@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as tb
 from typing import Dict, Any, Optional, Callable
+from bubble_detector import BubbleDetector
 
 class MangaSettingsDialog:
     """Settings dialog for manga translation"""
@@ -48,8 +49,12 @@ class MangaSettingsDialog:
                 'language_hints': ['ja', 'ko', 'zh'],
                 'confidence_threshold': 0.8,
                 'merge_nearby_threshold': 20,
+                'azure_merge_multiplier': 2.0,
                 'text_detection_mode': 'document',
-                'enable_rotation_correction': True
+                'enable_rotation_correction': True,
+                'bubble_detection_enabled': False,
+                'bubble_model_path': '',
+                'bubble_confidence': 0.5
             },
             'advanced': {
                 'format_detection': True,
@@ -1014,6 +1019,42 @@ class MangaSettingsDialog:
         )
         nearby_spinbox.pack(side='left', padx=10)
         tk.Label(nearby_frame, text="pixels").pack(side='left')
+
+        # Azure-specific settings 
+        azure_frame = tk.Frame(merge_frame)
+        azure_frame.pack(fill='x', pady=(10, 5))
+
+        tk.Label(azure_frame, text="Azure Merge Multiplier:", width=20, anchor='w').pack(side='left')
+
+        self.azure_merge_multiplier = tk.DoubleVar(
+            value=self.settings['ocr'].get('azure_merge_multiplier', 2.0)
+        )
+
+        azure_scale = tk.Scale(
+            azure_frame,
+            from_=1.0,
+            to=5.0,
+            resolution=0.5,
+            orient='horizontal',
+            variable=self.azure_merge_multiplier,
+            length=200,
+            command=lambda v: self._update_azure_label()
+        )
+        azure_scale.pack(side='left', padx=10)
+
+        self.azure_label = tk.Label(azure_frame, text="2.0x", width=5)
+        self.azure_label.pack(side='left')
+
+        # FIX: Initialize the label with the loaded value
+        self._update_azure_label()  # ADD THIS LINE
+
+        # Help text
+        tk.Label(
+            azure_frame,
+            text="(Multiplies merge distance for Azure OCR)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side='left', padx=5)
         
         # Rotation correction
         rotation_frame = tk.Frame(merge_frame)
@@ -1025,6 +1066,220 @@ class MangaSettingsDialog:
             variable=self.enable_rotation,
             bootstyle="round-toggle"
         ).pack(anchor='w')
+
+        # Bubble Detection Settings
+        bubble_frame = tk.LabelFrame(content_frame, text="AI Bubble Detection (YOLO)", padx=15, pady=10)
+        bubble_frame.pack(fill='x', padx=20, pady=(10, 0))
+
+        # Enable bubble detection
+        self.bubble_detection_enabled = tk.BooleanVar(
+            value=self.settings['ocr'].get('bubble_detection_enabled', False)
+        )
+
+        bubble_enable_cb = tb.Checkbutton(
+            bubble_frame,
+            text="Enable AI-powered bubble detection (overrides traditional merging)",
+            variable=self.bubble_detection_enabled,
+            bootstyle="round-toggle",
+            command=self._toggle_bubble_controls
+        )
+        bubble_enable_cb.pack(anchor='w')
+
+        # Model path frame
+        model_path_frame = tk.Frame(bubble_frame)
+        model_path_frame.pack(fill='x', pady=(10, 0))
+
+        tk.Label(model_path_frame, text="Model (.pt file):", width=15, anchor='w').pack(side='left')
+
+        self.bubble_model_path = tk.StringVar(
+            value=self.settings['ocr'].get('bubble_model_path', '')
+        )
+
+        self.bubble_model_entry = tk.Entry(
+            model_path_frame,
+            textvariable=self.bubble_model_path,
+            width=40,
+            state='readonly'
+        )
+        self.bubble_model_entry.pack(side='left', padx=(0, 10))
+
+        self.bubble_browse_btn = tb.Button(
+            model_path_frame,
+            text="Browse",
+            command=self._browse_bubble_model,
+            bootstyle="primary"
+        )
+        self.bubble_browse_btn.pack(side='left')
+
+        self.bubble_clear_btn = tb.Button(
+            model_path_frame,
+            text="Clear",
+            command=self._clear_bubble_model,
+            bootstyle="secondary"
+        )
+        self.bubble_clear_btn.pack(side='left', padx=(5, 0))
+
+        # Model status
+        self.bubble_status_label = tk.Label(
+            bubble_frame,
+            text="",
+            font=('Arial', 9)
+        )
+        self.bubble_status_label.pack(anchor='w', pady=(5, 0))
+
+        # Confidence threshold
+        bubble_conf_frame = tk.Frame(bubble_frame)
+        bubble_conf_frame.pack(fill='x', pady=(10, 0))
+
+        tk.Label(bubble_conf_frame, text="Detection Confidence:", width=15, anchor='w').pack(side='left')
+
+        self.bubble_confidence = tk.DoubleVar(
+            value=self.settings['ocr'].get('bubble_confidence', 0.5)
+        )
+
+        self.bubble_conf_scale = tk.Scale(
+            bubble_conf_frame,
+            from_=0.1,
+            to=0.9,
+            resolution=0.1,
+            orient='horizontal',
+            variable=self.bubble_confidence,
+            length=200,
+            command=lambda v: self.bubble_conf_label.config(text=f"{float(v):.1f}")
+        )
+        self.bubble_conf_scale.pack(side='left', padx=(0, 10))
+
+        self.bubble_conf_label = tk.Label(bubble_conf_frame, text="0.5", width=5)
+        self.bubble_conf_label.pack(side='left')
+
+        # Initialize label
+        self.bubble_conf_label.config(text=f"{self.bubble_confidence.get():.1f}")
+
+        # Help text
+        help_frame = tk.Frame(bubble_frame)
+        help_frame.pack(fill='x', pady=(10, 0))
+
+        tk.Label(
+            help_frame,
+            text="📥 Download model from: huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m",
+            font=('Arial', 9),
+            fg='blue',
+            cursor='hand2'
+        ).pack(anchor='w')
+
+        tk.Label(
+            help_frame,
+            text="ℹ️ The .pt file will be automatically converted to ONNX format on first use",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(anchor='w', pady=(2, 0))
+
+        tk.Label(
+            help_frame,
+            text="⚡ Provides better bubble detection than traditional merging, especially for Azure OCR",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(anchor='w', pady=(2, 0))
+
+        # Store controls for enable/disable
+        self.bubble_controls = [
+            self.bubble_model_entry,
+            self.bubble_browse_btn,
+            self.bubble_clear_btn,
+            self.bubble_conf_scale
+        ]
+
+        # Initialize control states
+        self._toggle_bubble_controls()
+        self._update_bubble_status()
+
+    def _toggle_bubble_controls(self):
+        """Enable/disable bubble detection controls"""
+        enabled = self.bubble_detection_enabled.get()
+        
+        for control in self.bubble_controls:
+            control.config(state='normal' if enabled else 'disabled')
+        
+        # Update status when toggling
+        if enabled:
+            self._update_bubble_status()
+        else:
+            self.bubble_status_label.config(text="")
+
+    def _browse_bubble_model(self):
+        """Browse for YOLO bubble detection model"""
+        from tkinter import filedialog
+        
+        path = filedialog.askopenfilename(
+            title="Select YOLO Bubble Detection Model (.pt file)",
+            filetypes=[
+                ("YOLO models", "*.pt"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if path:
+            self.bubble_model_path.set(path)
+            self._update_bubble_status()
+
+    def _clear_bubble_model(self):
+        """Clear selected model"""
+        self.bubble_model_path.set("")
+        self._update_bubble_status()
+
+    def _update_bubble_status(self):
+        """Update bubble model status label"""
+        if not self.bubble_detection_enabled.get():
+            self.bubble_status_label.config(text="")
+            return
+        
+        model_path = self.bubble_model_path.get()
+        
+        if not model_path:
+            self.bubble_status_label.config(
+                text="⚠️ Please select a model file",
+                fg='orange'
+            )
+            return
+        
+        if not os.path.exists(model_path):
+            self.bubble_status_label.config(
+                text="❌ Model file not found",
+                fg='red'
+            )
+            return
+        
+        # Check if ONNX version exists
+        onnx_dir = os.path.join(os.path.dirname(model_path), 'onnx_cache')
+        
+        if os.path.exists(onnx_dir):
+            # Look for ONNX files
+            onnx_files = [f for f in os.listdir(onnx_dir) if f.endswith('.onnx')]
+            if onnx_files:
+                self.bubble_status_label.config(
+                    text="✅ Model ready (ONNX cached)",
+                    fg='green'
+                )
+            else:
+                self.bubble_status_label.config(
+                    text="ℹ️ Will convert to ONNX on first use",
+                    fg='blue'
+                )
+        else:
+            self.bubble_status_label.config(
+                text="ℹ️ Will convert to ONNX on first use",
+                fg='blue'
+            )
+
+    def _update_azure_label(self):
+        """Update Azure multiplier label"""
+        value = self.azure_merge_multiplier.get()
+        self.azure_label.config(text=f"{value:.1f}x")
+
+    def _set_azure_multiplier(self, value):
+        """Set Azure multiplier from preset"""
+        self.azure_merge_multiplier.set(value)
+        self._update_azure_label()
     
     def _create_advanced_tab(self, notebook):
         """Create advanced settings tab with all options"""
@@ -1142,6 +1397,10 @@ class MangaSettingsDialog:
         self.settings['ocr']['text_detection_mode'] = self.detection_mode.get()
         self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold.get()
         self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation.get()
+        self.settings['ocr']['azure_merge_multiplier'] = self.azure_merge_multiplier.get()
+        self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled.get()
+        self.settings['ocr']['bubble_model_path'] = self.bubble_model_path.get()
+        self.settings['ocr']['bubble_confidence'] = self.bubble_confidence.get()
         
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
