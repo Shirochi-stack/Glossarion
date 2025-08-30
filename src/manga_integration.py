@@ -151,7 +151,6 @@ class MangaTranslationTab:
                 fg='red',
                 justify=tk.LEFT
             ).pack(anchor=tk.W)
-            
         
         # File selection frame
         file_frame = tk.LabelFrame(
@@ -240,28 +239,83 @@ class MangaTranslationTab:
         
         tk.Label(api_frame, text=f"Model: {current_model}", 
                 font=('Arial', 10, 'italic'), fg='gray').pack(side=tk.RIGHT)
-        
-        # Google Cloud Credentials section
-        creds_frame = tk.Frame(settings_frame)
-        creds_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(creds_frame, text="Google Cloud Credentials:", width=20, anchor='w').pack(side=tk.LEFT)
-        
+
+        # OCR Provider Selection
+        self.ocr_provider_frame = tk.Frame(settings_frame)
+        self.ocr_provider_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(self.ocr_provider_frame, text="OCR Provider:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        self.ocr_provider_var = tk.StringVar(value=self.main_gui.config.get('manga_ocr_provider', 'google'))
+        provider_combo = ttk.Combobox(
+            self.ocr_provider_frame,
+            textvariable=self.ocr_provider_var,
+            values=['google', 'azure'],
+            state='readonly',
+            width=15
+        )
+        provider_combo.pack(side=tk.LEFT, padx=10)
+        provider_combo.bind('<<ComboboxSelected>>', self._on_ocr_provider_change)
+
+        # Google Cloud Credentials section (now in a frame that can be hidden)
+        self.google_creds_frame = tk.Frame(settings_frame)
+        self.google_creds_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(self.google_creds_frame, text="Google Cloud Credentials:", width=20, anchor='w').pack(side=tk.LEFT)
+
         # Show current credentials file
         google_creds_path = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
         creds_display = os.path.basename(google_creds_path) if google_creds_path else "Not Set"
-        
-        self.creds_label = tk.Label(creds_frame, text=creds_display, 
+
+        self.creds_label = tk.Label(self.google_creds_frame, text=creds_display, 
                                    font=('Arial', 9), fg='green' if google_creds_path else 'red')
         self.creds_label.pack(side=tk.LEFT, padx=10)
-        
+
         tb.Button(
-            creds_frame,
+            self.google_creds_frame,
             text="Browse",
             command=self._browse_google_credentials_permanent,
             bootstyle="primary"
         ).pack(side=tk.LEFT)
-        
+
+        # Azure settings frame (hidden by default)
+        self.azure_frame = tk.Frame(settings_frame)
+
+        # Azure Key
+        azure_key_frame = tk.Frame(self.azure_frame)
+        azure_key_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Label(azure_key_frame, text="Azure Key:", width=20, anchor='w').pack(side=tk.LEFT)
+        self.azure_key_entry = tk.Entry(azure_key_frame, show='*', width=30)
+        self.azure_key_entry.pack(side=tk.LEFT, padx=10)
+
+        # Show/Hide button for Azure key
+        self.show_azure_key_var = tk.BooleanVar(value=False)
+        tb.Checkbutton(
+            azure_key_frame,
+            text="Show",
+            variable=self.show_azure_key_var,
+            command=lambda: self.azure_key_entry.config(show='' if self.show_azure_key_var.get() else '*'),
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Azure Endpoint
+        azure_endpoint_frame = tk.Frame(self.azure_frame)
+        azure_endpoint_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(azure_endpoint_frame, text="Azure Endpoint:", width=20, anchor='w').pack(side=tk.LEFT)
+        self.azure_endpoint_entry = tk.Entry(azure_endpoint_frame, width=40)
+        self.azure_endpoint_entry.pack(side=tk.LEFT, padx=10)
+
+        # Load saved Azure settings
+        saved_key = self.main_gui.config.get('azure_vision_key', '')
+        saved_endpoint = self.main_gui.config.get('azure_vision_endpoint', 'https://YOUR-RESOURCE.cognitiveservices.azure.com/')
+        self.azure_key_entry.insert(0, saved_key)
+        self.azure_endpoint_entry.insert(0, saved_endpoint)
+
+        # Initially show/hide based on saved provider
+        self._on_ocr_provider_change()
+
         # Separator for context settings
         ttk.Separator(settings_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
@@ -1053,7 +1107,50 @@ class MangaTranslationTab:
         self.log_text.tag_config('success', foreground='green')
         self.log_text.tag_config('warning', foreground='orange')
         self.log_text.tag_config('error', foreground='red')
+ 
+    def _on_ocr_provider_change(self, event=None):
+        """Handle OCR provider change"""
+        provider = self.ocr_provider_var.get()
         
+        if provider == 'azure':
+            # Hide Google, show Azure
+            self.google_creds_frame.pack_forget()
+            self.azure_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
+            
+            # Update API label
+            for widget in self.parent_frame.winfo_children():
+                if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Frame):
+                            for subchild in child.winfo_children():
+                                if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
+                                    subchild.config(text="OCR: Azure Computer Vision | Translation: API Key")
+                                    break
+        else:
+            # Hide Azure, show Google
+            self.azure_frame.pack_forget()
+            self.google_creds_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
+            
+            # Update API label
+            for widget in self.parent_frame.winfo_children():
+                if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Frame):
+                            for subchild in child.winfo_children():
+                                if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
+                                    subchild.config(text="OCR: Google Cloud Vision | Translation: API Key")
+                                    break
+        
+        # Save the selection
+        self.main_gui.config['manga_ocr_provider'] = provider
+        if hasattr(self.main_gui, 'save_config'):
+            self.main_gui.save_config(show_message=False)
+        
+        # IMPORTANT: Reset translator to force recreation with new OCR provider
+        if self.translator:
+            self._log(f"OCR provider changed to {provider.upper()}. Translator will be recreated on next run.", "info")
+            self.translator = None  # Force recreation on next translation
+ 
     def _open_advanced_settings(self):
         """Open the manga advanced settings dialog"""
         try:
@@ -1381,17 +1478,80 @@ class MangaTranslationTab:
     
     def _refresh_context_settings(self):
         """Refresh context settings from main GUI"""
-        # Update labels
-        contextual_status = "Enabled" if self.main_gui.contextual_var.get() else "Disabled"
-        self.contextual_status_label.config(text=f"• Contextual Translation: {contextual_status}")
+        # Actually fetch the current values from main GUI
+        if hasattr(self.main_gui, 'contextual_var'):
+            contextual_enabled = self.main_gui.contextual_var.get()
+            self.contextual_status_label.config(text=f"• Contextual Translation: {'Enabled' if contextual_enabled else 'Disabled'}")
         
-        history_limit = self.main_gui.trans_history.get() if hasattr(self.main_gui, 'trans_history') else "3"
-        self.history_limit_label.config(text=f"• Translation History Limit: {history_limit} exchanges")
+        if hasattr(self.main_gui, 'trans_history'):
+            history_limit = self.main_gui.trans_history.get()
+            self.history_limit_label.config(text=f"• Translation History Limit: {history_limit} exchanges")
         
-        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var.get() else "Disabled (Reset on Limit)"
-        self.rolling_status_label.config(text=f"• Rolling History: {rolling_status}")
+        if hasattr(self.main_gui, 'translation_history_rolling_var'):
+            rolling_enabled = self.main_gui.translation_history_rolling_var.get()
+            rolling_status = "Enabled (Rolling Window)" if rolling_enabled else "Disabled (Reset on Limit)"
+            self.rolling_status_label.config(text=f"• Rolling History: {rolling_status}")
         
-        self._log("✅ Refreshed context settings from main GUI", "success")
+        # Get and update model from main GUI
+        current_model = None
+        model_changed = False
+        
+        if hasattr(self.main_gui, 'model_var'):
+            current_model = self.main_gui.model_var.get()
+        elif hasattr(self.main_gui, 'model_combo'):
+            current_model = self.main_gui.model_combo.get()
+        elif hasattr(self.main_gui, 'config'):
+            current_model = self.main_gui.config.get('model', 'Unknown')
+        
+        # Update model display in the API Settings frame
+        for widget in self.parent_frame.winfo_children():
+            if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Frame):
+                        for subchild in child.winfo_children():
+                            if isinstance(subchild, tk.Label) and "Model:" in subchild.cget("text"):
+                                old_model_text = subchild.cget("text")
+                                old_model = old_model_text.split("Model: ")[-1] if "Model: " in old_model_text else None
+                                if old_model != current_model:
+                                    model_changed = True
+                                subchild.config(text=f"Model: {current_model}")
+                                break
+        
+        # If model changed, reset translator and client to force recreation
+        if model_changed and current_model:
+            if self.translator:
+                self._log(f"Model changed to {current_model}. Translator will be recreated on next run.", "info")
+                self.translator = None  # Force recreation on next translation
+            
+            # Also reset the client if it exists to ensure new model is used
+            if hasattr(self.main_gui, 'client') and self.main_gui.client:
+                if hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != current_model:
+                    self.main_gui.client = None  # Force recreation with new model
+        
+        # If translator exists, update its history manager settings
+        if self.translator and hasattr(self.translator, 'history_manager'):
+            try:
+                # Update the history manager with current main GUI settings
+                if hasattr(self.main_gui, 'contextual_var'):
+                    self.translator.history_manager.contextual_enabled = self.main_gui.contextual_var.get()
+                
+                if hasattr(self.main_gui, 'trans_history'):
+                    self.translator.history_manager.max_history = int(self.main_gui.trans_history.get())
+                
+                if hasattr(self.main_gui, 'translation_history_rolling_var'):
+                    self.translator.history_manager.rolling_enabled = self.main_gui.translation_history_rolling_var.get()
+                
+                # Reset the history to apply new settings
+                self.translator.history_manager.reset()
+                
+                self._log("✅ Refreshed context settings from main GUI and updated translator", "success")
+            except Exception as e:
+                self._log(f"✅ Refreshed context settings display (translator will update on next run)", "success")
+        else:
+            log_message = "✅ Refreshed context settings from main GUI"
+            if model_changed:
+                log_message += f" (Model: {current_model})"
+            self._log(log_message, "success")
     
     def _browse_google_credentials_permanent(self):
         """Browse and set Google Cloud Vision credentials from the permanent button"""
@@ -1877,129 +2037,154 @@ class MangaTranslationTab:
         
         # Schedule next update
         self.parent_frame.after(100, self._process_updates)
-    
+        
     def _start_translation(self):
-            """Start the translation process"""
-            if not self.selected_files:
-                messagebox.showwarning("No Files", "Please select manga images to translate.")
-                return
-            
-            # Check both possible config keys for backward compatibility
+        """Start the translation process"""
+        if not self.selected_files:
+            messagebox.showwarning("No Files", "Please select manga images to translate.")
+            return
+        
+        # Build OCR configuration
+        ocr_config = {'provider': self.ocr_provider_var.get()}
+        
+        if ocr_config['provider'] == 'google':
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
-            
             if not google_creds or not os.path.exists(google_creds):
                 messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
                 return
+            ocr_config['google_credentials_path'] = google_creds
             
-            # Get current API key and model
-            api_key = None
-            model = 'gemini-1.5-flash'  # default
+        elif ocr_config['provider'] == 'azure':
+            azure_key = self.azure_key_entry.get().strip()
+            azure_endpoint = self.azure_endpoint_entry.get().strip()
             
-            # Try to get API key from various sources
-            if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
-                api_key = self.main_gui.api_key_entry.get().strip()
-            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
-                api_key = self.main_gui.config.get('api_key')
-            
-            # Try to get model - ALWAYS get the current selection from GUI
-            if hasattr(self.main_gui, 'model_var'):
-                model = self.main_gui.model_var.get()
-            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
-                model = self.main_gui.config.get('model')
-            
-            if not api_key:
-                messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings.")
+            if not azure_key or not azure_endpoint:
+                messagebox.showerror("Error", "Azure credentials not configured.")
                 return
             
-            # Check if we need to create or update the client
-            needs_new_client = False
+            # Save Azure settings
+            self.main_gui.config['azure_vision_key'] = azure_key
+            self.main_gui.config['azure_vision_endpoint'] = azure_endpoint
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
             
-            if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
-                needs_new_client = True
-                self._log(f"Creating new API client with model: {model}", "info")
-            elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
-                needs_new_client = True
-                self._log(f"Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
-            
-            if needs_new_client:
-                # Create the unified client with the current model
-                try:
-                    from unified_api_client import UnifiedClient
-                    self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
-                    self._log(f"Created API client with model: {model}", "info")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
-                    return
-                    
-            # Reset the translator's history manager for new batch
-            if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
-                self.translator.reset_history_manager()
-    
-            # Initialize translator if needed
-            if not self.translator:
-                try:
-                    self.translator = MangaTranslator(
-                        google_creds,
-                        self.main_gui.client,
-                        self.main_gui,
-                        log_callback=self._log
-                    )
-                    # Set cloud inpainting if configured
-                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-                    if saved_api_key:
-                        self.translator.use_cloud_inpainting = True
-                        self.translator.replicate_api_key = saved_api_key                    
-                    # Apply text rendering settings
-                    self._apply_rendering_settings()
-                    
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
-                    self._log(f"Initialization error: {str(e)}", "error")
-                    self._log(traceback.format_exc(), "error")
-                    return
-            else:
-                # Update the translator with the new client if model changed
-                if needs_new_client and hasattr(self.translator, 'client'):
-                    self.translator.client = self.main_gui.client
-                    self._log(f"Updated translator with new API client", "info")
-                
-                # Update rendering settings
+            ocr_config['azure_key'] = azure_key
+            ocr_config['azure_endpoint'] = azure_endpoint
+        
+        # Get current API key and model for translation
+        api_key = None
+        model = 'gemini-1.5-flash'  # default
+        
+        # Try to get API key from various sources
+        if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
+            api_key = self.main_gui.api_key_entry.get().strip()
+        elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+            api_key = self.main_gui.config.get('api_key')
+        
+        # Try to get model - ALWAYS get the current selection from GUI
+        if hasattr(self.main_gui, 'model_var'):
+            model = self.main_gui.model_var.get()
+        elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
+            model = self.main_gui.config.get('model')
+        
+        if not api_key:
+            messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings.")
+            return
+        
+        # Check if we need to create or update the client
+        needs_new_client = False
+        
+        if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
+            needs_new_client = True
+            self._log(f"Creating new API client with model: {model}", "info")
+        elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
+            needs_new_client = True
+            self._log(f"Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
+        
+        if needs_new_client:
+            # Create the unified client with the current model
+            try:
+                from unified_api_client import UnifiedClient
+                self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
+                self._log(f"Created API client with model: {model}", "info")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
+                return
+        
+        # Reset the translator's history manager for new batch
+        if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
+            self.translator.reset_history_manager()
+        
+        # Initialize translator if needed
+        if not self.translator:
+            try:
+                self.translator = MangaTranslator(
+                    ocr_config,
+                    self.main_gui.client,
+                    self.main_gui,
+                    log_callback=self._log
+                )
+                # Set cloud inpainting if configured
+                saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+                if saved_api_key:
+                    self.translator.use_cloud_inpainting = True
+                    self.translator.replicate_api_key = saved_api_key
+                # Apply text rendering settings
                 self._apply_rendering_settings()
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
+                self._log(f"Initialization error: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "error")
+                return
+        else:
+            # Update the translator with the new client if model changed
+            if needs_new_client and hasattr(self.translator, 'client'):
+                self.translator.client = self.main_gui.client
+                self._log(f"Updated translator with new API client", "info")
             
-            # Clear log
-            self.log_text.delete('1.0', tk.END)
-            
-            # Reset progress
-            self.total_files = len(self.selected_files)
-            self.completed_files = 0
-            self.failed_files = 0
-            self.current_file_index = 0
-            
-            # Update UI state
-            self.is_running = True
-            self.stop_flag.clear()
-            self.start_button.config(state=tk.DISABLED)
-            self.stop_button.config(state=tk.NORMAL)
-            
-            # Disable file modification during translation
-            for widget in [self.file_listbox]:
-                widget.config(state=tk.DISABLED)
-            
-            # Log start message
-            self._log(f"Starting translation of {self.total_files} files...", "info")
-            self._log(f"Using Google Vision credentials: {os.path.basename(google_creds)}", "info")
-            self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
-            self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
-            self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
-            self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
-            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
-            
-            # Start translation thread
-            self.translation_thread = threading.Thread(
-                target=self._translation_worker,
-                daemon=True
-            )
-            self.translation_thread.start()
+            # Update rendering settings
+            self._apply_rendering_settings()
+        
+        # Clear log
+        self.log_text.delete('1.0', tk.END)
+        
+        # Reset progress
+        self.total_files = len(self.selected_files)
+        self.completed_files = 0
+        self.failed_files = 0
+        self.current_file_index = 0
+        
+        # Update UI state
+        self.is_running = True
+        self.stop_flag.clear()
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        
+        # Disable file modification during translation
+        for widget in [self.file_listbox]:
+            widget.config(state=tk.DISABLED)
+        
+        # Log start message
+        self._log(f"Starting translation of {self.total_files} files...", "info")
+        self._log(f"Using OCR provider: {ocr_config['provider'].upper()}", "info")
+        if ocr_config['provider'] == 'google':
+            self._log(f"Using Google Vision credentials: {os.path.basename(ocr_config['google_credentials_path'])}", "info")
+        else:
+            self._log(f"Using Azure endpoint: {ocr_config['azure_endpoint']}", "info")
+        self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
+        self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
+        self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
+        self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
+        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+        
+        # Start translation thread
+        self.translation_thread = threading.Thread(
+            target=self._translation_worker,
+            daemon=True
+        )
+        self.translation_thread.start()
     
     def _apply_rendering_settings(self):
         """Apply current rendering settings to translator"""
