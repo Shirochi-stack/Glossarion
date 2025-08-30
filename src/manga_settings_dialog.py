@@ -54,7 +54,7 @@ class MangaSettingsDialog:
                 'enable_rotation_correction': True,
                 'bubble_detection_enabled': False,
                 'bubble_model_path': '',
-                'bubble_confidence': 0.8
+                'bubble_confidence': 0.1
             },
             'advanced': {
                 'format_detection': True,
@@ -1131,10 +1131,10 @@ class MangaSettingsDialog:
         bubble_conf_frame = tk.Frame(bubble_frame)
         bubble_conf_frame.pack(fill='x', pady=(10, 0))
 
-        tk.Label(bubble_conf_frame, text="Detection Confidence:", width=15, anchor='w').pack(side='left')
+        tk.Label(bubble_conf_frame, text="Detection Confidence:", width=20, anchor='w').pack(side='left')
 
         self.bubble_confidence = tk.DoubleVar(
-            value=self.settings['ocr'].get('bubble_confidence', 0.5)
+            value=self.settings['ocr'].get('bubble_confidence', 0.1)
         )
 
         self.bubble_conf_scale = tk.Scale(
