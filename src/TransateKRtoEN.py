@@ -3469,11 +3469,11 @@ class TranslationProcessor:
                     self.client._current_output_file = fname
 
                 # Generate unique request ID for this chunk
-                request_id = f"{c['num']:03d}_chunk{chunk_idx}_{uuid.uuid4().hex[:8]}"
+                #request_id = f"{c['num']:03d}_chunk{chunk_idx}_{uuid.uuid4().hex[:8]}"
 
                 result, finish_reason = send_with_interrupt(
                     msgs, self.client, current_temp, current_max_tokens, 
-                    self.check_stop, chunk_timeout, request_id=request_id
+                    self.check_stop, chunk_timeout
                 )
                 if result and c.get("enhanced_extraction", False):
                     print(f"🔄 Converting enhanced mode plain text back to HTML...")
@@ -7206,8 +7206,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     # The client.send() call will handle multi-key rotation automatically
     
     # Generate request_id if not provided
-    if request_id is None:
-        request_id = str(uuid.uuid4())[:8]
+    #if request_id is None:
+    #    request_id = str(uuid.uuid4())[:8]
     
     result_queue = queue.Queue()
     
@@ -7224,8 +7224,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             
             # Add request_id if the client supports it
             sig = inspect.signature(client.send)
-            if 'request_id' in sig.parameters:
-                send_params['request_id'] = request_id
+            #if 'request_id' in sig.parameters:
+            #    send_params['request_id'] = request_id
             
             result = client.send(**send_params)
             elapsed = time.time() - start_time
