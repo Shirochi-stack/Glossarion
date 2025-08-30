@@ -8494,6 +8494,25 @@ class UnifiedClient:
                 print(f"🔄 Custom endpoint enabled: Overriding {provider} endpoint")
                 print(f"   Original: {base_url}")
                 print(f"   Override: {custom_base_url}")
+                
+                # Check if it's Azure
+                if '.azure.com' in custom_base_url or '.cognitiveservices' in custom_base_url:
+                    # Azure needs special handling
+                    deployment = self.model  # Use model as deployment name
+                    api_version = os.getenv('AZURE_API_VERSION', '2024-08-01-preview')
+                    
+                    # Fix Azure URL format
+                    if '/openai/deployments/' not in custom_base_url:
+                        custom_base_url = f"{custom_base_url.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+                    
+                    # Azure uses different auth header
+                    if headers is None:
+                        headers = {}
+                    headers['api-key'] = actual_api_key
+                    headers.pop('Authorization', None)  # Remove OpenAI auth
+                    
+                    print(f"🔷 Azure endpoint detected: {custom_base_url}")
+                
                 base_url = custom_base_url
                 
                 # Check if it's a local endpoint
