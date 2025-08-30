@@ -550,16 +550,59 @@ class MangaTranslationTab:
         )
         self.skip_inpainting_checkbox.pack(anchor='w', pady=5)
 
-        # Inpaint quality selection (only visible when inpainting is enabled)
-        self.inpaint_quality_frame = tk.Frame(render_frame)
-        self.inpaint_quality_frame.pack(fill=tk.X, pady=5)
+        # Inpainting method selection (only visible when inpainting is enabled)
+        self.inpaint_method_frame = tk.Frame(render_frame)
+        self.inpaint_method_frame.pack(fill=tk.X, pady=5)
 
-        tk.Label(self.inpaint_quality_frame, text="Inpaint Quality:", width=20, anchor='w').pack(side=tk.LEFT)
+        tk.Label(self.inpaint_method_frame, text="Inpaint Method:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        # Radio buttons for inpaint method
+        method_selection_frame = tk.Frame(self.inpaint_method_frame)
+        method_selection_frame.pack(side=tk.LEFT, padx=5)
+
+        self.inpaint_method_var = tk.StringVar(value=self.main_gui.config.get('manga_inpaint_method', 'cloud'))
+
+        tb.Radiobutton(
+            method_selection_frame,
+            text="Cloud API",
+            variable=self.inpaint_method_var,
+            value="cloud",
+            command=self._on_inpaint_method_change,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            method_selection_frame,
+            text="Local Model",
+            variable=self.inpaint_method_var,
+            value="local",
+            command=self._on_inpaint_method_change,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            method_selection_frame,
+            text="Hybrid",
+            variable=self.inpaint_method_var,
+            value="hybrid",
+            command=self._on_inpaint_method_change,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT)
+
+        # Cloud settings frame
+        self.cloud_inpaint_frame = tk.Frame(render_frame)
+        self.cloud_inpaint_frame.pack(fill=tk.X, pady=5)
+
+        # Quality selection for cloud
+        quality_frame = tk.Frame(self.cloud_inpaint_frame)
+        quality_frame.pack(fill=tk.X)
+
+        tk.Label(quality_frame, text="Cloud Quality:", width=20, anchor='w').pack(side=tk.LEFT)
 
         quality_options = [('high', 'High Quality'), ('fast', 'Fast')]
         for value, text in quality_options:
             tb.Radiobutton(
-                self.inpaint_quality_frame,
+                quality_frame,
                 text=text,
                 variable=self.inpaint_quality_var,
                 value=value,
@@ -567,21 +610,26 @@ class MangaTranslationTab:
                 command=self._save_rendering_settings
             ).pack(side=tk.LEFT, padx=10)
 
-        # Cloud inpainting API configuration
-        api_loader_frame = tk.Frame(self.inpaint_quality_frame)
-        api_loader_frame.pack(fill=tk.X, pady=(10, 0))
+        # Conditional separator
+        self.inpaint_separator = ttk.Separator(render_frame, orient='horizontal')
+        if not self.skip_inpainting_var.get():
+            self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))
+
+        # Cloud API status
+        api_status_frame = tk.Frame(self.cloud_inpaint_frame)
+        api_status_frame.pack(fill=tk.X, pady=(10, 0))
 
         # Check if API key exists
         saved_api_key = self.main_gui.config.get('replicate_api_key', '')
         if saved_api_key:
-            status_text = "✅ Cloud inpainting configured"
+            status_text = "✅ Cloud API configured"
             status_color = 'green'
         else:
-            status_text = "❌ Inpainting API not configured"
+            status_text = "❌ Cloud API not configured"
             status_color = 'red'
 
         self.inpaint_api_status_label = tk.Label(
-            api_loader_frame, 
+            api_status_frame, 
             text=status_text,
             font=('Arial', 9),
             fg=status_color
@@ -589,23 +637,100 @@ class MangaTranslationTab:
         self.inpaint_api_status_label.pack(side=tk.LEFT)
 
         tb.Button(
-            api_loader_frame,
+            api_status_frame,
             text="Configure API Key",
             command=self._configure_inpaint_api,
             bootstyle="info"
         ).pack(side=tk.LEFT, padx=(10, 0))
 
-        # Add a clear button if API is configured
         if saved_api_key:
             tb.Button(
-                api_loader_frame,
+                api_status_frame,
                 text="Clear",
                 command=self._clear_inpaint_api,
                 bootstyle="secondary"
             ).pack(side=tk.LEFT, padx=(5, 0))
 
-        # Set initial visibility based on current setting
-        self._toggle_inpaint_quality_visibility()
+        # Local inpainting settings frame
+        self.local_inpaint_frame = tk.Frame(render_frame)
+
+        # Local model selection
+        local_model_frame = tk.Frame(self.local_inpaint_frame)
+        local_model_frame.pack(fill=tk.X)
+
+        tk.Label(local_model_frame, text="Local Model:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        self.local_model_type_var = tk.StringVar(value=self.main_gui.config.get('manga_local_inpaint_model', 'lama'))
+        local_model_combo = ttk.Combobox(
+            local_model_frame,
+            textvariable=self.local_model_type_var,
+            values=['lama', 'aot', 'mat', 'sd_local'],
+            state='readonly',
+            width=15
+        )
+        local_model_combo.pack(side=tk.LEFT, padx=10)
+        local_model_combo.bind('<<ComboboxSelected>>', self._on_local_model_change)
+
+        # Model descriptions
+        model_desc = {
+            'lama': 'LaMa (Best quality)',
+            'aot': 'AOT GAN (Fast)',
+            'mat': 'MAT (High-res)',
+            'sd_local': 'Stable Diffusion (Anime)'
+        }
+        self.model_desc_label = tk.Label(
+            local_model_frame,
+            text=model_desc.get(self.local_model_type_var.get(), ''),
+            font=('Arial', 9),
+            fg='gray'
+        )
+        self.model_desc_label.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Model file selection
+        model_path_frame = tk.Frame(self.local_inpaint_frame)
+        model_path_frame.pack(fill=tk.X, pady=(5, 0))
+
+        tk.Label(model_path_frame, text="Model File:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        self.local_model_path_var = tk.StringVar(
+            value=self.main_gui.config.get(f'manga_{self.local_model_type_var.get()}_model_path', '')
+        )
+        self.local_model_entry = tk.Entry(
+            model_path_frame,
+            textvariable=self.local_model_path_var,
+            width=30,
+            state='readonly',
+            bg='#2b2b2b',  # Dark gray background
+            fg='#ffffff',  # White text
+            readonlybackground='#2b2b2b'  # Gray even when readonly
+        )
+        self.local_model_entry.pack(side=tk.LEFT, padx=(10, 5))
+
+        tb.Button(
+            model_path_frame,
+            text="Browse",
+            command=self._browse_local_model,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT)
+
+        # Model status
+        self.local_model_status_label = tk.Label(
+            self.local_inpaint_frame,
+            text="",
+            font=('Arial', 9)
+        )
+        self.local_model_status_label.pack(anchor='w', pady=(5, 0))
+
+        # Download guide button
+        tb.Button(
+            self.local_inpaint_frame,
+            text="📥 Download Guide",
+            command=self._show_model_download_guide,
+            bootstyle="info"
+        ).pack(anchor='w', pady=(5, 0))
+
+        # Initialize visibility based on current settings
+        self._toggle_inpaint_visibility()
         
         # Background size reduction
         reduction_frame = tk.Frame(render_frame)
@@ -1258,9 +1383,24 @@ class MangaTranslationTab:
             pass
         for child in widget.winfo_children():
             self._disable_widget_tree(child)
-    
+        
     def _load_rendering_settings(self):
         """Load text rendering settings from config"""
+        config = self.main_gui.config
+        
+        # Get inpainting settings from the nested location
+        manga_settings = config.get('manga_settings', {})
+        inpaint_settings = manga_settings.get('inpainting', {})
+        
+        # Load inpaint method from the correct location
+        self.inpaint_method_var = tk.StringVar(value=inpaint_settings.get('method', 'cloud'))
+        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'lama'))
+        
+        # Load model paths
+        for model_type in ['lama', 'aot', 'mat', 'sd_local']:
+            path = inpaint_settings.get(f'{model_type}_model_path', '')
+            if model_type == self.local_model_type_var.get():
+                self.local_model_path_var = tk.StringVar(value=path)
         config = self.main_gui.config
         
         # Initialize with defaults
@@ -1316,11 +1456,37 @@ class MangaTranslationTab:
         self._save_rendering_settings()
     
     def _save_rendering_settings(self):
-        """Save text rendering settings to config"""
+        # Ensure manga_settings structure exists
         # Don't save during initialization
         if hasattr(self, '_initializing') and self._initializing:
             return
+        if 'manga_settings' not in self.main_gui.config:
+            self.main_gui.config['manga_settings'] = {}
+        if 'inpainting' not in self.main_gui.config['manga_settings']:
+            self.main_gui.config['manga_settings']['inpainting'] = {}
+        
+        # Save to nested location
+        inpaint = self.main_gui.config['manga_settings']['inpainting']
+        inpaint['method'] = self.inpaint_method_var.get()
+        inpaint['local_method'] = self.local_model_type_var.get()
+        
+        # Save model path for current type
+        model_type = self.local_model_type_var.get()
+        inpaint[f'{model_type}_model_path'] = self.local_model_path_var.get()
+
             
+        # Add new inpainting settings
+        self.main_gui.config['manga_inpaint_method'] = self.inpaint_method_var.get()
+        self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
+        
+        # Save model paths for each type
+        for model_type in ['lama', 'aot', 'mat', 'sd_local']:
+            if hasattr(self, 'local_model_type_var'):
+                if model_type == self.local_model_type_var.get():
+                    path = self.local_model_path_var.get()
+                    if path:
+                        self.main_gui.config[f'manga_{model_type}_model_path'] = path
+                    
         # Update Manga GUI config
         self.main_gui.config['manga_bg_opacity'] = self.bg_opacity_var.get()
         self.main_gui.config['manga_bg_style'] = self.bg_style_var.get()
@@ -1773,9 +1939,186 @@ class MangaTranslationTab:
                 self.inpaint_quality_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
 
     def _toggle_inpaint_visibility(self):
-        """Toggle visibility of all inpaint-related options"""
-        self._toggle_inpaint_quality_visibility()
-        self._toggle_inpaint_controls_visibility()
+        """Show/hide inpainting options based on skip toggle"""
+        if self.skip_inpainting_var.get():
+            # Hide all inpainting options
+            self.inpaint_method_frame.pack_forget()
+            self.cloud_inpaint_frame.pack_forget()
+            self.local_inpaint_frame.pack_forget()
+            self.inpaint_separator.pack_forget()  # Hide separator
+        else:
+            # Show method selection
+            self.inpaint_method_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
+            self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))  # Show separator
+            self._on_inpaint_method_change()
+        
+        self._save_rendering_settings()
+
+    def _on_inpaint_method_change(self):
+        """Show appropriate inpainting settings based on method"""
+        method = self.inpaint_method_var.get()
+        
+        if method == 'cloud':
+            self.cloud_inpaint_frame.pack(fill=tk.X, pady=5, after=self.inpaint_method_frame)
+            self.local_inpaint_frame.pack_forget()
+        elif method == 'local':
+            self.local_inpaint_frame.pack(fill=tk.X, pady=10, after=self.inpaint_method_frame)
+            self.cloud_inpaint_frame.pack_forget()
+        elif method == 'hybrid':
+            # Show both frames for hybrid
+            self.local_inpaint_frame.pack(fill=tk.X, pady=5, after=self.inpaint_method_frame)
+            self.cloud_inpaint_frame.pack(fill=tk.X, pady=5, after=self.local_inpaint_frame)
+        
+        self._save_rendering_settings()
+
+    def _on_local_model_change(self, event=None):
+        """Handle local model type change"""
+        model_type = self.local_model_type_var.get()
+        
+        # Update description
+        model_desc = {
+            'lama': 'LaMa (Best quality)',
+            'aot': 'AOT GAN (Fast)',
+            'mat': 'MAT (High-res)',
+            'sd_local': 'Stable Diffusion (Anime)'
+        }
+        self.model_desc_label.config(text=model_desc.get(model_type, ''))
+        
+        # Load saved path for this model type
+        saved_path = self.main_gui.config.get(f'manga_{model_type}_model_path', '')
+        self.local_model_path_var.set(saved_path)
+        
+        # Update status
+        self._update_local_model_status()
+        self._save_rendering_settings()
+
+    def _browse_local_model(self):
+        """Browse for local inpainting model"""
+        model_type = self.local_model_type_var.get()
+        
+        if model_type == 'sd_local':
+            filetypes = [
+                ("Model files", "*.safetensors *.pt *.pth *.ckpt *.onnx"),
+                ("SafeTensors", "*.safetensors"),
+                ("Checkpoint files", "*.ckpt"),  # ADD this line
+                ("PyTorch models", "*.pt *.pth"),
+                ("ONNX models", "*.onnx"),
+                ("All files", "*.*")
+            ]
+        else:
+            filetypes = [
+                ("Model files", "*.pt *.pth *.ckpt *.onnx"),  # ADD .ckpt here
+                ("Checkpoint files", "*.ckpt"),  # ADD this line  
+                ("PyTorch models", "*.pt *.pth"),
+                ("ONNX models", "*.onnx"),
+                ("All files", "*.*")
+            ]
+        
+        path = filedialog.askopenfilename(
+            title=f"Select {model_type.upper()} Model",
+            filetypes=filetypes
+        )
+        
+        if path:
+            self.local_model_path_var.set(path)
+            # Save to config
+            self.main_gui.config[f'manga_{model_type}_model_path'] = path
+            self._update_local_model_status()
+            self._save_rendering_settings()
+
+    def _update_local_model_status(self):
+        """Update local model status display"""
+        path = self.local_model_path_var.get()
+        
+        if not path:
+            self.local_model_status_label.config(text="⚠️ No model selected", fg='orange')
+            return
+        
+        if not os.path.exists(path):
+            self.local_model_status_label.config(text="❌ Model file not found", fg='red')
+            return
+        
+        # Check for ONNX cache
+        if path.endswith(('.pt', '.pth', '.safetensors')):
+            onnx_dir = os.path.join(os.path.dirname(path), 'onnx_cache')
+            if os.path.exists(onnx_dir):
+                # Check if ONNX file exists for this model
+                model_hash = hashlib.md5(path.encode()).hexdigest()[:8]
+                onnx_files = [f for f in os.listdir(onnx_dir) if model_hash in f]
+                if onnx_files:
+                    self.local_model_status_label.config(
+                        text="✅ Model ready (ONNX cached)",
+                        fg='green'
+                    )
+                else:
+                    self.local_model_status_label.config(
+                        text="ℹ️ Will convert to ONNX on first use",
+                        fg='blue'
+                    )
+            else:
+                self.local_model_status_label.config(
+                    text="ℹ️ Will convert to ONNX on first use",
+                    fg='blue'
+                )
+        else:
+            self.local_model_status_label.config(
+                text="✅ ONNX model ready",
+                fg='green'
+            )
+
+    def _show_model_download_guide(self):
+        """Show download instructions for models"""
+        model_type = self.local_model_type_var.get()
+        
+        guides = {
+            'lama': "🎨 LaMa (Large Mask Inpainting)\n\n"
+                    "Download: github.com/advimman/lama\n"
+                    "• Get 'big-lama.zip' from releases\n"
+                    "• Extract and use 'models/best.ckpt'\n"
+                    "• Best quality for general inpainting\n"
+                    "• ~200MB download",
+            
+            'aot': "⚡ AOT GAN (Aggregated Contextual Transformations)\n\n"
+                   "Download: github.com/researchmm/AOT-GAN-for-Inpainting\n"
+                   "• Get pretrained models from releases\n"
+                   "• Use 'celebahq-256.pt' or 'places2-512.pt'\n"
+                   "• Fast processing, good quality\n"
+                   "• ~100-150MB download",
+            
+            'mat': "🔧 MAT (Mask-Aware Transformer)\n\n"
+                   "Download: github.com/fenglinglwb/MAT\n"
+                   "• Download from model zoo\n"
+                   "• Use 'Places_512_FullData.pkl'\n"
+                   "• Best for high-resolution images\n"
+                   "• ~500MB download",
+            
+            'sd_local': "🎌 Anime/Manga Inpainting (Stable Diffusion)\n\n"
+                       "Download: huggingface.co/dreMaz/AnimeMangaInpainting\n"
+                       "• Click 'Files and versions' tab\n"
+                       "• Download .safetensors file\n"
+                       "• Optimized for anime/manga art\n"
+                       "• ~2-4GB download\n\n"
+                       "Alternative: huggingface.co/runwayml/stable-diffusion-inpainting"
+        }
+        
+        guide = guides.get(model_type, "Please select a model type first")
+        
+        # Create a simple dialog with the guide
+        guide_dialog = tk.Toplevel(self.dialog)
+        guide_dialog.title(f"{model_type.upper()} Model Download Guide")
+        guide_dialog.geometry("500x400")
+        
+        text_widget = tk.Text(guide_dialog, wrap=tk.WORD, padx=20, pady=20)
+        text_widget.pack(fill='both', expand=True)
+        text_widget.insert(1.0, guide)
+        text_widget.config(state='disabled')
+        
+        tb.Button(
+            guide_dialog,
+            text="Close",
+            command=guide_dialog.destroy,
+            bootstyle="secondary"
+        ).pack(pady=10)
 
     def _toggle_inpaint_controls_visibility(self):
             """Toggle visibility of inpaint controls (mask expansion and passes) based on skip inpainting setting"""
