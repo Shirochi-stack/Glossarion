@@ -85,6 +85,7 @@ azure-identity
 onnxruntime
 # onnxruntime-gpu  # Optional, uncomment for GPU support
 ultralytics  # Optional, for PT to ONNX conversion
+lap>=0.5.12 
 
 # Inpainting
 replicate
