@@ -23,7 +23,7 @@ poe-api-wrapper
 #ballyregan
 google-genai
 google-cloud-aiplatform>=1.60.0
-
+deepl
 
 # Data processing
 datasketch
@@ -45,6 +45,7 @@ charset-normalizer
 olefile
 html2text
 markdown2
+rapidfuzz
 
 # Image processing
 opencv-python
