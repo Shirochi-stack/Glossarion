@@ -344,6 +344,7 @@ class MangaSettingsDialog:
         # Create all tabs
         self._create_preprocessing_tab(notebook)
         self._create_ocr_tab(notebook)
+        self._create_inpainting_tab(notebook)
         self._create_advanced_tab(notebook)
         
         # Cloud API tab
@@ -637,6 +638,283 @@ class MangaSettingsDialog:
         
         tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
 
+    def _create_inpainting_tab(self, notebook):
+        """Create local inpainting settings tab"""
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="Inpainting")
+        
+        content_frame = tk.Frame(frame)
+        content_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Inpainting method selection
+        method_frame = tk.LabelFrame(content_frame, text="Inpainting Method", padx=15, pady=10)
+        method_frame.pack(fill='x', padx=20, pady=20)
+        
+        self.inpaint_method_var = tk.StringVar(
+            value=self.settings.get('inpainting', {}).get('method', 'cloud')
+        )
+        
+        methods = [
+            ('cloud', 'Cloud API (Replicate)', 'Use cloud-based inpainting'),
+            ('local', 'Local Model', 'Use local ONNX/PyTorch models'),
+            ('hybrid', 'Hybrid Ensemble', 'Combine multiple methods'),
+        ]
+        
+        for value, text, tooltip in methods:
+            rb = tb.Radiobutton(
+                method_frame,
+                text=text,
+                variable=self.inpaint_method_var,
+                value=value,
+                command=self._on_inpaint_method_change
+            )
+            rb.pack(anchor='w', pady=2)
+        
+        # Local model settings
+        self.local_frame = tk.LabelFrame(content_frame, text="Local Model Settings", padx=15, pady=10)
+        self.local_frame.pack(fill='x', padx=20, pady=(0, 20))
+        
+        # Local method selection
+        local_method_frame = tk.Frame(self.local_frame)
+        local_method_frame.pack(fill='x', pady=5)
+        
+        tk.Label(local_method_frame, text="Model Type:", width=15, anchor='w').pack(side='left')
+        
+        self.local_method_var = tk.StringVar(
+            value=self.settings.get('inpainting', {}).get('local_method', 'aot')
+        )
+        
+        local_methods = ttk.Combobox(
+            local_method_frame,
+            textvariable=self.local_method_var,
+            values=['aot', 'lama', 'mat', 'ollama', 'sd_local'],
+            state='readonly',
+            width=20
+        )
+        local_methods.pack(side='left', padx=10)
+        local_methods.bind('<<ComboboxSelected>>', self._on_local_method_change)
+        
+        # Model path selection
+        model_path_frame = tk.Frame(self.local_frame)
+        model_path_frame.pack(fill='x', pady=5)
+        
+        tk.Label(model_path_frame, text="Model File:", width=15, anchor='w').pack(side='left')
+        
+        self.local_model_path = tk.StringVar()
+        self.model_path_entry = tk.Entry(
+            model_path_frame,
+            textvariable=self.local_model_path,
+            width=40,
+            state='readonly',
+            bg='#2b2b2b',  # Dark gray background
+            fg='#ffffff',  # White text
+            readonlybackground='#2b2b2b'  # Gray even when readonly
+        )
+        self.model_path_entry.pack(side='left', padx=(0, 10))
+        
+        tb.Button(
+            model_path_frame,
+            text="Browse",
+            command=self._browse_local_model,
+            bootstyle="primary"
+        ).pack(side='left')
+        
+        tb.Button(
+            model_path_frame,
+            text="Download",
+            command=self._download_model_guide,
+            bootstyle="info"
+        ).pack(side='left', padx=(5, 0))
+        
+        # Model status
+        self.model_status_label = tk.Label(
+            self.local_frame,
+            text="",
+            font=('Arial', 9)
+        )
+        self.model_status_label.pack(anchor='w', pady=(5, 0))
+        
+        # Ollama settings (if Ollama selected)
+        self.ollama_frame = tk.Frame(self.local_frame)
+        
+        ollama_info = tk.Label(
+            self.ollama_frame,
+            text="Ollama uses vision models for context-aware inpainting.\n"
+                 "Make sure Ollama is running: ollama serve\n"
+                 "Install vision model: ollama pull llava",
+            font=('Arial', 9),
+            fg='gray'
+        )
+        ollama_info.pack(anchor='w', pady=10)
+        
+        # Hybrid settings
+        self.hybrid_frame = tk.LabelFrame(content_frame, text="Hybrid Ensemble Settings", padx=15, pady=10)
+        
+        tk.Label(
+            self.hybrid_frame,
+            text="Select multiple models to combine their results:",
+            font=('Arial', 10)
+        ).pack(anchor='w', pady=(0, 10))
+        
+        # List of models for hybrid
+        self.hybrid_models_frame = tk.Frame(self.hybrid_frame)
+        self.hybrid_models_frame.pack(fill='both', expand=True)
+        
+        self.hybrid_model_vars = {}
+        for method in ['aot', 'lama', 'mat']:
+            var = tk.BooleanVar(value=False)
+            self.hybrid_model_vars[method] = var
+            
+            cb = tb.Checkbutton(
+                self.hybrid_models_frame,
+                text=f"Use {method.upper()} model",
+                variable=var,
+                bootstyle="round-toggle"
+            )
+            cb.pack(anchor='w', pady=2)
+        
+        # Performance settings
+        perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
+        perf_frame.pack(fill='x', padx=20)
+        
+        # Batch size for local processing
+        batch_frame = tk.Frame(perf_frame)
+        batch_frame.pack(fill='x', pady=5)
+        
+        tk.Label(batch_frame, text="Batch Size:", width=15, anchor='w').pack(side='left')
+        
+        self.inpaint_batch_size = tk.IntVar(
+            value=self.settings.get('inpainting', {}).get('batch_size', 1)
+        )
+        
+        tb.Spinbox(
+            batch_frame,
+            from_=1,
+            to=10,
+            textvariable=self.inpaint_batch_size,
+            width=10
+        ).pack(side='left', padx=10)
+        
+        tk.Label(
+            batch_frame,
+            text="(Higher = faster but more memory)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side='left')
+        
+        # Initially show/hide based on selection
+        self._on_inpaint_method_change()
+
+    def _on_inpaint_method_change(self):
+        """Show/hide relevant inpainting settings"""
+        method = self.inpaint_method_var.get()
+        
+        if method == 'local':
+            self.local_frame.pack(fill='x', padx=20, pady=(0, 20))
+            self.hybrid_frame.pack_forget()
+            self._on_local_method_change()  # Show relevant local settings
+        elif method == 'hybrid':
+            self.local_frame.pack_forget()
+            self.hybrid_frame.pack(fill='x', padx=20, pady=(0, 20))
+        else:
+            self.local_frame.pack_forget()
+            self.hybrid_frame.pack_forget()
+
+    def _on_local_method_change(self, event=None):
+        """Show/hide Ollama-specific settings"""
+        method = self.local_method_var.get()
+        
+        if method == 'ollama':
+            self.ollama_frame.pack(fill='x', pady=(10, 0))
+            self.model_path_entry.config(state='disabled')
+        else:
+            self.ollama_frame.pack_forget()
+            self.model_path_entry.config(state='readonly')
+            self._update_model_status()
+
+    def _browse_local_model(self):
+        """Browse for local inpainting model"""
+        filetypes = [
+            ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
+            ("PyTorch models", "*.pt *.pth"),
+            ("Checkpoint files", "*.ckpt"),
+            ("SafeTensors", "*.safetensors"),
+            ("ONNX models", "*.onnx"),
+            ("All files", "*.*")
+        ]
+        
+        path = filedialog.askopenfilename(
+            title=f"Select {self.local_method_var.get().upper()} Model",
+            filetypes=filetypes
+        )
+        
+        if path:
+            self.local_model_path.set(path)
+            self._update_model_status()
+
+    def _update_model_status(self):
+        """Update model status display"""
+        path = self.local_model_path.get()
+        
+        if not path:
+            self.model_status_label.config(text="", fg='black')
+            return
+        
+        if not os.path.exists(path):
+            self.model_status_label.config(
+                text="❌ Model file not found",
+                fg='red'
+            )
+            return
+        
+        # Check for ONNX cache
+        if path.endswith('.pt') or path.endswith('.pth'):
+            onnx_dir = os.path.join(os.path.dirname(path), 'onnx_cache')
+            if os.path.exists(onnx_dir):
+                self.model_status_label.config(
+                    text="✅ Model ready (will use cached ONNX)",
+                    fg='green'
+                )
+            else:
+                self.model_status_label.config(
+                    text="ℹ️ Will convert to ONNX on first use",
+                    fg='blue'
+                )
+        else:
+            self.model_status_label.config(
+                text="✅ ONNX model ready",
+                fg='green'
+            )
+
+    def _download_model_guide(self):
+        """Show download instructions for models"""
+        method = self.local_method_var.get()
+        
+        guides = {
+            'aot': "AOT GAN Models:\n"
+                   "• GitHub: github.com/researchmm/AOT-GAN\n"
+                   "• Download pretrained models from releases\n"
+                   "• Use celebahq-256.pt or places2-512.pt",
+            
+            'lama': "LaMa Models:\n"
+                    "• GitHub: github.com/saic-mdal/lama\n"
+                    "• Download big-lama.pt from releases\n"
+                    "• Best quality for general inpainting",
+            
+            'mat': "MAT Models:\n"
+                   "• GitHub: github.com/fenglinglwb/MAT\n"
+                   "• Download from model zoo\n"
+                   "• Good for high-resolution inpainting",
+            
+            'sd_local': "Stable Diffusion Models:\n"
+                       "• HuggingFace: huggingface.co/runwayml/stable-diffusion-inpainting\n"
+                       "• Download model.safetensors\n"
+                       "• Requires more VRAM but high quality"
+        }
+        
+        guide = guides.get(method, "Please select a model type first")
+        messagebox.showinfo(f"{method.upper()} Model Download", guide)
+    
     def _create_cloud_api_tab(self, parent):
             """Create cloud API settings tab"""
             # NO CANVAS - JUST USE PARENT DIRECTLY
