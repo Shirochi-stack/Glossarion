@@ -8507,10 +8507,29 @@ class UnifiedClient:
                             )
                             
                         except Exception as e:
+                            error_str = str(e).lower()
+                            
+                            # Check if this is a content filter error FIRST
+                            if ("content_filter" in error_str or 
+                                "responsibleaipolicyviolation" in error_str or
+                                "content management policy" in error_str or
+                                "400" in str(e)):
+                                
+                                # This is a content filter error - raise it immediately as prohibited_content
+                                print(f"Azure content filter detected: {str(e)[:100]}")
+                                raise UnifiedClientError(
+                                    f"Azure content blocked: {e}",
+                                    error_type="prohibited_content",
+                                    http_status=400,
+                                    details={"provider": "azure", "original_error": str(e)}
+                                )
+                            
+                            # Only retry for non-content-filter errors
                             if attempt < max_retries - 1:
                                 print(f"Azure error (attempt {attempt + 1}): {e}")
                                 time.sleep(api_delay)
                                 continue
+                            
                             raise UnifiedClientError(f"Azure error: {e}")
                 
                 # Not Azure, continue with regular custom endpoint
