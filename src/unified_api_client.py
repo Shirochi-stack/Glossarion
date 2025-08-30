@@ -3310,53 +3310,64 @@ class UnifiedClient:
                 if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
                     
-                    # Only try main key if conditions are met
+                    # Check if we should try fallback keys
+                    should_try_fallback = False
+                    
+                    # Check for main GUI key
                     if (self._multi_key_mode and 
                         not main_key_attempted and 
                         hasattr(self, 'original_api_key') and 
                         hasattr(self, 'original_model') and
                         self.original_api_key and 
                         self.original_model):
-                        
-                        print(f"🔄 Attempting main key fallback for prohibited content")
+                        should_try_fallback = True
+                        print(f"🔄 Will use main GUI key for fallback")
+                    
+                    # Also check for configured fallback keys
+                    elif (hasattr(self, 'translator_config') and 
+                          self.translator_config.get('use_fallback_keys', False) and
+                          not main_key_attempted):
+                        should_try_fallback = True
+                        print(f"🔄 Will use configured fallback keys")
+                    
+                    if should_try_fallback:
+                        print(f"🔄 Attempting fallback for prohibited content")
                         print(f"   Current key: {self.key_identifier}")
-                        print(f"   Main key model: {self.original_model}")
                         
                         main_key_attempted = True
                         
                         try:
-                            # Create temporary client with main key
+                            # Try retry with fallback keys
                             main_response = self._retry_with_main_key(
                                 messages, temperature, max_tokens, max_completion_tokens, context, request_id
                             )
                             
                             if main_response:
                                 content, finish_reason = main_response
-                                print(f"✅ Main key succeeded! Returning response")
-                                return content, finish_reason  # <-- RETURN HERE, DON'T CONTINUE
+                                print(f"✅ Fallback key succeeded! Returning response")
+                                return content, finish_reason
                             else:
-                                print(f"❌ Main key returned None")
+                                print(f"❌ Fallback key returned None")
                                 # Fall through to error handling
                                 
                         except Exception as main_error:
-                            print(f"❌ Main key error: {str(main_error)[:200]}")
-                            # Check if main key also hit content filter
+                            print(f"❌ Fallback key error: {str(main_error)[:200]}")
+                            # Check if fallback also hit content filter
                             main_error_str = str(main_error).lower()
                             if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                print(f"❌ Main key also hit content filter")
+                                print(f"❌ Fallback key also hit content filter")
                             # Fall through to error handling
                     else:
-                        # Only print this if we're NOT trying the main key
-                        if not self._multi_key_mode:
-                            # Don't print confusing message if this is a retry client
+                        # Only print this if we're NOT trying fallback
+                        if not self._multi_key_mode and not hasattr(self, 'translator_config'):
                             if not getattr(self, '_is_retry_client', False):
-                                print(f"❌ Not in multi-key mode, cannot retry")
+                                print(f"❌ Not in multi-key mode and no fallback config")
                         elif main_key_attempted:
-                            print(f"❌ Already attempted main key")
-                        else:
-                            print(f"❌ Main key not available for retry")
+                            print(f"❌ Already attempted fallback keys")
+                        elif not hasattr(self, 'original_api_key') and not (hasattr(self, 'translator_config') and self.translator_config.get('use_fallback_keys')):
+                            print(f"❌ No fallback keys configured")
                     
-                    # Only reach here if main key wasn't tried or failed
+                    # Only reach here if fallback wasn't tried or failed
                     print(f"❌ Content prohibited - cannot continue")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
@@ -4459,53 +4470,64 @@ class UnifiedClient:
                 if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
                     print(f"❌ Prohibited image content detected: {error_str[:200]}")
                     
-                    # Only try main key if conditions are met
+                    # Check if we should try fallback keys
+                    should_try_fallback = False
+                    
+                    # Check for main GUI key
                     if (self._multi_key_mode and 
                         not main_key_attempted and 
                         hasattr(self, 'original_api_key') and 
                         hasattr(self, 'original_model') and
                         self.original_api_key and 
                         self.original_model):
-                        
-                        print(f"🔄 Attempting main key fallback for prohibited image content")
+                        should_try_fallback = True
+                        print(f"🔄 Will use main GUI key for image fallback")
+                    
+                    # Also check for configured fallback keys
+                    elif (hasattr(self, 'translator_config') and 
+                          self.translator_config.get('use_fallback_keys', False) and
+                          not main_key_attempted):
+                        should_try_fallback = True
+                        print(f"🔄 Will use configured fallback keys for image")
+                    
+                    if should_try_fallback:
+                        print(f"🔄 Attempting fallback for prohibited image content")
                         print(f"   Current key: {self.key_identifier}")
-                        print(f"   Main key model: {self.original_model}")
                         
                         main_key_attempted = True
                         
                         try:
-                            # Create temporary client with main key for image
+                            # Try retry with fallback keys for image
                             main_response = self._retry_image_with_main_key(
                                 messages, image_data, temperature, max_tokens, max_completion_tokens, context, request_id
                             )
                             
                             if main_response:
                                 content, finish_reason = main_response
-                                print(f"✅ Main key succeeded for image! Returning response")
-                                return content, finish_reason  # <-- RETURN HERE, DON'T CONTINUE
+                                print(f"✅ Fallback key succeeded for image! Returning response")
+                                return content, finish_reason
                             else:
-                                print(f"❌ Main key returned None for image")
+                                print(f"❌ Fallback key returned None for image")
                                 # Fall through to error handling
                                 
                         except Exception as main_error:
-                            print(f"❌ Main key image error: {str(main_error)[:200]}")
-                            # Check if main key also hit content filter
+                            print(f"❌ Fallback key image error: {str(main_error)[:200]}")
+                            # Check if fallback also hit content filter
                             main_error_str = str(main_error).lower()
                             if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                print(f"❌ Main key also hit content filter for image")
+                                print(f"❌ Fallback key also hit content filter for image")
                             # Fall through to error handling
                     else:
-                        # Only print this if we're NOT trying the main key
-                        if not self._multi_key_mode:
-                            # Don't print confusing message if this is a retry client
+                        # Only print this if we're NOT trying fallback
+                        if not self._multi_key_mode and not hasattr(self, 'translator_config'):
                             if not getattr(self, '_is_retry_client', False):
-                                print(f"❌ Not in multi-key mode, cannot retry image")
+                                print(f"❌ Not in multi-key mode and no fallback config for image")
                         elif main_key_attempted:
-                            print(f"❌ Already attempted main key")
-                        else:
-                            print(f"❌ Main key not available for retry")
+                            print(f"❌ Already attempted fallback keys for image")
+                        elif not hasattr(self, 'original_api_key') and not (hasattr(self, 'translator_config') and self.translator_config.get('use_fallback_keys')):
+                            print(f"❌ No fallback keys configured for image")
                     
-                    # Only reach here if main key wasn't tried or failed
+                    # Only reach here if fallback wasn't tried or failed
                     print(f"❌ Image content prohibited - cannot continue")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
