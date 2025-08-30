@@ -1033,7 +1033,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.0.8"
+        __version__ = "4.1.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1918,7 +1918,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.0.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.1.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -9769,8 +9769,8 @@ Important rules:
                 
                 # Detection Thresholds Section using ttkbootstrap
                 threshold_frame = tb.LabelFrame(scrollable_frame, text="Detection Thresholds (%)", 
-                                                padding=20, bootstyle="secondary")
-                threshold_frame.pack(fill='x', padx=20, pady=(0, 15))
+                                                padding=25, bootstyle="secondary")
+                threshold_frame.pack(fill='x', padx=20, pady=(0, 25))
                 
                 threshold_descriptions = {
                     'similarity': ('Text Similarity', 'Character-by-character comparison'),
@@ -14917,7 +14917,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v4.0.8...")
+    print("🚀 Starting Glossarion v4.1.0...")
     
     # Initialize splash screen
     splash_manager = None
