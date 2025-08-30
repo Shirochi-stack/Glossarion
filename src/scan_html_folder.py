@@ -3050,7 +3050,7 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
                     for candidate_key in candidates:
                         candidate_info = prog["chapters"][candidate_key]
                         candidate_output = candidate_info.get("output_file", "")
-                        if candidate_output == faulty_filename or candidate_output.endswith(faulty_filename):
+                        if candidate_output and (candidate_output == faulty_filename or candidate_output.endswith(faulty_filename)):
                             chapter_key = candidate_key
                             break
                     
