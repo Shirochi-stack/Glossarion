@@ -7312,10 +7312,12 @@ class UnifiedClient:
                     should_retry = True
                 
                 # Handle max_tokens vs max_completion_tokens reactively
-                elif not fixes_attempted['max_tokens_param'] and "max_tokens" in error_str and ("not supported" in error_str or "unsupported" in error_str):
-                    print(f"Model {self.model} requires max_completion_tokens instead of max_tokens, will retry...")
+                elif not fixes_attempted['max_tokens_param'] and "max_tokens" in error_str and ("not supported" in error_str or "max_completion_tokens" in error_str):
+                    print(f"Switching from max_tokens to max_completion_tokens for model {self.model}")
                     fixes_attempted['max_tokens_param'] = True
                     should_retry = True
+                    time.sleep(api_delay)
+                    continue
                 
                 # Handle rate limits
                 elif "rate limit" in error_str.lower() or "429" in error_str:
@@ -8527,13 +8529,20 @@ class UnifiedClient:
                                 azure_endpoint=azure_endpoint
                             )
                             
-                            # Use the deployment name instead of model
-                            response = client.chat.completions.create(
-                                model=deployment,
-                                messages=messages,
-                                temperature=temperature,
-                                max_tokens=max_tokens
-                            )
+                            # Build params with correct token parameter based on model
+                            params = {
+                                "model": deployment,
+                                "messages": messages,
+                                "temperature": temperature
+                            }
+
+                            # Check model type using existing method
+                            if self._is_o_series_model():
+                                params["max_completion_tokens"] = max_tokens
+                            else:
+                                params["max_tokens"] = max_tokens
+
+                            response = client.chat.completions.create(**params)
                             
                             # Extract response
                             content = response.choices[0].message.content if response.choices else ""
@@ -9090,9 +9099,8 @@ class UnifiedClient:
             "temperature": temperature
         }
         
-        # Check MODEL_CONSTRAINTS to determine which token parameter to use
-        model_base = self.model.split('-')[0] if '-' in self.model else self.model
-        if any(model in self.model.lower() for model in self.MODEL_CONSTRAINTS.get('max_completion_tokens', [])):
+        # Use _is_o_series_model to determine which token parameter to use
+        if self._is_o_series_model():
             data["max_completion_tokens"] = max_tokens
         else:
             data["max_tokens"] = max_tokens
