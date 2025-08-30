@@ -885,6 +885,29 @@ excludes = [
     # 'numpy',  # Required by datasketch and OpenCV - do not exclude
     'sklearn',
     'skimage',
+    'torch',
+    'torchvision',
+    'torchaudio',
+    'tensorflow',
+    'tensorflow_hub',
+    'tensorboard',
+    'keras',
+    'jax',
+    'flax',
+    'transformers',  # Hugging Face
+    'accelerate',
+    'xformers',
+    'triton',  # PyTorch dependency
+    'nvidia',  # CUDA libraries
+    'cuda',
+    'cudnn',
+    'cublas',
+    'cufft',
+    'curand',
+    'cusolver',
+    'cusparse',
+    'nccl',
+    'nvtx',
     
     # Testing frameworks
     'pytest',
