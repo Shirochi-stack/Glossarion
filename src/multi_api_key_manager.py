@@ -1621,11 +1621,11 @@ class MultiAPIKeyDialog:
         
         # Expand the width to show more text (make it wider than the column)
         expanded_width = max(width + 100, 250)  # At least 250 pixels wide
-        expanded_height = height + 2  # Add some padding to the height
+        expanded_height = height + 8  # Add some padding to the height
         
         # Create entry widget
         edit_var = tk.StringVar(value=key.model)
-        self.edit_widget = tb.Entry(self.tree, textvariable=edit_var, font=('TkDefaultFont', 16))
+        self.edit_widget = tb.Entry(self.tree, textvariable=edit_var, font=('TkDefaultFont', 11))
         
         def save_edit():
             new_value = edit_var.get().strip()
