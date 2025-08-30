@@ -90,6 +90,12 @@ lap>=0.5.12
 # Inpainting
 replicate
 
+# Optional .onnx conversion (increases .exe file size by 1.5gb)
+#torch
+#torchvision
+#onnxruntime
+#safetensors
+
 # Encryption/Decryption
 cryptography
 
