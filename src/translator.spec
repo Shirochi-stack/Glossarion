@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v4.0.6 - PyInstaller Specification File
+Glossarion v4.0.8 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v4.0.6'  # CHANGED: Updated version
+APP_NAME = 'Glossarion v4.0.8'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -298,6 +298,24 @@ api_modules = [
     'google.cloud.vision_v1.types',
     'google.cloud.vision_v1.services',
     'google.cloud.vision_v1.services.image_annotator',
+	
+	# Google Cloud Translate
+	'google.cloud.translate',
+	'google.cloud.translate_v2',
+	'google.cloud.translate_v3',
+	'google.cloud.translate_v3.types',
+	'google.cloud.translate_v3.services',
+	'google.cloud.translate_v3.services.translation_service',
+	
+	# DeepL
+	'deepl',
+	'deepl.translator',
+	'deepl.exceptions',
+	'deepl.api',
+	'deepl.http',
+	'deepl.util',
+	'deepl.auth',
+	'deepl.model',	
     
     'proto',
     'proto.message',
@@ -403,6 +421,7 @@ api_modules = [
 
 # Text Processing & NLP
 text_modules = [
+
     # Language detection
     'langdetect',
     'langdetect.detector',
@@ -410,6 +429,13 @@ text_modules = [
     'langdetect.language',
     'langdetect.detector_factory',
     'langdetect.utils',
+	
+	# Fuzzy string matching (ADD THIS SECTION)
+    'rapidfuzz',
+    'rapidfuzz.fuzz',
+    'rapidfuzz.process',
+    'rapidfuzz.distance',
+    'rapidfuzz.utils',
     
     # Token counting
     'tiktoken',
@@ -943,6 +969,7 @@ This build includes:
 - Datasketch for enhanced QA scanning performance
 - AI Hunter Enhanced for improved duplicate detection
 - Complete API client support (Google, OpenAI, Anthropic)
+- DeepL and Google Translate for traditional translation APIs 
 - Full text processing and analysis capabilities
 - Manga text detection with Google Cloud Vision OCR support
 - Manga text translation with API key
