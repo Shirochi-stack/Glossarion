@@ -194,6 +194,20 @@ except ImportError:
     VERTEX_AI_AVAILABLE = False
     print("Vertex AI SDK not installed. Install with: pip install google-cloud-aiplatform")
 
+try:
+    import deepl
+    DEEPL_AVAILABLE = True
+except ImportError:
+    deepl = None
+    DEEPL_AVAILABLE = False
+
+try:
+    from google.cloud import translate_v2 as google_translate
+    GOOGLE_TRANSLATE_AVAILABLE = True
+except ImportError:
+    google_translate = None
+    GOOGLE_TRANSLATE_AVAILABLE = False
+    
 from functools import lru_cache
 from datetime import datetime, timedelta
  
@@ -348,6 +362,8 @@ class UnifiedClient:
         'eh/': 'electronhub',
         'electronhub/': 'electronhub',
         'electron/': 'electronhub',
+        'deepl': 'deepl',
+        'google-translate': 'google_translate',
     }
     
     # Model-specific constraints
@@ -2579,7 +2595,17 @@ class UnifiedClient:
                         base_url=base_url
                     )
                 logger.info(f"xAI client configured with endpoint: {base_url}")
-        
+ 
+        elif self.client_type == 'deepl' or self.model.startswith('deepl'):
+            self.client_type = 'deepl'
+            self.client = None  # No persistent client needed
+            return 
+            
+        elif self.client_type == 'google_translate' or self.model.startswith('google-translate'):
+            self.client_type = 'google_translate'
+            self.client = None  # No persistent client needed
+            return            
+ 
         elif self.client_type == 'vertex_model_garden':
             # Vertex AI doesn't need a client created here
             logger.info("Vertex AI Model Garden will initialize on demand")
@@ -2763,7 +2789,36 @@ class UnifiedClient:
                         # Call the actual implementation with retry reason
                         result = self._send_internal(messages, temperature, max_tokens, 
                                                    max_completion_tokens, context, retry_reason=retry_reason,request_id=request_id)
-                        
+
+                        # CHECK FOR TRUNCATED RESPONSE AND RETRY IF ENABLED
+                        content, finish_reason = result
+                        if finish_reason in ['length', 'max_tokens'] and os.getenv("RETRY_TRUNCATED", "0") == "1":
+                            print(f"[{thread_name}] Response truncated (finish_reason: {finish_reason})")
+                            
+                            # Check if we haven't exceeded max retries for truncation
+                            if retry_count < max_retries - 1:
+                                # Get the max retry tokens from environment
+                                max_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+                                
+                                # Determine new token limit
+                                current_limit = max_tokens or max_completion_tokens or 8192
+                                new_limit = max(current_limit * 2, max_retry_tokens)
+                                
+                                print(f"[{thread_name}] Retrying with increased tokens: {current_limit} → {new_limit}")
+                                
+                                # Update token limits for retry
+                                if max_tokens is not None:
+                                    max_tokens = new_limit
+                                if max_completion_tokens is not None:
+                                    max_completion_tokens = new_limit
+                                
+                                retry_reason = f"truncated_retry_{current_limit}_to_{new_limit}"
+                                retry_count += 1
+                                continue  # Retry with increased tokens
+                            else:
+                                print(f"[{thread_name}] Truncated but max retries reached, accepting response")
+                                # Fall through to success handling
+ 
                         # Mark success
                         if self._multi_key_mode:
                             tls = self._get_thread_local_client()
@@ -3774,7 +3829,36 @@ class UnifiedClient:
                         result = self._send_image_internal(messages, image_data, temperature,
                                                          max_tokens, max_completion_tokens, context,
                                                          retry_reason=retry_reason, request_id=request_id)
-                        
+
+                        # CHECK FOR TRUNCATED IMAGE RESPONSE AND RETRY IF ENABLED
+                        content, finish_reason = result
+                        if finish_reason in ['length', 'max_tokens'] and os.getenv("RETRY_TRUNCATED", "0") == "1":
+                            print(f"[{thread_name}] Image response truncated (finish_reason: {finish_reason})")
+                            
+                            # Check if we haven't exceeded max retries for truncation
+                            if retry_count < max_retries - 1:
+                                # Get the max retry tokens from environment
+                                max_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+                                
+                                # Determine new token limit
+                                current_limit = max_tokens or max_completion_tokens or 8192
+                                new_limit = max(current_limit * 2, max_retry_tokens)
+                                
+                                print(f"[{thread_name}] Retrying image with increased tokens: {current_limit} → {new_limit}")
+                                
+                                # Update token limits for retry
+                                if max_tokens is not None:
+                                    max_tokens = new_limit
+                                if max_completion_tokens is not None:
+                                    max_completion_tokens = new_limit
+                                
+                                retry_reason = f"image_truncated_retry_{current_limit}_to_{new_limit}"
+                                retry_count += 1
+                                continue  # Retry with increased tokens
+                            else:
+                                print(f"[{thread_name}] Image truncated but max retries reached, accepting response")
+                                # Fall through to success handling
+
                         # Mark success
                         if self._multi_key_mode:
                             tls = self._get_thread_local_client()
@@ -6214,6 +6298,8 @@ class UnifiedClient:
             'fireworks': self._send_fireworks,  # Fireworks AI
             'xai': self._send_xai,  # xAI Grok models
             'vertex_model_garden': self._send_vertex_model_garden,
+            'deepl': self._send_deepl,  # DeepL translation service
+            'google_translate': self._send_google_translate,  # Google Cloud Translate
         }
         
         # IMPORTANT: Use actual_provider for routing, not client_type
@@ -6230,9 +6316,14 @@ class UnifiedClient:
                 logger.info(f"Using Together AI for {self.client_type} model")
                 return self._send_together(messages, temperature, max_tokens, response_name)
             raise UnifiedClientError(f"No handler for client type: {self.client_type}")
+
+        if self.client_type in ['deepl', 'google_translate']:
+            # These services don't use temperature or token limits
+            # They just translate the text directly
+            return handler(messages, None, None, response_name)
         
         # Route based on actual provider (handles Gemini with OpenAI endpoint correctly)
-        if actual_provider == 'gemini':
+        elif actual_provider == 'gemini':
             # Always use Gemini handler for Gemini models, regardless of transport
             logger.debug(f"Routing to Gemini handler (actual provider: {actual_provider}, client_type: {self.client_type})")
             return self._send_gemini(messages, temperature, max_tokens, response_name)
@@ -10614,3 +10705,258 @@ class UnifiedClient:
             print(f"  Thread-local key_index: {getattr(tls, 'key_index', None)}")
         
         print("[DEBUG] End of Multi-Key State\n")
+
+
+    # Fixed implementations with correct logging for unified_api_client.py
+
+    def _send_deepl(self, messages, temperature=None, max_tokens=None, response_name=None) -> UnifiedResponse:
+        """
+        Send messages to DeepL API for translation
+        
+        Args:
+            messages: List of message dicts
+            temperature: Not used by DeepL (included for signature compatibility)
+            max_tokens: Not used by DeepL (included for signature compatibility)
+            response_name: Name for saving response (for debugging/logging)
+        
+        Returns:
+            UnifiedResponse object
+        """
+        
+        if not DEEPL_AVAILABLE:
+            raise UnifiedClientError("DeepL library not installed. Run: pip install deepl")
+        
+        try:
+            # Get DeepL API key
+            deepl_api_key = os.getenv('DEEPL_API_KEY') or self.api_key
+            
+            if not deepl_api_key or deepl_api_key == 'dummy':
+                raise UnifiedClientError("DeepL API key not found. Set DEEPL_API_KEY environment variable or configure in settings.")
+            
+            # Initialize DeepL translator
+            translator = deepl.Translator(deepl_api_key)
+            
+            # Extract text to translate from messages
+            text_to_translate = ""
+            source_lang = None
+            target_lang = "EN-US"  # Default to US English
+            
+            for msg in messages:
+                if msg['role'] == 'system':
+                    # Try to detect language hints from system prompt
+                    content_lower = msg['content'].lower()
+                    if 'korean' in content_lower or 'kr' in content_lower:
+                        source_lang = 'KO'
+                    elif 'japanese' in content_lower or 'jp' in content_lower:
+                        source_lang = 'JA'
+                    elif 'chinese' in content_lower or 'zh' in content_lower:
+                        source_lang = 'ZH'
+                    
+                    # Check for target language preference
+                    if 'british english' in content_lower:
+                        target_lang = "EN-GB"
+                elif msg['role'] == 'user':
+                    text_to_translate = msg['content']
+            
+            if not text_to_translate:
+                raise UnifiedClientError("No text to translate found in messages")
+            
+            # Log the translation request
+            logger.info(f"DeepL: Translating {len(text_to_translate)} characters")
+            if source_lang:
+                logger.info(f"DeepL: Source language: {source_lang}")
+            
+            # Perform translation
+            start_time = time.time()
+            
+            # DeepL API call
+            if source_lang:
+                result = translator.translate_text(
+                    text_to_translate, 
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    preserve_formatting=True,
+                    tag_handling='html' if '<' in text_to_translate else None
+                )
+            else:
+                result = translator.translate_text(
+                    text_to_translate,
+                    target_lang=target_lang,
+                    preserve_formatting=True,
+                    tag_handling='html' if '<' in text_to_translate else None
+                )
+            
+            elapsed_time = time.time() - start_time
+            
+            # Get the translated text
+            translated_text = result.text
+            
+            # Create UnifiedResponse object
+            response = UnifiedResponse(
+                content=translated_text,
+                finish_reason='complete',
+                usage={
+                    'characters': len(text_to_translate),
+                    'detected_source_lang': result.detected_source_lang if hasattr(result, 'detected_source_lang') else source_lang
+                },
+                raw_response={'result': result}
+            )
+            
+            logger.info(f"DeepL: Translation completed in {elapsed_time:.2f}s")
+            
+            return response
+            
+        except Exception as e:
+            error_msg = f"DeepL API error: {str(e)}"
+            logger.error(f"ERROR: {error_msg}")
+            raise UnifiedClientError(error_msg)
+
+    def _send_google_translate(self, messages, temperature=None, max_tokens=None, response_name=None):
+        """Send messages to Google Translate API"""
+        
+        if not GOOGLE_TRANSLATE_AVAILABLE:
+            raise UnifiedClientError(
+                "Google Cloud Translate not installed. Run: pip install google-cloud-translate\n"
+                "Also ensure you have Google Cloud credentials configured."
+            )
+        
+        try:
+            # Check for Google Cloud credentials with better error messages
+            google_creds_path = None
+            
+            # Try multiple possible locations for credentials
+            possible_paths = [
+                os.getenv('GOOGLE_APPLICATION_CREDENTIALS'),
+                os.getenv('GOOGLE_CLOUD_CREDENTIALS'),
+                self.config.get('google_cloud_credentials') if hasattr(self, 'config') else None,
+                self.config.get('google_vision_credentials') if hasattr(self, 'config') else None,
+            ]
+            
+            for path in possible_paths:
+                if path and os.path.exists(path):
+                    google_creds_path = path
+                    break
+            
+            if not google_creds_path:
+                raise UnifiedClientError(
+                    "Google Cloud credentials not found.\n\n"
+                    "To use Google Translate, you need to:\n"
+                    "1. Create a Google Cloud service account\n"
+                    "2. Download the JSON credentials file\n"
+                    "3. Set it up in Glossarion:\n"
+                    "   - For GUI: Use the 'Set up Google Cloud Translate Credentials' button\n"
+                    "   - For CLI: Set GOOGLE_APPLICATION_CREDENTIALS environment variable\n\n"
+                    "The same credentials work for both Google Translate and Cloud Vision (manga OCR)."
+                )
+            
+            # Set the environment variable for the Google client library
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds_path
+            logger.info(f"Using Google Cloud credentials: {os.path.basename(google_creds_path)}")
+            
+            # Initialize the client
+            translate_client = google_translate.Client()
+            
+            # Extract text and detect language from messages
+            text_to_translate = ""
+            source_lang = None
+            target_lang = 'en'  # Default to English
+            
+            for msg in messages:
+                if msg['role'] == 'system':
+                    # Try to detect language hints from system prompt
+                    content_lower = msg['content'].lower()
+                    if 'korean' in content_lower or 'kr' in content_lower:
+                        source_lang = 'ko'
+                    elif 'japanese' in content_lower or 'jp' in content_lower:
+                        source_lang = 'ja'
+                    elif 'chinese simplified' in content_lower:
+                        source_lang = 'zh-CN'
+                    elif 'chinese traditional' in content_lower:
+                        source_lang = 'zh-TW'
+                    elif 'chinese' in content_lower or 'zh' in content_lower:
+                        source_lang = 'zh'
+                elif msg['role'] == 'user':
+                    text_to_translate = msg['content']
+            
+            if not text_to_translate:
+                # Return empty response instead of error
+                return UnifiedResponse(
+                    content="",
+                    finish_reason='complete',
+                    usage={'characters': 0},
+                    raw_response={}
+                )
+            
+            # Log the translation request
+            logger.info(f"Google Translate: Translating {len(text_to_translate)} characters")
+            if source_lang:
+                logger.info(f"Google Translate: Source language: {source_lang}")
+            
+            # Perform translation
+            start_time = time.time()
+            
+            # Google Translate API call
+            if source_lang:
+                result = translate_client.translate(
+                    text_to_translate,
+                    source_language=source_lang,
+                    target_language=target_lang,
+                    format_='html' if '<' in text_to_translate else 'text'
+                )
+            else:
+                # Auto-detect source language
+                result = translate_client.translate(
+                    text_to_translate,
+                    target_language=target_lang,
+                    format_='html' if '<' in text_to_translate else 'text'
+                )
+            
+            elapsed_time = time.time() - start_time
+            
+            # Handle both single result and list of results
+            if isinstance(result, list):
+                result = result[0] if result else {}
+            
+            translated_text = result.get('translatedText', '')
+            detected_lang = result.get('detectedSourceLanguage', source_lang)
+            
+            # Create UnifiedResponse object
+            response = UnifiedResponse(
+                content=translated_text,
+                finish_reason='complete',
+                usage={
+                    'characters': len(text_to_translate),
+                    'detected_source_lang': detected_lang
+                },
+                raw_response=result
+            )
+            
+            logger.info(f"Google Translate: Translation completed in {elapsed_time:.2f}s")
+            
+            return response
+            
+        except UnifiedClientError:
+            # Re-raise our custom errors with helpful messages
+            raise
+        except Exception as e:
+            # Provide more helpful error messages for common issues
+            error_msg = str(e)
+            
+            if "403" in error_msg or "permission" in error_msg.lower():
+                raise UnifiedClientError(
+                    "Google Translate API permission denied.\n\n"
+                    "Please ensure:\n"
+                    "1. Cloud Translation API is enabled in your Google Cloud project\n"
+                    "2. Your service account has the 'Cloud Translation API User' role\n"
+                    "3. Billing is enabled for your project (required for Translation API)\n\n"
+                    f"Original error: {error_msg}"
+                )
+            elif "billing" in error_msg.lower():
+                raise UnifiedClientError(
+                    "Google Cloud billing not enabled.\n\n"
+                    "The Translation API requires billing to be enabled on your project.\n"
+                    "Visit: https://console.cloud.google.com/billing\n\n"
+                    f"Original error: {error_msg}"
+                )
+            else:
+                raise UnifiedClientError(f"Google Translate API error: {error_msg}")
