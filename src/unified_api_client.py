@@ -3647,12 +3647,18 @@ class UnifiedClient:
                     print(f"[{label} {idx+1}] Operation was cancelled during retry")
                     return None
                 
+                # Check if it's Azure content filter - CONTINUE TO NEXT KEY
+                error_str = str(e).lower()
+                if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
+                    print(f"[{label} {idx+1}] ❌ Content filter error: {str(e)[:100]}")
+                    continue  # TRY NEXT FALLBACK KEY
+                
                 print(f"[{label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
-                continue
+                continue  # TRY NEXT KEY REGARDLESS
                 
             except Exception as e:
                 print(f"[{label} {idx+1}] ❌ Exception: {str(e)[:200]}")
-                continue
+                continue  # TRY NEXT KEY
         
         # If we get here, all fallback keys failed
         print(f"[MAIN KEY RETRY] ❌ All {len(fallback_keys)} fallback keys failed")
@@ -4774,19 +4780,25 @@ class UnifiedClient:
                     else:
                         print(f"[IMAGE {label} {idx+1}] ❌ Image content too short or empty: {len(content) if content else 0} chars")
                         continue
-                    
+                                    
             except UnifiedClientError as e:
                 # Check if it's a cancellation
                 if e.error_type == "cancelled":
                     print(f"[IMAGE {label} {idx+1}] Operation was cancelled during retry")
                     return None
-                    
+                
+                # Check if it's Azure content filter - CONTINUE TO NEXT KEY
+                error_str = str(e).lower()
+                if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
+                    print(f"[IMAGE {label} {idx+1}] ❌ Content filter error: {str(e)[:100]}")
+                    continue  # TRY NEXT FALLBACK KEY
+                
                 print(f"[IMAGE {label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
-                continue
+                continue  # TRY NEXT KEY REGARDLESS
                 
             except Exception as e:
                 print(f"[IMAGE {label} {idx+1}] ❌ Exception: {str(e)[:200]}")
-                continue
+                continue  # TRY NEXT KEY
         
         # If we get here, all fallback keys failed
         print(f"[IMAGE MAIN KEY RETRY] ❌ All {len(fallback_keys)} fallback keys failed")
