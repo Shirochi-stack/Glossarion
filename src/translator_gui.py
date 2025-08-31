@@ -1142,6 +1142,7 @@ class TranslatorGUI:
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
         self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2024-08-01-preview'))
+        self.use_fallback_keys_var = tk.BooleanVar(value=self.config.get('use_fallback_keys', False))
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
@@ -8142,6 +8143,8 @@ Provide translations in the same numbered format."""
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
             'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var.get(),
+            'USE_FALLBACK_KEYS': '1' if self.use_fallback_keys_var.get() else '0',
+            'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
@@ -14175,6 +14178,7 @@ Important rules:
                     'gemini_openai_endpoint': self.gemini_openai_endpoint_var.get(),
                     'image_chunk_overlap': safe_float(self.image_chunk_overlap_var.get(), 1.0),
                     'azure_api_version': self.azure_api_version_var.get() if hasattr(self, 'azure_api_version_var') else '2024-08-01-preview',
+                    'use_fallback_keys': self.use_fallback_keys_var.get(),
 
                                         
                     # ALL Anti-duplicate parameters (moved below other settings)
@@ -14280,6 +14284,8 @@ Important rules:
                     'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
                     'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
                     'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
+                    'USE_FALLBACK_KEYS': '1' if self.use_fallback_keys_var.get() else '0',
+                    'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
                     'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var.get(),
                     
                     # Metadata and batch header settings
