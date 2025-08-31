@@ -8073,6 +8073,8 @@ Provide translations in the same numbered format."""
             if extraction_mode == 'enhanced':
                 enhanced_filtering = getattr(self, 'enhanced_filtering_var', tk.StringVar(value='smart')).get()
             else:
+
+
                 enhanced_filtering = 'smart'
                     
         return {
