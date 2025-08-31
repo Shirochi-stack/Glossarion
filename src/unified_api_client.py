@@ -421,9 +421,9 @@ class UnifiedClient:
             
             # Load the validated keys
             cls._api_key_pool.load_from_list(validated_keys)
-            cls._main_fallback_key = validated_keys[0]['api_key']
-            cls._main_fallback_model = validated_keys[0]['model']
-            print(f"🔑 Using {validated_keys[0]['model']} as main fallback key")
+            #cls._main_fallback_key = validated_keys[0]['api_key']
+            #cls._main_fallback_model = validated_keys[0]['model']
+            #print(f"🔑 Using {validated_keys[0]['model']} as main fallback key")
 
             # FIX 2: Store settings at class level (these affect all instances)
             # These are class variables since pool is shared
