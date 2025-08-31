@@ -555,6 +555,16 @@ class UnifiedClient:
         
         # Store Google Cloud credentials path if available
         self.google_creds_path = None
+
+        self.translator_config = {
+            'use_fallback_keys': os.getenv('USE_FALLBACK_KEYS', '0') == '1',
+            'fallback_keys': json.loads(os.getenv('FALLBACK_KEYS', '[]'))
+        }
+        
+        # Debug print to verify
+        if self.translator_config['use_fallback_keys']:
+            num_fallbacks = len(self.translator_config['fallback_keys'])
+            print(f"🔑 Fallback keys loaded: {num_fallbacks} keys")
         
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
@@ -3527,19 +3537,28 @@ class UnifiedClient:
         })
         print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
         
-        # THEN: Add any additional configured fallback keys
-        if hasattr(self, 'translator_config'):
-            use_fallback = self.translator_config.get('use_fallback_keys', False)
-            if use_fallback:
-                configured_fallbacks = self.translator_config.get('fallback_keys', [])
+        # DEBUG: Check what's in environment
+        print(f"[DEBUG] USE_FALLBACK_KEYS env: {os.getenv('USE_FALLBACK_KEYS')}")
+        print(f"[DEBUG] FALLBACK_KEYS env: {os.getenv('FALLBACK_KEYS', 'NOT SET')[:100]}")
+        
+        # Try loading directly from environment if translator_config doesn't exist
+        use_fallback_env = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
+        
+        if use_fallback_env and fallback_keys_json != '[]':
+            try:
+                configured_fallbacks = json.loads(fallback_keys_json)
+                print(f"[DEBUG] Loaded {len(configured_fallbacks)} fallback keys from environment")
                 for fb in configured_fallbacks:
                     fallback_keys.append({
                         'api_key': fb.get('api_key'),
                         'model': fb.get('model'),
-                        'label': 'ADDITIONAL FALLBACK'
+                        'label': 'FALLBACK KEY'
                     })
+            except Exception as e:
+                print(f"[DEBUG] Failed to parse FALLBACK_KEYS: {e}")
         
-        print(f"[MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main GUI key first)")
+        print(f"[MAIN KEY RETRY] Total keys to try: {len(fallback_keys)}")
         
         # Try each fallback key in the list
         for idx, fallback_data in enumerate(fallback_keys):
@@ -4672,20 +4691,6 @@ class UnifiedClient:
             'label': 'MAIN GUI KEY'
         })
         print(f"[IMAGE MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
-        
-        # THEN: Add any additional configured fallback keys
-        if hasattr(self, 'translator_config'):
-            use_fallback = self.translator_config.get('use_fallback_keys', False)
-            if use_fallback:
-                configured_fallbacks = self.translator_config.get('fallback_keys', [])
-                for fb in configured_fallbacks:
-                    fallback_keys.append({
-                        'api_key': fb.get('api_key'),
-                        'model': fb.get('model'),
-                        'label': 'ADDITIONAL FALLBACK'
-                    })
-        
-        print(f"[IMAGE MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main GUI key first)")
         
         # Try each fallback key in the list
         for idx, fallback_data in enumerate(fallback_keys):
@@ -8561,7 +8566,7 @@ class UnifiedClient:
                             if ("content_filter" in error_str or 
                                 "responsibleaipolicyviolation" in error_str or
                                 "content management policy" in error_str or
-                                "400" in str(e)):
+                                "the response was filtered" in error_str):
                                 
                                 # This is a content filter error - raise it immediately as prohibited_content
                                 print(f"Azure content filter detected: {str(e)[:100]}")
