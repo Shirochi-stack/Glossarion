@@ -3576,6 +3576,19 @@ class UnifiedClient:
                     model=fallback_model,   
                     output_dir=self.output_dir
                 )
+
+                if hasattr(self, 'base_url') and self.base_url:
+                    temp_client.base_url = self.base_url
+                    temp_client.openai_base_url = self.base_url
+                    
+                if hasattr(self, 'api_version'):
+                    temp_client.api_version = self.api_version
+                    
+                if hasattr(self, 'is_azure') and self.is_azure:
+                    temp_client.is_azure = self.is_azure
+                    
+                # Force the client to reinitialize with Azure settings
+                temp_client._setup_client()
                 
                 # FORCE single-key mode after initialization
                 temp_client._multi_key_mode = False
