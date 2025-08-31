@@ -2763,32 +2763,39 @@ class UnifiedClient:
                         error_str = str(e)
                         print(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
                         
-                        # Check for ANY Azure error with these specific error codes
-                        is_azure_content_filter = False
-                        if "azure" in error_str.lower():
-                            if "400" in error_str and any(indicator in error_str.lower() for indicator in ["responsibleaipolicyviolation", "content_filter", "content management policy"]):
-                                is_azure_content_filter = True
-                                print(f"[Thread-{thread_name}] Azure content filter detected (400 error)")                        
-                        
-                        # Check for prohibited content FIRST
-                        if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                        # Check for prohibited content INCLUDING Azure
+                        if ("content_filter" in error_str.lower() or 
+                            "responsibleaipolicyviolation" in error_str.lower() or
+                            "content management policy" in error_str.lower() or
+                            "prohibited_content" in error_str.lower() or
+                            any(indicator in error_str.lower() for indicator in content_filter_indicators)):
+                            
                             retry_reason = "prohibited_content"
                             print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
                             
-                            # Try main key if conditions are met
-                            if (self._multi_key_mode and 
-                                hasattr(self, 'original_api_key') and 
-                                hasattr(self, 'original_model') and
-                                self.original_api_key and 
-                                self.original_model and
-                                not should_try_main_key):
+                            # Try fallback keys if not already attempted
+                            if not should_try_main_key:
+                                print(f"[Thread-{thread_name}] Will retry with fallback keys")
                                 
-                                print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
-                                should_try_main_key = True
+                                # Call the retry method that uses fallback keys
+                                try:
+                                    fallback_response = self._retry_with_main_key(
+                                        messages, temperature, max_tokens, 
+                                        max_completion_tokens, context, request_id
+                                    )
+                                    
+                                    if fallback_response:
+                                        content, finish_reason = fallback_response
+                                        successful_response = fallback_response
+                                        break  # Exit retry loop with success
+                                except Exception as fallback_error:
+                                    print(f"[Thread-{thread_name}] Fallback keys also failed: {str(fallback_error)[:100]}")
+                                
+                                should_try_main_key = True  # Mark as attempted
                                 retry_count += 1
                                 continue
                             else:
-                                print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
+                                print(f"[Thread-{thread_name}] Already tried fallback keys")
                                 raise
                         
                         # Check for rate limit
@@ -3597,13 +3604,19 @@ class UnifiedClient:
                 # Check the result
                 if result and isinstance(result, tuple):
                     content, finish_reason = result
-                    if content:
+                    
+                    # Check if content is an error message
+                    if content and "[AI RESPONSE UNAVAILABLE]" in content:
+                        print(f"[{label} {idx+1}] ❌ Got error message: {content}")
+                        continue  # Try next fallback key
+                    
+                    # Check if content is valid
+                    if content and len(content) > 50:  # Require more than 50 chars
                         print(f"[{label} {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
-                        # Save the response using our instance's method
                         self._save_response(content, response_name)
                         return content, finish_reason
                     else:
-                        print(f"[{label} {idx+1}] ❌ Empty content returned")
+                        print(f"[{label} {idx+1}] ❌ Content too short or empty: {len(content) if content else 0} chars")
                         continue
                 else:
                     print(f"[{label} {idx+1}] ❌ Unexpected result type: {type(result)}")
@@ -3841,57 +3854,39 @@ class UnifiedClient:
                         error_str = str(e)
                         print(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
                         
-                        # Check for ANY Azure error with these specific error codes
-                        is_azure_content_filter = False
-                        if "azure" in error_str.lower():
-                            # Azure error detected, check if it's a 400 with content filter
-                            if "400" in error_str and any(indicator in error_str.lower() for indicator in ["responsibleaipolicyviolation", "content_filter", "content management policy"]):
-                                is_azure_content_filter = True
-                                print(f"[Thread-{thread_name}] Azure image content filter detected (400 error)")
-                        
-                        # Check for prohibited content FIRST (before rate limit check)
-                        if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                        # Check for prohibited content INCLUDING Azure
+                        if ("content_filter" in error_str.lower() or 
+                            "responsibleaipolicyviolation" in error_str.lower() or
+                            "content management policy" in error_str.lower() or
+                            "prohibited_content" in error_str.lower() or
+                            any(indicator in error_str.lower() for indicator in content_filter_indicators)):
+                            
                             retry_reason = "prohibited_image_content"
                             print(f"[Thread-{thread_name}] Prohibited image content detected on {self.key_identifier}")
                             
-                            # If we're in multi-key mode and haven't tried main key yet
-                            if (self._multi_key_mode and 
-                                hasattr(self, 'original_api_key') and 
-                                hasattr(self, 'original_model') and
-                                self.original_api_key and 
-                                self.original_model and
-                                not should_try_main_key):
+                            # Try fallback keys if not already attempted
+                            if not should_try_main_key:
+                                print(f"[Thread-{thread_name}] Will retry with fallback keys for image")
                                 
-                                print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
-                                should_try_main_key = True
-                                
-                                # Try with main key
+                                # Call the retry method that uses fallback keys
                                 try:
-                                    main_response = self._retry_image_with_main_key(
-                                        messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                                    fallback_response = self._retry_image_with_main_key(
+                                        messages, image_data, temperature, max_tokens, 
+                                        max_completion_tokens, context, request_id
                                     )
                                     
-                                    if main_response:
-                                        content, finish_reason = main_response
-                                        print(f"✅ Main key succeeded for image! Returning response")
-                                        successful_response = main_response
+                                    if fallback_response:
+                                        content, finish_reason = fallback_response
+                                        successful_response = fallback_response
                                         break  # Exit retry loop with success
-                                    else:
-                                        print(f"❌ Main key returned None for image")
-                                        
-                                except Exception as main_error:
-                                    print(f"❌ Main key image error: {str(main_error)[:200]}")
-                                    # Check if main key also hit content filter
-                                    main_error_str = str(main_error).lower()
-                                    if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                        print(f"❌ Main key also hit content filter for image")
+                                except Exception as fallback_error:
+                                    print(f"[Thread-{thread_name}] Image fallback keys also failed: {str(fallback_error)[:100]}")
                                 
-                                # Don't count this as a retry, just continue
+                                should_try_main_key = True  # Mark as attempted
                                 retry_count += 1
                                 continue
                             else:
-                                # Either not in multi-key mode, or already tried main key
-                                print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
+                                print(f"[Thread-{thread_name}] Already tried fallback keys for image")
                                 raise
                         
                         # Check for rate limit
@@ -4760,17 +4755,20 @@ class UnifiedClient:
                 # Check the result
                 if result and isinstance(result, tuple):
                     content, finish_reason = result
-                    if content:
+                    
+                    # Check if content is an error message
+                    if content and "[AI RESPONSE UNAVAILABLE]" in content:
+                        print(f"[IMAGE {label} {idx+1}] ❌ Got error message: {content}")
+                        continue  # Try next fallback key
+                    
+                    # Check if content is valid
+                    if content and len(content) > 50:  # Require more than 50 chars
                         print(f"[IMAGE {label} {idx+1}] ✅ SUCCESS! Got image response of length: {len(content)}")
-                        # Save the response using our instance's method
                         self._save_response(content, response_name)
                         return content, finish_reason
                     else:
-                        print(f"[IMAGE {label} {idx+1}] ❌ Empty content returned for image")
+                        print(f"[IMAGE {label} {idx+1}] ❌ Image content too short or empty: {len(content) if content else 0} chars")
                         continue
-                else:
-                    print(f"[IMAGE {label} {idx+1}] ❌ Unexpected result type: {type(result)}")
-                    continue
                     
             except UnifiedClientError as e:
                 # Check if it's a cancellation
