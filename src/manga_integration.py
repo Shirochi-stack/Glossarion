@@ -723,12 +723,20 @@ class MangaTranslationTab:
         )
         self.local_model_status_label.pack(anchor='w', pady=(5, 0))
 
-        # Download guide button
+        # Download model button
         tb.Button(
             self.local_inpaint_frame,
-            text="📥 Download Guide",
-            command=self._show_model_download_guide,
+            text="📥 Download Model",
+            command=self._download_model,
             bootstyle="info"
+        ).pack(anchor='w', pady=(5, 0))
+
+        # Model info button
+        tb.Button(
+            self.local_inpaint_frame,
+            text="ℹ️ Model Info",
+            command=self._show_model_info,
+            bootstyle="secondary"
         ).pack(anchor='w', pady=(5, 0))
 
         # Initialize visibility based on current settings
@@ -2070,57 +2078,242 @@ class MangaTranslationTab:
                 fg='green'
             )
 
-    def _show_model_download_guide(self):
-        """Show download instructions for models"""
+    def _download_model(self):
+        """Actually download the model for the selected type"""
         model_type = self.local_model_type_var.get()
         
-        guides = {
-            'lama': "🎨 LaMa (Large Mask Inpainting)\n\n"
-                    "Download: github.com/advimman/lama\n"
-                    "• Get 'big-lama.zip' from releases\n"
-                    "• Extract and use 'models/best.ckpt'\n"
-                    "• Best quality for general inpainting\n"
-                    "• ~200MB download",
-            
-            'aot': "⚡ AOT GAN (Aggregated Contextual Transformations)\n\n"
-                   "Download: github.com/researchmm/AOT-GAN-for-Inpainting\n"
-                   "• Get pretrained models from releases\n"
-                   "• Use 'celebahq-256.pt' or 'places2-512.pt'\n"
-                   "• Fast processing, good quality\n"
-                   "• ~100-150MB download",
-            
-            'mat': "🔧 MAT (Mask-Aware Transformer)\n\n"
-                   "Download: github.com/fenglinglwb/MAT\n"
-                   "• Download from model zoo\n"
-                   "• Use 'Places_512_FullData.pkl'\n"
-                   "• Best for high-resolution images\n"
-                   "• ~500MB download",
-            
-            'sd_local': "🎌 Anime/Manga Inpainting (Stable Diffusion)\n\n"
-                       "Download: huggingface.co/dreMaz/AnimeMangaInpainting\n"
-                       "• Click 'Files and versions' tab\n"
-                       "• Download .safetensors file\n"
-                       "• Optimized for anime/manga art\n"
-                       "• ~2-4GB download\n\n"
-                       "Alternative: huggingface.co/runwayml/stable-diffusion-inpainting"
+        # Define URLs for each model type (matching manga_settings_dialog)
+        model_urls = {
+            'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
+            'lama': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'mat': '',  # User must provide
+            'ollama': '',  # Not applicable
+            'sd_local': ''  # User must provide
         }
         
-        guide = guides.get(model_type, "Please select a model type first")
+        url = model_urls.get(model_type, '')
         
-        # Create a simple dialog with the guide
-        guide_dialog = tk.Toplevel(self.dialog)
-        guide_dialog.title(f"{model_type.upper()} Model Download Guide")
-        guide_dialog.geometry("500x400")
+        if not url:
+            if model_type == 'ollama':
+                messagebox.showinfo("Ollama", "Ollama doesn't require a download. Run 'ollama pull llava' in terminal.")
+                return
+            else:
+                # Ask user for URL
+                from tkinter import simpledialog
+                url = simpledialog.askstring(
+                    f"{model_type.upper()} Model URL",
+                    f"Enter the download URL for {model_type.upper()} model:",
+                    parent=self.dialog
+                )
+                if not url:
+                    return
         
-        text_widget = tk.Text(guide_dialog, wrap=tk.WORD, padx=20, pady=20)
+        # Select download location
+        default_filename = f"{model_type}_model.pt"
+        save_path = filedialog.asksaveasfilename(
+            title=f"Save {model_type.upper()} Model",
+            defaultextension=".pt",
+            initialfile=default_filename,
+            filetypes=[
+                ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if not save_path:
+            return
+        
+        # Download the model
+        self._perform_download(url, save_path, model_type)
+
+    def _perform_download(self, url: str, save_path: str, model_name: str):
+        """Perform the actual download with progress indication"""
+        import threading
+        import requests
+        
+        # Create a progress dialog
+        progress_dialog = tk.Toplevel(self.dialog)
+        progress_dialog.title(f"Downloading {model_name.upper()} Model")
+        progress_dialog.geometry("400x150")
+        progress_dialog.transient(self.dialog)
+        progress_dialog.grab_set()
+        
+        # Center the dialog
+        progress_dialog.update_idletasks()
+        x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
+        y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
+        progress_dialog.geometry(f"+{x}+{y}")
+        
+        # Progress label
+        progress_label = tk.Label(progress_dialog, text="⏳ Downloading...", font=('Arial', 10))
+        progress_label.pack(pady=20)
+        
+        # Progress bar
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(
+            progress_dialog,
+            length=350,
+            mode='determinate',
+            variable=progress_var
+        )
+        progress_bar.pack(pady=10)
+        
+        # Status label
+        status_label = tk.Label(progress_dialog, text="0%", font=('Arial', 9))
+        status_label.pack()
+        
+        # Cancel flag
+        cancel_download = {'value': False}
+        
+        def on_cancel():
+            cancel_download['value'] = True
+            progress_dialog.destroy()
+        
+        progress_dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        
+        def download_thread():
+            try:
+                # Download with progress
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if cancel_download['value']:
+                            # Clean up partial file
+                            f.close()
+                            if os.path.exists(save_path):
+                                os.remove(save_path)
+                            return
+                        
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            # Update progress
+                            if total_size > 0:
+                                progress = (downloaded / total_size) * 100
+                                progress_dialog.after(0, lambda p=progress: [
+                                    progress_var.set(p),
+                                    status_label.config(text=f"{p:.1f}%"),
+                                    progress_label.config(text=f"⏳ Downloading... {downloaded//1024//1024}MB / {total_size//1024//1024}MB")
+                                ])
+                
+                # Success - update UI in main thread
+                progress_dialog.after(0, lambda: [
+                    progress_dialog.destroy(),
+                    self._download_complete(save_path, model_name)
+                ])
+                
+            except requests.exceptions.RequestException as e:
+                # Error - update UI in main thread
+                if not cancel_download['value']:
+                    progress_dialog.after(0, lambda: [
+                        progress_dialog.destroy(),
+                        self._download_failed(str(e))
+                    ])
+            except Exception as e:
+                if not cancel_download['value']:
+                    progress_dialog.after(0, lambda: [
+                        progress_dialog.destroy(),
+                        self._download_failed(str(e))
+                    ])
+        
+        # Start download in background thread
+        thread = threading.Thread(target=download_thread, daemon=True)
+        thread.start()
+
+    def _download_complete(self, save_path: str, model_name: str):
+        """Handle successful download"""
+        # Update the model path entry
+        self.local_model_path_var.set(save_path)
+        
+        # Show success message
+        messagebox.showinfo("Success", f"{model_name.upper()} model downloaded successfully!")
+        
+        # Log to main GUI
+        self.main_gui.log_message(f"✅ Downloaded {model_name} model to: {save_path}", "success")
+
+    def _download_failed(self, error: str):
+        """Handle download failure"""
+        messagebox.showerror("Download Failed", f"Failed to download model:\n{error}")
+        self.main_gui.log_message(f"❌ Model download failed: {error}", "error")
+
+    def _show_model_info(self):
+        """Show information about models"""
+        model_type = self.local_model_type_var.get()
+        
+        info = {
+            'aot': "AOT GAN Model:\n\n"
+                   "• Auto-downloads from HuggingFace\n"
+                   "• Traced PyTorch JIT model\n"
+                   "• Good for general inpainting\n"
+                   "• Fast processing speed\n"
+                   "• File size: ~100MB",
+            
+            'lama': "LaMa Model:\n\n"
+                    "• Auto-downloads anime-optimized version\n"
+                    "• Best quality for manga/anime\n"
+                    "• Large model (~200MB)\n"
+                    "• Excellent at removing text from bubbles\n"
+                    "• Preserves art style well",
+            
+            'anime': "Anime-Specific Model:\n\n"
+                     "• Same as LaMa anime version\n"
+                     "• Optimized for manga/anime art\n"
+                     "• Auto-downloads from GitHub\n"
+                     "• Recommended for manga translation\n"
+                     "• Preserves screen tones and patterns",
+            
+            'mat': "MAT Model:\n\n"
+                   "• Manual download required\n"
+                   "• Get from: github.com/fenglinglwb/MAT\n"
+                   "• Good for high-resolution images\n"
+                   "• Slower but high quality\n"
+                   "• File size: ~500MB",
+            
+            'ollama': "Ollama:\n\n"
+                      "• Uses local Ollama server\n"
+                      "• No model download needed here\n"
+                      "• Run: ollama pull llava\n"
+                      "• Context-aware inpainting\n"
+                      "• Requires Ollama running locally",
+            
+            'sd_local': "Stable Diffusion:\n\n"
+                        "• Manual download required\n"
+                        "• Get from HuggingFace\n"
+                        "• Requires significant VRAM (4-8GB)\n"
+                        "• Best quality but slowest\n"
+                        "• Can use custom prompts"
+        }
+        
+        # Create info dialog
+        info_dialog = tk.Toplevel(self.dialog)
+        info_dialog.title(f"{model_type.upper()} Model Information")
+        info_dialog.geometry("450x350")
+        info_dialog.transient(self.dialog)
+        
+        # Center the dialog
+        info_dialog.update_idletasks()
+        x = (info_dialog.winfo_screenwidth() // 2) - (info_dialog.winfo_width() // 2)
+        y = (info_dialog.winfo_screenheight() // 2) - (info_dialog.winfo_height() // 2)
+        info_dialog.geometry(f"+{x}+{y}")
+        
+        # Info text
+        text_widget = tk.Text(info_dialog, wrap=tk.WORD, padx=20, pady=20)
         text_widget.pack(fill='both', expand=True)
-        text_widget.insert(1.0, guide)
+        text_widget.insert(1.0, info.get(model_type, "Please select a model type first"))
         text_widget.config(state='disabled')
         
+        # Close button
         tb.Button(
-            guide_dialog,
+            info_dialog,
             text="Close",
-            command=guide_dialog.destroy,
+            command=info_dialog.destroy,
             bootstyle="secondary"
         ).pack(pady=10)
 
