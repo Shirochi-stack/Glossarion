@@ -226,12 +226,13 @@ class BubbleDetector:
             self.model_loaded = False
             return False
     
-    def load_rtdetr_model(self, model_path: str = None, force_reload: bool = False) -> bool:
+    def load_rtdetr_model(self, model_path: str = None, model_id: str = None, force_reload: bool = False) -> bool:
         """
         Load RT-DETR model for advanced bubble and text detection.
         
         Args:
-            model_path: Optional path to local model (will download from HF if not provided)
+            model_path: Optional path to local model
+            model_id: Optional HuggingFace model ID (default: 'ogkalu/comic-text-and-bubble-detector')
             force_reload: Force reload even if already loaded
             
         Returns:
@@ -250,18 +251,21 @@ class BubbleDetector:
             return True
         
         try:
-            logger.info(f"📥 Loading RT-DETR model from {self.rtdetr_repo}...")
+            # Use custom model_id if provided, otherwise use default
+            repo_id = model_id if model_id else self.rtdetr_repo
+            
+            logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
             
             # Load processor
             self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
-                self.rtdetr_repo,
+                repo_id,
                 size={"width": 640, "height": 640},
                 cache_dir=self.cache_dir if not model_path else None
             )
             
             # Load model
             self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                model_path if model_path else self.rtdetr_repo,
+                model_path if model_path else repo_id,
                 cache_dir=self.cache_dir if not model_path else None
             )
             
@@ -273,7 +277,9 @@ class BubbleDetector:
             self.rtdetr_model.eval()
             self.rtdetr_loaded = True
             
+            # Save the model ID that was used
             self.config['rtdetr_loaded'] = True
+            self.config['rtdetr_model_id'] = repo_id
             self._save_config()
             
             logger.info("✅ RT-DETR model loaded successfully")
@@ -284,7 +290,42 @@ class BubbleDetector:
             logger.error(f"❌ Failed to load RT-DETR: {e}")
             self.rtdetr_loaded = False
             return False
-    
+ 
+    def check_rtdetr_available(self, model_id: str = None) -> bool:
+        """
+        Check if RT-DETR model is available (cached).
+        
+        Args:
+            model_id: Optional HuggingFace model ID
+            
+        Returns:
+            True if model is cached and available
+        """
+        try:
+            from pathlib import Path
+            
+            # Use provided model_id or default
+            repo_id = model_id if model_id else self.rtdetr_repo
+            
+            # Check HuggingFace cache
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            model_id_formatted = repo_id.replace("/", "--")
+            
+            # Look for model folder
+            model_folders = list(cache_dir.glob(f"models--{model_id_formatted}*"))
+            
+            if model_folders:
+                for folder in model_folders:
+                    if (folder / "snapshots").exists():
+                        snapshots = list((folder / "snapshots").iterdir())
+                        if snapshots:
+                            return True
+            
+            return False
+            
+        except Exception:
+            return False
+        
     def detect_bubbles(self, 
                       image_path: str, 
                       confidence: float = None,
@@ -448,6 +489,8 @@ class BubbleDetector:
                 threshold=confidence
             )[0]
             
+            logger.info(f"📊 RT-DETR found {len(results['boxes'])} detections above {confidence:.2f} confidence")
+
             # Organize detections by class
             detections = {
                 'bubbles': [],       # Empty speech bubbles
