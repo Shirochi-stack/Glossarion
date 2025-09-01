@@ -697,9 +697,9 @@ class MangaSettingsDialog:
         # Model path selection
         model_path_frame = tk.Frame(self.local_frame)
         model_path_frame.pack(fill='x', pady=5)
-        
+
         tk.Label(model_path_frame, text="Model File:", width=15, anchor='w').pack(side='left')
-        
+
         self.local_model_path = tk.StringVar()
         self.model_path_entry = tk.Entry(
             model_path_frame,
@@ -711,19 +711,30 @@ class MangaSettingsDialog:
             readonlybackground='#2b2b2b'  # Gray even when readonly
         )
         self.model_path_entry.pack(side='left', padx=(0, 10))
-        
+
         tb.Button(
             model_path_frame,
             text="Browse",
             command=self._browse_local_model,
             bootstyle="primary"
         ).pack(side='left')
-        
-        tb.Button(
+
+        # Store the download button as an instance attribute
+        self.download_btn = tb.Button(
             model_path_frame,
             text="Download",
-            command=self._download_model_guide,
+            command=self._download_model,
             bootstyle="info"
+        )
+        self.download_btn.pack(side='left', padx=(5, 0))
+
+        # Optional: Add help button
+        tb.Button(
+            model_path_frame,
+            text="?",
+            command=self._show_model_info,
+            bootstyle="secondary",
+            width=3
         ).pack(side='left', padx=(5, 0))
         
         # Model status
@@ -805,6 +816,45 @@ class MangaSettingsDialog:
         # Initially show/hide based on selection
         self._on_inpaint_method_change()
 
+
+    def _show_model_info(self):
+        """Show information about where to find models"""
+        method = self.local_method_var.get()
+        
+        info = {
+            'aot': "AOT GAN Model:\n"
+                   "• Auto-downloads from HuggingFace\n"
+                   "• Traced PyTorch model\n"
+                   "• Good for general inpainting",
+            
+            'lama': "LaMa Model:\n"
+                    "• Auto-downloads anime-optimized version\n"
+                    "• Best quality for manga/anime\n"
+                    "• Large model (~200MB)",
+            
+            'anime': "Anime-Specific Model:\n"
+                     "• Same as LaMa anime version\n"
+                     "• Optimized for manga/anime art\n"
+                     "• Auto-downloads from GitHub",
+            
+            'mat': "MAT Model:\n"
+                   "• You need to provide the URL\n"
+                   "• Get from: github.com/fenglinglwb/MAT\n"
+                   "• Good for high-resolution",
+            
+            'ollama': "Ollama:\n"
+                      "• Uses local Ollama server\n"
+                      "• No download needed here\n"
+                      "• Run: ollama pull llava",
+            
+            'sd_local': "Stable Diffusion:\n"
+                        "• You need to provide the URL\n"
+                        "• Get from HuggingFace\n"
+                        "• Requires more VRAM"
+        }
+        
+        messagebox.showinfo(f"{method.upper()} Model Info", info.get(method, "No information available"))
+    
     def _on_inpaint_method_change(self):
         """Show/hide relevant inpainting settings"""
         method = self.inpaint_method_var.get()
@@ -886,34 +936,113 @@ class MangaSettingsDialog:
                 fg='green'
             )
 
-    def _download_model_guide(self):
-        """Show download instructions for models"""
+    def _download_model(self):
+        """Actually download the model for the selected type"""
         method = self.local_method_var.get()
         
-        guides = {
-            'aot': "AOT GAN Models:\n"
-                   "• GitHub: github.com/researchmm/AOT-GAN\n"
-                   "• Download pretrained models from releases\n"
-                   "• Use celebahq-256.pt or places2-512.pt",
-            
-            'lama': "LaMa Models:\n"
-                    "• GitHub: github.com/saic-mdal/lama\n"
-                    "• Download big-lama.pt from releases\n"
-                    "• Best quality for general inpainting",
-            
-            'mat': "MAT Models:\n"
-                   "• GitHub: github.com/fenglinglwb/MAT\n"
-                   "• Download from model zoo\n"
-                   "• Good for high-resolution inpainting",
-            
-            'sd_local': "Stable Diffusion Models:\n"
-                       "• HuggingFace: huggingface.co/runwayml/stable-diffusion-inpainting\n"
-                       "• Download model.safetensors\n"
-                       "• Requires more VRAM but high quality"
+        # Define URLs for each model type
+        model_urls = {
+            'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
+            'lama': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'mat': '',  # User must provide
+            'ollama': '',  # Not applicable
+            'sd_local': ''  # User must provide
         }
         
-        guide = guides.get(method, "Please select a model type first")
-        messagebox.showinfo(f"{method.upper()} Model Download", guide)
+        url = model_urls.get(method, '')
+        
+        if not url:
+            if method == 'ollama':
+                messagebox.showinfo("Ollama", "Ollama doesn't require a download. Run 'ollama pull llava' in terminal.")
+            else:
+                # Ask user for URL
+                from tkinter import simpledialog
+                url = simpledialog.askstring(
+                    f"{method.upper()} Model URL",
+                    f"Enter the download URL for {method.upper()} model:",
+                    parent=self.dialog
+                )
+                if not url:
+                    return
+        
+        # Select download location
+        default_filename = f"{method}_model.pt"
+        save_path = filedialog.asksaveasfilename(
+            title=f"Save {method.upper()} Model",
+            defaultextension=".pt",
+            initialfile=default_filename,
+            filetypes=[
+                ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if not save_path:
+            return
+        
+        # Download the model
+        self._perform_download(url, save_path, method)
+
+    def _perform_download(self, url: str, save_path: str, model_name: str):
+        """Perform the actual download with progress indication"""
+        import threading
+        import requests
+        
+        # Update button and status
+        self.download_btn.config(state='disabled', text='Downloading...')
+        self.model_status_label.config(text="⏳ Downloading...", fg='orange')
+        
+        def download_thread():
+            try:
+                # Download with progress
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            # Update progress
+                            if total_size > 0:
+                                progress = int((downloaded / total_size) * 100)
+                                self.dialog.after(0, lambda p=progress: 
+                                    self.model_status_label.config(
+                                        text=f"⏳ Downloading... {p}%", 
+                                        fg='orange'
+                                    ))
+                
+                # Success - update UI in main thread
+                self.dialog.after(0, self._download_complete, save_path, model_name)
+                
+            except requests.exceptions.RequestException as e:
+                # Error - update UI in main thread
+                self.dialog.after(0, self._download_failed, str(e))
+            except Exception as e:
+                self.dialog.after(0, self._download_failed, str(e))
+        
+        # Start download in background thread
+        thread = threading.Thread(target=download_thread, daemon=True)
+        thread.start()
+
+    def _download_complete(self, save_path: str, model_name: str):
+        """Handle successful download"""
+        self.download_btn.config(state='normal', text='Download')
+        self.local_model_path.set(save_path)
+        self.model_status_label.config(text="✅ Downloaded successfully!", fg='green')
+        messagebox.showinfo("Success", f"{model_name.upper()} model downloaded successfully!")
+        self._update_model_status()
+
+    def _download_failed(self, error: str):
+        """Handle download failure"""
+        self.download_btn.config(state='normal', text='Download')
+        self.model_status_label.config(text="❌ Download failed", fg='red')
+        messagebox.showerror("Download Failed", f"Failed to download model:\n{error}")
     
     def _create_cloud_api_tab(self, parent):
             """Create cloud API settings tab"""
