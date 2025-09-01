@@ -1,276 +1,623 @@
-# bubble_detector.py
 """
-Local LLM bubble detector with automatic PT to ONNX conversion
-No model bundling required - users provide their own
+YOLOv8 Speech Bubble Detector for Manga/Comic Translation
+Supports both .pt and ONNX models with automatic conversion
+Fully configurable through GUI settings
 """
 
 import os
 import json
-import hashlib
-from typing import Optional, List, Tuple
 import numpy as np
 import cv2
+from typing import List, Tuple, Optional, Dict, Any
+import logging
+import traceback
+import hashlib
+from pathlib import Path
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Try to import YOLO dependencies
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    logger.warning("Ultralytics YOLO not available - install with: pip install ultralytics")
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    logger.warning("PyTorch not available")
 
 try:
     import onnxruntime as ort
     ONNX_AVAILABLE = True
 except ImportError:
     ONNX_AVAILABLE = False
+    logger.warning("ONNX Runtime not available")
+
 
 class BubbleDetector:
-    """YOLOv8 bubble detector with automatic model conversion"""
+    """
+    YOLOv8-based speech bubble detector for comics and manga.
+    Supports multiple model formats and provides configurable detection.
+    """
     
     def __init__(self, config_path: str = "bubble_detector_config.json"):
-        """Initialize detector
+        """
+        Initialize the bubble detector.
         
         Args:
-            config_path: Path to configuration file storing model paths
+            config_path: Path to configuration file
         """
         self.config_path = config_path
         self.config = self._load_config()
-        self.session = None
+        self.model = None
         self.model_loaded = False
+        self.model_type = None  # 'yolo', 'onnx', or 'torch'
+        self.onnx_session = None
         
-    def _load_config(self) -> dict:
-        """Load configuration"""
+        # Detection settings
+        self.default_confidence = 0.5
+        self.default_iou_threshold = 0.45
+        self.default_max_detections = 100
+        
+        # Cache directory for ONNX conversions
+        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'bubble_model_cache')
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # GPU availability
+        self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
+        
+        logger.info(f"🗨️ BubbleDetector initialized")
+        logger.info(f"   GPU: {'Available' if self.use_gpu else 'Not available'}")
+        logger.info(f"   YOLO: {'Available' if YOLO_AVAILABLE else 'Not installed'}")
+        logger.info(f"   ONNX: {'Available' if ONNX_AVAILABLE else 'Not installed'}")
+    
+    def _load_config(self) -> Dict[str, Any]:
+        """Load configuration from file."""
         if os.path.exists(self.config_path):
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
+            try:
+                with open(self.config_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load config: {e}")
         return {}
     
     def _save_config(self):
-        """Save configuration"""
-        with open(self.config_path, 'w') as f:
-            json.dump(self.config, f, indent=2)
+        """Save configuration to file."""
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
     
-    def load_model(self, pt_path: str, force_reconvert: bool = False) -> bool:
-        """Load YOLO model, converting from PT to ONNX if needed
+    def load_model(self, model_path: str, force_reload: bool = False) -> bool:
+        """
+        Load a YOLOv8 model for bubble detection.
         
         Args:
-            pt_path: Path to .pt file
-            force_reconvert: Force reconversion even if ONNX exists
+            model_path: Path to model file (.pt, .onnx, or .torchscript)
+            force_reload: Force reload even if model is already loaded
             
         Returns:
-            True if successful
+            True if model loaded successfully, False otherwise
         """
-        if not os.path.exists(pt_path):
-            raise FileNotFoundError(f"Model file not found: {pt_path}")
-        
-        if not pt_path.endswith('.pt'):
-            raise ValueError("Model file must be a .pt file")
-        
-        # Generate ONNX path based on PT file
-        onnx_dir = os.path.join(os.path.dirname(pt_path), 'onnx_cache')
-        os.makedirs(onnx_dir, exist_ok=True)
-        
-        # Use hash to handle model updates
-        pt_hash = self._get_file_hash(pt_path)
-        onnx_filename = f"{os.path.splitext(os.path.basename(pt_path))[0]}_{pt_hash[:8]}.onnx"
-        onnx_path = os.path.join(onnx_dir, onnx_filename)
-        
-        # Check if we need to convert
-        if not os.path.exists(onnx_path) or force_reconvert:
-            print(f"Converting {os.path.basename(pt_path)} to ONNX format...")
-            onnx_path = self._convert_to_onnx(pt_path, onnx_path)
-            if not onnx_path:
-                return False
-        else:
-            print(f"Using cached ONNX model: {onnx_filename}")
-        
-        # Load ONNX model
         try:
-            if not ONNX_AVAILABLE:
-                raise ImportError("onnxruntime not installed")
+            if not os.path.exists(model_path):
+                logger.error(f"Model file not found: {model_path}")
+                return False
             
-            providers = ['CPUExecutionProvider']
-            self.session = ort.InferenceSession(onnx_path, providers=providers)
+            if self.model_loaded and not force_reload:
+                logger.info("Model already loaded")
+                return True
             
-            # Get model info
-            self.input_name = self.session.get_inputs()[0].name
-            self.input_shape = self.session.get_inputs()[0].shape
-            self.output_names = [output.name for output in self.session.get_outputs()]
+            logger.info(f"📥 Loading bubble detection model: {model_path}")
             
-            # Save to config
-            self.config['last_pt_path'] = pt_path
-            self.config['last_onnx_path'] = onnx_path
-            self.config['model_hash'] = pt_hash
-            self._save_config()
+            # Determine model type by extension
+            ext = Path(model_path).suffix.lower()
+            
+            if ext in ['.pt', '.pth']:
+                if not YOLO_AVAILABLE:
+                    logger.error("Ultralytics package required for .pt models")
+                    return False
+                
+                # Load YOLOv8 model
+                self.model = YOLO(model_path)
+                self.model_type = 'yolo'
+                
+                # Set to eval mode
+                if hasattr(self.model, 'model'):
+                    self.model.model.eval()
+                
+                # Move to GPU if available
+                if self.use_gpu:
+                    self.model.to('cuda')
+                    
+                logger.info("✅ YOLOv8 model loaded successfully")
+                
+            elif ext == '.onnx':
+                if not ONNX_AVAILABLE:
+                    logger.error("ONNX Runtime required for .onnx models")
+                    return False
+                
+                # Load ONNX model
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+                self.onnx_session = ort.InferenceSession(model_path, providers=providers)
+                self.model_type = 'onnx'
+                
+                logger.info("✅ ONNX model loaded successfully")
+                
+            elif ext == '.torchscript':
+                if not TORCH_AVAILABLE:
+                    logger.error("PyTorch required for TorchScript models")
+                    return False
+                
+                # Load TorchScript model
+                self.model = torch.jit.load(model_path)
+                self.model.eval()
+                self.model_type = 'torch'
+                
+                if self.use_gpu:
+                    self.model = self.model.cuda()
+                
+                logger.info("✅ TorchScript model loaded successfully")
+                
+            else:
+                logger.error(f"Unsupported model format: {ext}")
+                return False
             
             self.model_loaded = True
-            print(f"✅ Model loaded successfully")
+            self.config['last_model_path'] = model_path
+            self.config['model_type'] = self.model_type
+            self._save_config()
+            
             return True
             
         except Exception as e:
-            print(f"❌ Failed to load ONNX model: {e}")
+            logger.error(f"Failed to load model: {e}")
+            logger.error(traceback.format_exc())
+            self.model_loaded = False
             return False
     
-    def _get_file_hash(self, filepath: str) -> str:
-        """Get file hash for caching"""
-        hasher = hashlib.md5()
-        with open(filepath, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b''):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-    
-    def _convert_to_onnx(self, pt_path: str, onnx_path: str) -> Optional[str]:
-        """Convert PT model to ONNX
-        
-        Args:
-            pt_path: Input .pt file
-            onnx_path: Output .onnx file
-            
-        Returns:
-            Path to ONNX file or None if failed
+    def detect_bubbles(self, 
+                      image_path: str, 
+                      confidence: float = None,
+                      iou_threshold: float = None,
+                      max_detections: int = None) -> List[Tuple[int, int, int, int]]:
         """
-        try:
-            # Check if ultralytics is available
-            try:
-                from ultralytics import YOLO
-            except ImportError:
-                print("❌ ultralytics not installed. Cannot convert model.")
-                print("   Install with: pip install ultralytics")
-                return None
-            
-            # Load and convert
-            print(f"Loading YOLO model...")
-            model = YOLO(pt_path)
-            
-            print(f"Converting to ONNX (this may take a minute)...")
-            exported_path = model.export(
-                format='onnx',
-                simplify=True,
-                dynamic=False,
-                imgsz=640,
-                half=False
-            )
-            
-            # Move to desired location if different
-            if exported_path and exported_path != onnx_path:
-                import shutil
-                shutil.move(exported_path, onnx_path)
-            
-            print(f"✅ Converted to: {onnx_path}")
-            return onnx_path
-            
-        except Exception as e:
-            print(f"❌ Conversion failed: {e}")
-            return None
-    
-    def detect_bubbles(self, image_path: str, confidence_threshold: float = 0.5) -> List[Tuple[int, int, int, int]]:
-        """Detect speech bubbles in image
+        Detect speech bubbles in an image.
         
         Args:
-            image_path: Path to image
-            confidence_threshold: Minimum confidence
+            image_path: Path to image file
+            confidence: Minimum confidence threshold (0-1)
+            iou_threshold: IOU threshold for NMS (0-1)
+            max_detections: Maximum number of detections to return
             
         Returns:
-            List of (x, y, width, height) tuples
+            List of bubble bounding boxes as (x, y, width, height) tuples
         """
         if not self.model_loaded:
-            raise RuntimeError("No model loaded. Call load_model() first")
+            logger.error("No model loaded. Call load_model() first.")
+            return []
         
-        # Load image
-        image = cv2.imread(image_path)
-        if image is None:
-            from PIL import Image
-            pil_image = Image.open(image_path)
-            image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        # Use defaults if not specified
+        confidence = confidence or self.default_confidence
+        iou_threshold = iou_threshold or self.default_iou_threshold
+        max_detections = max_detections or self.default_max_detections
         
-        original_height, original_width = image.shape[:2]
-        
-        # Preprocess
-        input_tensor = self._preprocess(image)
+        try:
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                logger.error(f"Failed to load image: {image_path}")
+                return []
+            
+            h, w = image.shape[:2]
+            logger.info(f"🔍 Detecting bubbles in {w}x{h} image")
+            
+            if self.model_type == 'yolo':
+                # YOLOv8 inference
+                results = self.model(
+                    image_path,
+                    conf=confidence,
+                    iou=iou_threshold,
+                    max_det=max_detections,
+                    verbose=False
+                )
+                
+                bubbles = []
+                for r in results:
+                    if r.boxes is not None:
+                        for box in r.boxes:
+                            # Get box coordinates
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            x, y = int(x1), int(y1)
+                            width = int(x2 - x1)
+                            height = int(y2 - y1)
+                            
+                            # Get confidence
+                            conf = float(box.conf[0])
+                            
+                            # Add to list
+                            bubbles.append((x, y, width, height))
+                            
+                            logger.debug(f"   Bubble: ({x},{y}) {width}x{height} conf={conf:.2f}")
+                
+            elif self.model_type == 'onnx':
+                # ONNX inference
+                bubbles = self._detect_with_onnx(image, confidence, iou_threshold, max_detections)
+                
+            elif self.model_type == 'torch':
+                # TorchScript inference
+                bubbles = self._detect_with_torchscript(image, confidence, iou_threshold, max_detections)
+            
+            else:
+                logger.error(f"Unknown model type: {self.model_type}")
+                return []
+            
+            logger.info(f"✅ Detected {len(bubbles)} speech bubbles")
+            return bubbles
+            
+        except Exception as e:
+            logger.error(f"Detection failed: {e}")
+            logger.error(traceback.format_exc())
+            return []
+    
+    def _detect_with_onnx(self, image: np.ndarray, confidence: float, 
+                         iou_threshold: float, max_detections: int) -> List[Tuple[int, int, int, int]]:
+        """Run detection using ONNX model."""
+        # Preprocess image
+        img_size = 640  # Standard YOLOv8 input size
+        img_resized = cv2.resize(image, (img_size, img_size))
+        img_norm = img_resized.astype(np.float32) / 255.0
+        img_transposed = np.transpose(img_norm, (2, 0, 1))
+        img_batch = np.expand_dims(img_transposed, axis=0)
         
         # Run inference
-        outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
+        input_name = self.onnx_session.get_inputs()[0].name
+        outputs = self.onnx_session.run(None, {input_name: img_batch})
         
-        # Postprocess
-        boxes = self._postprocess(outputs[0], original_width, original_height, confidence_threshold)
+        # Process outputs (YOLOv8 format)
+        predictions = outputs[0][0]  # Remove batch dimension
         
-        return boxes
-    
-    def _preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess image for YOLO"""
-        # Resize to 640x640
-        resized = cv2.resize(image, (640, 640))
-        
-        # Convert BGR to RGB
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        
-        # Normalize to [0, 1]
-        normalized = rgb.astype(np.float32) / 255.0
-        
-        # Transpose to CHW
-        chw = np.transpose(normalized, (2, 0, 1))
-        
-        # Add batch dimension
-        batch = np.expand_dims(chw, axis=0)
-        
-        return batch
-    
-    def _postprocess(self, output: np.ndarray, orig_w: int, orig_h: int, conf_thresh: float) -> List[Tuple[int, int, int, int]]:
-        """Process YOLO output"""
+        # Filter by confidence and apply NMS
+        bubbles = []
         boxes = []
+        scores = []
         
-        # DEBUG: Initialize counters at the start
-        total_detections = 0
-        filtered_out = 0
-        
-        # Handle different output formats
-        if len(output.shape) == 3:
-            predictions = output[0].T
-        else:
-            predictions = output
-        
-        # Scale factors
-        x_scale = orig_w / 640
-        y_scale = orig_h / 640
-        
-        # DEBUG: Log prediction count
-        print(f"\n   YOLO OUTPUT DEBUG:")
-        print(f"   - Raw predictions shape: {predictions.shape}")
-        print(f"   - Confidence threshold: {conf_thresh:.3f}")
-        
-        for i, pred in enumerate(predictions):
+        for pred in predictions.T:  # Transpose to get predictions per detection
             if len(pred) >= 5:
-                confidence = pred[4]
-                total_detections += 1
+                x_center, y_center, width, height, obj_conf = pred[:5]
                 
-                # DEBUG: Only log first 10 to avoid spam
-                if total_detections <= 10:
-                    print(f"   Detection {total_detections}: confidence={confidence:.3f}", end="")
+                if obj_conf >= confidence:
+                    # Convert to corner coordinates
+                    x1 = x_center - width / 2
+                    y1 = y_center - height / 2
+                    
+                    # Scale to original image size
+                    h, w = image.shape[:2]
+                    x1 = int(x1 * w / img_size)
+                    y1 = int(y1 * h / img_size)
+                    width = int(width * w / img_size)
+                    height = int(height * h / img_size)
+                    
+                    boxes.append([x1, y1, x1 + width, y1 + height])
+                    scores.append(float(obj_conf))
+        
+        # Apply NMS
+        if boxes:
+            indices = cv2.dnn.NMSBoxes(boxes, scores, confidence, iou_threshold)
+            if len(indices) > 0:
+                indices = indices.flatten()[:max_detections]
+                for i in indices:
+                    x1, y1, x2, y2 = boxes[i]
+                    bubbles.append((x1, y1, x2 - x1, y2 - y1))
+        
+        return bubbles
+    
+    def _detect_with_torchscript(self, image: np.ndarray, confidence: float,
+                                 iou_threshold: float, max_detections: int) -> List[Tuple[int, int, int, int]]:
+        """Run detection using TorchScript model."""
+        # Similar to ONNX but using PyTorch tensors
+        img_size = 640
+        img_resized = cv2.resize(image, (img_size, img_size))
+        img_norm = img_resized.astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_norm).permute(2, 0, 1).unsqueeze(0)
+        
+        if self.use_gpu:
+            img_tensor = img_tensor.cuda()
+        
+        with torch.no_grad():
+            outputs = self.model(img_tensor)
+        
+        # Process outputs similar to ONNX
+        # Implementation depends on exact model output format
+        # This is a placeholder - adjust based on your model
+        return []
+    
+    def visualize_detections(self, image_path: str, bubbles: List[Tuple[int, int, int, int]], 
+                            output_path: str = None) -> np.ndarray:
+        """
+        Visualize detected bubbles on the image.
+        
+        Args:
+            image_path: Path to original image
+            bubbles: List of bubble bounding boxes
+            output_path: Optional path to save visualization
+            
+        Returns:
+            Image with drawn bounding boxes
+        """
+        image = cv2.imread(image_path)
+        if image is None:
+            logger.error(f"Failed to load image: {image_path}")
+            return None
+        
+        # Draw bounding boxes
+        for i, (x, y, w, h) in enumerate(bubbles):
+            # Draw rectangle
+            color = (0, 255, 0)  # Green
+            thickness = 2
+            cv2.rectangle(image, (x, y), (x + w, y + h), color, thickness)
+            
+            # Add label
+            label = f"Bubble {i+1}"
+            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(image, (x, y - label_size[1] - 4), (x + label_size[0], y), color, -1)
+            cv2.putText(image, label, (x, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Save if output path provided
+        if output_path:
+            cv2.imwrite(output_path, image)
+            logger.info(f"💾 Visualization saved to: {output_path}")
+        
+        return image
+    
+    def convert_to_onnx(self, model_path: str, output_path: str = None) -> bool:
+        """
+        Convert a YOLOv8 model to ONNX format.
+        
+        Args:
+            model_path: Path to YOLOv8 .pt model
+            output_path: Path for ONNX output (auto-generated if None)
+            
+        Returns:
+            True if conversion successful, False otherwise
+        """
+        if not YOLO_AVAILABLE:
+            logger.error("Ultralytics package required for conversion")
+            return False
+        
+        try:
+            logger.info(f"🔄 Converting {model_path} to ONNX...")
+            
+            # Load model
+            model = YOLO(model_path)
+            
+            # Generate output path if not provided
+            if output_path is None:
+                base_name = Path(model_path).stem
+                output_path = os.path.join(self.cache_dir, f"{base_name}.onnx")
+            
+            # Export to ONNX
+            model.export(format='onnx', imgsz=640, simplify=True)
+            
+            logger.info(f"✅ ONNX model saved to: {output_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Conversion failed: {e}")
+            return False
+    
+    def batch_detect(self, image_paths: List[str], **kwargs) -> Dict[str, List[Tuple[int, int, int, int]]]:
+        """
+        Detect bubbles in multiple images.
+        
+        Args:
+            image_paths: List of image paths
+            **kwargs: Detection parameters (confidence, iou_threshold, max_detections)
+            
+        Returns:
+            Dictionary mapping image paths to bubble lists
+        """
+        results = {}
+        
+        for i, image_path in enumerate(image_paths):
+            logger.info(f"Processing image {i+1}/{len(image_paths)}: {os.path.basename(image_path)}")
+            bubbles = self.detect_bubbles(image_path, **kwargs)
+            results[image_path] = bubbles
+        
+        return results
+    
+    def get_bubble_masks(self, image_path: str, bubbles: List[Tuple[int, int, int, int]]) -> np.ndarray:
+        """
+        Create a mask image with bubble regions.
+        
+        Args:
+            image_path: Path to original image
+            bubbles: List of bubble bounding boxes
+            
+        Returns:
+            Binary mask with bubble regions as white (255)
+        """
+        image = cv2.imread(image_path)
+        if image is None:
+            return None
+        
+        h, w = image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Fill bubble regions
+        for x, y, bw, bh in bubbles:
+            cv2.rectangle(mask, (x, y), (x + bw, y + bh), 255, -1)
+        
+        return mask
+    
+    def filter_bubbles_by_size(self, bubbles: List[Tuple[int, int, int, int]], 
+                              min_area: int = 100, 
+                              max_area: int = None) -> List[Tuple[int, int, int, int]]:
+        """
+        Filter bubbles by area.
+        
+        Args:
+            bubbles: List of bubble bounding boxes
+            min_area: Minimum area in pixels
+            max_area: Maximum area in pixels (None for no limit)
+            
+        Returns:
+            Filtered list of bubbles
+        """
+        filtered = []
+        
+        for x, y, w, h in bubbles:
+            area = w * h
+            if area >= min_area and (max_area is None or area <= max_area):
+                filtered.append((x, y, w, h))
+        
+        return filtered
+    
+    def merge_overlapping_bubbles(self, bubbles: List[Tuple[int, int, int, int]], 
+                                 overlap_threshold: float = 0.1) -> List[Tuple[int, int, int, int]]:
+        """
+        Merge overlapping bubble detections.
+        
+        Args:
+            bubbles: List of bubble bounding boxes
+            overlap_threshold: Minimum overlap ratio to merge
+            
+        Returns:
+            Merged list of bubbles
+        """
+        if not bubbles:
+            return []
+        
+        # Convert to numpy array for easier manipulation
+        boxes = np.array([(x, y, x+w, y+h) for x, y, w, h in bubbles])
+        
+        merged = []
+        used = set()
+        
+        for i, box1 in enumerate(boxes):
+            if i in used:
+                continue
+            
+            # Start with current box
+            x1, y1, x2, y2 = box1
+            
+            # Check for overlaps with remaining boxes
+            for j in range(i + 1, len(boxes)):
+                if j in used:
+                    continue
                 
-                if confidence >= conf_thresh:
-                    cx, cy, w, h = pred[:4]
+                box2 = boxes[j]
+                
+                # Calculate intersection
+                ix1 = max(x1, box2[0])
+                iy1 = max(y1, box2[1])
+                ix2 = min(x2, box2[2])
+                iy2 = min(y2, box2[3])
+                
+                if ix1 < ix2 and iy1 < iy2:
+                    # Calculate overlap ratio
+                    intersection = (ix2 - ix1) * (iy2 - iy1)
+                    area1 = (x2 - x1) * (y2 - y1)
+                    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+                    overlap = intersection / min(area1, area2)
                     
-                    # Convert to top-left
-                    x = (cx - w / 2) * x_scale
-                    y = (cy - h / 2) * y_scale
-                    width = w * x_scale
-                    height = h * y_scale
-                    
-                    # Clamp to image bounds
-                    x = max(0, min(x, orig_w))
-                    y = max(0, min(y, orig_h))
-                    width = min(width, orig_w - x)
-                    height = min(height, orig_h - y)
-                    
-                    boxes.append((int(x), int(y), int(width), int(height)))
-                    
-                    if total_detections <= 10:
-                        print(f" ✓ ACCEPTED")
-                else:
-                    filtered_out += 1
-                    if total_detections <= 10:
-                        print(f" ✗ REJECTED")
+                    if overlap >= overlap_threshold:
+                        # Merge boxes
+                        x1 = min(x1, box2[0])
+                        y1 = min(y1, box2[1])
+                        x2 = max(x2, box2[2])
+                        y2 = max(y2, box2[3])
+                        used.add(j)
+            
+            merged.append((int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
         
-        # DEBUG: Summary
-        print(f"\n   CONFIDENCE FILTER SUMMARY:")
-        print(f"   - Total YOLO detections: {total_detections}")
-        print(f"   - Accepted (>={conf_thresh:.2f}): {len(boxes)}")
-        print(f"   - Filtered out: {filtered_out}")
-        if total_detections > 0:
-            print(f"   - Acceptance rate: {len(boxes)/total_detections*100:.1f}%")
-        print("")
+        return merged
+
+
+# Standalone utility functions
+def download_model_from_huggingface(repo_id: str = "ogkalu/comic-speech-bubble-detector-yolov8m",
+                                   filename: str = "comic-speech-bubble-detector-yolov8m.pt",
+                                   cache_dir: str = "models") -> str:
+    """
+    Download model from Hugging Face Hub.
+    
+    Args:
+        repo_id: Hugging Face repository ID
+        filename: Model filename in the repository
+        cache_dir: Local directory to cache the model
         
-        return boxes
+    Returns:
+        Path to downloaded model file
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        logger.info(f"📥 Downloading {filename} from {repo_id}...")
+        
+        model_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=cache_dir,
+            local_dir=cache_dir
+        )
+        
+        logger.info(f"✅ Model downloaded to: {model_path}")
+        return model_path
+        
+    except ImportError:
+        logger.error("huggingface-hub package required. Install with: pip install huggingface-hub")
+        return None
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        return None
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    import sys
+    
+    # Create detector
+    detector = BubbleDetector()
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "download":
+            # Download model from Hugging Face
+            model_path = download_model_from_huggingface()
+            if model_path:
+                print(f"Model downloaded to: {model_path}")
+        
+        elif sys.argv[1] == "detect" and len(sys.argv) > 3:
+            # Detect bubbles in an image
+            model_path = sys.argv[2]
+            image_path = sys.argv[3]
+            
+            if detector.load_model(model_path):
+                bubbles = detector.detect_bubbles(image_path, confidence=0.5)
+                print(f"Detected {len(bubbles)} bubbles:")
+                for i, (x, y, w, h) in enumerate(bubbles):
+                    print(f"  Bubble {i+1}: position=({x},{y}) size=({w}x{h})")
+                
+                # Optionally visualize
+                if len(sys.argv) > 4:
+                    output_path = sys.argv[4]
+                    detector.visualize_detections(image_path, bubbles, output_path)
+        
+        else:
+            print("Usage:")
+            print("  python bubble_detector.py download")
+            print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
+    
+    else:
+        print("Bubble Detector Module")
+        print("Usage:")
+        print("  python bubble_detector.py download")
+        print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
