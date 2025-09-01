@@ -1349,6 +1349,10 @@ class MangaSettingsDialog:
         bubble_frame = tk.LabelFrame(content_frame, text="AI Bubble Detection (YOLO)", padx=15, pady=10)
         bubble_frame.pack(fill='x', padx=20, pady=(10, 0))
 
+        # Bubble Detection Settings (Enhanced)
+        bubble_frame = tk.LabelFrame(content_frame, text="AI Bubble Detection (YOLOv8 + RT-DETR)", padx=15, pady=10)
+        bubble_frame.pack(fill='x', padx=20, pady=(10, 0))
+
         # Enable bubble detection
         self.bubble_detection_enabled = tk.BooleanVar(
             value=self.settings['ocr'].get('bubble_detection_enabled', False)
@@ -1363,26 +1367,67 @@ class MangaSettingsDialog:
         )
         bubble_enable_cb.pack(anchor='w')
 
-        # Model path frame
-        model_path_frame = tk.Frame(bubble_frame)
-        model_path_frame.pack(fill='x', pady=(10, 0))
+        # Detector type selection
+        detector_type_frame = tk.Frame(bubble_frame)
+        detector_type_frame.pack(fill='x', pady=(10, 0))
 
-        tk.Label(model_path_frame, text="Model (.pt file):", width=15, anchor='w').pack(side='left')
+        tk.Label(detector_type_frame, text="Detector Type:", width=15, anchor='w').pack(side='left')
+
+        self.detector_type = tk.StringVar(
+            value=self.settings['ocr'].get('detector_type', 'yolo')
+        )
+
+        detector_radio_frame = tk.Frame(detector_type_frame)
+        detector_radio_frame.pack(side='left', padx=(10, 0))
+
+        tk.Radiobutton(
+            detector_radio_frame,
+            text="YOLOv8 (Fast)",
+            variable=self.detector_type,
+            value='yolo',
+            command=self._on_detector_type_changed
+        ).pack(side='left', padx=(0, 15))
+
+        tk.Radiobutton(
+            detector_radio_frame,
+            text="RT-DETR (Accurate)",
+            variable=self.detector_type,
+            value='rtdetr',
+            command=self._on_detector_type_changed
+        ).pack(side='left', padx=(0, 15))
+
+        tk.Radiobutton(
+            detector_radio_frame,
+            text="Auto (Best Available)",
+            variable=self.detector_type,
+            value='auto',
+            command=self._on_detector_type_changed
+        ).pack(side='left')
+
+        # YOLOv8 Settings Frame
+        self.yolo_settings_frame = tk.LabelFrame(bubble_frame, text="YOLOv8 Settings", padx=10, pady=5)
+        self.yolo_settings_frame.pack(fill='x', pady=(10, 0))
+
+        # YOLOv8 Model path
+        yolo_model_frame = tk.Frame(self.yolo_settings_frame)
+        yolo_model_frame.pack(fill='x', pady=(5, 0))
+
+        tk.Label(yolo_model_frame, text="Model (.pt):", width=12, anchor='w').pack(side='left')
 
         self.bubble_model_path = tk.StringVar(
             value=self.settings['ocr'].get('bubble_model_path', '')
         )
 
         self.bubble_model_entry = tk.Entry(
-            model_path_frame,
+            yolo_model_frame,
             textvariable=self.bubble_model_path,
-            width=40,
+            width=35,
             state='readonly'
         )
         self.bubble_model_entry.pack(side='left', padx=(0, 10))
 
         self.bubble_browse_btn = tb.Button(
-            model_path_frame,
+            yolo_model_frame,
             text="Browse",
             command=self._browse_bubble_model,
             bootstyle="primary"
@@ -1390,33 +1435,25 @@ class MangaSettingsDialog:
         self.bubble_browse_btn.pack(side='left')
 
         self.bubble_clear_btn = tb.Button(
-            model_path_frame,
+            yolo_model_frame,
             text="Clear",
             command=self._clear_bubble_model,
             bootstyle="secondary"
         )
         self.bubble_clear_btn.pack(side='left', padx=(5, 0))
 
-        # Model status
-        self.bubble_status_label = tk.Label(
-            bubble_frame,
-            text="",
-            font=('Arial', 9)
-        )
-        self.bubble_status_label.pack(anchor='w', pady=(5, 0))
+        # YOLOv8 Confidence
+        yolo_conf_frame = tk.Frame(self.yolo_settings_frame)
+        yolo_conf_frame.pack(fill='x', pady=(10, 0))
 
-        # Confidence threshold
-        bubble_conf_frame = tk.Frame(bubble_frame)
-        bubble_conf_frame.pack(fill='x', pady=(10, 0))
-
-        tk.Label(bubble_conf_frame, text="Detection Confidence:", width=20, anchor='w').pack(side='left')
+        tk.Label(yolo_conf_frame, text="Confidence:", width=12, anchor='w').pack(side='left')
 
         self.bubble_confidence = tk.DoubleVar(
-            value=self.settings['ocr'].get('bubble_confidence', 0.1)
+            value=self.settings['ocr'].get('bubble_confidence', 0.5)
         )
 
         self.bubble_conf_scale = tk.Scale(
-            bubble_conf_frame,
+            yolo_conf_frame,
             from_=0.1,
             to=0.9,
             resolution=0.1,
@@ -1427,11 +1464,107 @@ class MangaSettingsDialog:
         )
         self.bubble_conf_scale.pack(side='left', padx=(0, 10))
 
-        self.bubble_conf_label = tk.Label(bubble_conf_frame, text="0.5", width=5)
+        self.bubble_conf_label = tk.Label(yolo_conf_frame, text=f"{self.bubble_confidence.get():.1f}", width=5)
         self.bubble_conf_label.pack(side='left')
 
-        # Initialize label
-        self.bubble_conf_label.config(text=f"{self.bubble_confidence.get():.1f}")
+        # RT-DETR Settings Frame
+        self.rtdetr_settings_frame = tk.LabelFrame(bubble_frame, text="RT-DETR Settings", padx=10, pady=5)
+        self.rtdetr_settings_frame.pack(fill='x', pady=(10, 0))
+
+        # RT-DETR Status and Actions
+        rtdetr_status_frame = tk.Frame(self.rtdetr_settings_frame)
+        rtdetr_status_frame.pack(fill='x', pady=(5, 0))
+
+        tk.Label(rtdetr_status_frame, text="Status:", width=12, anchor='w').pack(side='left')
+
+        self.rtdetr_status_label = tk.Label(
+            rtdetr_status_frame,
+            text="Not loaded",
+            font=('Arial', 9)
+        )
+        self.rtdetr_status_label.pack(side='left', padx=(0, 15))
+
+        self.rtdetr_load_btn = tb.Button(
+            rtdetr_status_frame,
+            text="Load Model",
+            command=self._load_rtdetr_model,
+            bootstyle="primary"
+        )
+        self.rtdetr_load_btn.pack(side='left', padx=(0, 5))
+
+        self.rtdetr_download_btn = tb.Button(
+            rtdetr_status_frame,
+            text="Download",
+            command=self._download_rtdetr_model,
+            bootstyle="success"
+        )
+        self.rtdetr_download_btn.pack(side='left')
+
+        # RT-DETR Classes to detect
+        rtdetr_classes_frame = tk.Frame(self.rtdetr_settings_frame)
+        rtdetr_classes_frame.pack(fill='x', pady=(10, 0))
+
+        tk.Label(rtdetr_classes_frame, text="Detect:", width=12, anchor='w').pack(side='left')
+
+        self.detect_empty_bubbles = tk.BooleanVar(
+            value=self.settings['ocr'].get('detect_empty_bubbles', True)
+        )
+        tk.Checkbutton(
+            rtdetr_classes_frame,
+            text="Empty Bubbles",
+            variable=self.detect_empty_bubbles
+        ).pack(side='left', padx=(0, 10))
+
+        self.detect_text_bubbles = tk.BooleanVar(
+            value=self.settings['ocr'].get('detect_text_bubbles', True)
+        )
+        tk.Checkbutton(
+            rtdetr_classes_frame,
+            text="Text Bubbles",
+            variable=self.detect_text_bubbles
+        ).pack(side='left', padx=(0, 10))
+
+        self.detect_free_text = tk.BooleanVar(
+            value=self.settings['ocr'].get('detect_free_text', True)
+        )
+        tk.Checkbutton(
+            rtdetr_classes_frame,
+            text="Free Text",
+            variable=self.detect_free_text
+        ).pack(side='left')
+
+        # RT-DETR Confidence
+        rtdetr_conf_frame = tk.Frame(self.rtdetr_settings_frame)
+        rtdetr_conf_frame.pack(fill='x', pady=(10, 0))
+
+        tk.Label(rtdetr_conf_frame, text="Confidence:", width=12, anchor='w').pack(side='left')
+
+        self.rtdetr_confidence = tk.DoubleVar(
+            value=self.settings['ocr'].get('rtdetr_confidence', 0.3)
+        )
+
+        self.rtdetr_conf_scale = tk.Scale(
+            rtdetr_conf_frame,
+            from_=0.1,
+            to=0.9,
+            resolution=0.05,
+            orient='horizontal',
+            variable=self.rtdetr_confidence,
+            length=200,
+            command=lambda v: self.rtdetr_conf_label.config(text=f"{float(v):.2f}")
+        )
+        self.rtdetr_conf_scale.pack(side='left', padx=(0, 10))
+
+        self.rtdetr_conf_label = tk.Label(rtdetr_conf_frame, text=f"{self.rtdetr_confidence.get():.2f}", width=5)
+        self.rtdetr_conf_label.pack(side='left')
+
+        # Overall status label
+        self.bubble_status_label = tk.Label(
+            bubble_frame,
+            text="",
+            font=('Arial', 9)
+        )
+        self.bubble_status_label.pack(anchor='w', pady=(5, 0))
 
         # Help text
         help_frame = tk.Frame(bubble_frame)
@@ -1439,7 +1572,7 @@ class MangaSettingsDialog:
 
         tk.Label(
             help_frame,
-            text="📥 Download model from: huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m",
+            text="📥 YOLOv8: huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m",
             font=('Arial', 9),
             fg='blue',
             cursor='hand2'
@@ -1447,14 +1580,15 @@ class MangaSettingsDialog:
 
         tk.Label(
             help_frame,
-            text="ℹ️ The .pt file will be automatically converted to ONNX format on first use",
+            text="📥 RT-DETR: huggingface.co/ogkalu/comic-text-and-bubble-detector (auto-downloads)",
             font=('Arial', 9),
-            fg='gray'
+            fg='blue',
+            cursor='hand2'
         ).pack(anchor='w', pady=(2, 0))
 
         tk.Label(
             help_frame,
-            text="⚡ Provides better bubble detection than traditional merging, especially for Azure OCR",
+            text="ℹ️ RT-DETR provides 3-class detection: empty bubbles, text bubbles, and free text",
             font=('Arial', 9),
             fg='gray'
         ).pack(anchor='w', pady=(2, 0))
@@ -1464,13 +1598,135 @@ class MangaSettingsDialog:
             self.bubble_model_entry,
             self.bubble_browse_btn,
             self.bubble_clear_btn,
+            self.bubble_conf_scale,
+            self.rtdetr_load_btn,
+            self.rtdetr_download_btn,
+            self.rtdetr_conf_scale
+        ]
+
+        # Store RT-DETR specific controls
+        self.rtdetr_controls = [
+            self.rtdetr_load_btn,
+            self.rtdetr_download_btn,
+            self.rtdetr_conf_scale,
+            self.detect_empty_bubbles,
+            self.detect_text_bubbles,
+            self.detect_free_text
+        ]
+
+        # Store YOLOv8 specific controls
+        self.yolo_controls = [
+            self.bubble_model_entry,
+            self.bubble_browse_btn,
+            self.bubble_clear_btn,
             self.bubble_conf_scale
         ]
 
         # Initialize control states
         self._toggle_bubble_controls()
+        self._on_detector_type_changed()
         self._update_bubble_status()
 
+    def _on_detector_type_changed(self):
+        """Handle detector type change"""
+        if not hasattr(self, 'bubble_detection_enabled'):
+            return
+            
+        if not self.bubble_detection_enabled.get():
+            return
+        
+        detector_type = self.detector_type.get()
+        
+        if detector_type == 'yolo':
+            # Enable YOLOv8, disable RT-DETR
+            self.yolo_settings_frame.config(text="YOLOv8 Settings ✓")
+            self.rtdetr_settings_frame.config(text="RT-DETR Settings (Disabled)")
+            
+            for widget in self.yolo_controls:
+                try:
+                    widget.config(state='normal')
+                except:
+                    pass
+            
+            for widget in self.rtdetr_controls:
+                try:
+                    widget.config(state='disabled')
+                except:
+                    pass
+        
+        elif detector_type == 'rtdetr':
+            # Disable YOLOv8, enable RT-DETR
+            self.yolo_settings_frame.config(text="YOLOv8 Settings (Disabled)")
+            self.rtdetr_settings_frame.config(text="RT-DETR Settings ✓")
+            
+            for widget in self.yolo_controls:
+                try:
+                    widget.config(state='disabled')
+                except:
+                    pass
+            
+            for widget in self.rtdetr_controls:
+                try:
+                    widget.config(state='normal')
+                except:
+                    pass
+        
+        else:  # auto
+            # Enable both
+            self.yolo_settings_frame.config(text="YOLOv8 Settings")
+            self.rtdetr_settings_frame.config(text="RT-DETR Settings")
+            
+            for widget in self.yolo_controls + self.rtdetr_controls:
+                try:
+                    widget.config(state='normal')
+                except:
+                    pass
+        
+        self._update_bubble_status()
+
+    def _load_rtdetr_model(self):
+        """Test loading RT-DETR model"""
+        try:
+            from bubble_detector import BubbleDetector
+            
+            self.rtdetr_status_label.config(text="Loading...", fg='orange')
+            self.dialog.update_idletasks()
+            
+            detector = BubbleDetector()
+            
+            if detector.load_rtdetr_model():
+                self.rtdetr_status_label.config(text="✅ Ready", fg='green')
+                messagebox.showinfo("Success", "RT-DETR model loaded successfully!")
+            else:
+                self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                
+        except ImportError:
+            self.rtdetr_status_label.config(text="❌ Missing transformers", fg='red')
+            messagebox.showerror("Error", "Install transformers: pip install transformers")
+        except Exception as e:
+            self.rtdetr_status_label.config(text="❌ Error", fg='red')
+            messagebox.showerror("Error", f"Failed to load: {e}")
+
+    def _download_rtdetr_model(self):
+        """Download RT-DETR model"""
+        try:
+            self.rtdetr_status_label.config(text="Downloading...", fg='orange')
+            self.dialog.update_idletasks()
+            
+            from bubble_detector import BubbleDetector
+            
+            detector = BubbleDetector()
+            if detector.load_rtdetr_model():
+                self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
+                messagebox.showinfo("Success", "RT-DETR model downloaded and ready!")
+            else:
+                self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                messagebox.showerror("Error", "Failed to download RT-DETR model")
+        
+        except Exception as e:
+            self.rtdetr_status_label.config(text="❌ Error", fg='red')
+            messagebox.showerror("Error", f"Download failed: {e}")
+            
     def _toggle_bubble_controls(self):
         """Enable/disable bubble detection controls"""
         enabled = self.bubble_detection_enabled.get()
@@ -1679,6 +1935,11 @@ class MangaSettingsDialog:
         self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled.get()
         self.settings['ocr']['bubble_model_path'] = self.bubble_model_path.get()
         self.settings['ocr']['bubble_confidence'] = self.bubble_confidence.get()
+        self.settings['ocr']['detector_type'] = self.detector_type.get()
+        self.settings['ocr']['rtdetr_confidence'] = self.rtdetr_confidence.get()
+        self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles.get()
+        self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
+        self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
         
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
