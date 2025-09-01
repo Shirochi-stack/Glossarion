@@ -681,13 +681,13 @@ class MangaSettingsDialog:
         tk.Label(local_method_frame, text="Model Type:", width=15, anchor='w').pack(side='left')
         
         self.local_method_var = tk.StringVar(
-            value=self.settings.get('inpainting', {}).get('local_method', 'aot')
+            value=self.settings.get('inpainting', {}).get('local_method', 'anime')
         )
         
         local_methods = ttk.Combobox(
             local_method_frame,
             textvariable=self.local_method_var,
-            values=['aot', 'lama', 'mat', 'ollama', 'sd_local'],
+            values=['aot', 'lama', 'mat', 'ollama', 'sd_local','anime'],
             state='readonly',
             width=20
         )
@@ -761,7 +761,7 @@ class MangaSettingsDialog:
         self.hybrid_models_frame.pack(fill='both', expand=True)
         
         self.hybrid_model_vars = {}
-        for method in ['aot', 'lama', 'mat']:
+        for method in ['aot', 'lama', 'mat','anime']:
             var = tk.BooleanVar(value=False)
             self.hybrid_model_vars[method] = var
             
