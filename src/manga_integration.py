@@ -671,6 +671,7 @@ class MangaTranslationTab:
         )
         local_model_combo.pack(side=tk.LEFT, padx=10)
         local_model_combo.bind('<<ComboboxSelected>>', self._on_local_model_change)
+        self.disable_spinbox_mousewheel(local_model_combo)
 
         # Model descriptions
         model_desc = {
