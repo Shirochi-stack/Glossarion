@@ -9,6 +9,7 @@ import os
 import json
 import threading
 import time
+import hashlib
 import traceback
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -664,7 +665,7 @@ class MangaTranslationTab:
         local_model_combo = ttk.Combobox(
             local_model_frame,
             textvariable=self.local_model_type_var,
-            values=['lama', 'aot', 'mat', 'sd_local'],
+            values=['lama', 'aot', 'mat', 'sd_local', 'anime'],
             state='readonly',
             width=15
         )
@@ -676,7 +677,8 @@ class MangaTranslationTab:
             'lama': 'LaMa (Best quality)',
             'aot': 'AOT GAN (Fast)',
             'mat': 'MAT (High-res)',
-            'sd_local': 'Stable Diffusion (Anime)'
+            'sd_local': 'Stable Diffusion (Anime)',
+            'anime': 'Anime/Manga Inpainting',
         }
         self.model_desc_label = tk.Label(
             local_model_frame,
@@ -1397,7 +1399,7 @@ class MangaTranslationTab:
         self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'lama'))
         
         # Load model paths
-        for model_type in ['lama', 'aot', 'mat', 'sd_local']:
+        for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             if model_type == self.local_model_type_var.get():
                 self.local_model_path_var = tk.StringVar(value=path)
@@ -1480,7 +1482,7 @@ class MangaTranslationTab:
         self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
         
         # Save model paths for each type
-        for model_type in ['lama', 'aot', 'mat', 'sd_local']:
+        for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
             if hasattr(self, 'local_model_type_var'):
                 if model_type == self.local_model_type_var.get():
                     path = self.local_model_path_var.get()
@@ -1980,7 +1982,9 @@ class MangaTranslationTab:
             'lama': 'LaMa (Best quality)',
             'aot': 'AOT GAN (Fast)',
             'mat': 'MAT (High-res)',
-            'sd_local': 'Stable Diffusion (Anime)'
+            'sd_local': 'Stable Diffusion (Anime)',
+            'anime': 'Anime/Manga Inpainting',
+            
         }
         self.model_desc_label.config(text=model_desc.get(model_type, ''))
         
@@ -2416,7 +2420,7 @@ class MangaTranslationTab:
         
         # Get current API key and model for translation
         api_key = None
-        model = 'gemini-1.5-flash'  # default
+        model = 'gemini-2.5-flash'  # default
         
         # Try to get API key from various sources
         if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
