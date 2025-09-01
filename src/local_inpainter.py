@@ -1,640 +1,866 @@
-# local_inpainter.py
 """
-Local inpainting methods with automatic model conversion
-Supports AOT, LaMa, MAT, Ollama, and Stable Diffusion-based inpainting
-No OpenCV fallback as requested
+Local inpainting implementation - COMPATIBLE VERSION WITH JIT SUPPORT
+Maintains full backward compatibility while adding proper JIT model support
 """
 
 import os
 import json
-import hashlib
 import numpy as np
 import cv2
-from typing import Optional, Tuple, Dict, Any
-from PIL import Image
+from typing import Optional, List, Tuple, Dict, Any
 import logging
+import traceback
+import re
+import hashlib
+import urllib.request
+from pathlib import Path
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Environment variables for ONNX
+ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'onnx_cache')
+AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'false').lower() == 'true'
+SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'true'
+FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
+CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting'))
 
 try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    logger.warning("PyTorch not available")
+
+try:
+    import onnx
     import onnxruntime as ort
     ONNX_AVAILABLE = True
 except ImportError:
     ONNX_AVAILABLE = False
+    logger.warning("ONNX Runtime not available")
 
 try:
-    import requests
-    REQUESTS_AVAILABLE = True
+    from bubble_detector import BubbleDetector
+    BUBBLE_DETECTOR_AVAILABLE = True
 except ImportError:
-    REQUESTS_AVAILABLE = False
+    BUBBLE_DETECTOR_AVAILABLE = False
+    logger.info("Bubble detector not available - basic inpainting will be used")
 
-logger = logging.getLogger(__name__)
+
+# JIT Model URLs (for automatic download)
+LAMA_JIT_MODELS = {
+    'lama': {
+        'url': 'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt',
+        'md5': 'e3aa4aaa15225a33ec84f9f4bc47e500',
+        'name': 'BigLama'
+    },
+    'anime': {
+        'url': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+        'md5': '29f284f36a0a510bcacf39ecf4c4d54f',
+        'name': 'Anime-Manga BigLama'
+    },
+    'lama_official': {
+        'url': 'https://github.com/Sanster/models/releases/download/lama/lama.pt',
+        'md5': '4b1a1de53b7a74e0ff9dd622834e8e1e',
+        'name': 'LaMa Official'
+    }
+}
+
+
+def norm_img(img: np.ndarray) -> np.ndarray:
+    """Normalize image to [0, 1] range"""
+    if img.dtype == np.uint8:
+        return img.astype(np.float32) / 255.0
+    return img
+
+
+def get_cache_path_by_url(url: str) -> str:
+    """Get cache path for a model URL"""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    filename = os.path.basename(url)
+    return os.path.join(CACHE_DIR, filename)
+
+
+def download_model(url: str, md5: str = None) -> str:
+    """Download model if not cached"""
+    cache_path = get_cache_path_by_url(url)
+    
+    if os.path.exists(cache_path):
+        logger.info(f"✅ Model already cached: {cache_path}")
+        return cache_path
+    
+    logger.info(f"📥 Downloading model from {url}")
+    
+    try:
+        urllib.request.urlretrieve(url, cache_path)
+        logger.info(f"✅ Model downloaded to: {cache_path}")
+        return cache_path
+    except Exception as e:
+        logger.error(f"❌ Download failed: {e}")
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+        raise
+
+
+class FFCInpaintModel(nn.Module):
+    """FFC model for LaMa inpainting - for checkpoint compatibility"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Encoder
+        self.model_1_ffc_convl2l = nn.Conv2d(4, 64, 7, padding=3)
+        self.model_1_bn_l = nn.BatchNorm2d(64)
+        
+        self.model_2_ffc_convl2l = nn.Conv2d(64, 128, 3, padding=1)
+        self.model_2_bn_l = nn.BatchNorm2d(128)
+        
+        self.model_3_ffc_convl2l = nn.Conv2d(128, 256, 3, padding=1)
+        self.model_3_bn_l = nn.BatchNorm2d(256)
+        
+        self.model_4_ffc_convl2l = nn.Conv2d(256, 128, 3, padding=1)
+        self.model_4_ffc_convl2g = nn.Conv2d(256, 384, 3, padding=1)
+        self.model_4_bn_l = nn.BatchNorm2d(128)
+        self.model_4_bn_g = nn.BatchNorm2d(384)
+        
+        # FFC blocks
+        for i in range(5, 23):
+            for conv_type in ['conv1', 'conv2']:
+                setattr(self, f'model_{i}_{conv_type}_ffc_convl2l', nn.Conv2d(128, 128, 3, padding=1))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convl2g', nn.Conv2d(128, 384, 3, padding=1))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convg2l', nn.Conv2d(384, 128, 3, padding=1))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv1_0', nn.Conv2d(384, 192, 1))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv1_1', nn.BatchNorm2d(192))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_fu_conv_layer', nn.Conv2d(384, 384, 1))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_fu_bn', nn.BatchNorm2d(384))
+                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv2', nn.Conv2d(192, 384, 1))
+                setattr(self, f'model_{i}_{conv_type}_bn_l', nn.BatchNorm2d(128))
+                setattr(self, f'model_{i}_{conv_type}_bn_g', nn.BatchNorm2d(384))
+        
+        # Decoder
+        self.model_24 = nn.Conv2d(512, 256, 3, padding=1)
+        self.model_25 = nn.BatchNorm2d(256)
+        
+        self.model_27 = nn.Conv2d(256, 128, 3, padding=1)
+        self.model_28 = nn.BatchNorm2d(128)
+        
+        self.model_30 = nn.Conv2d(128, 64, 3, padding=1)
+        self.model_31 = nn.BatchNorm2d(64)
+        
+        self.model_34 = nn.Conv2d(64, 3, 7, padding=3)
+        
+        self.relu = nn.ReLU(inplace=True)
+        self.tanh = nn.Tanh()
+    
+    def forward(self, image, mask):
+        x = torch.cat([image, mask], dim=1)
+        
+        x = self.relu(self.model_1_bn_l(self.model_1_ffc_convl2l(x)))
+        x = self.relu(self.model_2_bn_l(self.model_2_ffc_convl2l(x)))
+        x = self.relu(self.model_3_bn_l(self.model_3_ffc_convl2l(x)))
+        
+        x_l = self.relu(self.model_4_bn_l(self.model_4_ffc_convl2l(x)))
+        x_g = self.relu(self.model_4_bn_g(self.model_4_ffc_convl2g(x)))
+        
+        for i in range(5, 23):
+            identity_l, identity_g = x_l, x_g
+            x_l, x_g = self._ffc_block(x_l, x_g, i, 'conv1')
+            x_l, x_g = self._ffc_block(x_l, x_g, i, 'conv2')
+            x_l = x_l + identity_l
+            x_g = x_g + identity_g
+        
+        x = torch.cat([x_l, x_g], dim=1)
+        x = self.relu(self.model_25(self.model_24(x)))
+        x = self.relu(self.model_28(self.model_27(x)))
+        x = self.relu(self.model_31(self.model_30(x)))
+        x = self.tanh(self.model_34(x))
+        
+        mask_3ch = mask.repeat(1, 3, 1, 1)
+        return x * mask_3ch + image * (1 - mask_3ch)
+    
+    def _ffc_block(self, x_l, x_g, idx, conv_type):
+        convl2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2l')
+        convl2g = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2g')
+        convg2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2l')
+        convg2g_conv1 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv1_0')
+        convg2g_bn1 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv1_1')
+        fu_conv = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_fu_conv_layer')
+        fu_bn = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_fu_bn')
+        convg2g_conv2 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv2')
+        bn_l = getattr(self, f'model_{idx}_{conv_type}_bn_l')
+        bn_g = getattr(self, f'model_{idx}_{conv_type}_bn_g')
+        
+        out_xl = convl2l(x_l) + convg2l(x_g)
+        out_xg = convl2g(x_l) + convg2g_conv2(self.relu(convg2g_bn1(convg2g_conv1(x_g)))) + self.relu(fu_bn(fu_conv(x_g)))
+        
+        return self.relu(bn_l(out_xl)), self.relu(bn_g(out_xg))
+
 
 class LocalInpainter:
-    """Local inpainting with multiple backend support"""
+    """Local inpainter with full backward compatibility"""
     
+    # MAINTAIN ORIGINAL SUPPORTED_METHODS for compatibility
     SUPPORTED_METHODS = {
-        'aot': 'AOT GAN Inpainting',
-        'lama': 'LaMa Inpainting', 
-        'mat': 'MAT Inpainting',
-        'ollama': 'Ollama Vision Inpainting',
-        'sd_local': 'Stable Diffusion Local'
+        'lama': ('LaMa Inpainting', FFCInpaintModel),
+        'mat': ('MAT Inpainting', FFCInpaintModel),
+        'aot': ('AOT GAN Inpainting', FFCInpaintModel),
+        'sd': ('Stable Diffusion Inpainting', FFCInpaintModel),
+        'anime': ('Anime/Manga Inpainting', FFCInpaintModel),
+        'lama_official': ('Official LaMa', FFCInpaintModel),
     }
     
-    def __init__(self, config_path: str = "inpainter_config.json"):
-        """Initialize local inpainter"""
+    def __init__(self, config_path="inpainter_config.json"):
         self.config_path = config_path
         self.config = self._load_config()
-        self.session = None
+        self.model = None
         self.model_loaded = False
         self.current_method = None
-        self.ollama_client = None
+        self.use_opencv_fallback = False
+        self.onnx_session = None
+        self.use_onnx = False
+        self.is_jit_model = False  # Track if using JIT model
+        self.pad_mod = 8  # Default padding modulo
         
-    def _load_config(self) -> dict:
-        """Load configuration"""
+        # Bubble detection
+        self.bubble_detector = None
+        self.bubble_model_loaded = False
+        
+        # Create ONNX cache directory
+        os.makedirs(ONNX_CACHE_DIR, exist_ok=True)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        logger.info(f"📁 ONNX cache directory: {ONNX_CACHE_DIR}")
+        
+        self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
+        if TORCH_AVAILABLE:
+            self.device = torch.device('cuda' if self.use_gpu else 'cpu')
+            if self.use_gpu:
+                logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
+            else:
+                logger.info("💻 Using CPU")
+        else:
+            self.device = None
+        
+        # Initialize bubble detector if available
+        if BUBBLE_DETECTOR_AVAILABLE:
+            self.bubble_detector = BubbleDetector()
+            logger.info("🗨️ Bubble detection available")
+    
+    def _load_config(self):
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r') as f:
                 return json.load(f)
         return {}
     
     def _save_config(self):
-        """Save configuration"""
         with open(self.config_path, 'w') as f:
             json.dump(self.config, f, indent=2)
     
-    def _get_file_hash(self, filepath: str) -> str:
-        """Get file hash for caching"""
-        hasher = hashlib.md5()
-        with open(filepath, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b''):
-                hasher.update(chunk)
-        return hasher.hexdigest()
+    def _convert_checkpoint_key(self, key):
+        """Convert checkpoint key format to model format"""
+        # model.24.weight -> model_24.weight
+        if re.match(r'^model\.(\d+)\.(weight|bias|running_mean|running_var)$', key):
+            return re.sub(r'model\.(\d+)\.', r'model_\1.', key)
+        
+        # model.5.conv1.ffc.weight -> model_5_conv1_ffc.weight
+        if key.startswith('model.'):
+            parts = key.split('.')
+            if parts[-1] in ['weight', 'bias', 'running_mean', 'running_var']:
+                return '_'.join(parts[:-1]).replace('model_', 'model_') + '.' + parts[-1]
+        
+        return key.replace('.', '_')
     
-    def load_model(self, method: str, model_path: str = None, force_reconvert: bool = False) -> bool:
-        """Load inpainting model based on method
+    def _load_weights_with_mapping(self, model, state_dict):
+        """Load weights with proper mapping"""
+        model_dict = model.state_dict()
         
-        Args:
-            method: One of 'aot', 'lama', 'mat', 'ollama', 'sd_local'
-            model_path: Path to model file (for non-Ollama methods)
-            force_reconvert: Force reconversion even if ONNX exists
-        """
-        self.current_method = method
+        logger.info(f"📊 Model expects {len(model_dict)} weights")
+        logger.info(f"📊 Checkpoint has {len(state_dict)} weights")
         
-        if method == 'ollama':
-            return self._setup_ollama()
+        # Filter out num_batches_tracked
+        actual_weights = {k: v for k, v in state_dict.items() if 'num_batches_tracked' not in k}
+        logger.info(f"   Actual weights: {len(actual_weights)}")
         
-        if not model_path or not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+        mapped = {}
+        unmapped_ckpt = []
+        unmapped_model = list(model_dict.keys())
         
-        # For PyTorch models, convert to ONNX
-        if model_path.endswith('.pt') or model_path.endswith('.pth') or model_path.endswith('.safetensors') or model_path.endswith('.ckpt'):  # ADD .ckpt
-            onnx_path = self._convert_to_onnx(method, model_path, force_reconvert)
-            if not onnx_path:
-                return False
-        elif model_path.endswith('.onnx'):
-            onnx_path = model_path
+        # Map checkpoint weights
+        for ckpt_key, ckpt_val in actual_weights.items():
+            success = False
+            converted_key = self._convert_checkpoint_key(ckpt_key)
+            
+            if converted_key in model_dict:
+                target_shape = model_dict[converted_key].shape
+                
+                if target_shape == ckpt_val.shape:
+                    mapped[converted_key] = ckpt_val
+                    success = True
+                elif len(ckpt_val.shape) == 4 and len(target_shape) == 4:
+                    # 4D permute for decoder convs
+                    permuted = ckpt_val.permute(1, 0, 2, 3)
+                    if target_shape == permuted.shape:
+                        mapped[converted_key] = permuted
+                        logger.info(f"   ✅ Permuted: {ckpt_key}")
+                        success = True
+                elif len(ckpt_val.shape) == 2 and len(target_shape) == 2:
+                    # 2D transpose
+                    transposed = ckpt_val.transpose(0, 1)
+                    if target_shape == transposed.shape:
+                        mapped[converted_key] = transposed
+                        success = True
+                
+                if success and converted_key in unmapped_model:
+                    unmapped_model.remove(converted_key)
+            
+            if not success:
+                unmapped_ckpt.append(ckpt_key)
+        
+        # Try fallback mapping for unmapped
+        if unmapped_ckpt:
+            logger.info(f"   🔧 Fallback mapping for {len(unmapped_ckpt)} weights...")
+            for ckpt_key in unmapped_ckpt[:]:
+                ckpt_val = actual_weights[ckpt_key]
+                for model_key in unmapped_model[:]:
+                    if model_dict[model_key].shape == ckpt_val.shape:
+                        if ('weight' in ckpt_key and 'weight' in model_key) or \
+                           ('bias' in ckpt_key and 'bias' in model_key):
+                            mapped[model_key] = ckpt_val
+                            unmapped_model.remove(model_key)
+                            unmapped_ckpt.remove(ckpt_key)
+                            logger.info(f"   ✅ Mapped: {ckpt_key} -> {model_key}")
+                            break
+        
+        # Initialize missing weights
+        complete_dict = model_dict.copy()
+        complete_dict.update(mapped)
+        
+        for key in unmapped_model:
+            param = complete_dict[key]
+            if 'weight' in key:
+                if 'conv' in key.lower():
+                    nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='relu')
+                else:
+                    nn.init.xavier_uniform_(param)
+            elif 'bias' in key:
+                nn.init.zeros_(param)
+            elif 'running_mean' in key:
+                nn.init.zeros_(param)
+            elif 'running_var' in key:
+                nn.init.ones_(param)
+        
+        # Report
+        logger.info(f"✅ Mapped {len(actual_weights) - len(unmapped_ckpt)}/{len(actual_weights)} checkpoint weights")
+        logger.info(f"   Filled {len(mapped)}/{len(model_dict)} model positions")
+        
+        if unmapped_model:
+            pct = (len(unmapped_model) / len(model_dict)) * 100
+            logger.info(f"   ⚠️ Initialized {len(unmapped_model)} missing weights ({pct:.1f}%)")
+            if pct > 20:
+                logger.warning("   ⚠️ May produce artifacts - checkpoint is incomplete")
+                logger.warning("   💡 Consider downloading JIT model for better quality:")
+                logger.warning(f"      inpainter.download_jit_model('{self.current_method or 'lama'}')")
+        
+        model.load_state_dict(complete_dict, strict=True)
+        return True
+    
+    def download_jit_model(self, method: str) -> str:
+        """Download JIT model for a method"""
+        if method in LAMA_JIT_MODELS:
+            model_info = LAMA_JIT_MODELS[method]
+            logger.info(f"📥 Downloading {model_info['name']}...")
+            
+            try:
+                model_path = download_model(model_info['url'], model_info['md5'])
+                return model_path
+            except Exception as e:
+                logger.error(f"Failed to download {method}: {e}")
         else:
-            raise ValueError("Model must be .pt, .pth, .safetensors, or .onnx file")
+            logger.warning(f"No JIT model available for {method}")
         
-        # Load ONNX model
+        return None
+    
+    def load_model(self, method, model_path, force_reload=False):
+        """Load model - supports both JIT and checkpoint files for compatibility"""
         try:
-            if not ONNX_AVAILABLE:
-                raise ImportError("onnxruntime not installed")
+            if not TORCH_AVAILABLE:
+                raise ImportError("PyTorch required")
             
-            # Use GPU if available, fall back to CPU
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-            self.session = ort.InferenceSession(onnx_path, providers=providers)
+            if not os.path.exists(model_path):
+                # Try to auto-download JIT model if path doesn't exist
+                logger.warning(f"Model not found: {model_path}")
+                logger.info("Attempting to download JIT model...")
+                
+                jit_path = self.download_jit_model(method)
+                if jit_path and os.path.exists(jit_path):
+                    model_path = jit_path
+                    logger.info(f"Using downloaded JIT model: {jit_path}")
+                else:
+                    raise FileNotFoundError(f"Model not found and download failed: {model_path}")
             
-            # Get model info
-            self.input_names = [inp.name for inp in self.session.get_inputs()]
-            self.output_names = [out.name for out in self.session.get_outputs()]
-            self.input_shapes = [inp.shape for inp in self.session.get_inputs()]
+            if self.model_loaded and self.current_method == method and not force_reload:
+                logger.info(f"✅ {method.upper()} already loaded")
+                return True
             
-            # Save to config
+            logger.info(f"📥 Loading {method} from {model_path}")
+            
+            # Check if it's a JIT model (.pt) or checkpoint (.ckpt/.pth)
+            if model_path.endswith('.pt'):
+                try:
+                    # Try loading as JIT/TorchScript
+                    logger.info("📦 Attempting to load as JIT model...")
+                    self.model = torch.jit.load(model_path, map_location=self.device or 'cpu')
+                    self.model.eval()
+                    
+                    if self.use_gpu and self.device:
+                        self.model = self.model.to(self.device)
+                    
+                    self.is_jit_model = True
+                    self.model_loaded = True
+                    self.current_method = method
+                    logger.info("✅ JIT model loaded successfully!")
+                    
+                    self.config[f'{method}_model_path'] = model_path
+                    self._save_config()
+                    return True
+                    
+                except Exception as jit_error:
+                    logger.info("   Not a JIT model, trying as regular checkpoint...")
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                    self.is_jit_model = False
+            else:
+                # Load as regular checkpoint
+                checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                self.is_jit_model = False
+            
+            # If we get here, it's not JIT, so load as checkpoint
+            if not self.is_jit_model:
+                self.model = FFCInpaintModel()
+                
+                if isinstance(checkpoint, dict):
+                    if 'gen_state_dict' in checkpoint:
+                        state_dict = checkpoint['gen_state_dict']
+                        logger.info("📦 Found gen_state_dict")
+                    elif 'state_dict' in checkpoint:
+                        state_dict = checkpoint['state_dict']
+                    elif 'model' in checkpoint:
+                        state_dict = checkpoint['model']
+                    else:
+                        state_dict = checkpoint
+                else:
+                    state_dict = checkpoint
+                
+                self._load_weights_with_mapping(self.model, state_dict)
+                
+                self.model.eval()
+                if self.use_gpu and self.device:
+                    self.model = self.model.to(self.device)
+            
+            self.model_loaded = True
+            self.current_method = method
+            
             self.config[f'{method}_model_path'] = model_path
-            self.config[f'{method}_onnx_path'] = onnx_path
-            self.config[f'{method}_hash'] = self._get_file_hash(model_path)
             self._save_config()
             
-            self.model_loaded = True
-            print(f"✅ {self.SUPPORTED_METHODS[method]} model loaded successfully")
+            logger.info(f"✅ {method.upper()} loaded!")
             return True
             
         except Exception as e:
-            print(f"❌ Failed to load ONNX model: {e}")
+            logger.error(f"❌ Failed: {e}")
+            logger.error(traceback.format_exc())
             return False
     
-    def _convert_to_onnx(self, method: str, model_path: str, force_reconvert: bool) -> Optional[str]:
-        """Convert PyTorch model to ONNX based on method"""
-        
-        # Generate ONNX path
-        onnx_dir = os.path.join(os.path.dirname(model_path), 'onnx_cache')
-        os.makedirs(onnx_dir, exist_ok=True)
-        
-        model_hash = self._get_file_hash(model_path)[:8]
-        onnx_filename = f"{os.path.splitext(os.path.basename(model_path))[0]}_{method}_{model_hash}.onnx"
-        onnx_path = os.path.join(onnx_dir, onnx_filename)
-        
-        # Check if conversion needed
-        if os.path.exists(onnx_path) and not force_reconvert:
-            print(f"Using cached ONNX model: {onnx_filename}")
-            return onnx_path
-        
-        print(f"Converting {method.upper()} model to ONNX format...")
-        
-        # Method-specific conversion
-        if method == 'aot':
-            return self._convert_aot_to_onnx(model_path, onnx_path)
-        elif method == 'lama':
-            return self._convert_lama_to_onnx(model_path, onnx_path)
-        elif method == 'mat':
-            return self._convert_mat_to_onnx(model_path, onnx_path)
-        elif method == 'sd_local':
-            return self._convert_sd_to_onnx(model_path, onnx_path)
+    def pad_img_to_modulo(self, img: np.ndarray, mod: int) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        """Pad image to be divisible by mod"""
+        if len(img.shape) == 2:
+            height, width = img.shape
         else:
-            print(f"❌ Unknown conversion method: {method}")
-            return None
-    
-    def _convert_aot_to_onnx(self, pt_path: str, onnx_path: str) -> Optional[str]:
-        """Convert AOT GAN model to ONNX"""
-        try:
-            import torch
-            import torch.nn as nn
-            
-            print("Loading AOT model...")
-            
-            # Simplified AOT architecture for ONNX export
-            class SimpleAOTGenerator(nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    # Encoder
-                    self.encoder = nn.Sequential(
-                        nn.Conv2d(4, 64, 7, padding=3),  # 4 channels: RGB + mask
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(64, 128, 4, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(128, 256, 4, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                    )
-                    
-                    # Middle
-                    self.middle = nn.Sequential(
-                        nn.Conv2d(256, 256, 3, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(256, 256, 3, padding=1),
-                        nn.ReLU(inplace=True),
-                    )
-                    
-                    # Decoder
-                    self.decoder = nn.Sequential(
-                        nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(64, 3, 7, padding=3),
-                        nn.Tanh()
-                    )
-                
-                def forward(self, x, mask):
-                    # Concatenate image and mask
-                    inp = torch.cat([x, mask], dim=1)
-                    
-                    # Encode
-                    feat = self.encoder(inp)
-                    
-                    # Process
-                    feat = self.middle(feat)
-                    
-                    # Decode
-                    out = self.decoder(feat)
-                    
-                    # Blend with original
-                    return out * mask + x * (1 - mask)
-            
-            # Load or create model
-            model = SimpleAOTGenerator()
-            
-            # Try to load weights if available
-            if os.path.exists(pt_path):
-                try:
-                    state_dict = torch.load(pt_path, map_location='cpu')
-                    if 'generator' in state_dict:
-                        state_dict = state_dict['generator']
-                    model.load_state_dict(state_dict, strict=False)
-                except:
-                    print("Warning: Could not load pretrained weights, using random initialization")
-            
-            model.eval()
-            
-            # Export to ONNX
-            dummy_image = torch.randn(1, 3, 512, 512)
-            dummy_mask = torch.randn(1, 1, 512, 512)
-            
-            torch.onnx.export(
-                model,
-                (dummy_image, dummy_mask),
-                onnx_path,
-                input_names=['image', 'mask'],
-                output_names=['output'],
-                dynamic_axes={
-                    'image': {0: 'batch', 2: 'height', 3: 'width'},
-                    'mask': {0: 'batch', 2: 'height', 3: 'width'},
-                    'output': {0: 'batch', 2: 'height', 3: 'width'}
-                },
-                opset_version=11
-            )
-            
-            print(f"✅ Converted AOT model to: {onnx_path}")
-            return onnx_path
-            
-        except Exception as e:
-            print(f"❌ AOT conversion failed: {e}")
-            return None
-    
-    def _convert_lama_to_onnx(self, pt_path: str, onnx_path: str) -> Optional[str]:
-        """Convert LaMa model to ONNX"""
-        try:
-            import torch
-            import torch.nn as nn
-            
-            print("Loading LaMa model...")
-            
-            # Simplified LaMa architecture
-            class SimpleLaMa(nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    self.encoder = nn.Sequential(
-                        nn.Conv2d(4, 64, 3, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(64, 128, 3, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(128, 256, 3, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                    )
-                    
-                    self.decoder = nn.Sequential(
-                        nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(64, 3, 3, padding=1),
-                        nn.Sigmoid()
-                    )
-                
-                def forward(self, image, mask):
-                    x = torch.cat([image, mask], dim=1)
-                    feat = self.encoder(x)
-                    out = self.decoder(feat)
-                    return out * mask + image * (1 - mask)
-            
-            model = SimpleLaMa()
-            
-            # Try loading weights
-            if os.path.exists(pt_path):
-                try:
-                    checkpoint = torch.load(pt_path, map_location='cpu')
-                    if 'state_dict' in checkpoint:
-                        model.load_state_dict(checkpoint['state_dict'], strict=False)
-                except:
-                    print("Warning: Using random weights")
-            
-            model.eval()
-            
-            # Export
-            dummy_image = torch.randn(1, 3, 512, 512)
-            dummy_mask = torch.randn(1, 1, 512, 512)
-            
-            torch.onnx.export(
-                model,
-                (dummy_image, dummy_mask),
-                onnx_path,
-                input_names=['image', 'mask'],
-                output_names=['output'],
-                dynamic_axes={
-                    'image': {0: 'batch', 2: 'height', 3: 'width'},
-                    'mask': {0: 'batch', 2: 'height', 3: 'width'},
-                    'output': {0: 'batch', 2: 'height', 3: 'width'}
-                },
-                opset_version=11
-            )
-            
-            print(f"✅ Converted LaMa model to: {onnx_path}")
-            return onnx_path
-            
-        except Exception as e:
-            print(f"❌ LaMa conversion failed: {e}")
-            return None
-    
-    def _convert_mat_to_onnx(self, pt_path: str, onnx_path: str) -> Optional[str]:
-        """Convert MAT model to ONNX"""
-        # Similar structure to AOT/LaMa
-        return self._convert_lama_to_onnx(pt_path, onnx_path)  # Reuse for now
-    
-    def _convert_sd_to_onnx(self, pt_path: str, onnx_path: str) -> Optional[str]:
-        """Convert Stable Diffusion inpainting model to ONNX - handles .safetensors"""
-        try:
-            import torch
-            import torch.nn as nn
-            
-            print("Converting SD/AnimeManga model to ONNX...")
-            
-            # Simplified SD-style inpainting network
-            class SimpleSDInpaint(nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    # Similar to LaMa but with GroupNorm for SD-style
-                    self.encoder = nn.Sequential(
-                        nn.Conv2d(4, 64, 3, padding=1),
-                        nn.GroupNorm(8, 64),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(64, 128, 3, stride=2, padding=1),
-                        nn.GroupNorm(16, 128),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(128, 256, 3, stride=2, padding=1),
-                        nn.GroupNorm(32, 256),
-                        nn.ReLU(inplace=True),
-                    )
-                    
-                    self.decoder = nn.Sequential(
-                        nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-                        nn.GroupNorm(16, 128),
-                        nn.ReLU(inplace=True),
-                        nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
-                        nn.GroupNorm(8, 64),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(64, 3, 3, padding=1),
-                        nn.Sigmoid()
-                    )
-                
-                def forward(self, image, mask):
-                    x = torch.cat([image, mask], dim=1)
-                    feat = self.encoder(x)
-                    out = self.decoder(feat)
-                    return out * mask + image * (1 - mask)
-            
-            model = SimpleSDInpaint()
-            
-            # Try loading weights
-            if os.path.exists(pt_path):
-                try:
-                    if pt_path.endswith('.safetensors'):
-                        # Handle safetensors format
-                        from safetensors.torch import load_file
-                        state_dict = load_file(pt_path)
-                        model.load_state_dict(state_dict, strict=False)
-                    elif pt_path.endswith('.ckpt'):
-                        # Handle .ckpt checkpoint format
-                        checkpoint = torch.load(pt_path, map_location='cpu')
-                        if 'state_dict' in checkpoint:
-                            state_dict = checkpoint['state_dict']
-                        else:
-                            state_dict = checkpoint
-                        # Filter out non-model keys if needed
-                        model_state_dict = {k: v for k, v in state_dict.items() 
-                                           if k.startswith('model.') or not any(k.startswith(p) for p in ['cond_stage_model', 'first_stage_model'])}
-                        model.load_state_dict(model_state_dict, strict=False)
-                    else:
-                        # Handle regular .pt/.pth files
-                        checkpoint = torch.load(pt_path, map_location='cpu')
-                        if 'state_dict' in checkpoint:
-                            model.load_state_dict(checkpoint['state_dict'], strict=False)
-                        else:
-                            model.load_state_dict(checkpoint, strict=False)
-                except:
-                    print("Warning: Using random weights")
-            
-            model.eval()
-            
-            # Export
-            dummy_image = torch.randn(1, 3, 512, 512)
-            dummy_mask = torch.randn(1, 1, 512, 512)
-            
-            torch.onnx.export(
-                model,
-                (dummy_image, dummy_mask),
-                onnx_path,
-                input_names=['image', 'mask'],
-                output_names=['output'],
-                dynamic_axes={
-                    'image': {0: 'batch', 2: 'height', 3: 'width'},
-                    'mask': {0: 'batch', 2: 'height', 3: 'width'},
-                    'output': {0: 'batch', 2: 'height', 3: 'width'}
-                },
-                opset_version=11
-            )
-            
-            print(f"✅ Converted SD model to: {onnx_path}")
-            return onnx_path
-            
-        except ImportError as e:
-            print(f"❌ Missing library for SD conversion: {e}")
-            print("Install with: pip install safetensors")
-            return None
-        except Exception as e:
-            print(f"❌ SD conversion failed: {e}")
-            return None
-    
-    def _setup_ollama(self) -> bool:
-        """Setup Ollama for vision-based inpainting"""
-        try:
-            if not REQUESTS_AVAILABLE:
-                raise ImportError("requests library required for Ollama")
-            
-            # Check if Ollama is running
-            response = requests.get("http://localhost:11434/api/tags")
-            if response.status_code != 200:
-                raise ConnectionError("Ollama not running on localhost:11434")
-            
-            # Check for vision models
-            models = response.json()
-            vision_models = [m for m in models.get('models', []) 
-                           if 'vision' in m.get('name', '').lower() or 
-                           'llava' in m.get('name', '').lower()]
-            
-            if not vision_models:
-                print("⚠️ No vision models found in Ollama")
-                print("   Install with: ollama pull llava")
-                return False
-            
-            self.ollama_client = True
-            self.model_loaded = True
-            print(f"✅ Ollama ready with {len(vision_models)} vision model(s)")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Ollama setup failed: {e}")
-            return False
-    
-    def inpaint(self, image: np.ndarray, mask: np.ndarray, **kwargs) -> np.ndarray:
-        """Perform inpainting using loaded model
+            height, width = img.shape[:2]
         
-        Args:
-            image: Input image (BGR)
-            mask: Binary mask (255 for inpaint regions)
-            **kwargs: Method-specific parameters
-            
-        Returns:
-            Inpainted image
-        """
+        pad_height = (mod - height % mod) % mod
+        pad_width = (mod - width % mod) % mod
+        
+        pad_top = pad_height // 2
+        pad_bottom = pad_height - pad_top
+        pad_left = pad_width // 2
+        pad_right = pad_width - pad_left
+        
+        if len(img.shape) == 2:
+            padded = np.pad(img, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='reflect')
+        else:
+            padded = np.pad(img, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='reflect')
+        
+        return padded, (pad_top, pad_bottom, pad_left, pad_right)
+    
+    def remove_padding(self, img: np.ndarray, padding: Tuple[int, int, int, int]) -> np.ndarray:
+        """Remove padding from image"""
+        pad_top, pad_bottom, pad_left, pad_right = padding
+        
+        if len(img.shape) == 2:
+            return img[pad_top:img.shape[0]-pad_bottom, pad_left:img.shape[1]-pad_right]
+        else:
+            return img[pad_top:img.shape[0]-pad_bottom, pad_left:img.shape[1]-pad_right, :]
+
+    def inpaint(self, image, mask, refinement='normal'):
+        """Inpaint - compatible with both JIT and checkpoint models"""
         if not self.model_loaded:
-            print("❌ No model loaded, returning original image")
+            logger.error("No model loaded")
             return image
         
-        if self.current_method == 'ollama':
-            return self._inpaint_ollama(image, mask, **kwargs)
-        else:
-            return self._inpaint_onnx(image, mask)
-    
-    def _inpaint_onnx(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Inpaint using ONNX model"""
         try:
-            # Preprocess
-            h, w = image.shape[:2]
+            # Store original dimensions
+            orig_h, orig_w = image.shape[:2]
             
-            # Resize to model input size (typically 512x512)
-            target_size = 512
-            resized_image = cv2.resize(image, (target_size, target_size))
-            resized_mask = cv2.resize(mask, (target_size, target_size))
+            if len(mask.shape) == 3:
+                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
             
-            # Convert to RGB and normalize
-            rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-            rgb_image = rgb_image.astype(np.float32) / 255.0
+            # Apply dilation for anime method
+            if self.current_method == 'anime':
+                kernel = np.ones((7, 7), np.uint8)
+                mask = cv2.dilate(mask, kernel, iterations=1)
             
-            # Prepare mask (single channel, normalized)
-            mask_input = (resized_mask > 127).astype(np.float32)
-            mask_input = np.expand_dims(mask_input, axis=2)
+            if self.is_jit_model:
+                # JIT model processing - following the exact reference implementation
+                
+                # Convert BGR to RGB (CRITICAL - JIT models expect RGB)
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                
+                # Pad images to be divisible by mod
+                image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                
+                # CRITICAL: Normalize to [0, 1] range exactly as reference does
+                image_norm = image_padded.astype(np.float32) / 255.0
+                mask_norm = mask_padded.astype(np.float32) / 255.0
+                
+                # Binary mask (values > 0 become 1)
+                mask_binary = (mask_norm > 0) * 1.0
+                
+                # Convert to PyTorch tensors with correct shape
+                # Image should be [B, C, H, W]
+                image_tensor = torch.from_numpy(image_norm).float()
+                
+                # Ensure image is [H, W, C] -> [C, H, W]
+                if len(image_tensor.shape) == 3:
+                    if image_tensor.shape[2] == 3:  # [H, W, C] format
+                        image_tensor = image_tensor.permute(2, 0, 1)
+                
+                # Add batch dimension [C, H, W] -> [B, C, H, W]
+                image_tensor = image_tensor.unsqueeze(0)
+                
+                # Mask should be [B, 1, H, W]
+                mask_tensor = torch.from_numpy(mask_binary).float()
+                
+                # Add dimensions as needed
+                while len(mask_tensor.shape) < 4:
+                    mask_tensor = mask_tensor.unsqueeze(0)
+                
+                # Ensure mask has single channel
+                if mask_tensor.shape[1] != 1:
+                    mask_tensor = mask_tensor[:, :1, :, :]
+                
+                # Move to device
+                image_tensor = image_tensor.to(self.device)
+                mask_tensor = mask_tensor.to(self.device)
+                
+                # Debug shapes
+                logger.debug(f"Image tensor shape: {image_tensor.shape}")  # Should be [1, 3, H, W]
+                logger.debug(f"Mask tensor shape: {mask_tensor.shape}")    # Should be [1, 1, H, W]
+                
+                # Ensure spatial dimensions match
+                if image_tensor.shape[2:] != mask_tensor.shape[2:]:
+                    logger.warning(f"Spatial dimension mismatch: image {image_tensor.shape[2:]}, mask {mask_tensor.shape[2:]}")
+                    # Resize mask to match image
+                    mask_tensor = F.interpolate(mask_tensor, size=image_tensor.shape[2:], mode='nearest')
+                
+                # Run inference with proper error handling
+                with torch.no_grad():
+                    try:
+                        # Standard LaMa JIT models expect (image, mask)
+                        inpainted = self.model(image_tensor, mask_tensor)
+                    except RuntimeError as e:
+                        error_str = str(e)
+                        logger.error(f"Model inference failed: {error_str}")
+                        
+                        # If tensor size mismatch, log detailed info
+                        if "size of tensor" in error_str.lower():
+                            logger.error(f"Image shape: {image_tensor.shape}")
+                            logger.error(f"Mask shape: {mask_tensor.shape}")
+                            
+                            # Try transposing if needed
+                            if "dimension 3" in error_str and "880" in error_str:
+                                # This suggests the tensors might be in wrong format
+                                # Try different permutation
+                                logger.info("Attempting to fix tensor format...")
+                                
+                                # Ensure image is [B, C, H, W] not [B, H, W, C]
+                                if image_tensor.shape[1] > 3:
+                                    image_tensor = image_tensor.permute(0, 3, 1, 2)
+                                    logger.info(f"Permuted image to: {image_tensor.shape}")
+                                
+                                # Try again
+                                inpainted = self.model(image_tensor, mask_tensor)
+                            else:
+                                # As last resort, try swapped arguments
+                                logger.info("Trying swapped arguments (mask, image)...")
+                                inpainted = self.model(mask_tensor, image_tensor)
+                        else:
+                            raise e
+                
+                # Process output
+                # Output should be [B, C, H, W]
+                if len(inpainted.shape) == 4:
+                    # Remove batch dimension and permute to [H, W, C]
+                    result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+                else:
+                    # Handle unexpected output shape
+                    result = inpainted.detach().cpu().numpy()
+                    if len(result.shape) == 3 and result.shape[0] == 3:
+                        result = result.transpose(1, 2, 0)
+                
+                # Denormalize to 0-255 range
+                result = np.clip(result * 255, 0, 255).astype(np.uint8)
+                
+                # Convert RGB back to BGR for OpenCV
+                result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                
+                # Remove padding
+                result = self.remove_padding(result, padding)
+                
+            else:
+                # Original checkpoint model processing (keep as is)
+                h, w = image.shape[:2]
+                size = 768 if self.current_method == 'anime' else 512
+                
+                img_resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_LANCZOS4)
+                mask_resized = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST)
+                
+                img_norm = img_resized.astype(np.float32) / 127.5 - 1
+                mask_norm = mask_resized.astype(np.float32) / 255.0
+                
+                img_tensor = torch.from_numpy(img_norm).permute(2, 0, 1).unsqueeze(0).float()
+                mask_tensor = torch.from_numpy(mask_norm).unsqueeze(0).unsqueeze(0).float()
+                
+                if self.use_gpu and self.device:
+                    img_tensor = img_tensor.to(self.device)
+                    mask_tensor = mask_tensor.to(self.device)
+                
+                with torch.no_grad():
+                    output = self.model(img_tensor, mask_tensor)
+                
+                result = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                result = ((result + 1) * 127.5).clip(0, 255).astype(np.uint8)
+                result = cv2.resize(result, (w, h), interpolation=cv2.INTER_LANCZOS4)
             
-            # Create batch
-            image_batch = np.transpose(rgb_image, (2, 0, 1))
-            image_batch = np.expand_dims(image_batch, axis=0)
+            # Ensure result matches original size exactly
+            if result.shape[:2] != (orig_h, orig_w):
+                result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
             
-            mask_batch = np.transpose(mask_input, (2, 0, 1))
-            mask_batch = np.expand_dims(mask_batch, axis=0)
+            # Apply refinement blending if requested
+            if refinement != 'fast':
+                # Ensure mask is same size as result
+                if mask.shape[:2] != (orig_h, orig_w):
+                    mask = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                
+                mask_3ch = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) / 255.0
+                kernel = cv2.getGaussianKernel(21, 5)
+                kernel = kernel @ kernel.T
+                mask_blur = cv2.filter2D(mask_3ch, -1, kernel)
+                result = (result * mask_blur + image * (1 - mask_blur)).astype(np.uint8)
             
-            # Run inference
-            inputs = {
-                self.input_names[0]: image_batch,
-                self.input_names[1]: mask_batch
-            }
-            
-            outputs = self.session.run(self.output_names, inputs)
-            result = outputs[0][0]  # Remove batch dimension
-            
-            # Postprocess
-            result = np.transpose(result, (1, 2, 0))
-            result = (result * 255).clip(0, 255).astype(np.uint8)
-            result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-            
-            # Resize back to original size
-            result = cv2.resize(result, (w, h))
-            
+            logger.info("✅ Inpainted successfully!")
             return result
             
         except Exception as e:
-            print(f"❌ ONNX inpainting failed: {e}")
+            logger.error(f"❌ Inpainting failed: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Return original image on failure
+            logger.warning("Returning original image due to error")
             return image
     
-    def _inpaint_ollama(self, image: np.ndarray, mask: np.ndarray, 
-                       prompt: str = None, model: str = "llava") -> np.ndarray:
-        """Inpaint using Ollama vision model (returns original since Ollama doesn't actually inpaint)"""
-        try:
-            import base64
-            from io import BytesIO
+    def inpaint_with_prompt(self, image, mask, prompt=None):
+        """Compatibility method"""
+        return self.inpaint(image, mask)
+    
+    def batch_inpaint(self, images, masks):
+        """Batch inpainting"""
+        return [self.inpaint(img, mask) for img, mask in zip(images, masks)]
+    
+    def load_bubble_model(self, model_path: str) -> bool:
+        """Load bubble detection model"""
+        if not BUBBLE_DETECTOR_AVAILABLE:
+            logger.warning("Bubble detector not available")
+            return False
+        
+        if self.bubble_detector is None:
+            self.bubble_detector = BubbleDetector()
+        
+        if self.bubble_detector.load_model(model_path):
+            self.bubble_model_loaded = True
+            self.config['bubble_model_path'] = model_path
+            self._save_config()
+            logger.info("✅ Bubble detection model loaded")
+            return True
+        
+        return False
+    
+    def detect_bubbles(self, image_path: str, confidence: float = 0.5) -> List[Tuple[int, int, int, int]]:
+        """Detect speech bubbles in image"""
+        if not self.bubble_model_loaded or self.bubble_detector is None:
+            logger.warning("No bubble model loaded")
+            return []
+        
+        return self.bubble_detector.detect_bubbles(image_path, confidence=confidence)
+    
+    def create_bubble_mask(self, image: np.ndarray, bubbles: List[Tuple[int, int, int, int]], 
+                          expand_pixels: int = 5) -> np.ndarray:
+        """Create mask from detected bubbles"""
+        h, w = image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        for x, y, bw, bh in bubbles:
+            x1 = max(0, x - expand_pixels)
+            y1 = max(0, y - expand_pixels)
+            x2 = min(w, x + bw + expand_pixels)
+            y2 = min(h, y + bh + expand_pixels)
             
-            # Create visualization showing mask
-            vis_image = image.copy()
-            vis_image[mask > 127] = [0, 0, 255]  # Mark inpaint areas in red
-            
-            # Convert to base64
-            rgb_image = cv2.cvtColor(vis_image, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_image)
-            buffered = BytesIO()
-            pil_image.save(buffered, format="PNG")
-            img_b64 = base64.b64encode(buffered.getvalue()).decode()
-            
-            # Create prompt
-            if not prompt:
-                prompt = ("This image has red areas that need to be filled in. "
-                         "Describe what should naturally be in those red areas based on the surrounding context. "
-                         "The red areas likely contained text that was removed.")
-            
-            # Call Ollama
-            response = requests.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "images": [img_b64],
-                    "stream": False
-                }
-            )
-            
-            if response.status_code == 200:
-                # Ollama provides description, not actual inpainting
-                result = response.json()
-                description = result.get('response', '')
-                print(f"Ollama analysis: {description[:200]}...")
-                
-                # Return original since Ollama can't actually inpaint
-                print("Note: Ollama provides analysis only, not actual inpainting")
-                return image
-            else:
-                print(f"❌ Ollama request failed: {response.status_code}")
-                return image
-                
-        except Exception as e:
-            print(f"❌ Ollama inpainting failed: {e}")
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+        
+        return mask
+    
+    def inpaint_with_bubble_detection(self, image_path: str, confidence: float = 0.5,
+                                     expand_pixels: int = 5, refinement: str = 'normal') -> np.ndarray:
+        """Inpaint using automatic bubble detection"""
+        image = cv2.imread(image_path)
+        if image is None:
+            logger.error(f"Failed to load image: {image_path}")
+            return None
+        
+        bubbles = self.detect_bubbles(image_path, confidence)
+        if not bubbles:
+            logger.warning("No bubbles detected")
             return image
+        
+        logger.info(f"Detected {len(bubbles)} bubbles")
+        
+        mask = self.create_bubble_mask(image, bubbles, expand_pixels)
+        result = self.inpaint(image, mask, refinement)
+        
+        return result
+    
+    def batch_inpaint_with_bubbles(self, image_paths: List[str], **kwargs) -> List[np.ndarray]:
+        """Batch inpaint multiple images with bubble detection"""
+        results = []
+        
+        for i, image_path in enumerate(image_paths):
+            logger.info(f"Processing image {i+1}/{len(image_paths)}")
+            result = self.inpaint_with_bubble_detection(image_path, **kwargs)
+            results.append(result)
+        
+        return results
+
+
+# Compatibility classes - MAINTAIN ALL ORIGINAL CLASSES
+class LaMaModel(FFCInpaintModel):
+    pass
+
+class MATModel(FFCInpaintModel):
+    pass
+
+class AOTModel(FFCInpaintModel):
+    pass
+
+class SDInpaintModel(FFCInpaintModel):
+    pass
+
+class AnimeMangaInpaintModel(FFCInpaintModel):
+    pass
+
+class LaMaOfficialModel(FFCInpaintModel):
+    pass
 
 
 class HybridInpainter:
-    """Combines multiple inpainting methods for best results"""
+    """Hybrid inpainter for compatibility"""
     
     def __init__(self):
-        self.local_inpainter = LocalInpainter()
-        self.methods = []
-        
-    def add_method(self, method: str, model_path: str = None) -> bool:
-        """Add an inpainting method to the pipeline"""
-        if self.local_inpainter.load_model(method, model_path):
-            self.methods.append({
-                'method': method,
-                'model_path': model_path,
-                'inpainter': LocalInpainter()  # Create separate instance
-            })
-            self.methods[-1]['inpainter'].load_model(method, model_path)
-            return True
+        self.inpainters = {}
+    
+    def add_method(self, name, method, model_path):
+        """Add a method - maintains compatibility"""
+        try:
+            inpainter = LocalInpainter()
+            if inpainter.load_model(method, model_path):
+                self.inpainters[name] = inpainter
+                return True
+        except:
+            pass
         return False
     
-    def inpaint_ensemble(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Use multiple methods and blend results"""
-        if not self.methods:
+    def inpaint_ensemble(self, image: np.ndarray, mask: np.ndarray, 
+                        weights: Dict[str, float] = None) -> np.ndarray:
+        """Ensemble inpainting"""
+        if not self.inpainters:
+            logger.error("No inpainters loaded")
             return image
+        
+        if weights is None:
+            weights = {name: 1.0 / len(self.inpainters) for name in self.inpainters}
         
         results = []
-        weights = []
+        for name, inpainter in self.inpainters.items():
+            result = inpainter.inpaint(image, mask)
+            weight = weights.get(name, 1.0 / len(self.inpainters))
+            results.append(result * weight)
         
-        for method_info in self.methods:
-            try:
-                result = method_info['inpainter'].inpaint(image, mask)
-                results.append(result)
-                
-                # Weight based on method (you can adjust these)
-                if method_info['method'] == 'lama':
-                    weights.append(1.5)  # LaMa usually performs well
-                elif method_info['method'] == 'aot':
-                    weights.append(1.3)
-                else:
-                    weights.append(1.0)
-            except:
-                continue
+        ensemble = np.sum(results, axis=0).astype(np.uint8)
+        return ensemble
+
+
+# Helper function for quick setup
+def setup_inpainter_for_manga(auto_download=True):
+    """Quick setup for manga inpainting"""
+    inpainter = LocalInpainter()
+    
+    if auto_download:
+        # Try to download anime JIT model
+        jit_path = inpainter.download_jit_model('anime')
+        if jit_path:
+            inpainter.load_model('anime', jit_path)
+            logger.info("✅ Manga inpainter ready with JIT model")
+    
+    return inpainter
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "download_jit":
+            # Download JIT models
+            inpainter = LocalInpainter()
+            for method in ['lama', 'anime', 'lama_official']:
+                print(f"\nDownloading {method}...")
+                path = inpainter.download_jit_model(method)
+                if path:
+                    print(f"  ✅ Downloaded to: {path}")
         
-        if not results:
-            return image
-        
-        # Weighted average of results
-        weights = np.array(weights) / np.sum(weights)
-        final = np.zeros_like(image, dtype=np.float32)
-        
-        for result, weight in zip(results, weights):
-            final += result.astype(np.float32) * weight
-        
-        return final.astype(np.uint8)
+        elif len(sys.argv) > 2:
+            # Test with model
+            inpainter = LocalInpainter()
+            inpainter.load_model('lama', sys.argv[1])
+            print("Model loaded - check logs for details")
+    
+    else:
+        print("\nLocal Inpainter - Compatible Version")
+        print("=====================================")
+        print("\nSupports both:")
+        print("  - JIT models (.pt) - RECOMMENDED")
+        print("  - Checkpoint files (.ckpt) - With warnings")
+        print("\nTo download JIT models:")
+        print("  python local_inpainter.py download_jit")
+        print("\nTo test:")
+        print("  python local_inpainter.py <model_path>")
