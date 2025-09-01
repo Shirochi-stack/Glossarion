@@ -30,8 +30,13 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
     TORCH_AVAILABLE = True
+    BaseModel = nn.Module
 except ImportError:
     TORCH_AVAILABLE = False
+    BaseModel = object
+    torch = None
+    nn = None
+    F = None
     logger.warning("PyTorch not available")
 
 try:
@@ -114,6 +119,9 @@ class FFCInpaintModel(nn.Module):
     """FFC model for LaMa inpainting - for checkpoint compatibility"""
     
     def __init__(self):
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch is required for FFCInpaintModel")
+            
         super().__init__()
         
         # Encoder
