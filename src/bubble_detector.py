@@ -27,13 +27,15 @@ except:  # Catch ANY error including AttributeError from missing torch
     YOLO = None
     logger.warning("Ultralytics YOLO not available")
 
-# Rest of your imports stay the same
 try:
     import torch
+    # Test if cuda attribute exists
+    _ = torch.cuda
     TORCH_AVAILABLE = True
-except ImportError:
+except (ImportError, AttributeError):
     TORCH_AVAILABLE = False
-    logger.warning("PyTorch not available")
+    torch = None
+    logger.warning("PyTorch not available or incomplete")
 
 try:
     import onnxruntime as ort
