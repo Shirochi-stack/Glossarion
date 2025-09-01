@@ -739,6 +739,18 @@ class MangaTranslationTab:
             bootstyle="secondary"
         ).pack(anchor='w', pady=(5, 0))
 
+        # Try to load saved model for current type on dialog open
+        initial_model_type = self.local_model_type_var.get()
+        initial_model_path = self.main_gui.config.get(f'manga_{initial_model_type}_model_path', '')
+
+        if initial_model_path and os.path.exists(initial_model_path):
+            self.local_model_path_var.set(initial_model_path)
+            self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
+            # Auto-load after dialog is ready
+            self.dialog.after(500, lambda: self._try_load_model(initial_model_type, initial_model_path))
+        else:
+            self.local_model_status_label.config(text="No model loaded", fg='gray')
+
         # Initialize visibility based on current settings
         self._toggle_inpaint_visibility()
         
@@ -1982,7 +1994,7 @@ class MangaTranslationTab:
         self._save_rendering_settings()
 
     def _on_local_model_change(self, event=None):
-        """Handle local model type change"""
+        """Handle model type change and auto-load if model exists"""
         model_type = self.local_model_type_var.get()
         
         # Update description
@@ -1992,35 +2004,43 @@ class MangaTranslationTab:
             'mat': 'MAT (High-res)',
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
-            
         }
         self.model_desc_label.config(text=model_desc.get(model_type, ''))
         
-        # Load saved path for this model type
+        # Check for saved path for this model type
         saved_path = self.main_gui.config.get(f'manga_{model_type}_model_path', '')
-        self.local_model_path_var.set(saved_path)
         
-        # Update status
-        self._update_local_model_status()
+        if saved_path and os.path.exists(saved_path):
+            # Update the path display
+            self.local_model_path_var.set(saved_path)
+            self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
+            
+            # Auto-load the model after a short delay
+            self.dialog.after(100, lambda: self._try_load_model(model_type, saved_path))
+        else:
+            # Clear the path display
+            self.local_model_path_var.set("")
+            self.local_model_status_label.config(text="No model loaded", fg='gray')
+        
         self._save_rendering_settings()
 
     def _browse_local_model(self):
-        """Browse for local inpainting model"""
+        """Browse for local inpainting model and auto-load"""
         model_type = self.local_model_type_var.get()
         
         if model_type == 'sd_local':
             filetypes = [
                 ("Model files", "*.safetensors *.pt *.pth *.ckpt *.onnx"),
                 ("SafeTensors", "*.safetensors"),
-                ("Checkpoint files", "*.ckpt"),  # ADD this line
+                ("Checkpoint files", "*.ckpt"),
                 ("PyTorch models", "*.pt *.pth"),
                 ("ONNX models", "*.onnx"),
                 ("All files", "*.*")
             ]
         else:
             filetypes = [
-                ("Model files", "*.pt *.pth *.ckpt *.onnx"),  # ADD .ckpt here
-                ("Checkpoint files", "*.ckpt"),  # ADD this line  
+                ("Model files", "*.pt *.pth *.ckpt *.onnx"),
+                ("Checkpoint files", "*.ckpt"),
                 ("PyTorch models", "*.pt *.pth"),
                 ("ONNX models", "*.onnx"),
                 ("All files", "*.*")
@@ -2035,9 +2055,79 @@ class MangaTranslationTab:
             self.local_model_path_var.set(path)
             # Save to config
             self.main_gui.config[f'manga_{model_type}_model_path'] = path
-            self._update_local_model_status()
             self._save_rendering_settings()
+            
+            # Update status first
+            self._update_local_model_status()
+            
+            # Auto-load the selected model
+            self.dialog.after(100, lambda: self._try_load_model(model_type, path))
 
+    def _try_load_model(self, method: str, model_path: str):
+        """Try to load a model and update status"""
+        try:
+            # Show loading status
+            self.local_model_status_label.config(text="⏳ Loading model...", fg='orange')
+            self.dialog.update_idletasks()
+            
+            self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
+            
+            # Try to load using LocalInpainter
+            from local_inpainter import LocalInpainter
+            
+            # Initialize test inpainter
+            test_inpainter = LocalInpainter()
+            
+            # Try to load the model
+            if test_inpainter.load_model(method, model_path, force_reload=True):
+                # Success - update status using existing method
+                self._update_local_model_status()
+                
+                # Override with success message temporarily
+                self.local_model_status_label.config(
+                    text=f"✅ {method.upper()} model loaded successfully!",
+                    fg='green'
+                )
+                
+                self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
+                
+                # Update the translator's inpainter if it exists
+                if hasattr(self, 'translator') and self.translator:
+                    # Force reinitialize with new model
+                    if hasattr(self.translator, 'local_inpainter'):
+                        self.translator.local_inpainter = None
+                    if hasattr(self.translator, '_last_local_method'):
+                        self.translator._last_local_method = None
+                    if hasattr(self.translator, '_last_local_model_path'):
+                        self.translator._last_local_model_path = None
+                
+                # After 3 seconds, revert to normal status display
+                self.dialog.after(3000, self._update_local_model_status)
+                
+                return True
+            else:
+                self.local_model_status_label.config(
+                    text="⚠️ Model file found but failed to load",
+                    fg='orange'
+                )
+                self.main_gui.append_log(f"⚠️ Model file found but failed to load")
+                return False
+                
+        except ImportError:
+            self.local_model_status_label.config(
+                text="❌ Local inpainter module not available",
+                fg='red'
+            )
+            self.main_gui.append_log("❌ Local inpainter module not available", "error")
+            return False
+        except Exception as e:
+            self.local_model_status_label.config(
+                text=f"❌ Error: {str(e)[:50]}",
+                fg='red'
+            )
+            self.main_gui.append_log(f"❌ Error loading model: {str(e)}")
+            return False
+        
     def _update_local_model_status(self):
         """Update local model status display"""
         path = self.local_model_path_var.get()
@@ -2232,16 +2322,28 @@ class MangaTranslationTab:
         # Update the model path entry
         self.local_model_path_var.set(save_path)
         
-        # Show success message
-        messagebox.showinfo("Success", f"{model_name.upper()} model downloaded successfully!")
+        # Save to config
+        self.main_gui.config[f'manga_{model_name}_model_path'] = save_path
+        self._save_rendering_settings()
+        
+        # Auto-load the downloaded model
+        self.local_model_status_label.config(text="⏳ Loading downloaded model...", fg='orange')
+        
+        def load_after_download():
+            if self._try_load_model(model_name, save_path):
+                messagebox.showinfo("Success", f"{model_name.upper()} model downloaded and loaded!")
+            else:
+                messagebox.showinfo("Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
+        
+        self.dialog.after(100, load_after_download)
         
         # Log to main GUI
-        self.main_gui.log_message(f"✅ Downloaded {model_name} model to: {save_path}", "success")
+        self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
 
     def _download_failed(self, error: str):
         """Handle download failure"""
         messagebox.showerror("Download Failed", f"Failed to download model:\n{error}")
-        self.main_gui.log_message(f"❌ Model download failed: {error}", "error")
+        self.main_gui.append_log(f"❌ Model download failed: {error}")
 
     def _show_model_info(self):
         """Show information about models"""
