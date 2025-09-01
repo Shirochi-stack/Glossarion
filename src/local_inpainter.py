@@ -115,101 +115,146 @@ def download_model(url: str, md5: str = None) -> str:
         raise
 
 
-class FFCInpaintModel(nn.Module):
+class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
     """FFC model for LaMa inpainting - for checkpoint compatibility"""
     
     def __init__(self):
         if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch is required for FFCInpaintModel")
+            # Initialize as a simple object when PyTorch is not available
+            super().__init__()
+            logger.warning("PyTorch not available - FFCInpaintModel initialized as placeholder")
+            self._pytorch_available = False
+            return
+            
+        # Additional safety check for nn being None
+        if nn is None:
+            super().__init__()
+            logger.error("Neural network modules not available - FFCInpaintModel disabled")
+            self._pytorch_available = False
+            return
             
         super().__init__()
+        self._pytorch_available = True
         
-        # Encoder
-        self.model_1_ffc_convl2l = nn.Conv2d(4, 64, 7, padding=3)
-        self.model_1_bn_l = nn.BatchNorm2d(64)
-        
-        self.model_2_ffc_convl2l = nn.Conv2d(64, 128, 3, padding=1)
-        self.model_2_bn_l = nn.BatchNorm2d(128)
-        
-        self.model_3_ffc_convl2l = nn.Conv2d(128, 256, 3, padding=1)
-        self.model_3_bn_l = nn.BatchNorm2d(256)
-        
-        self.model_4_ffc_convl2l = nn.Conv2d(256, 128, 3, padding=1)
-        self.model_4_ffc_convl2g = nn.Conv2d(256, 384, 3, padding=1)
-        self.model_4_bn_l = nn.BatchNorm2d(128)
-        self.model_4_bn_g = nn.BatchNorm2d(384)
-        
-        # FFC blocks
-        for i in range(5, 23):
-            for conv_type in ['conv1', 'conv2']:
-                setattr(self, f'model_{i}_{conv_type}_ffc_convl2l', nn.Conv2d(128, 128, 3, padding=1))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convl2g', nn.Conv2d(128, 384, 3, padding=1))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convg2l', nn.Conv2d(384, 128, 3, padding=1))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv1_0', nn.Conv2d(384, 192, 1))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv1_1', nn.BatchNorm2d(192))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_fu_conv_layer', nn.Conv2d(384, 384, 1))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_fu_bn', nn.BatchNorm2d(384))
-                setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv2', nn.Conv2d(192, 384, 1))
-                setattr(self, f'model_{i}_{conv_type}_bn_l', nn.BatchNorm2d(128))
-                setattr(self, f'model_{i}_{conv_type}_bn_g', nn.BatchNorm2d(384))
-        
-        # Decoder
-        self.model_24 = nn.Conv2d(512, 256, 3, padding=1)
-        self.model_25 = nn.BatchNorm2d(256)
-        
-        self.model_27 = nn.Conv2d(256, 128, 3, padding=1)
-        self.model_28 = nn.BatchNorm2d(128)
-        
-        self.model_30 = nn.Conv2d(128, 64, 3, padding=1)
-        self.model_31 = nn.BatchNorm2d(64)
-        
-        self.model_34 = nn.Conv2d(64, 3, 7, padding=3)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.tanh = nn.Tanh()
+        try:
+            # Encoder
+            self.model_1_ffc_convl2l = nn.Conv2d(4, 64, 7, padding=3)
+            self.model_1_bn_l = nn.BatchNorm2d(64)
+            
+            self.model_2_ffc_convl2l = nn.Conv2d(64, 128, 3, padding=1)
+            self.model_2_bn_l = nn.BatchNorm2d(128)
+            
+            self.model_3_ffc_convl2l = nn.Conv2d(128, 256, 3, padding=1)
+            self.model_3_bn_l = nn.BatchNorm2d(256)
+            
+            self.model_4_ffc_convl2l = nn.Conv2d(256, 128, 3, padding=1)
+            self.model_4_ffc_convl2g = nn.Conv2d(256, 384, 3, padding=1)
+            self.model_4_bn_l = nn.BatchNorm2d(128)
+            self.model_4_bn_g = nn.BatchNorm2d(384)
+            
+            # FFC blocks
+            for i in range(5, 23):
+                for conv_type in ['conv1', 'conv2']:
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convl2l', nn.Conv2d(128, 128, 3, padding=1))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convl2g', nn.Conv2d(128, 384, 3, padding=1))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convg2l', nn.Conv2d(384, 128, 3, padding=1))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv1_0', nn.Conv2d(384, 192, 1))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv1_1', nn.BatchNorm2d(192))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_fu_conv_layer', nn.Conv2d(384, 384, 1))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_fu_bn', nn.BatchNorm2d(384))
+                    setattr(self, f'model_{i}_{conv_type}_ffc_convg2g_conv2', nn.Conv2d(192, 384, 1))
+                    setattr(self, f'model_{i}_{conv_type}_bn_l', nn.BatchNorm2d(128))
+                    setattr(self, f'model_{i}_{conv_type}_bn_g', nn.BatchNorm2d(384))
+            
+            # Decoder
+            self.model_24 = nn.Conv2d(512, 256, 3, padding=1)
+            self.model_25 = nn.BatchNorm2d(256)
+            
+            self.model_27 = nn.Conv2d(256, 128, 3, padding=1)
+            self.model_28 = nn.BatchNorm2d(128)
+            
+            self.model_30 = nn.Conv2d(128, 64, 3, padding=1)
+            self.model_31 = nn.BatchNorm2d(64)
+            
+            self.model_34 = nn.Conv2d(64, 3, 7, padding=3)
+            
+            # Activation functions
+            self.relu = nn.ReLU(inplace=True)
+            self.tanh = nn.Tanh()
+            
+            logger.info("FFCInpaintModel initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize FFCInpaintModel: {e}")
+            self._pytorch_available = False
+            raise
     
     def forward(self, image, mask):
-        x = torch.cat([image, mask], dim=1)
-        
-        x = self.relu(self.model_1_bn_l(self.model_1_ffc_convl2l(x)))
-        x = self.relu(self.model_2_bn_l(self.model_2_ffc_convl2l(x)))
-        x = self.relu(self.model_3_bn_l(self.model_3_ffc_convl2l(x)))
-        
-        x_l = self.relu(self.model_4_bn_l(self.model_4_ffc_convl2l(x)))
-        x_g = self.relu(self.model_4_bn_g(self.model_4_ffc_convl2g(x)))
-        
-        for i in range(5, 23):
-            identity_l, identity_g = x_l, x_g
-            x_l, x_g = self._ffc_block(x_l, x_g, i, 'conv1')
-            x_l, x_g = self._ffc_block(x_l, x_g, i, 'conv2')
-            x_l = x_l + identity_l
-            x_g = x_g + identity_g
-        
-        x = torch.cat([x_l, x_g], dim=1)
-        x = self.relu(self.model_25(self.model_24(x)))
-        x = self.relu(self.model_28(self.model_27(x)))
-        x = self.relu(self.model_31(self.model_30(x)))
-        x = self.tanh(self.model_34(x))
-        
-        mask_3ch = mask.repeat(1, 3, 1, 1)
-        return x * mask_3ch + image * (1 - mask_3ch)
+        if not self._pytorch_available:
+            logger.error("PyTorch not available for forward pass")
+            return image  # Return input image as fallback
+            
+        if not TORCH_AVAILABLE or torch is None:
+            logger.error("PyTorch not available for forward pass")
+            return image  # Return input image as fallback
+            
+        try:
+            x = torch.cat([image, mask], dim=1)
+            
+            x = self.relu(self.model_1_bn_l(self.model_1_ffc_convl2l(x)))
+            x = self.relu(self.model_2_bn_l(self.model_2_ffc_convl2l(x)))
+            x = self.relu(self.model_3_bn_l(self.model_3_ffc_convl2l(x)))
+            
+            x_l = self.relu(self.model_4_bn_l(self.model_4_ffc_convl2l(x)))
+            x_g = self.relu(self.model_4_bn_g(self.model_4_ffc_convl2g(x)))
+            
+            for i in range(5, 23):
+                identity_l, identity_g = x_l, x_g
+                x_l, x_g = self._ffc_block(x_l, x_g, i, 'conv1')
+                x_l, x_g = self._ffc_block(x_l, x_g, i, 'conv2')
+                x_l = x_l + identity_l
+                x_g = x_g + identity_g
+            
+            x = torch.cat([x_l, x_g], dim=1)
+            x = self.relu(self.model_25(self.model_24(x)))
+            x = self.relu(self.model_28(self.model_27(x)))
+            x = self.relu(self.model_31(self.model_30(x)))
+            x = self.tanh(self.model_34(x))
+            
+            mask_3ch = mask.repeat(1, 3, 1, 1)
+            return x * mask_3ch + image * (1 - mask_3ch)
+            
+        except Exception as e:
+            logger.error(f"Forward pass failed: {e}")
+            return image  # Return input image as fallback
     
     def _ffc_block(self, x_l, x_g, idx, conv_type):
-        convl2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2l')
-        convl2g = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2g')
-        convg2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2l')
-        convg2g_conv1 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv1_0')
-        convg2g_bn1 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv1_1')
-        fu_conv = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_fu_conv_layer')
-        fu_bn = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_fu_bn')
-        convg2g_conv2 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv2')
-        bn_l = getattr(self, f'model_{idx}_{conv_type}_bn_l')
-        bn_g = getattr(self, f'model_{idx}_{conv_type}_bn_g')
-        
-        out_xl = convl2l(x_l) + convg2l(x_g)
-        out_xg = convl2g(x_l) + convg2g_conv2(self.relu(convg2g_bn1(convg2g_conv1(x_g)))) + self.relu(fu_bn(fu_conv(x_g)))
-        
-        return self.relu(bn_l(out_xl)), self.relu(bn_g(out_xg))
+        if not self._pytorch_available:
+            return x_l, x_g  # Return unchanged inputs as fallback
+            
+        if not TORCH_AVAILABLE:
+            return x_l, x_g  # Return unchanged inputs as fallback
+            
+        try:
+            convl2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2l')
+            convl2g = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2g')
+            convg2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2l')
+            convg2g_conv1 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv1_0')
+            convg2g_bn1 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv1_1')
+            fu_conv = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_fu_conv_layer')
+            fu_bn = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_fu_bn')
+            convg2g_conv2 = getattr(self, f'model_{idx}_{conv_type}_ffc_convg2g_conv2')
+            bn_l = getattr(self, f'model_{idx}_{conv_type}_bn_l')
+            bn_g = getattr(self, f'model_{idx}_{conv_type}_bn_g')
+            
+            out_xl = convl2l(x_l) + convg2l(x_g)
+            out_xg = convl2g(x_l) + convg2g_conv2(self.relu(convg2g_bn1(convg2g_conv1(x_g)))) + self.relu(fu_bn(fu_conv(x_g)))
+            
+            return self.relu(bn_l(out_xl)), self.relu(bn_g(out_xg))
+            
+        except Exception as e:
+            logger.error(f"FFC block failed: {e}")
+            return x_l, x_g  # Return unchanged inputs as fallback
 
 
 class LocalInpainter:
@@ -509,7 +554,18 @@ class LocalInpainter:
         """Load model - supports both JIT and checkpoint files with ONNX conversion"""
         try:
             if not TORCH_AVAILABLE:
-                raise ImportError("PyTorch required")
+                logger.warning("PyTorch not available in this build")
+                logger.info("Inpainting features will be disabled - this is normal for lightweight builds")
+                logger.info("The application will continue to work without local inpainting")
+                self.model_loaded = False
+                return False
+            
+            # Additional safety check for torch being None
+            if torch is None or nn is None:
+                logger.warning("PyTorch modules not properly loaded")
+                logger.info("Inpainting features will be disabled - this is normal for lightweight builds")
+                self.model_loaded = False
+                return False
             
             # Check if model path changed
             current_saved_path = self.config.get(f'{method}_model_path', '')
@@ -524,12 +580,19 @@ class LocalInpainter:
                 logger.warning(f"Model not found: {model_path}")
                 logger.info("Attempting to download JIT model...")
                 
-                jit_path = self.download_jit_model(method)
-                if jit_path and os.path.exists(jit_path):
-                    model_path = jit_path
-                    logger.info(f"Using downloaded JIT model: {jit_path}")
-                else:
-                    raise FileNotFoundError(f"Model not found and download failed: {model_path}")
+                try:
+                    jit_path = self.download_jit_model(method)
+                    if jit_path and os.path.exists(jit_path):
+                        model_path = jit_path
+                        logger.info(f"Using downloaded JIT model: {jit_path}")
+                    else:
+                        logger.error(f"Model not found and download failed: {model_path}")
+                        logger.info("Inpainting will be unavailable for this session")
+                        return False
+                except Exception as download_error:
+                    logger.error(f"Download failed: {download_error}")
+                    logger.info("Inpainting will be unavailable for this session")
+                    return False
             
             if self.model_loaded and self.current_method == method and not force_reload:
                 logger.info(f"✅ {method.upper()} already loaded")
@@ -554,7 +617,11 @@ class LocalInpainter:
                     self.model.eval()
                     
                     if self.use_gpu and self.device:
-                        self.model = self.model.to(self.device)
+                        try:
+                            self.model = self.model.to(self.device)
+                        except Exception as gpu_error:
+                            logger.warning(f"Could not move model to GPU: {gpu_error}")
+                            logger.info("Using CPU instead")
                     
                     self.is_jit_model = True
                     self.model_loaded = True
@@ -566,45 +633,69 @@ class LocalInpainter:
                     
                     # ONNX CONVERSION (but handle failures gracefully)
                     if AUTO_CONVERT_TO_ONNX and self.model_loaded:
-                        onnx_path = self.convert_to_onnx(model_path, method)
-                        if onnx_path and self.load_onnx_model(onnx_path):
-                            logger.info("🚀 Using ONNX model for inference")
-                        else:
+                        try:
+                            onnx_path = self.convert_to_onnx(model_path, method)
+                            if onnx_path and self.load_onnx_model(onnx_path):
+                                logger.info("🚀 Using ONNX model for inference")
+                            else:
+                                logger.info("📦 Using PyTorch JIT model for inference")
+                        except Exception as onnx_error:
+                            logger.warning(f"ONNX conversion failed: {onnx_error}")
                             logger.info("📦 Using PyTorch JIT model for inference")
                     
-                    return True  # This was causing early return before ONNX conversion
+                    return True
                     
                 except Exception as jit_error:
-                    logger.info("   Not a JIT model, trying as regular checkpoint...")
-                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-                    self.is_jit_model = False
+                    logger.info(f"   Not a JIT model, trying as regular checkpoint... ({jit_error})")
+                    try:
+                        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                        self.is_jit_model = False
+                    except Exception as load_error:
+                        logger.error(f"Failed to load checkpoint: {load_error}")
+                        return False
             else:
                 # Load as regular checkpoint
-                checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-                self.is_jit_model = False
+                try:
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                    self.is_jit_model = False
+                except Exception as load_error:
+                    logger.error(f"Failed to load checkpoint: {load_error}")
+                    logger.info("This may happen if PyTorch is not fully available in the .exe build")
+                    return False
             
             # If we get here, it's not JIT, so load as checkpoint
             if not self.is_jit_model:
-                self.model = FFCInpaintModel()
-                
-                if isinstance(checkpoint, dict):
-                    if 'gen_state_dict' in checkpoint:
-                        state_dict = checkpoint['gen_state_dict']
-                        logger.info("📦 Found gen_state_dict")
-                    elif 'state_dict' in checkpoint:
-                        state_dict = checkpoint['state_dict']
-                    elif 'model' in checkpoint:
-                        state_dict = checkpoint['model']
+                try:
+                    # Try to create the model - this might fail if nn.Module is None
+                    self.model = FFCInpaintModel()
+                    
+                    if isinstance(checkpoint, dict):
+                        if 'gen_state_dict' in checkpoint:
+                            state_dict = checkpoint['gen_state_dict']
+                            logger.info("📦 Found gen_state_dict")
+                        elif 'state_dict' in checkpoint:
+                            state_dict = checkpoint['state_dict']
+                        elif 'model' in checkpoint:
+                            state_dict = checkpoint['model']
+                        else:
+                            state_dict = checkpoint
                     else:
                         state_dict = checkpoint
-                else:
-                    state_dict = checkpoint
-                
-                self._load_weights_with_mapping(self.model, state_dict)
-                
-                self.model.eval()
-                if self.use_gpu and self.device:
-                    self.model = self.model.to(self.device)
+                    
+                    self._load_weights_with_mapping(self.model, state_dict)
+                    
+                    self.model.eval()
+                    if self.use_gpu and self.device:
+                        try:
+                            self.model = self.model.to(self.device)
+                        except Exception as gpu_error:
+                            logger.warning(f"Could not move model to GPU: {gpu_error}")
+                            logger.info("Using CPU instead")
+                            
+                except Exception as model_error:
+                    logger.error(f"Failed to create or initialize model: {model_error}")
+                    logger.info("This may happen if PyTorch neural network modules are not available in the .exe build")
+                    return False
             
             self.model_loaded = True
             self.current_method = method
@@ -616,15 +707,22 @@ class LocalInpainter:
             
             # ONNX CONVERSION
             if AUTO_CONVERT_TO_ONNX and model_path.endswith('.pt') and self.model_loaded:
-                onnx_path = self.convert_to_onnx(model_path, method)
-                if onnx_path and self.load_onnx_model(onnx_path):
-                    logger.info("🚀 Using ONNX model for inference")
+                try:
+                    onnx_path = self.convert_to_onnx(model_path, method)
+                    if onnx_path and self.load_onnx_model(onnx_path):
+                        logger.info("🚀 Using ONNX model for inference")
+                except Exception as onnx_error:
+                    logger.warning(f"ONNX conversion failed: {onnx_error}")
+                    logger.info("📦 Continuing with PyTorch model")
 
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed: {e}")
+            logger.error(f"❌ Failed to load model: {e}")
             logger.error(traceback.format_exc())
+            logger.info("Note: If running from .exe, some ML libraries may not be included")
+            logger.info("This is normal for lightweight builds - inpainting will be disabled")
+            self.model_loaded = False
             return False
     
     def pad_img_to_modulo(self, img: np.ndarray, mod: int) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
