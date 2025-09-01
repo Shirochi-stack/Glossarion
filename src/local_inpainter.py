@@ -388,6 +388,14 @@ class LocalInpainter:
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch required")
             
+            # Check if model path changed (FIX: Add this check)
+            current_saved_path = self.config.get(f'{method}_model_path', '')
+            if current_saved_path != model_path and current_saved_path:
+                logger.info(f"📍 Model path changed for {method}")
+                logger.info(f"   Old: {current_saved_path}")
+                logger.info(f"   New: {model_path}")
+                force_reload = True
+            
             if not os.path.exists(model_path):
                 # Try to auto-download JIT model if path doesn't exist
                 logger.warning(f"Model not found: {model_path}")
@@ -403,6 +411,14 @@ class LocalInpainter:
             if self.model_loaded and self.current_method == method and not force_reload:
                 logger.info(f"✅ {method.upper()} already loaded")
                 return True
+            
+            # Clear previous model if force reload
+            if force_reload:
+                logger.info(f"🔄 Force reloading {method} model...")
+                self.model = None
+                self.onnx_session = None
+                self.model_loaded = False
+                self.is_jit_model = False
             
             logger.info(f"📥 Loading {method} from {model_path}")
             
