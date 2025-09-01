@@ -285,7 +285,8 @@ class MangaTranslator:
                 self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
                 self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
                 self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
-                
+                self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
+
                 # Get FULL RT-DETR detections (not just bubbles)
                 rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
                     image_path=image_path,
@@ -409,45 +410,32 @@ class MangaTranslator:
                 if idx not in used_indices:
                     # This text is outside any bubble
                     
-                    # For RT-DETR, check if we should include free text
+                    # For RT-DETR mode, check if we should include free text
                     if detector_type == 'rtdetr':
-                        # Check if this region is in a free text area
-                        region_should_inpaint = False
-                        
-                        if rtdetr_detections and 'text_free' in rtdetr_detections:
-                            # Check if this OCR region overlaps with any RT-DETR free text detection
-                            rx, ry, rw, rh = region.bounding_box
-                            region_center_x = rx + rw / 2
-                            region_center_y = ry + rh / 2
-                            
-                            for (fx, fy, fw, fh) in rtdetr_detections.get('text_free', []):
-                                if (fx <= region_center_x <= fx + fw and 
-                                    fy <= region_center_y <= fy + fh):
-                                    # This region is detected as free text by RT-DETR
-                                    if ocr_settings.get('detect_free_text', True):
-                                        region_should_inpaint = True
-                                        self._log(f"   Free text INCLUDED: '{region.text[:30]}...'", "info")
-                                    else:
-                                        self._log(f"   Free text EXCLUDED (unchecked): '{region.text[:30]}...'", "info")
-                                    break
-                        
-                        # Mark whether this region should be inpainted
-                        region.should_inpaint = region_should_inpaint
+                        # If "Free Text" checkbox is checked, include ALL text outside bubbles
+                        # Don't require RT-DETR to specifically detect it as free text
+                        if ocr_settings.get('detect_free_text', True):
+                            region.should_inpaint = True
+                            self._log(f"   Text outside bubbles INCLUDED: '{region.text[:30]}...'", "debug")
+                        else:
+                            region.should_inpaint = False
+                            self._log(f"   Text outside bubbles EXCLUDED (Free Text unchecked): '{region.text[:30]}...'", "info")
                     else:
                         # For YOLO/auto, include all text by default
                         region.should_inpaint = True
                     
                     merged_regions.append(region)
-            
+
             # Log summary
             regions_to_inpaint = sum(1 for r in merged_regions if getattr(r, 'should_inpaint', True))
             regions_to_skip = len(merged_regions) - regions_to_inpaint
-            
+
             self._log(f"📊 Bubble detection complete: {len(regions)} → {len(merged_regions)} regions", "success")
-            if detector_type == 'rtdetr' and regions_to_skip > 0:
+            if detector_type == 'rtdetr':
                 self._log(f"   {regions_to_inpaint} regions will be inpainted", "info")
-                self._log(f"   {regions_to_skip} regions will be preserved (based on RT-DETR filters)", "info")
-            
+                if regions_to_skip > 0:
+                    self._log(f"   {regions_to_skip} regions will be preserved (Free Text unchecked)", "info")
+
             return merged_regions
             
         except Exception as e:
