@@ -882,9 +882,11 @@ hiddenimports = list(set(hiddenimports))
 
 excludes = [
     # Large scientific packages (unless needed)
+	'ultralytics',
+	'onnxruntime',
     'matplotlib',
     'pandas',
-    # 'scipy',  # Required by datasketch - do not exclude
+    #'scipy',  # Required by datasketch - do not exclude
     # 'numpy',  # Required by datasketch and OpenCV - do not exclude
     'sklearn',
     'skimage',
