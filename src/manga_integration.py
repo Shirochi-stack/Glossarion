@@ -2125,7 +2125,7 @@ class MangaTranslationTab:
                 text=f"❌ Error: {str(e)[:50]}",
                 fg='red'
             )
-            self.main_gui.append_log(f"❌ Error loading model: {str(e)}")
+            print(f"❌ Error loading model: {str(e)}")
             return False
         
     def _update_local_model_status(self):
