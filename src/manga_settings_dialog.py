@@ -1373,36 +1373,46 @@ class MangaSettingsDialog:
 
         tk.Label(detector_type_frame, text="Detector Type:", width=15, anchor='w').pack(side='left')
 
+        # Default to RT-DETR instead of yolo
         self.detector_type = tk.StringVar(
-            value=self.settings['ocr'].get('detector_type', 'yolo')
+            value=self.settings['ocr'].get('detector_type', 'rtdetr')  # Changed default
         )
 
         detector_radio_frame = tk.Frame(detector_type_frame)
         detector_radio_frame.pack(side='left', padx=(10, 0))
 
-        tk.Radiobutton(
+        # Store radio button references for enable/disable
+        self.detector_radio_widgets = []
+
+        yolo_radio = tk.Radiobutton(
             detector_radio_frame,
             text="YOLOv8 (Fast)",
             variable=self.detector_type,
             value='yolo',
             command=self._on_detector_type_changed
-        ).pack(side='left', padx=(0, 15))
+        )
+        yolo_radio.pack(side='left', padx=(0, 15))
+        self.detector_radio_widgets.append(yolo_radio)
 
-        tk.Radiobutton(
+        rtdetr_radio = tk.Radiobutton(
             detector_radio_frame,
             text="RT-DETR (Accurate)",
             variable=self.detector_type,
             value='rtdetr',
             command=self._on_detector_type_changed
-        ).pack(side='left', padx=(0, 15))
+        )
+        rtdetr_radio.pack(side='left', padx=(0, 15))
+        self.detector_radio_widgets.append(rtdetr_radio)
 
-        tk.Radiobutton(
+        auto_radio = tk.Radiobutton(
             detector_radio_frame,
             text="Auto (Best Available)",
             variable=self.detector_type,
             value='auto',
             command=self._on_detector_type_changed
-        ).pack(side='left')
+        )
+        auto_radio.pack(side='left')
+        self.detector_radio_widgets.append(auto_radio)
 
         # YOLOv8 Settings Frame
         self.yolo_settings_frame = tk.LabelFrame(bubble_frame, text="YOLOv8 Settings", padx=10, pady=5)
@@ -1471,15 +1481,40 @@ class MangaSettingsDialog:
         self.rtdetr_settings_frame = tk.LabelFrame(bubble_frame, text="RT-DETR Settings", padx=10, pady=5)
         self.rtdetr_settings_frame.pack(fill='x', pady=(10, 0))
 
+        # RT-DETR Model URL configuration (NEW)
+        rtdetr_url_frame = tk.Frame(self.rtdetr_settings_frame)
+        rtdetr_url_frame.pack(fill='x', pady=(5, 0))
+
+        tk.Label(rtdetr_url_frame, text="Model:", width=12, anchor='w').pack(side='left')
+
+        self.rtdetr_model_url = tk.StringVar(
+            value=self.settings['ocr'].get('rtdetr_model_url', 
+                                           'ogkalu/comic-text-and-bubble-detector')
+        )
+
+        self.rtdetr_url_entry = tk.Entry(
+            rtdetr_url_frame,
+            textvariable=self.rtdetr_model_url,
+            width=35
+        )
+        self.rtdetr_url_entry.pack(side='left', padx=(0, 10))
+
+        tk.Label(
+            rtdetr_url_frame,
+            text="(HuggingFace ID)",
+            font=('Arial', 8),
+            fg='gray'
+        ).pack(side='left')
+
         # RT-DETR Status and Actions
         rtdetr_status_frame = tk.Frame(self.rtdetr_settings_frame)
-        rtdetr_status_frame.pack(fill='x', pady=(5, 0))
+        rtdetr_status_frame.pack(fill='x', pady=(10, 0))
 
         tk.Label(rtdetr_status_frame, text="Status:", width=12, anchor='w').pack(side='left')
 
         self.rtdetr_status_label = tk.Label(
             rtdetr_status_frame,
-            text="Not loaded",
+            text="Checking...",
             font=('Arial', 9)
         )
         self.rtdetr_status_label.pack(side='left', padx=(0, 15))
@@ -1499,6 +1534,31 @@ class MangaSettingsDialog:
             bootstyle="success"
         )
         self.rtdetr_download_btn.pack(side='left')
+
+        # RT-DETR Model URL configuration
+        rtdetr_url_frame = tk.Frame(self.rtdetr_settings_frame)
+        rtdetr_url_frame.pack(fill='x', pady=(10, 0))
+
+        tk.Label(rtdetr_url_frame, text="Model URL:", width=12, anchor='w').pack(side='left')
+
+        self.rtdetr_model_url = tk.StringVar(
+            value=self.settings['ocr'].get('rtdetr_model_url', 
+                                           'ogkalu/comic-text-and-bubble-detector')
+        )
+
+        self.rtdetr_url_entry = tk.Entry(
+            rtdetr_url_frame,
+            textvariable=self.rtdetr_model_url,
+            width=40
+        )
+        self.rtdetr_url_entry.pack(side='left', padx=(0, 10))
+
+        tk.Label(
+            rtdetr_url_frame,
+            text="(HuggingFace model ID)",
+            font=('Arial', 8),
+            fg='gray'
+        ).pack(side='left')
 
         # RT-DETR Classes to detect
         rtdetr_classes_frame = tk.Frame(self.rtdetr_settings_frame)
@@ -1599,6 +1659,7 @@ class MangaSettingsDialog:
             self.bubble_browse_btn,
             self.bubble_clear_btn,
             self.bubble_conf_scale,
+            self.rtdetr_url_entry,
             self.rtdetr_load_btn,
             self.rtdetr_download_btn,
             self.rtdetr_conf_scale
@@ -1606,6 +1667,7 @@ class MangaSettingsDialog:
 
         # Store RT-DETR specific controls
         self.rtdetr_controls = [
+            self.rtdetr_url_entry,
             self.rtdetr_load_btn,
             self.rtdetr_download_btn,
             self.rtdetr_conf_scale,
@@ -1622,10 +1684,19 @@ class MangaSettingsDialog:
             self.bubble_conf_scale
         ]
 
+        # Store detector type frame reference for layout management
+        self.detector_type_frame = detector_type_frame
+
         # Initialize control states
         self._toggle_bubble_controls()
-        self._on_detector_type_changed()
-        self._update_bubble_status()
+
+        # Only call _on_detector_type_changed if bubble detection is enabled
+        if self.bubble_detection_enabled.get():
+            self._on_detector_type_changed()
+            self._update_bubble_status()
+
+        # Check RT-DETR status after dialog is ready
+        self.dialog.after(500, self._check_rtdetr_status)
 
     def _on_detector_type_changed(self):
         """Handle detector type change"""
@@ -1633,38 +1704,35 @@ class MangaSettingsDialog:
             return
             
         if not self.bubble_detection_enabled.get():
+            # Hide both frames when detection is disabled
+            self.yolo_settings_frame.pack_forget()
+            self.rtdetr_settings_frame.pack_forget()
             return
         
         detector_type = self.detector_type.get()
         
+        # First, hide all frames to reset the layout
+        self.yolo_settings_frame.pack_forget()
+        self.rtdetr_settings_frame.pack_forget()
+        
         if detector_type == 'yolo':
-            # Enable YOLOv8, disable RT-DETR
-            self.yolo_settings_frame.config(text="YOLOv8 Settings ✓")
-            self.rtdetr_settings_frame.config(text="RT-DETR Settings (Disabled)")
+            # Show YOLOv8 only
+            self.yolo_settings_frame.pack(fill='x', pady=(10, 0))
+            self.yolo_settings_frame.config(text="YOLOv8 Settings")
             
+            # Enable YOLOv8 controls
             for widget in self.yolo_controls:
                 try:
                     widget.config(state='normal')
                 except:
                     pass
-            
-            for widget in self.rtdetr_controls:
-                try:
-                    widget.config(state='disabled')
-                except:
-                    pass
         
         elif detector_type == 'rtdetr':
-            # Disable YOLOv8, enable RT-DETR
-            self.yolo_settings_frame.config(text="YOLOv8 Settings (Disabled)")
-            self.rtdetr_settings_frame.config(text="RT-DETR Settings ✓")
+            # Show RT-DETR only  
+            self.rtdetr_settings_frame.pack(fill='x', pady=(10, 0))
+            self.rtdetr_settings_frame.config(text="RT-DETR Settings")
             
-            for widget in self.yolo_controls:
-                try:
-                    widget.config(state='disabled')
-                except:
-                    pass
-            
+            # Enable RT-DETR controls
             for widget in self.rtdetr_controls:
                 try:
                     widget.config(state='normal')
@@ -1672,40 +1740,29 @@ class MangaSettingsDialog:
                     pass
         
         else:  # auto
-            # Enable both
-            self.yolo_settings_frame.config(text="YOLOv8 Settings")
-            self.rtdetr_settings_frame.config(text="RT-DETR Settings")
+            # Show both frames in correct order
+            self.yolo_settings_frame.pack(fill='x', pady=(10, 0))
+            self.rtdetr_settings_frame.pack(fill='x', pady=(10, 0))
             
+            self.yolo_settings_frame.config(text="YOLOv8 Settings (Optional)")
+            self.rtdetr_settings_frame.config(text="RT-DETR Settings (Optional)")
+            
+            # Enable all controls
             for widget in self.yolo_controls + self.rtdetr_controls:
                 try:
                     widget.config(state='normal')
                 except:
                     pass
         
+        # Always pack the status label and help frame at the end
+        self.bubble_status_label.pack_forget()
+        self.bubble_status_label.pack(anchor='w', pady=(5, 0))
+        
+        if hasattr(self, 'help_frame'):
+            self.help_frame.pack_forget()
+            self.help_frame.pack(fill='x', pady=(10, 0))
+        
         self._update_bubble_status()
-
-    def _load_rtdetr_model(self):
-        """Test loading RT-DETR model"""
-        try:
-            from bubble_detector import BubbleDetector
-            
-            self.rtdetr_status_label.config(text="Loading...", fg='orange')
-            self.dialog.update_idletasks()
-            
-            detector = BubbleDetector()
-            
-            if detector.load_rtdetr_model():
-                self.rtdetr_status_label.config(text="✅ Ready", fg='green')
-                messagebox.showinfo("Success", "RT-DETR model loaded successfully!")
-            else:
-                self.rtdetr_status_label.config(text="❌ Failed", fg='red')
-                
-        except ImportError:
-            self.rtdetr_status_label.config(text="❌ Missing transformers", fg='red')
-            messagebox.showerror("Error", "Install transformers: pip install transformers")
-        except Exception as e:
-            self.rtdetr_status_label.config(text="❌ Error", fg='red')
-            messagebox.showerror("Error", f"Failed to load: {e}")
 
     def _download_rtdetr_model(self):
         """Download RT-DETR model"""
@@ -1716,28 +1773,86 @@ class MangaSettingsDialog:
             from bubble_detector import BubbleDetector
             
             detector = BubbleDetector()
-            if detector.load_rtdetr_model():
+            model_url = self.rtdetr_model_url.get()
+            
+            # Pass the custom model_id to the detector
+            if detector.load_rtdetr_model(model_id=model_url):
                 self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
-                messagebox.showinfo("Success", "RT-DETR model downloaded and ready!")
+                messagebox.showinfo("Success", f"RT-DETR model downloaded from {model_url}")
             else:
                 self.rtdetr_status_label.config(text="❌ Failed", fg='red')
-                messagebox.showerror("Error", "Failed to download RT-DETR model")
+                messagebox.showerror("Error", f"Failed to download from {model_url}")
         
         except Exception as e:
             self.rtdetr_status_label.config(text="❌ Error", fg='red')
             messagebox.showerror("Error", f"Download failed: {e}")
+
+    def _check_rtdetr_status(self):
+        """Check if RT-DETR model is already loaded"""
+        try:
+            from bubble_detector import BubbleDetector
+            
+            detector = BubbleDetector()
+            model_url = self.rtdetr_model_url.get()
+            
+            # Check if the model is available
+            if detector.check_rtdetr_available(model_id=model_url):
+                self.rtdetr_status_label.config(text="✅ Ready", fg='green')
+                return True
+            else:
+                self.rtdetr_status_label.config(text="Not loaded", fg='gray')
+                return False
+                
+        except ImportError:
+            self.rtdetr_status_label.config(text="❌ Missing deps", fg='red')
+            return False
+        except Exception:
+            self.rtdetr_status_label.config(text="Not loaded", fg='gray')
+            return False
+
+    def _load_rtdetr_model(self):
+        """Test loading RT-DETR model"""
+        try:
+            from bubble_detector import BubbleDetector
+            
+            self.rtdetr_status_label.config(text="Loading...", fg='orange')
+            self.dialog.update_idletasks()
+            
+            detector = BubbleDetector()
+            model_url = self.rtdetr_model_url.get()
+            
+            if detector.load_rtdetr_model(model_id=model_url):
+                self.rtdetr_status_label.config(text="✅ Ready", fg='green')
+                messagebox.showinfo("Success", f"RT-DETR model loaded successfully from {model_url}!")
+            else:
+                self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                
+        except ImportError:
+            self.rtdetr_status_label.config(text="❌ Missing transformers", fg='red')
+            messagebox.showerror("Error", "Install transformers: pip install transformers")
+        except Exception as e:
+            self.rtdetr_status_label.config(text="❌ Error", fg='red')
+            messagebox.showerror("Error", f"Failed to load: {e}")
             
     def _toggle_bubble_controls(self):
         """Enable/disable bubble detection controls"""
         enabled = self.bubble_detection_enabled.get()
         
-        for control in self.bubble_controls:
-            control.config(state='normal' if enabled else 'disabled')
-        
-        # Update status when toggling
         if enabled:
-            self._update_bubble_status()
+            # Enable detector type radio buttons
+            for widget in self.detector_radio_widgets:
+                widget.config(state='normal')
+            
+            # Show/hide frames based on detector type
+            self._on_detector_type_changed()
         else:
+            # Disable all radio buttons
+            for widget in self.detector_radio_widgets:
+                widget.config(state='disabled')
+            
+            # Hide both frames when disabled
+            self.yolo_settings_frame.pack_forget()
+            self.rtdetr_settings_frame.pack_forget()
             self.bubble_status_label.config(text="")
 
     def _browse_bubble_model(self):
@@ -1940,6 +2055,7 @@ class MangaSettingsDialog:
         self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles.get()
         self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
         self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
+        self.settings['ocr']['rtdetr_model_url'] = self.rtdetr_model_url.get()
         
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
