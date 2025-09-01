@@ -1,10 +1,10 @@
+#bubble_detector.py
 """
 YOLOv8 and RT-DETR Speech Bubble Detector for Manga/Comic Translation
 Supports both .pt and ONNX models with automatic conversion
 Fully configurable through GUI settings
 Enhanced with RT-DETR for 3-class detection (empty bubbles, text bubbles, free text)
 """
-
 import os
 import json
 import numpy as np
@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
-except ImportError:
+except:  # Catch ANY error including AttributeError from missing torch
     YOLO_AVAILABLE = False
-    logger.warning("Ultralytics YOLO not available - install with: pip install ultralytics")
+    YOLO = None
+    logger.warning("Ultralytics YOLO not available")
 
+# Rest of your imports stay the same
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -43,24 +45,24 @@ except ImportError:
 # Try to import transformers for RT-DETR
 try:
     from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
-    # Try V2 if available
     try:
         from transformers import RTDetrV2ForObjectDetection
         RTDetrForObjectDetection = RTDetrV2ForObjectDetection
     except ImportError:
         pass
     TRANSFORMERS_AVAILABLE = True
-except ImportError:
+except:
     TRANSFORMERS_AVAILABLE = False
-    logger.info("Transformers not available for RT-DETR - install with: pip install transformers")
+    RTDetrForObjectDetection = None
+    RTDetrImageProcessor = None
+    logger.info("Transformers not available for RT-DETR")
 
 try:
     from PIL import Image
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    logger.info("PIL not available - some features may be limited")
-
+    logger.info("PIL not available")
 
 class BubbleDetector:
     """
