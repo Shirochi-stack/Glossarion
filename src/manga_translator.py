@@ -73,6 +73,31 @@ class MangaTranslator:
                     'azure_endpoint': str (if azure)
                 }
         """
+        self.main_gui = main_gui
+        self.config = main_gui.config
+        self.manga_settings = self.config.get('manga_settings', {})
+        
+        # Initialize attributes
+        self.current_image = None
+        self.current_mask = None
+        self.text_regions = []
+        self.translated_regions = []
+        self.final_image = None
+        
+        # Initialize inpainter attributes (ADD THESE)
+        self.local_inpainter = None
+        self.hybrid_inpainter = None
+        self.inpainter = None
+        
+        # Initialize bubble detector
+        self.bubble_detector = None
+        
+        # Processing flags
+        self.is_processing = False
+        self.cancel_requested = False
+        
+        # Cache for processed images
+        self.cache = {}
         # Determine OCR provider
         self.ocr_provider = ocr_config.get('provider', 'google')
         self.bubble_detector = None
@@ -2075,11 +2100,39 @@ class MangaTranslator:
             inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
             
             if inpaint_method == 'local':
-                self.local_inpainter = LocalInpainter()
-                
-                # Get selected local method
+                # Get current settings
                 local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
                 model_path = self.manga_settings.get('inpainting', {}).get(f'{local_method}_model_path', '')
+                
+                # Check if we need to reinitialize due to changes
+                need_reload = False
+                
+                # Initialize tracking attributes if they don't exist
+                if not hasattr(self, '_last_local_method'):
+                    self._last_local_method = None
+                    self._last_local_model_path = None
+                
+                # Check for changes
+                if self._last_local_method != local_method:
+                    self._log(f"🔄 Local method changed from {self._last_local_method} to {local_method}", "info")
+                    need_reload = True
+                
+                if self._last_local_model_path != model_path:
+                    self._log(f"🔄 Model path changed", "info")
+                    if self._last_local_model_path:
+                        self._log(f"   Old: {os.path.basename(self._last_local_model_path)}", "debug")
+                    if model_path:
+                        self._log(f"   New: {os.path.basename(model_path)}", "debug")
+                    need_reload = True
+                
+                # Store current settings
+                self._last_local_method = local_method
+                self._last_local_model_path = model_path
+                
+                # Initialize inpainter if needed
+                if self.local_inpainter is None:
+                    self.local_inpainter = LocalInpainter()
+                    need_reload = True  # First time, definitely need to load
                 
                 # If no model path or doesn't exist, try to find or download one
                 if not model_path or not os.path.exists(model_path):
@@ -2091,23 +2144,41 @@ class MangaTranslator:
                     if downloaded_path:
                         model_path = downloaded_path
                         self._log(f"✅ Downloaded JIT model to: {model_path}")
+                        need_reload = True  # Downloaded new model
                 
-                # Try to load the model
+                # Load or reload the model if needed
                 if model_path and os.path.exists(model_path):
-                    if self.local_inpainter.load_model(local_method, model_path):
-                        self._log(f"✅ Local inpainter initialized with {local_method.upper()}")
-                        return True
+                    if need_reload or not self.local_inpainter.model_loaded:
+                        self._log(f"📥 Loading {local_method} model...", "info")
+                        if self.local_inpainter.load_model(local_method, model_path, force_reload=need_reload):
+                            self._log(f"✅ Local inpainter loaded with {local_method.upper()}")
+                        else:
+                            self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
                     else:
-                        self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
-                        # IMPORTANT: Return True to keep the inpainter object
-                        return True
+                        self._log(f"✅ Using already loaded {local_method.upper()} model", "info")
                 else:
                     self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
-                    # IMPORTANT: Still return True so local_inpainter exists
-                    return True
+                
+                # Always return True so local_inpainter exists
+                return True
             
             elif inpaint_method == 'hybrid':
-                self.hybrid_inpainter = HybridInpainter()
+                # Track hybrid settings changes
+                if not hasattr(self, '_last_hybrid_config'):
+                    self._last_hybrid_config = None
+                
+                current_hybrid_config = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
+                
+                # Check if hybrid config changed
+                need_reload = self._last_hybrid_config != current_hybrid_config
+                if need_reload:
+                    self._log("🔄 Hybrid configuration changed, reloading...", "info")
+                    self.hybrid_inpainter = None  # Clear old instance
+                
+                self._last_hybrid_config = current_hybrid_config.copy() if current_hybrid_config else []
+                
+                if self.hybrid_inpainter is None:
+                    self.hybrid_inpainter = HybridInpainter()
                 
                 # Load multiple methods
                 methods = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
@@ -2118,18 +2189,16 @@ class MangaTranslator:
                     model_path = method_config.get('model_path')
                     
                     if method and model_path:
-                        # FIX: add_method needs 3 arguments: (name, method, model_path)
                         if self.hybrid_inpainter.add_method(method, method, model_path):
                             loaded += 1
                             self._log(f"✅ Added {method.upper()} to hybrid inpainter")
                 
                 if loaded > 0:
                     self._log(f"✅ Hybrid inpainter ready with {loaded} methods")
-                    return True
                 else:
-                    # Keep the hybrid_inpainter object even if no methods loaded
                     self._log("⚠️ Hybrid inpainter initialized but no methods loaded", "warning")
-                    return True
+                
+                return True
             
             return False
             
