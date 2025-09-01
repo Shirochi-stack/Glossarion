@@ -1962,7 +1962,7 @@ class MangaTranslator:
     def _initialize_local_inpainter(self):
         """Initialize local inpainting if configured"""
         try:
-            from local_inpainter import LocalInpainter, HybridInpainter
+            from local_inpainter import LocalInpainter, HybridInpainter, AnimeMangaInpaintModel
             
             inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
             
@@ -1970,16 +1970,33 @@ class MangaTranslator:
                 self.local_inpainter = LocalInpainter()
                 
                 # Get selected local method
-                local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'aot')
+                local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
                 model_path = self.manga_settings.get('inpainting', {}).get(f'{local_method}_model_path', '')
                 
+                # If no model path or doesn't exist, try to find or download one
+                if not model_path or not os.path.exists(model_path):
+                    self._log(f"⚠️ Model path not found: {model_path}", "warning")
+                    
+                    # Try to download JIT model automatically
+                    self._log("📥 Attempting to download JIT model...", "info")
+                    downloaded_path = self.local_inpainter.download_jit_model(local_method)
+                    if downloaded_path:
+                        model_path = downloaded_path
+                        self._log(f"✅ Downloaded JIT model to: {model_path}")
+                
+                # Try to load the model
                 if model_path and os.path.exists(model_path):
                     if self.local_inpainter.load_model(local_method, model_path):
                         self._log(f"✅ Local inpainter initialized with {local_method.upper()}")
                         return True
                     else:
-                        self._log(f"❌ Failed to load local inpainting model", "error")
-                        return False
+                        self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
+                        # IMPORTANT: Return True to keep the inpainter object
+                        return True
+                else:
+                    self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
+                    # IMPORTANT: Still return True so local_inpainter exists
+                    return True
             
             elif inpaint_method == 'hybrid':
                 self.hybrid_inpainter = HybridInpainter()
@@ -1993,12 +2010,17 @@ class MangaTranslator:
                     model_path = method_config.get('model_path')
                     
                     if method and model_path:
-                        if self.hybrid_inpainter.add_method(method, model_path):
+                        # FIX: add_method needs 3 arguments: (name, method, model_path)
+                        if self.hybrid_inpainter.add_method(method, method, model_path):
                             loaded += 1
                             self._log(f"✅ Added {method.upper()} to hybrid inpainter")
                 
                 if loaded > 0:
                     self._log(f"✅ Hybrid inpainter ready with {loaded} methods")
+                    return True
+                else:
+                    # Keep the hybrid_inpainter object even if no methods loaded
+                    self._log("⚠️ Hybrid inpainter initialized but no methods loaded", "warning")
                     return True
             
             return False
@@ -2006,6 +2028,10 @@ class MangaTranslator:
         except ImportError:
             self._log("❌ Local inpainter module not available", "error")
             return False
+        except Exception as e:
+            self._log(f"❌ Error initializing inpainter: {e}", "error")
+            return False
+
 
     def inpaint_regions(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """Inpaint using configured method (cloud, local, or hybrid)"""
@@ -2015,9 +2041,32 @@ class MangaTranslator:
         
         inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
         
-        if inpaint_method == 'local' and hasattr(self, 'local_inpainter'):
-            self._log("   🖥️ Using local inpainting", "info")
-            return self.local_inpainter.inpaint(image, mask)
+        if inpaint_method == 'local':
+            # Check if local_inpainter exists
+            if not hasattr(self, 'local_inpainter'):
+                self._log("   ⚠️ Local inpainter not initialized, attempting now...", "warning")
+                self._initialize_local_inpainter()
+            
+            if hasattr(self, 'local_inpainter') and self.local_inpainter:
+                # Check if model is loaded
+                if not self.local_inpainter.model_loaded:
+                    self._log("   ⚠️ No model loaded, attempting to load...", "warning")
+                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                    
+                    # Try to download JIT model
+                    model_path = self.local_inpainter.download_jit_model(local_method)
+                    if model_path:
+                        self.local_inpainter.load_model(local_method, model_path)
+                
+                if self.local_inpainter.model_loaded:
+                    self._log("   🖥️ Using local inpainting", "info")
+                    return self.local_inpainter.inpaint(image, mask)
+                else:
+                    self._log("   ❌ No model loaded, returning original", "error")
+                    return image.copy()
+            else:
+                self._log("   ❌ Local inpainter not available", "error")
+                return image.copy()
         
         elif inpaint_method == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
             self._log("   🔄 Using hybrid ensemble inpainting", "info")
