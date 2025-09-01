@@ -1,7 +1,8 @@
 """
-YOLOv8 Speech Bubble Detector for Manga/Comic Translation
+YOLOv8 and RT-DETR Speech Bubble Detector for Manga/Comic Translation
 Supports both .pt and ONNX models with automatic conversion
 Fully configurable through GUI settings
+Enhanced with RT-DETR for 3-class detection (empty bubbles, text bubbles, free text)
 """
 
 import os
@@ -39,11 +40,33 @@ except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
 
+# Try to import transformers for RT-DETR
+try:
+    from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+    # Try V2 if available
+    try:
+        from transformers import RTDetrV2ForObjectDetection
+        RTDetrForObjectDetection = RTDetrV2ForObjectDetection
+    except ImportError:
+        pass
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    logger.info("Transformers not available for RT-DETR - install with: pip install transformers")
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    logger.info("PIL not available - some features may be limited")
+
 
 class BubbleDetector:
     """
-    YOLOv8-based speech bubble detector for comics and manga.
+    Combined YOLOv8 and RT-DETR speech bubble detector for comics and manga.
     Supports multiple model formats and provides configurable detection.
+    Backward compatible with existing code while adding RT-DETR support.
     """
     
     def __init__(self, config_path: str = "bubble_detector_config.json"):
@@ -55,10 +78,23 @@ class BubbleDetector:
         """
         self.config_path = config_path
         self.config = self._load_config()
+        
+        # YOLOv8 components (original)
         self.model = None
         self.model_loaded = False
         self.model_type = None  # 'yolo', 'onnx', or 'torch'
         self.onnx_session = None
+        
+        # RT-DETR components (new)
+        self.rtdetr_model = None
+        self.rtdetr_processor = None
+        self.rtdetr_loaded = False
+        self.rtdetr_repo = 'ogkalu/comic-text-and-bubble-detector'
+        
+        # RT-DETR class definitions
+        self.CLASS_BUBBLE = 0      # Empty speech bubble
+        self.CLASS_TEXT_BUBBLE = 1 # Bubble with text
+        self.CLASS_TEXT_FREE = 2   # Text without bubble
         
         # Detection settings
         self.default_confidence = 0.5
@@ -71,11 +107,13 @@ class BubbleDetector:
         
         # GPU availability
         self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
+        self.device = 'cuda' if self.use_gpu else 'cpu'
         
         logger.info(f"🗨️ BubbleDetector initialized")
         logger.info(f"   GPU: {'Available' if self.use_gpu else 'Not available'}")
         logger.info(f"   YOLO: {'Available' if YOLO_AVAILABLE else 'Not installed'}")
         logger.info(f"   ONNX: {'Available' if ONNX_AVAILABLE else 'Not installed'}")
+        logger.info(f"   RT-DETR: {'Available' if TRANSFORMERS_AVAILABLE else 'Not installed'}")
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file."""
@@ -97,7 +135,7 @@ class BubbleDetector:
     
     def load_model(self, model_path: str, force_reload: bool = False) -> bool:
         """
-        Load a YOLOv8 model for bubble detection.
+        Load a YOLOv8 model for bubble detection (original method, maintained for compatibility).
         
         Args:
             model_path: Path to model file (.pt, .onnx, or .torchscript)
@@ -107,6 +145,11 @@ class BubbleDetector:
             True if model loaded successfully, False otherwise
         """
         try:
+            # Check if it's an RT-DETR model based on name/path
+            if 'rtdetr' in model_path.lower() or 'text-and-bubble' in model_path.lower():
+                logger.info("Detected RT-DETR model path, loading as RT-DETR...")
+                return self.load_rtdetr_model(force_reload=force_reload)
+            
             if not os.path.exists(model_path):
                 logger.error(f"Model file not found: {model_path}")
                 return False
@@ -183,23 +226,99 @@ class BubbleDetector:
             self.model_loaded = False
             return False
     
+    def load_rtdetr_model(self, model_path: str = None, force_reload: bool = False) -> bool:
+        """
+        Load RT-DETR model for advanced bubble and text detection.
+        
+        Args:
+            model_path: Optional path to local model (will download from HF if not provided)
+            force_reload: Force reload even if already loaded
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not TRANSFORMERS_AVAILABLE:
+            logger.error("Transformers library required for RT-DETR. Install with: pip install transformers")
+            return False
+        
+        if not PIL_AVAILABLE:
+            logger.error("PIL required for RT-DETR. Install with: pip install pillow")
+            return False
+        
+        if self.rtdetr_loaded and not force_reload:
+            logger.info("RT-DETR model already loaded")
+            return True
+        
+        try:
+            logger.info(f"📥 Loading RT-DETR model from {self.rtdetr_repo}...")
+            
+            # Load processor
+            self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
+                self.rtdetr_repo,
+                size={"width": 640, "height": 640},
+                cache_dir=self.cache_dir if not model_path else None
+            )
+            
+            # Load model
+            self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
+                model_path if model_path else self.rtdetr_repo,
+                cache_dir=self.cache_dir if not model_path else None
+            )
+            
+            # Move to device
+            if self.device == 'cuda':
+                self.rtdetr_model = self.rtdetr_model.to('cuda')
+                logger.info("   RT-DETR model moved to GPU")
+            
+            self.rtdetr_model.eval()
+            self.rtdetr_loaded = True
+            
+            self.config['rtdetr_loaded'] = True
+            self._save_config()
+            
+            logger.info("✅ RT-DETR model loaded successfully")
+            logger.info("   Classes: Empty bubbles, Text bubbles, Free text")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load RT-DETR: {e}")
+            self.rtdetr_loaded = False
+            return False
+    
     def detect_bubbles(self, 
                       image_path: str, 
                       confidence: float = None,
                       iou_threshold: float = None,
-                      max_detections: int = None) -> List[Tuple[int, int, int, int]]:
+                      max_detections: int = None,
+                      use_rtdetr: bool = None) -> List[Tuple[int, int, int, int]]:
         """
-        Detect speech bubbles in an image.
+        Detect speech bubbles in an image (backward compatible method).
         
         Args:
             image_path: Path to image file
             confidence: Minimum confidence threshold (0-1)
             iou_threshold: IOU threshold for NMS (0-1)
             max_detections: Maximum number of detections to return
+            use_rtdetr: If True, use RT-DETR instead of YOLOv8 (if available)
             
         Returns:
             List of bubble bounding boxes as (x, y, width, height) tuples
         """
+        # Decide which model to use
+        if use_rtdetr is None:
+            # Auto-select: prefer RT-DETR if available
+            use_rtdetr = self.rtdetr_loaded
+        
+        if use_rtdetr and self.rtdetr_loaded:
+            # Use RT-DETR
+            results = self.detect_with_rtdetr(
+                image_path=image_path,
+                confidence=confidence,
+                return_all_bubbles=True
+            )
+            return results
+        
+        # Original YOLOv8 detection
         if not self.model_loaded:
             logger.error("No model loaded. Call load_model() first.")
             return []
@@ -266,6 +385,132 @@ class BubbleDetector:
             logger.error(f"Detection failed: {e}")
             logger.error(traceback.format_exc())
             return []
+    
+    def detect_with_rtdetr(self,
+                          image_path: str = None,
+                          image: np.ndarray = None,
+                          confidence: float = None,
+                          return_all_bubbles: bool = False) -> Any:
+        """
+        Detect using RT-DETR model with 3-class detection.
+        
+        Args:
+            image_path: Path to image file
+            image: Image array (BGR format)
+            confidence: Confidence threshold
+            return_all_bubbles: If True, return list of bubble boxes (for compatibility)
+                               If False, return dict with all classes
+        
+        Returns:
+            List of bubbles if return_all_bubbles=True, else dict with classes
+        """
+        if not self.rtdetr_loaded:
+            logger.warning("RT-DETR not loaded. Call load_rtdetr_model() first.")
+            if return_all_bubbles:
+                return []
+            return {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+        
+        confidence = confidence or self.default_confidence
+        
+        try:
+            # Load image
+            if image_path:
+                image = cv2.imread(image_path)
+            elif image is None:
+                logger.error("No image provided")
+                if return_all_bubbles:
+                    return []
+                return {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+            
+            # Convert BGR to RGB for PIL
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            
+            # Prepare image for model
+            inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
+            
+            # Move to device
+            if self.device == "cuda":
+                inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            
+            # Run inference
+            with torch.no_grad():
+                outputs = self.rtdetr_model(**inputs)
+            
+            # Post-process results
+            target_sizes = torch.tensor([pil_image.size[::-1]])
+            if self.device == "cuda":
+                target_sizes = target_sizes.to("cuda")
+            
+            results = self.rtdetr_processor.post_process_object_detection(
+                outputs,
+                target_sizes=target_sizes,
+                threshold=confidence
+            )[0]
+            
+            # Organize detections by class
+            detections = {
+                'bubbles': [],       # Empty speech bubbles
+                'text_bubbles': [],  # Bubbles with text
+                'text_free': []      # Text without bubbles
+            }
+            
+            for box, score, label in zip(results['boxes'], results['scores'], results['labels']):
+                x1, y1, x2, y2 = map(int, box.tolist())
+                width = x2 - x1
+                height = y2 - y1
+                
+                # Store as (x, y, width, height) to match YOLOv8 format
+                bbox = (x1, y1, width, height)
+                
+                label_id = label.item()
+                if label_id == self.CLASS_BUBBLE:
+                    detections['bubbles'].append(bbox)
+                elif label_id == self.CLASS_TEXT_BUBBLE:
+                    detections['text_bubbles'].append(bbox)
+                elif label_id == self.CLASS_TEXT_FREE:
+                    detections['text_free'].append(bbox)
+            
+            # Log results
+            total = len(detections['bubbles']) + len(detections['text_bubbles']) + len(detections['text_free'])
+            logger.info(f"✅ RT-DETR detected {total} objects:")
+            logger.info(f"   - Empty bubbles: {len(detections['bubbles'])}")
+            logger.info(f"   - Text bubbles: {len(detections['text_bubbles'])}")
+            logger.info(f"   - Free text: {len(detections['text_free'])}")
+            
+            # Return format based on compatibility mode
+            if return_all_bubbles:
+                # Return all bubbles (empty + with text) for backward compatibility
+                all_bubbles = detections['bubbles'] + detections['text_bubbles']
+                return all_bubbles
+            else:
+                return detections
+            
+        except Exception as e:
+            logger.error(f"RT-DETR detection failed: {e}")
+            logger.error(traceback.format_exc())
+            if return_all_bubbles:
+                return []
+            return {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+    
+    def detect_all_text_regions(self, image_path: str = None, image: np.ndarray = None) -> List[Tuple[int, int, int, int]]:
+        """
+        Detect all text regions using RT-DETR (both in bubbles and free text).
+        
+        Returns:
+            List of bounding boxes for all text regions
+        """
+        if not self.rtdetr_loaded:
+            logger.warning("RT-DETR required for text detection")
+            return []
+        
+        detections = self.detect_with_rtdetr(image_path=image_path, image=image, return_all_bubbles=False)
+        
+        # Combine text bubbles and free text
+        all_text = detections['text_bubbles'] + detections['text_free']
+        
+        logger.info(f"📝 Found {len(all_text)} text regions total")
+        return all_text
     
     def _detect_with_onnx(self, image: np.ndarray, confidence: float, 
                          iou_threshold: float, max_detections: int) -> List[Tuple[int, int, int, int]]:
@@ -339,15 +584,16 @@ class BubbleDetector:
         # This is a placeholder - adjust based on your model
         return []
     
-    def visualize_detections(self, image_path: str, bubbles: List[Tuple[int, int, int, int]], 
-                            output_path: str = None) -> np.ndarray:
+    def visualize_detections(self, image_path: str, bubbles: List[Tuple[int, int, int, int]] = None, 
+                            output_path: str = None, use_rtdetr: bool = False) -> np.ndarray:
         """
         Visualize detected bubbles on the image.
         
         Args:
             image_path: Path to original image
-            bubbles: List of bubble bounding boxes
+            bubbles: List of bubble bounding boxes (if None, will detect)
             output_path: Optional path to save visualization
+            use_rtdetr: Use RT-DETR for visualization with class colors
             
         Returns:
             Image with drawn bounding boxes
@@ -357,25 +603,58 @@ class BubbleDetector:
             logger.error(f"Failed to load image: {image_path}")
             return None
         
-        # Draw bounding boxes
-        for i, (x, y, w, h) in enumerate(bubbles):
-            # Draw rectangle
-            color = (0, 255, 0)  # Green
-            thickness = 2
-            cv2.rectangle(image, (x, y), (x + w, y + h), color, thickness)
+        vis_image = image.copy()
+        
+        if use_rtdetr and self.rtdetr_loaded:
+            # RT-DETR visualization with different colors per class
+            detections = self.detect_with_rtdetr(image_path=image_path, return_all_bubbles=False)
             
-            # Add label
-            label = f"Bubble {i+1}"
-            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(image, (x, y - label_size[1] - 4), (x + label_size[0], y), color, -1)
-            cv2.putText(image, label, (x, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            # Colors for each class
+            colors = {
+                'bubbles': (0, 255, 0),       # Green for empty bubbles
+                'text_bubbles': (255, 0, 0),  # Blue for text bubbles
+                'text_free': (0, 0, 255)      # Red for free text
+            }
+            
+            # Draw detections
+            for class_name, bboxes in detections.items():
+                color = colors[class_name]
+                
+                for i, (x, y, w, h) in enumerate(bboxes):
+                    # Draw rectangle
+                    cv2.rectangle(vis_image, (x, y), (x + w, y + h), color, 2)
+                    
+                    # Add label
+                    label = f"{class_name.replace('_', ' ').title()} {i+1}"
+                    label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(vis_image, (x, y - label_size[1] - 4), 
+                                (x + label_size[0], y), color, -1)
+                    cv2.putText(vis_image, label, (x, y - 2), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        else:
+            # Original YOLOv8 visualization
+            if bubbles is None:
+                bubbles = self.detect_bubbles(image_path)
+            
+            # Draw bounding boxes
+            for i, (x, y, w, h) in enumerate(bubbles):
+                # Draw rectangle
+                color = (0, 255, 0)  # Green
+                thickness = 2
+                cv2.rectangle(vis_image, (x, y), (x + w, y + h), color, thickness)
+                
+                # Add label
+                label = f"Bubble {i+1}"
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(vis_image, (x, y - label_size[1] - 4), (x + label_size[0], y), color, -1)
+                cv2.putText(vis_image, label, (x, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Save if output path provided
         if output_path:
-            cv2.imwrite(output_path, image)
+            cv2.imwrite(output_path, vis_image)
             logger.info(f"💾 Visualization saved to: {output_path}")
         
-        return image
+        return vis_image
     
     def convert_to_onnx(self, model_path: str, output_path: str = None) -> bool:
         """
@@ -419,7 +698,7 @@ class BubbleDetector:
         
         Args:
             image_paths: List of image paths
-            **kwargs: Detection parameters (confidence, iou_threshold, max_detections)
+            **kwargs: Detection parameters (confidence, iou_threshold, max_detections, use_rtdetr)
             
         Returns:
             Dictionary mapping image paths to bubble lists
@@ -581,6 +860,42 @@ def download_model_from_huggingface(repo_id: str = "ogkalu/comic-speech-bubble-d
         return None
 
 
+def download_rtdetr_model(cache_dir: str = "models") -> bool:
+    """
+    Download RT-DETR model for advanced detection.
+    
+    Args:
+        cache_dir: Directory to cache the model
+        
+    Returns:
+        True if successful
+    """
+    if not TRANSFORMERS_AVAILABLE:
+        logger.error("Transformers required. Install with: pip install transformers")
+        return False
+    
+    try:
+        logger.info("📥 Downloading RT-DETR model...")
+        from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+        
+        # This will download and cache the model
+        processor = RTDetrImageProcessor.from_pretrained(
+            "ogkalu/comic-text-and-bubble-detector",
+            cache_dir=cache_dir
+        )
+        model = RTDetrForObjectDetection.from_pretrained(
+            "ogkalu/comic-text-and-bubble-detector",
+            cache_dir=cache_dir
+        )
+        
+        logger.info("✅ RT-DETR model downloaded successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        return False
+
+
 # Example usage and testing
 if __name__ == "__main__":
     import sys
@@ -593,31 +908,64 @@ if __name__ == "__main__":
             # Download model from Hugging Face
             model_path = download_model_from_huggingface()
             if model_path:
-                print(f"Model downloaded to: {model_path}")
+                print(f"YOLOv8 model downloaded to: {model_path}")
+            
+            # Also download RT-DETR
+            if download_rtdetr_model():
+                print("RT-DETR model downloaded")
         
         elif sys.argv[1] == "detect" and len(sys.argv) > 3:
             # Detect bubbles in an image
             model_path = sys.argv[2]
             image_path = sys.argv[3]
             
-            if detector.load_model(model_path):
-                bubbles = detector.detect_bubbles(image_path, confidence=0.5)
-                print(f"Detected {len(bubbles)} bubbles:")
-                for i, (x, y, w, h) in enumerate(bubbles):
-                    print(f"  Bubble {i+1}: position=({x},{y}) size=({w}x{h})")
-                
-                # Optionally visualize
-                if len(sys.argv) > 4:
-                    output_path = sys.argv[4]
-                    detector.visualize_detections(image_path, bubbles, output_path)
+            # Load appropriate model
+            if 'rtdetr' in model_path.lower():
+                if detector.load_rtdetr_model():
+                    # Use RT-DETR
+                    results = detector.detect_with_rtdetr(image_path)
+                    print(f"RT-DETR Detection:")
+                    print(f"  Empty bubbles: {len(results['bubbles'])}")
+                    print(f"  Text bubbles: {len(results['text_bubbles'])}")
+                    print(f"  Free text: {len(results['text_free'])}")
+            else:
+                if detector.load_model(model_path):
+                    bubbles = detector.detect_bubbles(image_path, confidence=0.5)
+                    print(f"YOLOv8 detected {len(bubbles)} bubbles:")
+                    for i, (x, y, w, h) in enumerate(bubbles):
+                        print(f"  Bubble {i+1}: position=({x},{y}) size=({w}x{h})")
+            
+            # Optionally visualize
+            if len(sys.argv) > 4:
+                output_path = sys.argv[4]
+                detector.visualize_detections(image_path, output_path=output_path, 
+                                             use_rtdetr='rtdetr' in model_path.lower())
+        
+        elif sys.argv[1] == "test-both" and len(sys.argv) > 2:
+            # Test both models
+            image_path = sys.argv[2]
+            
+            # Load YOLOv8
+            yolo_path = "models/comic-speech-bubble-detector-yolov8m.pt"
+            if os.path.exists(yolo_path):
+                detector.load_model(yolo_path)
+                yolo_bubbles = detector.detect_bubbles(image_path, use_rtdetr=False)
+                print(f"YOLOv8: {len(yolo_bubbles)} bubbles")
+            
+            # Load RT-DETR
+            if detector.load_rtdetr_model():
+                rtdetr_bubbles = detector.detect_bubbles(image_path, use_rtdetr=True)
+                print(f"RT-DETR: {len(rtdetr_bubbles)} bubbles")
         
         else:
             print("Usage:")
             print("  python bubble_detector.py download")
             print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
+            print("  python bubble_detector.py test-both <image_path>")
     
     else:
-        print("Bubble Detector Module")
+        print("Bubble Detector Module (YOLOv8 + RT-DETR)")
         print("Usage:")
         print("  python bubble_detector.py download")
         print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
+        print("  python bubble_detector.py test-both <image_path>")
