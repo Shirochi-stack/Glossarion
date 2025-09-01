@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Environment variables for ONNX
 ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'onnx_cache')
-AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'false').lower() == 'true'
+AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true'
 SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'true'
 FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
 CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting'))
@@ -269,6 +269,13 @@ class LocalInpainter:
             logger.warning("ONNX not available, skipping conversion")
             return None
         
+        # Skip ONNX conversion for models with FFT operations
+        fft_models = ['lama', 'anime', 'lama_official']
+        if method in fft_models:
+            logger.info(f"ℹ️ {method.upper()} uses FFT operations that ONNX doesn't support")
+            logger.info("  Using optimized PyTorch JIT model instead")
+            return None
+        
         try:
             # Generate ONNX path
             model_name = os.path.basename(model_path).replace('.pt', '')
@@ -281,11 +288,10 @@ class LocalInpainter:
             
             logger.info(f"🔄 Converting {method} model to ONNX...")
             
-            # Load the model if not already loaded
+            # The model should already be loaded at this point
             if not self.model_loaded or self.current_method != method:
-                if not self.load_model(method, model_path):
-                    logger.error("Failed to load model for ONNX conversion")
-                    return None
+                logger.error("Model not loaded for ONNX conversion")
+                return None
             
             # Create dummy inputs based on model type
             if method == 'aot':
@@ -293,7 +299,7 @@ class LocalInpainter:
                 dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
                 dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
             else:
-                # LaMa models expect [0, 1] range
+                # Other models
                 dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
                 dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
             
@@ -303,7 +309,7 @@ class LocalInpainter:
                 (dummy_image, dummy_mask),
                 onnx_path,
                 export_params=True,
-                opset_version=11,
+                opset_version=11,  # AOT should work with opset 11
                 do_constant_folding=True,
                 input_names=['image', 'mask'],
                 output_names=['output'],
@@ -327,7 +333,7 @@ class LocalInpainter:
             logger.error(f"❌ ONNX conversion failed: {e}")
             logger.error(traceback.format_exc())
             return None
-
+        
     def load_onnx_model(self, onnx_path: str) -> bool:
         """Load an ONNX model for inference"""
         if not ONNX_AVAILABLE:
@@ -491,19 +497,6 @@ class LocalInpainter:
                 logger.info(f"   New: {model_path}")
                 force_reload = True
             
-            # Check for existing ONNX model
-            if AUTO_CONVERT_TO_ONNX and model_path.endswith('.pt'):
-                model_name = os.path.basename(model_path).replace('.pt', '')
-                onnx_path = os.path.join(ONNX_CACHE_DIR, f"{model_name}_{method}.onnx")
-                
-                if os.path.exists(onnx_path) and not force_reload:
-                    logger.info(f"📦 Found existing ONNX model: {onnx_path}")
-                    if self.load_onnx_model(onnx_path):
-                        self.model_loaded = True
-                        self.current_method = method
-                        self.is_jit_model = False  # ONNX is not JIT
-                        return True
-            
             if not os.path.exists(model_path):
                 # Try to auto-download JIT model if path doesn't exist
                 logger.warning(f"Model not found: {model_path}")
@@ -548,7 +541,16 @@ class LocalInpainter:
                     
                     self.config[f'{method}_model_path'] = model_path
                     self._save_config()
-                    return True
+                    
+                    # ONNX CONVERSION (but handle failures gracefully)
+                    if AUTO_CONVERT_TO_ONNX and self.model_loaded:
+                        onnx_path = self.convert_to_onnx(model_path, method)
+                        if onnx_path and self.load_onnx_model(onnx_path):
+                            logger.info("🚀 Using ONNX model for inference")
+                        else:
+                            logger.info("📦 Using PyTorch JIT model for inference")
+                    
+                    return True  # This was causing early return before ONNX conversion
                     
                 except Exception as jit_error:
                     logger.info("   Not a JIT model, trying as regular checkpoint...")
