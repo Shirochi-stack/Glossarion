@@ -132,10 +132,10 @@ class BubbleDetector:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
-    
+        
     def load_model(self, model_path: str, force_reload: bool = False) -> bool:
         """
-        Load a YOLOv8 model for bubble detection (original method, maintained for compatibility).
+        Load a YOLOv8 model for bubble detection.
         
         Args:
             model_path: Path to model file (.pt, .onnx, or .torchscript)
@@ -145,18 +145,27 @@ class BubbleDetector:
             True if model loaded successfully, False otherwise
         """
         try:
-            # Check if it's an RT-DETR model based on name/path
-            if 'rtdetr' in model_path.lower() or 'text-and-bubble' in model_path.lower():
-                logger.info("Detected RT-DETR model path, loading as RT-DETR...")
-                return self.load_rtdetr_model(force_reload=force_reload)
-            
             if not os.path.exists(model_path):
                 logger.error(f"Model file not found: {model_path}")
                 return False
             
+            # Check if it's the same model already loaded
             if self.model_loaded and not force_reload:
-                logger.info("Model already loaded")
-                return True
+                last_path = self.config.get('last_model_path', '')
+                if last_path == model_path:
+                    logger.info("Model already loaded (same path)")
+                    return True
+                else:
+                    logger.info(f"Model path changed from {last_path} to {model_path}, reloading...")
+                    force_reload = True
+            
+            # Clear previous model if force reload
+            if force_reload:
+                logger.info("Force reloading model...")
+                self.model = None
+                self.onnx_session = None
+                self.model_loaded = False
+                self.model_type = None
             
             logger.info(f"📥 Loading bubble detection model: {model_path}")
             
