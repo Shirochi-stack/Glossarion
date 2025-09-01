@@ -178,54 +178,87 @@ class BubbleDetector:
             
             if ext in ['.pt', '.pth']:
                 if not YOLO_AVAILABLE:
-                    logger.error("Ultralytics package required for .pt models")
+                    logger.warning("Ultralytics package not available in this build")
+                    logger.info("Bubble detection will be disabled - this is normal for lightweight builds")
+                    # Don't return False immediately, try other fallbacks
+                    self.model_loaded = False
                     return False
                 
                 # Load YOLOv8 model
-                self.model = YOLO(model_path)
-                self.model_type = 'yolo'
-                
-                # Set to eval mode
-                if hasattr(self.model, 'model'):
-                    self.model.model.eval()
-                
-                # Move to GPU if available
-                if self.use_gpu:
-                    self.model.to('cuda')
+                try:
+                    self.model = YOLO(model_path)
+                    self.model_type = 'yolo'
                     
-                logger.info("✅ YOLOv8 model loaded successfully")
-                
+                    # Set to eval mode
+                    if hasattr(self.model, 'model'):
+                        self.model.model.eval()
+                    
+                    # Move to GPU if available
+                    if self.use_gpu and TORCH_AVAILABLE:
+                        try:
+                            self.model.to('cuda')
+                        except Exception as gpu_error:
+                            logger.warning(f"Could not move model to GPU: {gpu_error}")
+                            
+                    logger.info("✅ YOLOv8 model loaded successfully")
+                    
+                except Exception as yolo_error:
+                    logger.error(f"Failed to load YOLO model: {yolo_error}")
+                    return False
+                    
             elif ext == '.onnx':
                 if not ONNX_AVAILABLE:
-                    logger.error("ONNX Runtime required for .onnx models")
+                    logger.warning("ONNX Runtime not available in this build")
+                    logger.info("ONNX model support disabled - this is normal for lightweight builds")
                     return False
                 
-                # Load ONNX model
-                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-                self.onnx_session = ort.InferenceSession(model_path, providers=providers)
-                self.model_type = 'onnx'
-                
-                logger.info("✅ ONNX model loaded successfully")
-                
+                try:
+                    # Load ONNX model
+                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+                    self.onnx_session = ort.InferenceSession(model_path, providers=providers)
+                    self.model_type = 'onnx'
+                    
+                    logger.info("✅ ONNX model loaded successfully")
+                    
+                except Exception as onnx_error:
+                    logger.error(f"Failed to load ONNX model: {onnx_error}")
+                    return False
+                    
             elif ext == '.torchscript':
                 if not TORCH_AVAILABLE:
-                    logger.error("PyTorch required for TorchScript models")
+                    logger.warning("PyTorch not available in this build")
+                    logger.info("TorchScript model support disabled - this is normal for lightweight builds")
                     return False
                 
-                # Load TorchScript model
-                self.model = torch.jit.load(model_path)
-                self.model.eval()
-                self.model_type = 'torch'
-                
-                if self.use_gpu:
-                    self.model = self.model.cuda()
-                
-                logger.info("✅ TorchScript model loaded successfully")
-                
+                try:
+                    # Add safety check for torch being None
+                    if torch is None:
+                        logger.error("PyTorch module is None - cannot load TorchScript model")
+                        return False
+                        
+                    # Load TorchScript model
+                    self.model = torch.jit.load(model_path, map_location='cpu')
+                    self.model.eval()
+                    self.model_type = 'torch'
+                    
+                    if self.use_gpu:
+                        try:
+                            self.model = self.model.cuda()
+                        except Exception as gpu_error:
+                            logger.warning(f"Could not move TorchScript model to GPU: {gpu_error}")
+                    
+                    logger.info("✅ TorchScript model loaded successfully")
+                    
+                except Exception as torch_error:
+                    logger.error(f"Failed to load TorchScript model: {torch_error}")
+                    return False
+                    
             else:
                 logger.error(f"Unsupported model format: {ext}")
+                logger.info("Supported formats: .pt/.pth (YOLOv8), .onnx (ONNX), .torchscript (TorchScript)")
                 return False
             
+            # Only set loaded if we actually succeeded
             self.model_loaded = True
             self.config['last_model_path'] = model_path
             self.config['model_type'] = self.model_type
@@ -237,6 +270,11 @@ class BubbleDetector:
             logger.error(f"Failed to load model: {e}")
             logger.error(traceback.format_exc())
             self.model_loaded = False
+            
+            # Provide helpful context for .exe users
+            logger.info("Note: If running from .exe, some ML libraries may not be included")
+            logger.info("This is normal for lightweight builds - bubble detection will be disabled")
+            
             return False
     
     def load_rtdetr_model(self, model_path: str = None, model_id: str = None, force_reload: bool = False) -> bool:
