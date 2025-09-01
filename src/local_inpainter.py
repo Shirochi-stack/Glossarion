@@ -234,32 +234,46 @@ class LocalInpainter:
         self.use_opencv_fallback = False
         self.onnx_session = None
         self.use_onnx = False
-        self.is_jit_model = False  # Track if using JIT model
-        self.pad_mod = 8  # Default padding modulo
+        self.is_jit_model = False
+        self.pad_mod = 8
         
         # Bubble detection
         self.bubble_detector = None
         self.bubble_model_loaded = False
         
-        # Create ONNX cache directory
+        # Create directories
         os.makedirs(ONNX_CACHE_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
         logger.info(f"📁 ONNX cache directory: {ONNX_CACHE_DIR}")
         
-        self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
-        if TORCH_AVAILABLE:
-            self.device = torch.device('cuda' if self.use_gpu else 'cpu')
-            if self.use_gpu:
-                logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
-            else:
-                logger.info("💻 Using CPU")
+        # Check GPU availability safely
+        self.use_gpu = False
+        self.device = None
+        
+        if TORCH_AVAILABLE and torch is not None:
+            try:
+                self.use_gpu = torch.cuda.is_available()
+                self.device = torch.device('cuda' if self.use_gpu else 'cpu')
+                if self.use_gpu:
+                    logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
+                else:
+                    logger.info("💻 Using CPU")
+            except AttributeError:
+                # torch module exists but doesn't have cuda attribute
+                self.use_gpu = False
+                self.device = None
+                logger.info("⚠️ PyTorch incomplete - inpainting disabled")
         else:
-            self.device = None
+            logger.info("⚠️ PyTorch not available - inpainting disabled")
         
         # Initialize bubble detector if available
         if BUBBLE_DETECTOR_AVAILABLE:
-            self.bubble_detector = BubbleDetector()
-            logger.info("🗨️ Bubble detection available")
+            try:
+                self.bubble_detector = BubbleDetector()
+                logger.info("🗨️ Bubble detection available")
+            except:
+                self.bubble_detector = None
+                logger.info("🗨️ Bubble detection not available")
     
     def _load_config(self):
         if os.path.exists(self.config_path):
