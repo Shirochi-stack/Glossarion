@@ -543,113 +543,157 @@ class LocalInpainter:
                 mask = cv2.dilate(mask, kernel, iterations=1)
             
             if self.is_jit_model:
-                # JIT model processing - following the exact reference implementation
-                
-                # Convert BGR to RGB (CRITICAL - JIT models expect RGB)
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                
-                # Pad images to be divisible by mod
-                image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
-                mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
-                
-                # CRITICAL: Normalize to [0, 1] range exactly as reference does
-                image_norm = image_padded.astype(np.float32) / 255.0
-                mask_norm = mask_padded.astype(np.float32) / 255.0
-                
-                # Binary mask (values > 0 become 1)
-                mask_binary = (mask_norm > 0) * 1.0
-                
-                # Convert to PyTorch tensors with correct shape
-                # Image should be [B, C, H, W]
-                image_tensor = torch.from_numpy(image_norm).float()
-                
-                # Ensure image is [H, W, C] -> [C, H, W]
-                if len(image_tensor.shape) == 3:
-                    if image_tensor.shape[2] == 3:  # [H, W, C] format
-                        image_tensor = image_tensor.permute(2, 0, 1)
-                
-                # Add batch dimension [C, H, W] -> [B, C, H, W]
-                image_tensor = image_tensor.unsqueeze(0)
-                
-                # Mask should be [B, 1, H, W]
-                mask_tensor = torch.from_numpy(mask_binary).float()
-                
-                # Add dimensions as needed
-                while len(mask_tensor.shape) < 4:
-                    mask_tensor = mask_tensor.unsqueeze(0)
-                
-                # Ensure mask has single channel
-                if mask_tensor.shape[1] != 1:
-                    mask_tensor = mask_tensor[:, :1, :, :]
-                
-                # Move to device
-                image_tensor = image_tensor.to(self.device)
-                mask_tensor = mask_tensor.to(self.device)
-                
-                # Debug shapes
-                logger.debug(f"Image tensor shape: {image_tensor.shape}")  # Should be [1, 3, H, W]
-                logger.debug(f"Mask tensor shape: {mask_tensor.shape}")    # Should be [1, 1, H, W]
-                
-                # Ensure spatial dimensions match
-                if image_tensor.shape[2:] != mask_tensor.shape[2:]:
-                    logger.warning(f"Spatial dimension mismatch: image {image_tensor.shape[2:]}, mask {mask_tensor.shape[2:]}")
-                    # Resize mask to match image
-                    mask_tensor = F.interpolate(mask_tensor, size=image_tensor.shape[2:], mode='nearest')
-                
-                # Run inference with proper error handling
-                with torch.no_grad():
-                    try:
-                        # Standard LaMa JIT models expect (image, mask)
-                        inpainted = self.model(image_tensor, mask_tensor)
-                    except RuntimeError as e:
-                        error_str = str(e)
-                        logger.error(f"Model inference failed: {error_str}")
-                        
-                        # If tensor size mismatch, log detailed info
-                        if "size of tensor" in error_str.lower():
-                            logger.error(f"Image shape: {image_tensor.shape}")
-                            logger.error(f"Mask shape: {mask_tensor.shape}")
-                            
-                            # Try transposing if needed
-                            if "dimension 3" in error_str and "880" in error_str:
-                                # This suggests the tensors might be in wrong format
-                                # Try different permutation
-                                logger.info("Attempting to fix tensor format...")
-                                
-                                # Ensure image is [B, C, H, W] not [B, H, W, C]
-                                if image_tensor.shape[1] > 3:
-                                    image_tensor = image_tensor.permute(0, 3, 1, 2)
-                                    logger.info(f"Permuted image to: {image_tensor.shape}")
-                                
-                                # Try again
-                                inpainted = self.model(image_tensor, mask_tensor)
-                            else:
-                                # As last resort, try swapped arguments
-                                logger.info("Trying swapped arguments (mask, image)...")
-                                inpainted = self.model(mask_tensor, image_tensor)
-                        else:
-                            raise e
-                
-                # Process output
-                # Output should be [B, C, H, W]
-                if len(inpainted.shape) == 4:
-                    # Remove batch dimension and permute to [H, W, C]
-                    result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+                # Special handling for AOT model
+                if self.current_method == 'aot':
+                    logger.debug("Using AOT-specific preprocessing")
+                    
+                    # Convert BGR to RGB
+                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    
+                    # Pad images to be divisible by mod
+                    image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                    mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                    
+                    # AOT normalization: [-1, 1] range
+                    img_torch = torch.from_numpy(image_padded).permute(2, 0, 1).unsqueeze_(0).float() / 127.5 - 1.0
+                    mask_torch = torch.from_numpy(mask_padded).unsqueeze_(0).unsqueeze_(0).float() / 255.0
+                    
+                    # Binarize mask for AOT
+                    mask_torch[mask_torch < 0.5] = 0
+                    mask_torch[mask_torch >= 0.5] = 1
+                    
+                    # Move to device
+                    img_torch = img_torch.to(self.device)
+                    mask_torch = mask_torch.to(self.device)
+                    
+                    # CRITICAL FOR AOT: Apply mask to input image
+                    img_torch = img_torch * (1 - mask_torch)
+                    
+                    logger.debug(f"AOT Image shape: {img_torch.shape}, Mask shape: {mask_torch.shape}")
+                    
+                    # Run inference
+                    with torch.no_grad():
+                        inpainted = self.model(img_torch, mask_torch)
+                    
+                    # Post-process AOT output: denormalize from [-1, 1] to [0, 255]
+                    result = ((inpainted.cpu().squeeze_(0).permute(1, 2, 0).numpy() + 1.0) * 127.5)
+                    result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    
+                    # Convert RGB back to BGR
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    # Remove padding
+                    result = self.remove_padding(result, padding)
+                    
                 else:
-                    # Handle unexpected output shape
-                    result = inpainted.detach().cpu().numpy()
-                    if len(result.shape) == 3 and result.shape[0] == 3:
-                        result = result.transpose(1, 2, 0)
-                
-                # Denormalize to 0-255 range
-                result = np.clip(result * 255, 0, 255).astype(np.uint8)
-                
-                # Convert RGB back to BGR for OpenCV
-                result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-                
-                # Remove padding
-                result = self.remove_padding(result, padding)
-                
+                    # LaMa/Anime model processing
+                    logger.debug(f"Using standard processing for {self.current_method}")
+                    
+                    # Convert BGR to RGB (CRITICAL - JIT models expect RGB)
+                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    
+                    # Pad images to be divisible by mod
+                    image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                    mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                    
+                    # CRITICAL: Normalize to [0, 1] range for LaMa models
+                    image_norm = image_padded.astype(np.float32) / 255.0
+                    mask_norm = mask_padded.astype(np.float32) / 255.0
+                    
+                    # Binary mask (values > 0 become 1)
+                    mask_binary = (mask_norm > 0) * 1.0
+                    
+                    # Convert to PyTorch tensors with correct shape
+                    # Image should be [B, C, H, W]
+                    image_tensor = torch.from_numpy(image_norm).float()
+                    
+                    # Ensure image is [H, W, C] -> [C, H, W]
+                    if len(image_tensor.shape) == 3:
+                        if image_tensor.shape[2] == 3:  # [H, W, C] format
+                            image_tensor = image_tensor.permute(2, 0, 1)
+                    
+                    # Add batch dimension [C, H, W] -> [B, C, H, W]
+                    image_tensor = image_tensor.unsqueeze(0)
+                    
+                    # Mask should be [B, 1, H, W]
+                    mask_tensor = torch.from_numpy(mask_binary).float()
+                    
+                    # Add dimensions as needed
+                    while len(mask_tensor.shape) < 4:
+                        mask_tensor = mask_tensor.unsqueeze(0)
+                    
+                    # Ensure mask has single channel
+                    if mask_tensor.shape[1] != 1:
+                        mask_tensor = mask_tensor[:, :1, :, :]
+                    
+                    # Move to device
+                    image_tensor = image_tensor.to(self.device)
+                    mask_tensor = mask_tensor.to(self.device)
+                    
+                    # Debug shapes
+                    logger.debug(f"Image tensor shape: {image_tensor.shape}")  # Should be [1, 3, H, W]
+                    logger.debug(f"Mask tensor shape: {mask_tensor.shape}")    # Should be [1, 1, H, W]
+                    
+                    # Ensure spatial dimensions match
+                    if image_tensor.shape[2:] != mask_tensor.shape[2:]:
+                        logger.warning(f"Spatial dimension mismatch: image {image_tensor.shape[2:]}, mask {mask_tensor.shape[2:]}")
+                        # Resize mask to match image
+                        mask_tensor = F.interpolate(mask_tensor, size=image_tensor.shape[2:], mode='nearest')
+                    
+                    # Run inference with proper error handling
+                    with torch.no_grad():
+                        try:
+                            # Standard LaMa JIT models expect (image, mask)
+                            inpainted = self.model(image_tensor, mask_tensor)
+                        except RuntimeError as e:
+                            error_str = str(e)
+                            logger.error(f"Model inference failed: {error_str}")
+                            
+                            # If tensor size mismatch, log detailed info
+                            if "size of tensor" in error_str.lower():
+                                logger.error(f"Image shape: {image_tensor.shape}")
+                                logger.error(f"Mask shape: {mask_tensor.shape}")
+                                
+                                # Try transposing if needed
+                                if "dimension 3" in error_str and "880" in error_str:
+                                    # This suggests the tensors might be in wrong format
+                                    # Try different permutation
+                                    logger.info("Attempting to fix tensor format...")
+                                    
+                                    # Ensure image is [B, C, H, W] not [B, H, W, C]
+                                    if image_tensor.shape[1] > 3:
+                                        image_tensor = image_tensor.permute(0, 3, 1, 2)
+                                        logger.info(f"Permuted image to: {image_tensor.shape}")
+                                    
+                                    # Try again
+                                    inpainted = self.model(image_tensor, mask_tensor)
+                                else:
+                                    # As last resort, try swapped arguments
+                                    logger.info("Trying swapped arguments (mask, image)...")
+                                    inpainted = self.model(mask_tensor, image_tensor)
+                            else:
+                                raise e
+                    
+                    # Process output
+                    # Output should be [B, C, H, W]
+                    if len(inpainted.shape) == 4:
+                        # Remove batch dimension and permute to [H, W, C]
+                        result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+                    else:
+                        # Handle unexpected output shape
+                        result = inpainted.detach().cpu().numpy()
+                        if len(result.shape) == 3 and result.shape[0] == 3:
+                            result = result.transpose(1, 2, 0)
+                    
+                    # Denormalize to 0-255 range
+                    result = np.clip(result * 255, 0, 255).astype(np.uint8)
+                    
+                    # Convert RGB back to BGR for OpenCV
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    # Remove padding
+                    result = self.remove_padding(result, padding)
+                    
             else:
                 # Original checkpoint model processing (keep as is)
                 h, w = image.shape[:2]
