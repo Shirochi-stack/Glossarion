@@ -262,6 +262,96 @@ class LocalInpainter:
     def _save_config(self):
         with open(self.config_path, 'w') as f:
             json.dump(self.config, f, indent=2)
+
+    def convert_to_onnx(self, model_path: str, method: str) -> Optional[str]:
+        """Convert a PyTorch model to ONNX format"""
+        if not ONNX_AVAILABLE:
+            logger.warning("ONNX not available, skipping conversion")
+            return None
+        
+        try:
+            # Generate ONNX path
+            model_name = os.path.basename(model_path).replace('.pt', '')
+            onnx_path = os.path.join(ONNX_CACHE_DIR, f"{model_name}_{method}.onnx")
+            
+            # Check if ONNX already exists
+            if os.path.exists(onnx_path) and not FORCE_ONNX_REBUILD:
+                logger.info(f"✅ ONNX model already exists: {onnx_path}")
+                return onnx_path
+            
+            logger.info(f"🔄 Converting {method} model to ONNX...")
+            
+            # Load the model if not already loaded
+            if not self.model_loaded or self.current_method != method:
+                if not self.load_model(method, model_path):
+                    logger.error("Failed to load model for ONNX conversion")
+                    return None
+            
+            # Create dummy inputs based on model type
+            if method == 'aot':
+                # AOT expects normalized inputs in [-1, 1]
+                dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
+                dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
+            else:
+                # LaMa models expect [0, 1] range
+                dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
+                dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
+            
+            # Export to ONNX
+            torch.onnx.export(
+                self.model,
+                (dummy_image, dummy_mask),
+                onnx_path,
+                export_params=True,
+                opset_version=11,
+                do_constant_folding=True,
+                input_names=['image', 'mask'],
+                output_names=['output'],
+                dynamic_axes={
+                    'image': {0: 'batch', 2: 'height', 3: 'width'},
+                    'mask': {0: 'batch', 2: 'height', 3: 'width'},
+                    'output': {0: 'batch', 2: 'height', 3: 'width'}
+                }
+            )
+            
+            logger.info(f"✅ ONNX model saved to: {onnx_path}")
+            
+            # Verify the ONNX model
+            onnx_model = onnx.load(onnx_path)
+            onnx.checker.check_model(onnx_model)
+            logger.info("✅ ONNX model verified successfully")
+            
+            return onnx_path
+            
+        except Exception as e:
+            logger.error(f"❌ ONNX conversion failed: {e}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def load_onnx_model(self, onnx_path: str) -> bool:
+        """Load an ONNX model for inference"""
+        if not ONNX_AVAILABLE:
+            logger.error("ONNX Runtime not available")
+            return False
+        
+        try:
+            logger.info(f"📥 Loading ONNX model: {onnx_path}")
+            
+            # Create ONNX Runtime session
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+            self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
+            
+            # Get input/output names
+            self.onnx_input_names = [i.name for i in self.onnx_session.get_inputs()]
+            self.onnx_output_names = [o.name for o in self.onnx_session.get_outputs()]
+            
+            self.use_onnx = True
+            logger.info(f"✅ ONNX model loaded with providers: {providers}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load ONNX model: {e}")
+            return False
     
     def _convert_checkpoint_key(self, key):
         """Convert checkpoint key format to model format"""
@@ -388,18 +478,31 @@ class LocalInpainter:
         return None
     
     def load_model(self, method, model_path, force_reload=False):
-        """Load model - supports both JIT and checkpoint files for compatibility"""
+        """Load model - supports both JIT and checkpoint files with ONNX conversion"""
         try:
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch required")
             
-            # Check if model path changed (FIX: Add this check)
+            # Check if model path changed
             current_saved_path = self.config.get(f'{method}_model_path', '')
             if current_saved_path != model_path and current_saved_path:
                 logger.info(f"📍 Model path changed for {method}")
                 logger.info(f"   Old: {current_saved_path}")
                 logger.info(f"   New: {model_path}")
                 force_reload = True
+            
+            # Check for existing ONNX model
+            if AUTO_CONVERT_TO_ONNX and model_path.endswith('.pt'):
+                model_name = os.path.basename(model_path).replace('.pt', '')
+                onnx_path = os.path.join(ONNX_CACHE_DIR, f"{model_name}_{method}.onnx")
+                
+                if os.path.exists(onnx_path) and not force_reload:
+                    logger.info(f"📦 Found existing ONNX model: {onnx_path}")
+                    if self.load_onnx_model(onnx_path):
+                        self.model_loaded = True
+                        self.current_method = method
+                        self.is_jit_model = False  # ONNX is not JIT
+                        return True
             
             if not os.path.exists(model_path):
                 # Try to auto-download JIT model if path doesn't exist
@@ -486,6 +589,13 @@ class LocalInpainter:
             self._save_config()
             
             logger.info(f"✅ {method.upper()} loaded!")
+            
+            # ONNX CONVERSION
+            if AUTO_CONVERT_TO_ONNX and model_path.endswith('.pt') and self.model_loaded:
+                onnx_path = self.convert_to_onnx(model_path, method)
+                if onnx_path and self.load_onnx_model(onnx_path):
+                    logger.info("🚀 Using ONNX model for inference")
+
             return True
             
         except Exception as e:
@@ -525,7 +635,7 @@ class LocalInpainter:
             return img[pad_top:img.shape[0]-pad_bottom, pad_left:img.shape[1]-pad_right, :]
 
     def inpaint(self, image, mask, refinement='normal'):
-        """Inpaint - compatible with both JIT and checkpoint models"""
+        """Inpaint - compatible with JIT, checkpoint, and ONNX models"""
         if not self.model_loaded:
             logger.error("No model loaded")
             return image
@@ -542,9 +652,70 @@ class LocalInpainter:
                 kernel = np.ones((7, 7), np.uint8)
                 mask = cv2.dilate(mask, kernel, iterations=1)
             
-            if self.is_jit_model:
-                # Special handling for AOT model
+            # ONNX inference path
+            if self.use_onnx and self.onnx_session:
+                logger.debug("Using ONNX inference")
+                
+                # Convert BGR to RGB
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                
+                # Pad images
+                image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                
+                # Prepare inputs based on model type
                 if self.current_method == 'aot':
+                    # AOT normalization
+                    img_np = image_padded.astype(np.float32) / 127.5 - 1.0
+                    mask_np = mask_padded.astype(np.float32) / 255.0
+                    mask_np[mask_np < 0.5] = 0
+                    mask_np[mask_np >= 0.5] = 1
+                    
+                    # Apply mask to input for AOT
+                    img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                    
+                    # Convert to NCHW format
+                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                else:
+                    # LaMa normalization
+                    img_np = image_padded.astype(np.float32) / 255.0
+                    mask_np = mask_padded.astype(np.float32) / 255.0
+                    mask_np = (mask_np > 0) * 1.0
+                    
+                    # Convert to NCHW format
+                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                
+                # Run ONNX inference
+                ort_inputs = {
+                    self.onnx_input_names[0]: img_np.astype(np.float32),
+                    self.onnx_input_names[1]: mask_np.astype(np.float32)
+                }
+                
+                ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
+                output = ort_outputs[0]
+                
+                # Post-process output
+                if self.current_method == 'aot':
+                    # Denormalize from [-1, 1] to [0, 255]
+                    result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
+                else:
+                    # Denormalize from [0, 1] to [0, 255]
+                    result = output[0].transpose(1, 2, 0) * 255
+                
+                result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                
+                # Convert RGB to BGR
+                result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                
+                # Remove padding
+                result = self.remove_padding(result, padding)
+            
+            elif self.is_jit_model:
+                # JIT model processing
+                if self.current_method == 'aot':
+                    # Special handling for AOT model
                     logger.debug("Using AOT-specific preprocessing")
                     
                     # Convert BGR to RGB
@@ -693,7 +864,7 @@ class LocalInpainter:
                     
                     # Remove padding
                     result = self.remove_padding(result, padding)
-                    
+            
             else:
                 # Original checkpoint model processing (keep as is)
                 h, w = image.shape[:2]
