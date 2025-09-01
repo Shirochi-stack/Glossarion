@@ -2186,6 +2186,15 @@ class MangaSettingsDialog:
         self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
         self.settings['ocr']['rtdetr_model_url'] = self.rtdetr_model_url.get()
         
+        # Inpainting settings
+        if hasattr(self, 'inpaint_method_var'):
+            self.settings['inpainting'] = {
+                'method': self.inpaint_method_var.get(),
+                'local_method': self.local_method_var.get() if hasattr(self, 'local_method_var') else 'anime',
+                'local_model_path': self.local_model_path.get() if hasattr(self, 'local_model_path') else '',
+                'batch_size': self.inpaint_batch_size.get() if hasattr(self, 'inpaint_batch_size') else 1,
+                }
+        
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
         self.settings['advanced']['webtoon_mode'] = self.webtoon_mode.get()
@@ -2204,7 +2213,12 @@ class MangaSettingsDialog:
             self.settings['cloud_timeout'] = self.cloud_timeout_var.get()
             self.settings['mask_dilation'] = self.mask_dilation_var.get()
             self.settings['dilation_iterations'] = self.dilation_iterations_var.get()
-        
+            
+        # Clear bubble detector cache to force reload with new settings
+        if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, 'translator'):
+            if hasattr(self.main_gui.manga_tab.translator, 'bubble_detector'):
+                self.main_gui.manga_tab.translator.bubble_detector = None
+                
         # Save to config
         self.config['manga_settings'] = self.settings
         
