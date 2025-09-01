@@ -677,13 +677,13 @@ class MangaSettingsDialog:
         # Local method selection
         local_method_frame = tk.Frame(self.local_frame)
         local_method_frame.pack(fill='x', pady=5)
-        
+
         tk.Label(local_method_frame, text="Model Type:", width=15, anchor='w').pack(side='left')
-        
+
         self.local_method_var = tk.StringVar(
             value=self.settings.get('inpainting', {}).get('local_method', 'anime')
         )
-        
+
         local_methods = ttk.Combobox(
             local_method_frame,
             textvariable=self.local_method_var,
@@ -692,6 +692,7 @@ class MangaSettingsDialog:
             width=20
         )
         local_methods.pack(side='left', padx=10)
+        # Add auto-load on selection change
         local_methods.bind('<<ComboboxSelected>>', self._on_local_method_change)
         
         # Model path selection
@@ -871,19 +872,34 @@ class MangaSettingsDialog:
             self.hybrid_frame.pack_forget()
 
     def _on_local_method_change(self, event=None):
-        """Show/hide Ollama-specific settings"""
+        """Handle local method change and auto-load if model exists"""
         method = self.local_method_var.get()
         
+        # Show/hide Ollama-specific settings
         if method == 'ollama':
             self.ollama_frame.pack(fill='x', pady=(10, 0))
             self.model_path_entry.config(state='disabled')
         else:
             self.ollama_frame.pack_forget()
             self.model_path_entry.config(state='readonly')
+        
+        # Check if we have a saved path for this method
+        saved_path = self.settings.get('inpainting', {}).get(f'{method}_model_path', '')
+        
+        if saved_path and os.path.exists(saved_path):
+            # Update the path display
+            self.local_model_path.set(saved_path)
+            self._update_model_status()
+            
+            # Auto-load the model
+            self._try_load_model(method, saved_path)
+        else:
+            # Clear the path display
+            self.local_model_path.set("")
             self._update_model_status()
 
     def _browse_local_model(self):
-        """Browse for local inpainting model"""
+        """Browse for local inpainting model and auto-load"""
         filetypes = [
             ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
             ("PyTorch models", "*.pt *.pth"),
@@ -901,6 +917,13 @@ class MangaSettingsDialog:
         if path:
             self.local_model_path.set(path)
             self._update_model_status()
+            
+            # Auto-load the selected model
+            method = self.local_method_var.get()
+            self._try_load_model(method, path)
+            
+            # Save the path for this method
+            self.settings.get('inpainting', {})[f'{method}_model_path'] = path
 
     def _update_model_status(self):
         """Update model status display"""
@@ -1030,13 +1053,50 @@ class MangaSettingsDialog:
         thread = threading.Thread(target=download_thread, daemon=True)
         thread.start()
 
+    def _try_load_model(self, method: str, model_path: str):
+        """Try to load a model and update status"""
+        try:
+            self.model_status_label.config(text="⏳ Loading model...", fg='orange')
+            self.dialog.update_idletasks()
+            
+            # Try to load using LocalInpainter
+            from local_inpainter import LocalInpainter
+            test_inpainter = LocalInpainter()
+            
+            if test_inpainter.load_model(method, model_path):
+                self.model_status_label.config(
+                    text=f"✅ {method.upper()} model loaded and ready",
+                    fg='green'
+                )
+                # Store in settings
+                if 'inpainting' not in self.settings:
+                    self.settings['inpainting'] = {}
+                self.settings['inpainting'][f'{method}_model_path'] = model_path
+            else:
+                self.model_status_label.config(
+                    text="⚠️ Model found but failed to load",
+                    fg='orange'
+                )
+        except Exception as e:
+            self.model_status_label.config(
+                text=f"❌ Error loading model: {str(e)[:50]}",
+                fg='red'
+            )
+        
     def _download_complete(self, save_path: str, model_name: str):
         """Handle successful download"""
         self.download_btn.config(state='normal', text='Download')
         self.local_model_path.set(save_path)
-        self.model_status_label.config(text="✅ Downloaded successfully!", fg='green')
-        messagebox.showinfo("Success", f"{model_name.upper()} model downloaded successfully!")
-        self._update_model_status()
+        
+        # Auto-load the downloaded model
+        self._try_load_model(model_name, save_path)
+        
+        # Save the path
+        if 'inpainting' not in self.settings:
+            self.settings['inpainting'] = {}
+        self.settings['inpainting'][f'{model_name}_model_path'] = save_path
+        
+        messagebox.showinfo("Success", f"{model_name.upper()} model downloaded and loaded!")
 
     def _download_failed(self, error: str):
         """Handle download failure"""
@@ -1609,31 +1669,6 @@ class MangaSettingsDialog:
         # RT-DETR Settings Frame
         self.rtdetr_settings_frame = tk.LabelFrame(bubble_frame, text="RT-DETR Settings", padx=10, pady=5)
         self.rtdetr_settings_frame.pack(fill='x', pady=(10, 0))
-
-        # RT-DETR Model URL configuration (NEW)
-        rtdetr_url_frame = tk.Frame(self.rtdetr_settings_frame)
-        rtdetr_url_frame.pack(fill='x', pady=(5, 0))
-
-        tk.Label(rtdetr_url_frame, text="Model:", width=12, anchor='w').pack(side='left')
-
-        self.rtdetr_model_url = tk.StringVar(
-            value=self.settings['ocr'].get('rtdetr_model_url', 
-                                           'ogkalu/comic-text-and-bubble-detector')
-        )
-
-        self.rtdetr_url_entry = tk.Entry(
-            rtdetr_url_frame,
-            textvariable=self.rtdetr_model_url,
-            width=35
-        )
-        self.rtdetr_url_entry.pack(side='left', padx=(0, 10))
-
-        tk.Label(
-            rtdetr_url_frame,
-            text="(HuggingFace ID)",
-            font=('Arial', 8),
-            fg='gray'
-        ).pack(side='left')
 
         # RT-DETR Status and Actions
         rtdetr_status_frame = tk.Frame(self.rtdetr_settings_frame)
