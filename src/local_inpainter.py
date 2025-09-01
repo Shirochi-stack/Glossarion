@@ -66,6 +66,11 @@ LAMA_JIT_MODELS = {
         'url': 'https://github.com/Sanster/models/releases/download/lama/lama.pt',
         'md5': '4b1a1de53b7a74e0ff9dd622834e8e1e',
         'name': 'LaMa Official'
+    },
+    'aot': {
+        'url': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
+        'md5': '5ecdac562c1d56267468fc4fbf80db27',
+        'name': 'AOT GAN'
     }
 }
 
