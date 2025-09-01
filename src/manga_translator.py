@@ -245,7 +245,7 @@ class MangaTranslator:
         return False
 
     def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
-        """Merge text regions by bubble while preserving original vertices for accurate masking"""
+        """Merge text regions by bubble and filter based on RT-DETR class settings"""
         try:
             # Get detector settings from config
             ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
@@ -262,6 +262,7 @@ class MangaTranslator:
                 self.bubble_detector = BubbleDetector()
             
             bubbles = None
+            rtdetr_detections = None  # Store full RT-DETR results for filtering
             
             if detector_type == 'rtdetr':
                 # Use RT-DETR
@@ -274,48 +275,64 @@ class MangaTranslator:
                         self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                 
-                # Get RT-DETR settings
+                # Get RT-DETR settings including class filters
                 rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
+                detect_empty = ocr_settings.get('detect_empty_bubbles', True)
+                detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
+                detect_free_text = ocr_settings.get('detect_free_text', True)
                 
-                # Detect using RT-DETR
-                bubbles = self.bubble_detector.detect_with_rtdetr(
+                self._log(f"📋 RT-DETR class filters:", "info")
+                self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                
+                # Get FULL RT-DETR detections (not just bubbles)
+                rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
                     image_path=image_path,
                     confidence=rtdetr_confidence,
-                    return_all_bubbles=True
+                    return_all_bubbles=False  # Get dict with all classes
                 )
                 
+                # Combine enabled bubble types for merging
+                bubbles = []
+                if detect_empty and 'bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['bubbles'])
+                if detect_text_bubbles and 'text_bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['text_bubbles'])
+                
+                # Store free text locations for filtering later
+                free_text_regions = rtdetr_detections.get('text_free', []) if detect_free_text else []
+                
+                self._log(f"✅ RT-DETR detected:", "success")
+                self._log(f"   {len(rtdetr_detections.get('bubbles', []))} empty bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_bubbles', []))} text bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_free', []))} free text regions", "info")
+                
             elif detector_type == 'yolo':
-                # Use YOLOv8
+                # Use YOLOv8 (existing code)
                 self._log("🤖 Using YOLOv8 for bubble detection", "info")
                 
-                # Get YOLO model path from config
                 model_path = ocr_settings.get('bubble_model_path')
                 if not model_path:
                     self._log("⚠️ No YOLO model configured, falling back to traditional merging", "warning")
                     return self._merge_nearby_regions(regions)
                 
-                # Load YOLO model if needed
                 if not self.bubble_detector.model_loaded:
                     self._log(f"📥 Loading YOLO model: {os.path.basename(model_path)}")
                     if not self.bubble_detector.load_model(model_path):
                         self._log("⚠️ Failed to load YOLO model, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                 
-                # Get YOLO confidence threshold
                 confidence = ocr_settings.get('bubble_confidence', 0.5)
-                
-                # Detect bubbles using YOLO
                 self._log(f"🎯 Detecting bubbles with YOLO (confidence >= {confidence:.2f})")
                 bubbles = self.bubble_detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
                 
             else:  # auto mode
                 self._log("🤖 Auto mode: using best available detector", "info")
                 
-                # First try to ensure RT-DETR is loaded
                 if not self.bubble_detector.rtdetr_loaded:
                     self.bubble_detector.load_rtdetr_model()
                 
-                # Let detect_bubbles auto-select
                 confidence = ocr_settings.get('bubble_confidence', 0.5)
                 bubbles = self.bubble_detector.detect_bubbles(
                     image_path, 
@@ -323,62 +340,45 @@ class MangaTranslator:
                     use_rtdetr=None
                 )
             
-            # Check if we got any bubbles
             if not bubbles:
                 self._log("⚠️ No bubbles detected, using traditional merging", "warning")
                 return self._merge_nearby_regions(regions)
             
-            self._log(f"✅ Detected {len(bubbles)} bubbles", "success")
+            self._log(f"✅ Found {len(bubbles)} bubbles for grouping", "success")
             
-            # Log first few bubbles for debugging
-            for i, bubble in enumerate(bubbles[:5]):
-                x, y, w, h = bubble
-                self._log(f"   Bubble {i+1}: position=({x},{y}) size=({w}x{h})", "info")
-            if len(bubbles) > 5:
-                self._log(f"   ... and {len(bubbles)-5} more", "info")
-            
-            # NOW WE MERGE - but preserve original regions for masking
+            # Merge regions within bubbles
             merged_regions = []
             used_indices = set()
             
             for bubble_idx, (bx, by, bw, bh) in enumerate(bubbles):
                 bubble_regions = []
                 
-                # Find text regions inside this bubble
                 for idx, region in enumerate(regions):
                     if idx in used_indices:
                         continue
                         
                     rx, ry, rw, rh = region.bounding_box
-                    
-                    # Check if region center is inside bubble
                     region_center_x = rx + rw / 2
                     region_center_y = ry + rh / 2
                     
-                    # Check if center point is inside bubble bounds
                     if (bx <= region_center_x <= bx + bw and 
                         by <= region_center_y <= by + bh):
                         bubble_regions.append(region)
                         used_indices.add(idx)
                 
-                # Create merged region for this bubble if it contains text
                 if bubble_regions:
-                    # Combine all text
                     merged_text = " ".join(r.text for r in bubble_regions)
                     
-                    # Calculate the union of all text bounding boxes (not bubble bounds)
                     min_x = min(r.bounding_box[0] for r in bubble_regions)
                     min_y = min(r.bounding_box[1] for r in bubble_regions)
                     max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in bubble_regions)
                     max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in bubble_regions)
                     
-                    # Collect ALL vertices from all regions for masking
                     all_vertices = []
                     for r in bubble_regions:
                         if hasattr(r, 'vertices') and r.vertices:
                             all_vertices.extend(r.vertices)
                     
-                    # If no vertices, create from the union bounds
                     if not all_vertices:
                         all_vertices = [
                             (min_x, min_y),
@@ -387,45 +387,74 @@ class MangaTranslator:
                             (min_x, max_y)
                         ]
                     
-                    # Create merged region
                     merged_region = TextRegion(
                         text=merged_text,
-                        vertices=all_vertices,  # Keep all original vertices
+                        vertices=all_vertices,
                         bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
                         confidence=0.95,
                         region_type='bubble_detected'
                     )
                     
-                    # CRITICAL: Store the original regions for masking
-                    # This is the key to preserving accurate masking
+                    # Store original regions for masking
                     merged_region.original_regions = bubble_regions
                     merged_region.bubble_bounds = (bx, by, bw, bh)
+                    # Mark that this should be inpainted
+                    merged_region.should_inpaint = True
                     
                     merged_regions.append(merged_region)
-                    
-                    self._log(f"   Bubble {bubble_idx + 1}: Merged {len(bubble_regions)} text regions")
-                    preview = merged_text[:50] + "..." if len(merged_text) > 50 else merged_text
-                    self._log(f"      Text: '{preview}'", "debug")
+                    self._log(f"   Bubble {bubble_idx + 1}: Merged {len(bubble_regions)} text regions", "info")
             
-            # Add any text regions that weren't inside any bubble
+            # Handle text outside bubbles based on RT-DETR settings
             for idx, region in enumerate(regions):
                 if idx not in used_indices:
+                    # This text is outside any bubble
+                    
+                    # For RT-DETR, check if we should include free text
+                    if detector_type == 'rtdetr':
+                        # Check if this region is in a free text area
+                        region_should_inpaint = False
+                        
+                        if rtdetr_detections and 'text_free' in rtdetr_detections:
+                            # Check if this OCR region overlaps with any RT-DETR free text detection
+                            rx, ry, rw, rh = region.bounding_box
+                            region_center_x = rx + rw / 2
+                            region_center_y = ry + rh / 2
+                            
+                            for (fx, fy, fw, fh) in rtdetr_detections.get('text_free', []):
+                                if (fx <= region_center_x <= fx + fw and 
+                                    fy <= region_center_y <= fy + fh):
+                                    # This region is detected as free text by RT-DETR
+                                    if ocr_settings.get('detect_free_text', True):
+                                        region_should_inpaint = True
+                                        self._log(f"   Free text INCLUDED: '{region.text[:30]}...'", "info")
+                                    else:
+                                        self._log(f"   Free text EXCLUDED (unchecked): '{region.text[:30]}...'", "info")
+                                    break
+                        
+                        # Mark whether this region should be inpainted
+                        region.should_inpaint = region_should_inpaint
+                    else:
+                        # For YOLO/auto, include all text by default
+                        region.should_inpaint = True
+                    
                     merged_regions.append(region)
-                    preview = region.text[:30] + "..." if len(region.text) > 30 else region.text
-                    self._log(f"   Text outside bubbles: '{preview}'")
             
-            self._log(f"📊 Bubble detection complete: {len(regions)} regions → {len(merged_regions)} final regions")
+            # Log summary
+            regions_to_inpaint = sum(1 for r in merged_regions if getattr(r, 'should_inpaint', True))
+            regions_to_skip = len(merged_regions) - regions_to_inpaint
+            
+            self._log(f"📊 Bubble detection complete: {len(regions)} → {len(merged_regions)} regions", "success")
+            if detector_type == 'rtdetr' and regions_to_skip > 0:
+                self._log(f"   {regions_to_inpaint} regions will be inpainted", "info")
+                self._log(f"   {regions_to_skip} regions will be preserved (based on RT-DETR filters)", "info")
+            
             return merged_regions
             
         except Exception as e:
             self._log(f"❌ Bubble detection error: {str(e)}", "error")
             self._log("   Falling back to traditional merging", "warning")
-            
-            import traceback
-            self._log(traceback.format_exc(), "debug")
-            
             return self._merge_nearby_regions(regions)
-    
+        
     def set_full_page_context(self, enabled: bool, custom_prompt: str = None):
         """Configure full page context translation mode
         
@@ -1988,77 +2017,65 @@ class MangaTranslator:
             self._log(traceback.format_exc(), "error")
             return {}
 
-            
+                
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
-        """Create mask using original regions when available for accurate coverage"""
+        """Create mask only for regions marked for inpainting"""
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        regions_masked = 0
+        regions_skipped = 0
         
         self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
         
         for i, region in enumerate(regions):
-            # CHECK: If this is a merged region, use the ORIGINAL regions for masking
+            # CHECK: Should this region be inpainted?
+            if not getattr(region, 'should_inpaint', True):
+                # Skip this region - it shouldn't be inpainted
+                regions_skipped += 1
+                self._log(f"   Region {i+1}: SKIPPED (filtered by RT-DETR settings)", "debug")
+                continue
+            
+            regions_masked += 1
+            
+            # Check if this is a merged region with original regions
             if hasattr(region, 'original_regions') and region.original_regions:
-                # This is a merged bubble region - use all original regions for precise masking
-                self._log(f"   Region {i+1}: Using {len(region.original_regions)} original regions for precise masking", "debug")
+                # Use original regions for precise masking
+                self._log(f"   Region {i+1}: Using {len(region.original_regions)} original regions", "debug")
                 
                 for orig_region in region.original_regions:
                     if hasattr(orig_region, 'vertices') and orig_region.vertices:
-                        # Use original vertices
                         pts = np.array(orig_region.vertices, np.int32)
                         pts = pts.reshape((-1, 1, 2))
                         cv2.fillPoly(mask, [pts], 255)
                     else:
-                        # Use original bounding box
                         x, y, w, h = orig_region.bounding_box
                         cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
             else:
-                # Normal region - use its own vertices/bounds
+                # Normal region
                 if hasattr(region, 'vertices') and region.vertices and len(region.vertices) <= 8:
-                    # Valid polygon vertices
                     pts = np.array(region.vertices, np.int32)
                     pts = pts.reshape((-1, 1, 2))
                     cv2.fillPoly(mask, [pts], 255)
-                    self._log(f"   Region {i+1}: Using polygon with {len(region.vertices)} vertices", "debug")
+                    self._log(f"   Region {i+1}: Using polygon", "debug")
                 else:
-                    # Use bounding box
                     x, y, w, h = region.bounding_box
                     cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
-                    self._log(f"   Region {i+1}: Using bounding box ({x},{y},{w}x{h})", "debug")
+                    self._log(f"   Region {i+1}: Using bounding box", "debug")
         
-        # Get dilation settings from manga_settings
+        self._log(f"📊 Mask summary: {regions_masked} regions masked, {regions_skipped} regions skipped", "info")
+        
+        # Apply dilation
         manga_settings = self.main_gui.config.get('manga_settings', {})
         dilation_size = manga_settings.get('mask_dilation', 15)
         dilation_iterations = manga_settings.get('dilation_iterations', 2)
         
-        self._log(f"📏 Applying mask dilation: {dilation_size}px, {dilation_iterations} iterations", "info")
-        
-        if dilation_size > 0:
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, 
-                (dilation_size, dilation_size)
-            )
+        if dilation_size > 0 and regions_masked > 0:
+            self._log(f"📏 Applying dilation: {dilation_size}px, {dilation_iterations} iterations", "info")
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
             mask = cv2.dilate(mask, kernel, iterations=dilation_iterations)
         
-        # Calculate coverage
         coverage_percent = (np.sum(mask > 0) / mask.size) * 100
-        self._log(f"📊 Mask coverage: {coverage_percent:.1f}% of image", "info")
-        
-        if coverage_percent > 30:
-            self._log(f"   ⚠️ High mask coverage may affect too much of the image", "warning")
-        
-        # Save debug mask if in debug mode
-        if self.debug_mode or self.save_intermediate:
-            try:
-                import os
-                base_name = "mask_debug"
-                if hasattr(self, 'current_image_path'):
-                    base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
-                
-                mask_path = f"debug_{base_name}_mask.png"
-                cv2.imwrite(mask_path, mask)
-                self._log(f"   💾 Saved debug mask to: {mask_path}", "debug")
-            except Exception as e:
-                self._log(f"   Failed to save debug mask: {e}", "debug")
+        self._log(f"📊 Final mask coverage: {coverage_percent:.1f}% of image", "info")
         
         return mask
     
