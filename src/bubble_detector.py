@@ -1,4 +1,3 @@
-
 """
 bubble_detector.py - Modified version that works in frozen PyInstaller executables
 Replace your bubble_detector.py with this version
@@ -1131,3 +1130,4 @@ if __name__ == "__main__":
         print("  python bubble_detector.py download")
         print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
         print("  python bubble_detector.py test-both <image_path>")
+
