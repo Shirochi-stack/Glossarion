@@ -1,11 +1,10 @@
-#bubble_detector.py
+
 """
-YOLOv8 and RT-DETR Speech Bubble Detector for Manga/Comic Translation
-Supports both .pt and ONNX models with automatic conversion
-Fully configurable through GUI settings
-Enhanced with RT-DETR for 3-class detection (empty bubbles, text bubbles, free text)
+bubble_detector.py - Modified version that works in frozen PyInstaller executables
+Replace your bubble_detector.py with this version
 """
 import os
+import sys
 import json
 import numpy as np
 import cv2
@@ -18,53 +17,122 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Try to import YOLO dependencies
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except:  # Catch ANY error including AttributeError from missing torch
-    YOLO_AVAILABLE = False
-    YOLO = None
-    logger.warning("Ultralytics YOLO not available")
+# Check if we're running in a frozen environment
+IS_FROZEN = getattr(sys, 'frozen', False)
+if IS_FROZEN:
+    # In frozen environment, set proper paths for ML libraries
+    MEIPASS = sys._MEIPASS
+    os.environ['TORCH_HOME'] = MEIPASS
+    os.environ['TRANSFORMERS_CACHE'] = os.path.join(MEIPASS, 'transformers')
+    os.environ['HF_HOME'] = os.path.join(MEIPASS, 'huggingface')
+    logger.info(f"Running in frozen environment: {MEIPASS}")
 
-try:
-    import torch
-    # Test if cuda attribute exists
-    _ = torch.cuda
-    TORCH_AVAILABLE = True
-except (ImportError, AttributeError):
-    TORCH_AVAILABLE = False
-    torch = None
-    logger.warning("PyTorch not available or incomplete")
+# Modified import checks for frozen environment
+YOLO_AVAILABLE = False
+YOLO = None
+torch = None
+TORCH_AVAILABLE = False
+ONNX_AVAILABLE = False
+TRANSFORMERS_AVAILABLE = False
+RTDetrForObjectDetection = None
+RTDetrImageProcessor = None
+PIL_AVAILABLE = False
 
+# Try to import YOLO dependencies with better error handling
+if IS_FROZEN:
+    # In frozen environment, try harder to import
+    try:
+        # First try to import torch components individually
+        import torch
+        import torch.nn
+        import torch.cuda
+        TORCH_AVAILABLE = True
+        logger.info("✓ PyTorch loaded in frozen environment")
+    except Exception as e:
+        logger.warning(f"PyTorch not available in frozen environment: {e}")
+        TORCH_AVAILABLE = False
+        torch = None
+    
+    # Try ultralytics after torch
+    if TORCH_AVAILABLE:
+        try:
+            from ultralytics import YOLO
+            YOLO_AVAILABLE = True
+            logger.info("✓ Ultralytics YOLO loaded in frozen environment")
+        except Exception as e:
+            logger.warning(f"Ultralytics not available in frozen environment: {e}")
+            YOLO_AVAILABLE = False
+    
+    # Try transformers
+    try:
+        import transformers
+        # Try specific imports
+        try:
+            from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+            TRANSFORMERS_AVAILABLE = True
+            logger.info("✓ Transformers RT-DETR loaded in frozen environment")
+        except ImportError:
+            # Try alternative import
+            try:
+                from transformers import AutoModel, AutoImageProcessor
+                RTDetrForObjectDetection = AutoModel
+                RTDetrImageProcessor = AutoImageProcessor
+                TRANSFORMERS_AVAILABLE = True
+                logger.info("✓ Transformers loaded with AutoModel fallback")
+            except:
+                TRANSFORMERS_AVAILABLE = False
+                logger.warning("Transformers RT-DETR not available in frozen environment")
+    except Exception as e:
+        logger.warning(f"Transformers not available in frozen environment: {e}")
+        TRANSFORMERS_AVAILABLE = False
+else:
+    # Normal environment - original import logic
+    try:
+        from ultralytics import YOLO
+        YOLO_AVAILABLE = True
+    except:
+        YOLO_AVAILABLE = False
+        logger.warning("Ultralytics YOLO not available")
+
+    try:
+        import torch
+        # Test if cuda attribute exists
+        _ = torch.cuda
+        TORCH_AVAILABLE = True
+    except (ImportError, AttributeError):
+        TORCH_AVAILABLE = False
+        torch = None
+        logger.warning("PyTorch not available or incomplete")
+
+    try:
+        from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+        try:
+            from transformers import RTDetrV2ForObjectDetection
+            RTDetrForObjectDetection = RTDetrV2ForObjectDetection
+        except ImportError:
+            pass
+        TRANSFORMERS_AVAILABLE = True
+    except:
+        TRANSFORMERS_AVAILABLE = False
+        logger.info("Transformers not available for RT-DETR")
+
+# ONNX Runtime - works well in frozen environments
 try:
     import onnxruntime as ort
     ONNX_AVAILABLE = True
+    logger.info("✓ ONNX Runtime available")
 except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
 
-# Try to import transformers for RT-DETR
-try:
-    from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
-    try:
-        from transformers import RTDetrV2ForObjectDetection
-        RTDetrForObjectDetection = RTDetrV2ForObjectDetection
-    except ImportError:
-        pass
-    TRANSFORMERS_AVAILABLE = True
-except:
-    TRANSFORMERS_AVAILABLE = False
-    RTDetrForObjectDetection = None
-    RTDetrImageProcessor = None
-    logger.info("Transformers not available for RT-DETR")
-
+# PIL
 try:
     from PIL import Image
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
     logger.info("PIL not available")
+
 
 class BubbleDetector:
     """
