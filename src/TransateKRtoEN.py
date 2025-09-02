@@ -4120,6 +4120,9 @@ class GlossaryManager:
                 
                 # Process chunks based on batch mode
                 if batch_translation and custom_prompt:
+                    # Set fast mode for parallel processing
+                    os.environ["GLOSSARY_SKIP_ALL_VALIDATION"] = "1"
+                    
                     # Use batch API calls for AI extraction
                     all_csv_lines = self._process_chunks_batch_api(
                         chunks_to_process, custom_prompt, language, 
@@ -4127,6 +4130,9 @@ class GlossaryManager:
                         output_dir, strip_honorifics, fuzzy_threshold, 
                         filter_mode, api_batch_size, extraction_workers
                     )
+                    
+                    # Reset validation mode
+                    os.environ["GLOSSARY_SKIP_ALL_VALIDATION"] = "0"
                     
                     # Process all collected entries at once
                     if all_csv_lines:
