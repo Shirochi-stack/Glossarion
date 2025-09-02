@@ -4,6 +4,7 @@ Maintains full backward compatibility while adding proper JIT model support
 """
 
 import os
+import sys
 import json
 import numpy as np
 import cv2
@@ -18,6 +19,15 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Check if we're running in a frozen environment
+IS_FROZEN = getattr(sys, 'frozen', False)
+if IS_FROZEN:
+    MEIPASS = sys._MEIPASS
+    os.environ['TORCH_HOME'] = MEIPASS
+    os.environ['TRANSFORMERS_CACHE'] = os.path.join(MEIPASS, 'transformers')
+    os.environ['HF_HOME'] = os.path.join(MEIPASS, 'huggingface')
+    logger.info(f"Running in frozen environment: {MEIPASS}")
+
 # Environment variables for ONNX
 ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'onnx_cache')
 AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true'
@@ -25,33 +35,55 @@ SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'tr
 FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
 CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting'))
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-    TORCH_AVAILABLE = True
-    BaseModel = nn.Module
-except ImportError:
-    TORCH_AVAILABLE = False
-    BaseModel = object
-    torch = None
-    nn = None
-    F = None
-    logger.warning("PyTorch not available")
+# Modified import handling for frozen environment
+TORCH_AVAILABLE = False
+torch = None
+nn = None
+F = None
+BaseModel = object
 
+if IS_FROZEN:
+    # In frozen environment, try harder to import
+    try:
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        TORCH_AVAILABLE = True
+        BaseModel = nn.Module
+        logger.info("✓ PyTorch loaded in frozen environment")
+    except Exception as e:
+        logger.warning(f"PyTorch not available in frozen environment: {e}")
+        logger.info("💡 Inpainting will use OpenCV fallback methods")
+else:
+    # Normal environment
+    try:
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        TORCH_AVAILABLE = True
+        BaseModel = nn.Module
+    except ImportError:
+        TORCH_AVAILABLE = False
+        logger.warning("PyTorch not available - will use OpenCV fallback")
+
+# ONNX Runtime - usually works well in frozen environments
+ONNX_AVAILABLE = False
 try:
     import onnx
     import onnxruntime as ort
     ONNX_AVAILABLE = True
+    logger.info("✓ ONNX Runtime available")
 except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
 
+# Bubble detector - optional
+BUBBLE_DETECTOR_AVAILABLE = False
 try:
     from bubble_detector import BubbleDetector
     BUBBLE_DETECTOR_AVAILABLE = True
+    logger.info("✓ Bubble detector available")
 except ImportError:
-    BUBBLE_DETECTOR_AVAILABLE = False
     logger.info("Bubble detector not available - basic inpainting will be used")
 
 
