@@ -14,7 +14,6 @@ import traceback
 import re
 import hashlib
 import urllib.request
-import gc
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -634,45 +633,10 @@ class LocalInpainter:
             # Clear previous model if force reload
             if force_reload:
                 logger.info(f"🔄 Force reloading {method} model...")
-                
-                # Properly clear existing model
-                if self.model is not None:
-                    if TORCH_AVAILABLE and torch is not None and hasattr(self.model, 'cpu'):
-                        try:
-                            self.model.cpu()
-                        except:
-                            pass
-                    del self.model
-                    self.model = None
-                
-                # Clear ONNX session
-                if self.onnx_session is not None:
-                    del self.onnx_session
-                    self.onnx_session = None
-                
-                # Clear GPU cache if using PyTorch
-                if TORCH_AVAILABLE and torch is not None:
-                    try:
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            torch.cuda.synchronize()
-                            logger.info("   Cleared GPU cache")
-                    except:
-                        pass
-                
-                # Force garbage collection for CPU memory
-                import gc
-                gc.collect()
-                
-                # Reset flags
+                self.model = None
+                self.onnx_session = None
                 self.model_loaded = False
                 self.is_jit_model = False
-                self.use_onnx = False
-                self.current_method = None
-                
-                # Small delay to ensure cleanup
-                import time
-                time.sleep(0.1)
             
             logger.info(f"📥 Loading {method} from {model_path}")
             
@@ -792,50 +756,6 @@ class LocalInpainter:
             logger.info("This is normal for lightweight builds - inpainting will be disabled")
             self.model_loaded = False
             return False
-
-    def cleanup(self):
-        """Properly cleanup and release all resources"""
-        logger.info("🧹 Cleaning up LocalInpainter resources...")
-        
-        # Clear model
-        if self.model is not None:
-            if TORCH_AVAILABLE and torch is not None and hasattr(self.model, 'cpu'):
-                try:
-                    self.model.cpu()
-                except:
-                    pass
-            del self.model
-            self.model = None
-        
-        # Clear ONNX
-        if self.onnx_session is not None:
-            del self.onnx_session
-            self.onnx_session = None
-        
-        # Clear bubble detector
-        if self.bubble_detector is not None:
-            if hasattr(self.bubble_detector, 'cleanup'):
-                self.bubble_detector.cleanup()
-            del self.bubble_detector
-            self.bubble_detector = None
-        
-        # Clear GPU cache
-        if TORCH_AVAILABLE and torch is not None:
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    logger.info("   GPU cache cleared")
-            except:
-                pass
-        
-        self.model_loaded = False
-        self.bubble_model_loaded = False
-        self.current_method = None
-        self.is_jit_model = False
-        self.use_onnx = False
-        
-        logger.info("✅ Cleanup complete")
     
     def pad_img_to_modulo(self, img: np.ndarray, mod: int) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """Pad image to be divisible by mod"""
