@@ -577,28 +577,32 @@ class MangaTranslator:
             
             # Route to appropriate provider
             if self.ocr_provider == 'google':
-                # [YOUR EXISTING GOOGLE CLOUD VISION CODE HERE - keep it exactly as is]
                 # Create Vision API image object
                 image = vision.Image(content=processed_image_data)
+                
+                # Build image context with all parameters
+                image_context = vision.ImageContext(
+                    language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                )
+                
+                # Add text detection params if available in your API version
+                if hasattr(vision, 'TextDetectionParams'):
+                    image_context.text_detection_params = vision.TextDetectionParams(
+                        enable_text_detection_confidence_score=True
+                    )
                 
                 # Configure text detection based on settings
                 detection_mode = ocr_settings.get('text_detection_mode', 'document')
                 
                 if detection_mode == 'document':
-                    # Perform document text detection (better for manga/dense text)
                     response = self.vision_client.document_text_detection(
                         image=image,
-                        image_context=vision.ImageContext(
-                            language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
-                        )
+                        image_context=image_context
                     )
                 else:
-                    # Regular text detection
                     response = self.vision_client.text_detection(
                         image=image,
-                        image_context=vision.ImageContext(
-                            language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
-                        )
+                        image_context=image_context
                     )
                 
                 if response.error.message:
@@ -655,7 +659,7 @@ class MangaTranslator:
                         )
                         regions.append(region)
                         self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
-                        
+            #            
             elif self.ocr_provider == 'azure':
                 import io
                 import time
@@ -676,50 +680,95 @@ class MangaTranslator:
                 # Create stream from image data
                 image_stream = io.BytesIO(processed_image_data)
                 
+                # Get Azure-specific settings
+                reading_order = ocr_settings.get('azure_reading_order', 'natural')  # 'basic' or 'natural'
+                model_version = ocr_settings.get('azure_model_version', 'latest')
+                max_wait = ocr_settings.get('azure_max_wait', 60)
+                poll_interval = ocr_settings.get('azure_poll_interval', 0.5)
+                
                 # Map language hints to Azure language codes
                 language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                
+                # Build parameters dictionary
+                read_params = {
+                    'raw': True,
+                    'readingOrder': reading_order
+                }
+                
+                # Add model version if not using latest
+                if model_version != 'latest':
+                    read_params['model-version'] = model_version
                 
                 # Use language parameter only if single language is selected
                 if len(language_hints) == 1:
                     azure_lang = language_hints[0]
                     # Map to Azure language codes
-                    if azure_lang == 'zh':
-                        azure_lang = 'zh-Hans'
-                    elif azure_lang == 'zh-TW':
-                        azure_lang = 'zh-Hant'
-                    # ja and ko stay the same
-                    
-                    self._log(f"   Using Azure Read API with language: {azure_lang}")
-                    read_response = self.vision_client.read_in_stream(
-                        image_stream,
-                        raw=True,
-                        language=azure_lang
-                    )
+                    lang_mapping = {
+                        'zh': 'zh-Hans',
+                        'zh-TW': 'zh-Hant',
+                        'zh-CN': 'zh-Hans',
+                        'ja': 'ja',
+                        'ko': 'ko',
+                        'en': 'en'
+                    }
+                    azure_lang = lang_mapping.get(azure_lang, azure_lang)
+                    read_params['language'] = azure_lang
+                    self._log(f"   Using Azure Read API with language: {azure_lang}, order: {reading_order}")
                 else:
-                    # Multiple languages selected - use auto-detect
-                    self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages)")
+                    self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages, order: {reading_order})")
+                
+                # Start Read operation with error handling
+                try:
                     read_response = self.vision_client.read_in_stream(
                         image_stream,
-                        raw=True
+                        **read_params
                     )
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'Bad Request' in error_msg:
+                        self._log("❌ Azure Read API Bad Request - retrying without language parameter", "error")
+                        # Retry without language parameter
+                        image_stream.seek(0)
+                        read_params.pop('language', None)
+                        read_response = self.vision_client.read_in_stream(
+                            image_stream,
+                            **read_params
+                        )
+                    else:
+                        raise
                 
                 # Get operation ID
                 operation_location = read_response.headers["Operation-Location"]
                 operation_id = operation_location.split("/")[-1]
                 
-                # Poll for results
-                self._log("   Waiting for Azure OCR to complete...")
-                max_wait = 60
+                # Poll for results with configurable timeout
+                self._log(f"   Waiting for Azure OCR to complete (max {max_wait}s)...")
                 wait_time = 0
+                last_status = None
+                
                 while wait_time < max_wait:
                     result = self.vision_client.get_read_result(operation_id)
+                    
+                    # Log status changes
+                    if result.status != last_status:
+                        self._log(f"   Status: {result.status}")
+                        last_status = result.status
+                    
                     if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
                         break
-                    time.sleep(0.5)
-                    wait_time += 0.5
+                    
+                    time.sleep(poll_interval)
+                    wait_time += poll_interval
                 
                 if result.status == OperationStatusCodes.succeeded:
-                    for page in result.analyze_result.read_results:
+                    # Track statistics
+                    total_lines = 0
+                    handwritten_lines = 0
+                    
+                    for page_num, page in enumerate(result.analyze_result.read_results):
+                        if len(result.analyze_result.read_results) > 1:
+                            self._log(f"   Processing page {page_num + 1}/{len(result.analyze_result.read_results)}")
+                        
                         for line in page.lines:
                             # Azure provides 8-point bounding box
                             bbox = line.bounding_box
@@ -736,15 +785,36 @@ class MangaTranslator:
                             x_min, x_max = min(xs), max(xs)
                             y_min, y_max = min(ys), max(ys)
                             
-                            # Calculate average confidence from word-level data
-                            if hasattr(line, 'words') and line.words:
-                                total_confidence = sum(word.confidence for word in line.words)
-                                confidence = total_confidence / len(line.words)
-                            else:
-                                # Fallback if no word-level confidence available
-                                confidence = 0.95
+                            # Calculate confidence from word-level data
+                            confidence = 0.95  # Default high confidence
                             
-                            # Respect the same confidence threshold as Google
+                            if hasattr(line, 'words') and line.words:
+                                # Calculate average confidence from words
+                                confidences = []
+                                for word in line.words:
+                                    if hasattr(word, 'confidence'):
+                                        confidences.append(word.confidence)
+                                
+                                if confidences:
+                                    confidence = sum(confidences) / len(confidences)
+                                    self._log(f"   Line has {len(line.words)} words, avg confidence: {confidence:.3f}")
+                            
+                            # Check for handwriting style (if available)
+                            style = 'print'  # Default
+                            style_confidence = None
+                            
+                            if hasattr(line, 'appearance') and line.appearance:
+                                if hasattr(line.appearance, 'style'):
+                                    style_info = line.appearance.style
+                                    if hasattr(style_info, 'name'):
+                                        style = style_info.name
+                                        if style == 'handwriting':
+                                            handwritten_lines += 1
+                                    if hasattr(style_info, 'confidence'):
+                                        style_confidence = style_info.confidence
+                                        self._log(f"   Style: {style} (confidence: {style_confidence:.2f})")
+                            
+                            # Apply confidence threshold filtering
                             if confidence >= confidence_threshold:
                                 region = TextRegion(
                                     text=line.text,
@@ -753,12 +823,40 @@ class MangaTranslator:
                                     confidence=confidence,
                                     region_type='text_line'
                                 )
+                                
+                                # Add extra attributes for Azure-specific info
+                                region.style = style
+                                region.style_confidence = style_confidence
+                                
                                 regions.append(region)
-                                self._log(f"   Found text region ({confidence:.2f}): {line.text[:50]}...")
+                                total_lines += 1
+                                
+                                # More detailed logging
+                                if style == 'handwriting':
+                                    self._log(f"   Found handwritten text ({confidence:.2f}): {line.text[:50]}...")
+                                else:
+                                    self._log(f"   Found text region ({confidence:.2f}): {line.text[:50]}...")
                             else:
                                 self._log(f"   Skipping low confidence text ({confidence:.2f}): {line.text[:30]}...")
+                    
+                    # Log summary statistics
+                    if total_lines > 0:
+                        self._log(f"   Total lines detected: {total_lines}")
+                        if handwritten_lines > 0:
+                            self._log(f"   Handwritten lines: {handwritten_lines} ({handwritten_lines/total_lines*100:.1f}%)")
+                    
+                elif result.status == OperationStatusCodes.failed:
+                    # More detailed error handling
+                    error_msg = "Azure OCR failed"
+                    if hasattr(result, 'message'):
+                        error_msg += f": {result.message}"
+                    if hasattr(result.analyze_result, 'errors') and result.analyze_result.errors:
+                        for error in result.analyze_result.errors:
+                            self._log(f"   Error: {error}", "error")
+                    raise Exception(error_msg)
                 else:
-                    raise Exception(f"Azure OCR failed with status: {result.status}")
+                    # Timeout or other status
+                    raise Exception(f"Azure OCR ended with status: {result.status} after {wait_time}s")
             else:
                 raise ValueError(f"Unknown OCR provider: {self.ocr_provider}")
             
