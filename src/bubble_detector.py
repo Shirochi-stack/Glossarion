@@ -11,7 +11,6 @@ from typing import List, Tuple, Optional, Dict, Any
 import logging
 import traceback
 import hashlib
-import gc
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -233,46 +232,11 @@ class BubbleDetector:
             
             # Clear previous model if force reload
             if force_reload:
-                logger.info(f"🔄 Force reloading {method} model...")
-                
-                # Properly clear existing model
-                if self.model is not None:
-                    if TORCH_AVAILABLE and torch is not None and hasattr(self.model, 'cpu'):
-                        try:
-                            self.model.cpu()
-                        except:
-                            pass
-                    del self.model
-                    self.model = None
-                
-                # Clear ONNX session
-                if self.onnx_session is not None:
-                    del self.onnx_session
-                    self.onnx_session = None
-                
-                # Clear GPU cache if using PyTorch
-                if TORCH_AVAILABLE and torch is not None:
-                    try:
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            torch.cuda.synchronize()
-                            logger.info("   Cleared GPU cache")
-                    except:
-                        pass
-                
-                # Force garbage collection for CPU memory
-                import gc
-                gc.collect()
-                
-                # Reset flags
+                logger.info("Force reloading model...")
+                self.model = None
+                self.onnx_session = None
                 self.model_loaded = False
-                self.is_jit_model = False
-                self.use_onnx = False
-                self.current_method = None
-                
-                # Small delay to ensure cleanup
-                import time
-                time.sleep(0.1)
+                self.model_type = None
             
             logger.info(f"📥 Loading bubble detection model: {model_path}")
             
@@ -379,51 +343,6 @@ class BubbleDetector:
             logger.info("This is normal for lightweight builds - bubble detection will be disabled")
             
             return False
-
-    def cleanup(self):
-        """Cleanup all loaded models and free memory"""
-        logger.info("🧹 Cleaning up BubbleDetector...")
-        
-        # Clear YOLO model
-        if self.model is not None:
-            if TORCH_AVAILABLE and hasattr(self.model, 'to'):
-                try:
-                    self.model.to('cpu')
-                except:
-                    pass
-            del self.model
-            self.model = None
-        
-        # Clear ONNX
-        if self.onnx_session is not None:
-            del self.onnx_session
-            self.onnx_session = None
-        
-        # Clear RT-DETR
-        if self.rtdetr_model is not None:
-            if TORCH_AVAILABLE and hasattr(self.rtdetr_model, 'cpu'):
-                try:
-                    self.rtdetr_model.cpu()
-                except:
-                    pass
-            del self.rtdetr_model
-            self.rtdetr_model = None
-        
-        if self.rtdetr_processor is not None:
-            del self.rtdetr_processor
-            self.rtdetr_processor = None
-        
-        # Clear GPU cache
-        if TORCH_AVAILABLE and torch is not None:
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except:
-                pass
-        
-        self.model_loaded = False
-        self.rtdetr_loaded = False
-        logger.info("✅ BubbleDetector cleanup complete")
     
     def load_rtdetr_model(self, model_path: str = None, model_id: str = None, force_reload: bool = False) -> bool:
         """
@@ -1211,4 +1130,3 @@ if __name__ == "__main__":
         print("  python bubble_detector.py download")
         print("  python bubble_detector.py detect <model_path> <image_path> [output_path]")
         print("  python bubble_detector.py test-both <image_path>")
-
