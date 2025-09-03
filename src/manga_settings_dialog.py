@@ -1817,6 +1817,15 @@ class MangaSettingsDialog:
         self.settings['ocr']['azure_max_wait'] = self.azure_max_wait.get()
         self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
         
+        # Save the detector type as the backend expects
+        detector_display = self.detector_type.get()
+        if 'RT-DETR' in detector_display:
+            self.settings['ocr']['detector_type'] = 'rtdetr'
+        elif 'YOLOv8' in detector_display:
+            self.settings['ocr']['detector_type'] = 'yolo'
+        else:
+            self.settings['ocr']['detector_type'] = 'auto'
+        
         # Inpainting settings
         if hasattr(self, 'inpaint_batch_size'):
             if 'inpainting' not in self.settings:
