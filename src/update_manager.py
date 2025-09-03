@@ -446,27 +446,34 @@ class UpdateManager:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill='x', pady=(10, 0))
         
-        if self.update_available:
-            def start_download():
-                if not self.selected_asset:
-                    messagebox.showerror("No File Selected", 
-                                       "Please select a version to download.")
-                    return
-                    
-                self.progress_frame.pack(fill='x', pady=(0, 10), before=button_frame)
-                download_btn.config(state='disabled')
+        def start_download():
+            if not self.selected_asset:
+                messagebox.showerror("No File Selected", 
+                                   "Please select a version to download.")
+                return
+                
+            self.progress_frame.pack(fill='x', pady=(0, 10), before=button_frame)
+            download_btn.config(state='disabled')
+            if remind_btn:
                 remind_btn.config(state='disabled')
+            if skip_btn:
                 skip_btn.config(state='disabled')
-                
-                # Reset progress
-                self.progress_bar['value'] = 0
-                self.download_progress = 0
-                
-                # Start download in background thread
-                thread = threading.Thread(target=self.download_update, 
-                                        args=(dialog,), daemon=True)
-                thread.start()
             
+            # Reset progress
+            self.progress_bar['value'] = 0
+            self.download_progress = 0
+            
+            # Start download in background thread
+            thread = threading.Thread(target=self.download_update, 
+                                    args=(dialog,), daemon=True)
+            thread.start()
+        
+        # Initialize these as None in case we don't create them
+        remind_btn = None
+        skip_btn = None
+        
+        if self.update_available:
+            # Show update-specific buttons
             download_btn = tb.Button(button_frame, text="Download Update", 
                                    command=start_download, bootstyle="success")
             download_btn.pack(side='left', padx=(0, 5))
@@ -480,10 +487,16 @@ class UpdateManager:
                                bootstyle="link")
             skip_btn.pack(side='left', padx=5)
         else:
-            # We're up to date - just show close button
+            # We're up to date - show download button if exe files are available
+            if self.selected_asset or (self.latest_release and 
+                                      any(a['name'].endswith('.exe') for a in self.latest_release.get('assets', []))):
+                download_btn = tb.Button(button_frame, text="Download", 
+                                       command=start_download, bootstyle="primary")
+                download_btn.pack(side='left', padx=(0, 5))
+            
             tb.Button(button_frame, text="Close", 
                      command=dialog.destroy, 
-                     bootstyle="primary").pack(side='left', padx=(0, 5))
+                     bootstyle="secondary").pack(side='left', padx=(0, 5))
         
         # Add "View All Releases" link button
         def open_releases_page():
