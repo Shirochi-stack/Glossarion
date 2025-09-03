@@ -186,6 +186,9 @@ class MangaTranslator:
             '}\n\n'
             'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
+
+        # Visual context setting (for non-vision model support)
+        self.visual_context_enabled = main_gui.config.get('manga_visual_context_enabled', True)
         
         # Store context for contextual translation (backwards compatibility)
         self.translation_context = []
@@ -658,27 +661,47 @@ class MangaTranslator:
                 import time
                 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
                 
+                # Check if image needs format conversion for Azure
+                file_ext = os.path.splitext(image_path)[1].lower()
+                azure_supported_formats = ['.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.tiff']
+                
+                if file_ext == '.webp' or file_ext not in azure_supported_formats:
+                    self._log(f"⚠️ Converting {file_ext} to PNG for Azure compatibility")
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(processed_image_data))
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='PNG')
+                    processed_image_data = buffer.getvalue()
+                
                 # Create stream from image data
                 image_stream = io.BytesIO(processed_image_data)
                 
                 # Map language hints to Azure language codes
                 language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
-                azure_lang = 'ja'  # Default
-                if 'ja' in language_hints:
-                    azure_lang = 'ja'
-                elif 'zh' in language_hints:
-                    azure_lang = 'zh-Hans'
-                elif 'ko' in language_hints:
-                    azure_lang = 'ko'
                 
-                self._log(f"   Using Azure Read API with language: {azure_lang}")
-                
-                # Start Read operation
-                read_response = self.vision_client.read_in_stream(
-                    image_stream,
-                    raw=True,
-                    language=azure_lang
-                )
+                # Use language parameter only if single language is selected
+                if len(language_hints) == 1:
+                    azure_lang = language_hints[0]
+                    # Map to Azure language codes
+                    if azure_lang == 'zh':
+                        azure_lang = 'zh-Hans'
+                    elif azure_lang == 'zh-TW':
+                        azure_lang = 'zh-Hant'
+                    # ja and ko stay the same
+                    
+                    self._log(f"   Using Azure Read API with language: {azure_lang}")
+                    read_response = self.vision_client.read_in_stream(
+                        image_stream,
+                        raw=True,
+                        language=azure_lang
+                    )
+                else:
+                    # Multiple languages selected - use auto-detect
+                    self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages)")
+                    read_response = self.vision_client.read_in_stream(
+                        image_stream,
+                        raw=True
+                    )
                 
                 # Get operation ID
                 operation_location = read_response.headers["Operation-Location"]
@@ -686,7 +709,7 @@ class MangaTranslator:
                 
                 # Poll for results
                 self._log("   Waiting for Azure OCR to complete...")
-                max_wait = 30  # Maximum 30 seconds
+                max_wait = 60
                 wait_time = 0
                 while wait_time < max_wait:
                     result = self.vision_client.get_read_result(operation_id)
@@ -713,19 +736,27 @@ class MangaTranslator:
                             x_min, x_max = min(xs), max(xs)
                             y_min, y_max = min(ys), max(ys)
                             
-                            # Azure Read API is highly accurate, use high confidence
-                            confidence = 0.95
+                            # Calculate average confidence from word-level data
+                            if hasattr(line, 'words') and line.words:
+                                total_confidence = sum(word.confidence for word in line.words)
+                                confidence = total_confidence / len(line.words)
+                            else:
+                                # Fallback if no word-level confidence available
+                                confidence = 0.95
                             
+                            # Respect the same confidence threshold as Google
                             if confidence >= confidence_threshold:
                                 region = TextRegion(
                                     text=line.text,
                                     vertices=vertices,
                                     bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
                                     confidence=confidence,
-                                    region_type='text_line'  # Azure returns lines
+                                    region_type='text_line'
                                 )
                                 regions.append(region)
-                                self._log(f"   Found text region (0.95): {line.text[:50]}...")
+                                self._log(f"   Found text region ({confidence:.2f}): {line.text[:50]}...")
+                            else:
+                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {line.text[:30]}...")
                 else:
                     raise Exception(f"Azure OCR failed with status: {result.status}")
             else:
@@ -1232,17 +1263,21 @@ class MangaTranslator:
             
             # Get system prompt from GUI profile
             profile_name = self.main_gui.profile_var.get()
-            
-            # The main GUI stores prompts directly as attributes, not in a dictionary
-            if profile_name == "Manga_JP":
-                system_prompt = getattr(self.main_gui, 'Manga_JP', '')
-            elif profile_name == "Manga_KR":
-                system_prompt = getattr(self.main_gui, 'Manga_KR', '')
-            elif profile_name == "Manga_CN":
-                system_prompt = getattr(self.main_gui, 'Manga_CN', '')
+
+            # Get the prompt from prompt_profiles dictionary
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                self._log(f"📋 Using profile: {profile_name}")
             else:
-                # For other profiles, try to get from PROFILES dict
-                system_prompt = self.main_gui.PROFILES.get(profile_name, {}).get('system_prompt', '')
+                self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
+
+            self._log(f"📝 System prompt: {system_prompt[:100]}..." if system_prompt else "📝 No system prompt configured")
+
+            if system_prompt:
+                messages = [{"role": "system", "content": system_prompt}]
+            else:
+                messages = []
             
             self._log(f"📋 Using profile: {profile_name}")
             if system_prompt:
@@ -1266,8 +1301,8 @@ class MangaTranslator:
             else:
                 self._log(f"🔗 Contextual: {'Disabled' if not self.contextual_enabled else 'No HistoryManager'}")
             
-            # Add full image context if available
-            if image_path:
+            # Add full image context if available AND visual context is enabled
+            if image_path and self.visual_context_enabled:
                 try:
                     import base64
                     from PIL import Image as PILImage
@@ -1336,7 +1371,6 @@ class MangaTranslator:
                         ]
                     })
                     
-                    
                     self._log(f"✅ Added full page image as visual context")
                     
                 except Exception as e:
@@ -1346,13 +1380,15 @@ class MangaTranslator:
                     self._log(traceback.format_exc(), "warning")
                     # Fall back to text-only translation
                     messages.append({"role": "user", "content": text})
+            elif image_path and not self.visual_context_enabled:
+                # Visual context disabled - text-only mode
+                self._log(f"📝 Text-only mode (visual context disabled)")
+                messages.append({"role": "user", "content": text})
             else:
-                # Text-only translation
+                # No image path provided - text-only translation
                 messages.append({"role": "user", "content": text})
             
             # Check input token limit
-            # For Gemini, images cost approximately 258 tokens per image (for Gemini 1.5)
-            # Text tokens are roughly 1 token per 4 characters
             text_tokens = 0
             image_tokens = 0
 
@@ -1366,10 +1402,9 @@ class MangaTranslator:
                         if content_part.get("type") == "text":
                             text_tokens += len(content_part.get("text", "")) // 4
                         elif content_part.get("type") == "image_url":
-                            # Gemini charges a flat rate per image regardless of size
-                            # For Gemini 1.5 Flash: 258 tokens per image
-                            # For Gemini 1.5 Pro: 258 tokens per image
-                            image_tokens += 258
+                            # Only count image tokens if visual context is enabled
+                            if self.visual_context_enabled:
+                                image_tokens += 258
 
             estimated_tokens = text_tokens + image_tokens
 
@@ -1581,6 +1616,10 @@ class MangaTranslator:
             # Get system prompt from GUI profile
             profile_name = self.main_gui.profile_var.get()
             
+            # Ensure visual_context_enabled exists (temporary fix)
+            if not hasattr(self, 'visual_context_enabled'):
+                self.visual_context_enabled = self.main_gui.config.get('manga_visual_context_enabled', True)
+            
             # Try to get the prompt from prompt_profiles dictionary (for all profiles including custom ones)
             system_prompt = ''
             if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
@@ -1628,81 +1667,87 @@ class MangaTranslator:
             if self._check_stop():
                 self._log("⏹️ Translation stopped before image processing", "warning")
                 return {}
+            
+            # Create the full context message text
+            context_text = "\n".join(text_list)
+            
+            # Log text content info
+            total_chars = sum(len(region.text) for region in regions)
+            self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
+            
+            # Process image if visual context is enabled
+            if self.visual_context_enabled:
+                try:
+                    import base64
+                    from PIL import Image as PILImage
                     
-            # Create the request with image
-            try:
-                import base64
-                from PIL import Image as PILImage
-                
-                self._log(f"📷 Adding full page visual context for translation")
-                
-                # Read and encode the image
-                with open(image_path, 'rb') as img_file:
-                    img_data = img_file.read()
-                
-                # Check image size
-                img_size_mb = len(img_data) / (1024 * 1024)
-                self._log(f"📊 Image size: {img_size_mb:.2f} MB")
-                
-                # Get image dimensions
-                pil_image = PILImage.open(image_path)
-                self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
-     
-                # CHECK 4: Before resizing (which can take time)
-                if self._check_stop():
-                    self._log("⏹️ Translation stopped during image preparation", "warning")
-                    return {}
-                
-                # Resize if needed
-                if img_size_mb > 10:
-                    self._log(f"📉 Resizing large image for API limits...")
-                    max_size = 2048
-                    ratio = min(max_size / pil_image.width, max_size / pil_image.height)
-                    if ratio < 1:
-                        new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
-                        pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
-                        from io import BytesIO
-                        buffered = BytesIO()
-                        pil_image.save(buffered, format="PNG", optimize=True)
-                        img_data = buffered.getvalue()
-                        self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
-                
-                # Convert to base64
-                img_b64 = base64.b64encode(img_data).decode('utf-8')
-                
-                # Create the full context message
-                context_text = "\n".join(text_list)
-                
-                # Log text content info
-                total_chars = sum(len(region.text) for region in regions)
-                self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
-                
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": context_text},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                    ]
-                })
-                
-                self._log(f"✅ Added full page image as visual context")
-                
-            except Exception as e:
-                self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
-                self._log(f"   Error type: {type(e).__name__}", "warning")
-                import traceback
-                self._log(traceback.format_exc(), "warning")
-                # Fall back to text-only translation
+                    self._log(f"📷 Adding full page visual context for translation")
+                    
+                    # Read and encode the image
+                    with open(image_path, 'rb') as img_file:
+                        img_data = img_file.read()
+                    
+                    # Check image size
+                    img_size_mb = len(img_data) / (1024 * 1024)
+                    self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                    
+                    # Get image dimensions
+                    pil_image = PILImage.open(image_path)
+                    self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
+                    
+                    # CHECK 4: Before resizing (which can take time)
+                    if self._check_stop():
+                        self._log("⏹️ Translation stopped during image preparation", "warning")
+                        return {}
+                    
+                    # Resize if needed
+                    if img_size_mb > 10:
+                        self._log(f"📉 Resizing large image for API limits...")
+                        max_size = 2048
+                        ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                        if ratio < 1:
+                            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                            pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                            from io import BytesIO
+                            buffered = BytesIO()
+                            pil_image.save(buffered, format="PNG", optimize=True)
+                            img_data = buffered.getvalue()
+                            self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                    
+                    # Convert to base64
+                    img_b64 = base64.b64encode(img_data).decode('utf-8')
+                    
+                    # Create message with both text and image
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": context_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                        ]
+                    })
+                    
+                    self._log(f"✅ Added full page image as visual context")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                    self._log(f"   Error type: {type(e).__name__}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "warning")
+                    self._log(f"   Falling back to text-only translation", "warning")
+                    
+                    # Fall back to text-only translation
+                    messages.append({"role": "user", "content": context_text})
+            else:
+                # Visual context disabled - send text only
+                self._log(f"📝 Text-only mode (visual context disabled for non-vision models)")
                 messages.append({"role": "user", "content": context_text})
-
+            
             # CHECK 5: Before API call
             if self._check_stop():
                 self._log("⏹️ Translation stopped before API call", "warning")
                 return {}
             
             # Check input token limit
-            # For Gemini, images cost approximately 258 tokens per image (for Gemini 1.5)
-            # Text tokens are roughly 1 token per 4 characters
             text_tokens = 0
             image_tokens = 0
 
@@ -1716,10 +1761,9 @@ class MangaTranslator:
                         if content_part.get("type") == "text":
                             text_tokens += len(content_part.get("text", "")) // 4
                         elif content_part.get("type") == "image_url":
-                            # Gemini charges a flat rate per image regardless of size
-                            # For Gemini 1.5 Flash: 258 tokens per image
-                            # For Gemini 1.5 Pro: 258 tokens per image
-                            image_tokens += 258
+                            # Only count image tokens if visual context is enabled
+                            if self.visual_context_enabled:
+                                image_tokens += 258
 
             estimated_tokens = text_tokens + image_tokens
 
@@ -1731,13 +1775,20 @@ class MangaTranslator:
                 
                 if estimated_tokens > self.input_token_limit:
                     self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
-                    # Keep system prompt, image, and current text only
+                    # Keep system prompt and current message only
                     messages = [messages[0], messages[-1]]  
                     # Recalculate tokens
-                    text_tokens = len(messages[0]["content"]) // 4 + len(context_text) // 4
+                    text_tokens = len(messages[0]["content"]) // 4
+                    if isinstance(messages[-1]["content"], str):
+                        text_tokens += len(messages[-1]["content"]) // 4
+                    else:
+                        for content_part in messages[-1]["content"]:
+                            if content_part.get("type") == "text":
+                                text_tokens += len(content_part.get("text", "")) // 4
                     estimated_tokens = text_tokens + image_tokens
                     self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
             
+            # [Rest of the method remains the same - API call, response handling, etc.]
             # Make API call using the client's send method (matching translate_text)
             self._log(f"🌐 Sending full page context to API...")
             self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
@@ -2029,7 +2080,6 @@ class MangaTranslator:
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
             return {}
-
                 
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Create mask only for regions marked for inpainting"""
