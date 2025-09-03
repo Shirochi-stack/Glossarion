@@ -47,7 +47,7 @@ class MangaSettingsDialog:
             },
             'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
-                'confidence_threshold': 0.8,
+                'confidence_threshold': 0.7,
                 'merge_nearby_threshold': 20,
                 'azure_merge_multiplier': 3.0,
                 'text_detection_mode': 'document',
@@ -152,7 +152,7 @@ class MangaSettingsDialog:
             self.scale_frame,
             from_=0.5,
             to=2.0,
-            resolution=0.1,
+            resolution=0.01,
             orient=tk.HORIZONTAL,
             variable=self.font_scale_var,
             length=200,
@@ -437,7 +437,7 @@ class MangaSettingsDialog:
         contrast_scale = tk.Scale(
             contrast_frame,
             from_=0.1, to=1.0,
-            resolution=0.1,
+            resolution=0.01,
             orient='horizontal',
             variable=self.contrast_threshold,
             length=250
@@ -460,7 +460,7 @@ class MangaSettingsDialog:
         sharpness_scale = tk.Scale(
             sharpness_frame,
             from_=0.1, to=1.0,
-            resolution=0.1,
+            resolution=0.01,
             orient='horizontal',
             variable=self.sharpness_threshold,
             length=250
@@ -483,7 +483,7 @@ class MangaSettingsDialog:
         enhance_scale = tk.Scale(
             enhance_frame,
             from_=0.1, to=3.0,
-            resolution=0.1,
+            resolution=0.01,
             orient='horizontal',
             variable=self.enhancement_strength,
             length=250
@@ -639,157 +639,105 @@ class MangaSettingsDialog:
         tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
 
     def _create_inpainting_tab(self, notebook):
-        """Create local inpainting settings tab"""
+        """Create inpainting settings tab - general settings only"""
         frame = ttk.Frame(notebook)
         notebook.add(frame, text="Inpainting")
         
         content_frame = tk.Frame(frame)
         content_frame.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Inpainting method selection
-        method_frame = tk.LabelFrame(content_frame, text="Inpainting Method", padx=15, pady=10)
-        method_frame.pack(fill='x', padx=20, pady=20)
+        # General Mask Settings (applies to all inpainting methods)
+        mask_frame = tk.LabelFrame(content_frame, text="Mask Settings", padx=15, pady=10)
+        mask_frame.pack(fill='x', padx=20, pady=(20, 10))
         
-        self.inpaint_method_var = tk.StringVar(
-            value=self.settings.get('inpainting', {}).get('method', 'cloud')
+        # Mask dilation size
+        dilation_frame = tk.Frame(mask_frame)
+        dilation_frame.pack(fill='x', pady=5)
+        
+        tk.Label(dilation_frame, text="Mask Dilation:", width=15, anchor='w').pack(side='left')
+        self.mask_dilation_var = tk.IntVar(value=self.settings.get('mask_dilation', 15))
+        dilation_spinbox = tb.Spinbox(
+            dilation_frame,
+            from_=0,
+            to=50,
+            textvariable=self.mask_dilation_var,
+            increment=5,
+            width=10
         )
+        dilation_spinbox.pack(side='left', padx=10)
+        tk.Label(dilation_frame, text="pixels (expand mask beyond text)").pack(side='left')
         
-        methods = [
-            ('cloud', 'Cloud API (Replicate)', 'Use cloud-based inpainting'),
-            ('local', 'Local Model', 'Use local ONNX/PyTorch models'),
-            ('hybrid', 'Hybrid Ensemble', 'Combine multiple methods'),
-        ]
+        # Dilation iterations  
+        iterations_frame = tk.Frame(mask_frame)
+        iterations_frame.pack(fill='x', pady=5)
         
-        for value, text, tooltip in methods:
-            rb = tb.Radiobutton(
-                method_frame,
-                text=text,
-                variable=self.inpaint_method_var,
-                value=value,
-                command=self._on_inpaint_method_change
-            )
-            rb.pack(anchor='w', pady=2)
-        
-        # Local model settings
-        self.local_frame = tk.LabelFrame(content_frame, text="Local Model Settings", padx=15, pady=10)
-        self.local_frame.pack(fill='x', padx=20, pady=(0, 20))
-        
-        # Local method selection
-        local_method_frame = tk.Frame(self.local_frame)
-        local_method_frame.pack(fill='x', pady=5)
-
-        tk.Label(local_method_frame, text="Model Type:", width=15, anchor='w').pack(side='left')
-
-        self.local_method_var = tk.StringVar(
-            value=self.settings.get('inpainting', {}).get('local_method', 'anime')
+        tk.Label(iterations_frame, text="Iterations:", width=15, anchor='w').pack(side='left')
+        self.dilation_iterations_var = tk.IntVar(value=self.settings.get('dilation_iterations', 2))
+        iterations_spinbox = tb.Spinbox(
+            iterations_frame,
+            from_=1,
+            to=5,
+            textvariable=self.dilation_iterations_var,
+            width=10
         )
-
-        local_methods = ttk.Combobox(
-            local_method_frame,
-            textvariable=self.local_method_var,
-            values=['aot', 'lama', 'mat', 'ollama', 'sd_local','anime'],
-            state='readonly',
-            width=20
-        )
-        local_methods.pack(side='left', padx=10)
-        # Add auto-load on selection change
-        local_methods.bind('<<ComboboxSelected>>', self._on_local_method_change)
+        iterations_spinbox.pack(side='left', padx=10)
+        tk.Label(iterations_frame, text="times (smoothing passes)").pack(side='left')
         
-        # Model path selection
-        model_path_frame = tk.Frame(self.local_frame)
-        model_path_frame.pack(fill='x', pady=5)
-
-        tk.Label(model_path_frame, text="Model File:", width=15, anchor='w').pack(side='left')
-
-        self.local_model_path = tk.StringVar()
-        self.model_path_entry = tk.Entry(
-            model_path_frame,
-            textvariable=self.local_model_path,
-            width=40,
-            state='readonly',
-            bg='#2b2b2b',  # Dark gray background
-            fg='#ffffff',  # White text
-            readonlybackground='#2b2b2b'  # Gray even when readonly
-        )
-        self.model_path_entry.pack(side='left', padx=(0, 10))
-
+        # Quick presets
+        preset_frame = tk.Frame(mask_frame)
+        preset_frame.pack(fill='x', pady=(10, 5))
+        
+        tk.Label(preset_frame, text="Quick Presets:").pack(side='left', padx=(0, 10))
+        
         tb.Button(
-            model_path_frame,
-            text="Browse",
-            command=self._browse_local_model,
-            bootstyle="primary"
-        ).pack(side='left')
-
-        # Store the download button as an instance attribute
-        self.download_btn = tb.Button(
-            model_path_frame,
-            text="Download",
-            command=self._download_model,
-            bootstyle="info"
-        )
-        self.download_btn.pack(side='left', padx=(5, 0))
-
-        # Optional: Add help button
-        tb.Button(
-            model_path_frame,
-            text="?",
-            command=self._show_model_info,
+            preset_frame,
+            text="Tight",
+            command=lambda: self._set_mask_preset(5, 1),
             bootstyle="secondary",
-            width=3
-        ).pack(side='left', padx=(5, 0))
+            width=9
+        ).pack(side='left', padx=2)
         
-        # Model status
-        self.model_status_label = tk.Label(
-            self.local_frame,
-            text="",
-            font=('Arial', 9)
-        )
-        self.model_status_label.pack(anchor='w', pady=(5, 0))
+        tb.Button(
+            preset_frame,
+            text="Standard",
+            command=lambda: self._set_mask_preset(15, 2),
+            bootstyle="secondary",
+            width=9
+        ).pack(side='left', padx=2)
         
-        # Ollama settings (if Ollama selected)
-        self.ollama_frame = tk.Frame(self.local_frame)
+        tb.Button(
+            preset_frame,
+            text="Aggressive",
+            command=lambda: self._set_mask_preset(25, 3),
+            bootstyle="secondary",
+            width=9
+        ).pack(side='left', padx=2)
         
-        ollama_info = tk.Label(
-            self.ollama_frame,
-            text="Ollama uses vision models for context-aware inpainting.\n"
-                 "Make sure Ollama is running: ollama serve\n"
-                 "Install vision model: ollama pull llava",
-            font=('Arial', 9),
-            fg='gray'
-        )
-        ollama_info.pack(anchor='w', pady=10)
+        tb.Button(
+            preset_frame,
+            text="Extra Wide",
+            command=lambda: self._set_mask_preset(40, 4),
+            bootstyle="secondary",
+            width=9
+        ).pack(side='left', padx=2)
         
-        # Hybrid settings
-        self.hybrid_frame = tk.LabelFrame(content_frame, text="Hybrid Ensemble Settings", padx=15, pady=10)
-        
+        # Help text
         tk.Label(
-            self.hybrid_frame,
-            text="Select multiple models to combine their results:",
-            font=('Arial', 10)
-        ).pack(anchor='w', pady=(0, 10))
+            mask_frame,
+            text="💡 Tight: For clean backgrounds with clear text boundaries\n"
+                 "💡 Standard: General purpose, works for most manga\n"
+                 "💡 Aggressive: For complex backgrounds or stylized text\n"
+                 "💡 Extra Wide: For text with effects, gradients, or shadows",
+            font=('Arial', 9),
+            fg='gray',
+            justify='left'
+        ).pack(anchor='w', pady=(10, 0))
         
-        # List of models for hybrid
-        self.hybrid_models_frame = tk.Frame(self.hybrid_frame)
-        self.hybrid_models_frame.pack(fill='both', expand=True)
-        
-        self.hybrid_model_vars = {}
-        for method in ['aot', 'lama', 'mat','anime']:
-            var = tk.BooleanVar(value=False)
-            self.hybrid_model_vars[method] = var
-            
-            cb = tb.Checkbutton(
-                self.hybrid_models_frame,
-                text=f"Use {method.upper()} model",
-                variable=var,
-                bootstyle="round-toggle"
-            )
-            cb.pack(anchor='w', pady=2)
-        
-        # Performance settings
+        # Performance settings  
         perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
-        perf_frame.pack(fill='x', padx=20)
+        perf_frame.pack(fill='x', padx=20, pady=(10, 0))
         
-        # Batch size for local processing
+        # Batch size for processing
         batch_frame = tk.Frame(perf_frame)
         batch_frame.pack(fill='x', pady=5)
         
@@ -809,300 +757,43 @@ class MangaSettingsDialog:
         
         tk.Label(
             batch_frame,
-            text="(Higher = faster but more memory)",
+            text="(Process multiple regions at once)",
             font=('Arial', 9),
             fg='gray'
         ).pack(side='left')
         
-        # Initially show/hide based on selection
-        self._on_inpaint_method_change()
-
-
-    def _show_model_info(self):
-        """Show information about where to find models"""
-        method = self.local_method_var.get()
+        # Cache settings
+        cache_frame = tk.Frame(perf_frame)
+        cache_frame.pack(fill='x', pady=5)
         
-        info = {
-            'aot': "AOT GAN Model:\n"
-                   "• Auto-downloads from HuggingFace\n"
-                   "• Traced PyTorch model\n"
-                   "• Good for general inpainting",
-            
-            'lama': "LaMa Model:\n"
-                    "• Auto-downloads anime-optimized version\n"
-                    "• Best quality for manga/anime\n"
-                    "• Large model (~200MB)",
-            
-            'anime': "Anime-Specific Model:\n"
-                     "• Same as LaMa anime version\n"
-                     "• Optimized for manga/anime art\n"
-                     "• Auto-downloads from GitHub",
-            
-            'mat': "MAT Model:\n"
-                   "• You need to provide the URL\n"
-                   "• Get from: github.com/fenglinglwb/MAT\n"
-                   "• Good for high-resolution",
-            
-            'ollama': "Ollama:\n"
-                      "• Uses local Ollama server\n"
-                      "• No download needed here\n"
-                      "• Run: ollama pull llava",
-            
-            'sd_local': "Stable Diffusion:\n"
-                        "• You need to provide the URL\n"
-                        "• Get from HuggingFace\n"
-                        "• Requires more VRAM"
-        }
-        
-        messagebox.showinfo(f"{method.upper()} Model Info", info.get(method, "No information available"))
-    
-    def _on_inpaint_method_change(self):
-        """Show/hide relevant inpainting settings"""
-        method = self.inpaint_method_var.get()
-        
-        if method == 'local':
-            self.local_frame.pack(fill='x', padx=20, pady=(0, 20))
-            self.hybrid_frame.pack_forget()
-            self._on_local_method_change()  # Show relevant local settings
-        elif method == 'hybrid':
-            self.local_frame.pack_forget()
-            self.hybrid_frame.pack(fill='x', padx=20, pady=(0, 20))
-        else:
-            self.local_frame.pack_forget()
-            self.hybrid_frame.pack_forget()
-
-    def _on_local_method_change(self, event=None):
-        """Handle local method change and auto-load if model exists"""
-        method = self.local_method_var.get()
-        
-        # Show/hide Ollama-specific settings
-        if method == 'ollama':
-            self.ollama_frame.pack(fill='x', pady=(10, 0))
-            self.model_path_entry.config(state='disabled')
-        else:
-            self.ollama_frame.pack_forget()
-            self.model_path_entry.config(state='readonly')
-        
-        # Check if we have a saved path for this method
-        saved_path = self.settings.get('inpainting', {}).get(f'{method}_model_path', '')
-        
-        if saved_path and os.path.exists(saved_path):
-            # Update the path display
-            self.local_model_path.set(saved_path)
-            self._update_model_status()
-            
-            # Auto-load the model
-            self._try_load_model(method, saved_path)
-        else:
-            # Clear the path display
-            self.local_model_path.set("")
-            self._update_model_status()
-
-    def _browse_local_model(self):
-        """Browse for local inpainting model and auto-load"""
-        filetypes = [
-            ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
-            ("PyTorch models", "*.pt *.pth"),
-            ("Checkpoint files", "*.ckpt"),
-            ("SafeTensors", "*.safetensors"),
-            ("ONNX models", "*.onnx"),
-            ("All files", "*.*")
-        ]
-        
-        path = filedialog.askopenfilename(
-            title=f"Select {self.local_method_var.get().upper()} Model",
-            filetypes=filetypes
+        self.enable_cache_var = tk.BooleanVar(
+            value=self.settings.get('inpainting', {}).get('enable_cache', True)
         )
         
-        if path:
-            self.local_model_path.set(path)
-            self._update_model_status()
-            
-            # Auto-load the selected model
-            method = self.local_method_var.get()
-            self._try_load_model(method, path)
-            
-            # Save the path for this method
-            self.settings.get('inpainting', {})[f'{method}_model_path'] = path
+        tb.Checkbutton(
+            cache_frame,
+            text="Enable inpainting cache (speeds up repeated processing)",
+            variable=self.enable_cache_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        
+        # Note about method selection
+        info_frame = tk.Frame(content_frame)
+        info_frame.pack(fill='x', padx=20, pady=(20, 0))
+        
+        tk.Label(
+            info_frame,
+            text="ℹ️ Note: Inpainting method (Cloud/Local) and model selection are configured\n"
+                 "     in the Manga tab when you select images for translation.",
+            font=('Arial', 10),
+            fg='#4a9eff',
+            justify='left'
+        ).pack(anchor='w')
 
-    def _update_model_status(self):
-        """Update model status display"""
-        path = self.local_model_path.get()
-        
-        if not path:
-            self.model_status_label.config(text="", fg='black')
-            return
-        
-        if not os.path.exists(path):
-            self.model_status_label.config(
-                text="❌ Model file not found",
-                fg='red'
-            )
-            return
-        
-        # Check for ONNX cache
-        if path.endswith('.pt') or path.endswith('.pth'):
-            onnx_dir = os.path.join(os.path.dirname(path), 'onnx_cache')
-            if os.path.exists(onnx_dir):
-                self.model_status_label.config(
-                    text="✅ Model ready (will use cached ONNX)",
-                    fg='green'
-                )
-            else:
-                self.model_status_label.config(
-                    text="ℹ️ Will convert to ONNX on first use",
-                    fg='blue'
-                )
-        else:
-            self.model_status_label.config(
-                text="✅ ONNX model ready",
-                fg='green'
-            )
-
-    def _download_model(self):
-        """Actually download the model for the selected type"""
-        method = self.local_method_var.get()
-        
-        # Define URLs for each model type
-        model_urls = {
-            'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
-            'lama': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
-            'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
-            'mat': '',  # User must provide
-            'ollama': '',  # Not applicable
-            'sd_local': ''  # User must provide
-        }
-        
-        url = model_urls.get(method, '')
-        
-        if not url:
-            if method == 'ollama':
-                messagebox.showinfo("Ollama", "Ollama doesn't require a download. Run 'ollama pull llava' in terminal.")
-            else:
-                # Ask user for URL
-                from tkinter import simpledialog
-                url = simpledialog.askstring(
-                    f"{method.upper()} Model URL",
-                    f"Enter the download URL for {method.upper()} model:",
-                    parent=self.dialog
-                )
-                if not url:
-                    return
-        
-        # Select download location
-        default_filename = f"{method}_model.pt"
-        save_path = filedialog.asksaveasfilename(
-            title=f"Save {method.upper()} Model",
-            defaultextension=".pt",
-            initialfile=default_filename,
-            filetypes=[
-                ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
-                ("All files", "*.*")
-            ]
-        )
-        
-        if not save_path:
-            return
-        
-        # Download the model
-        self._perform_download(url, save_path, method)
-
-    def _perform_download(self, url: str, save_path: str, model_name: str):
-        """Perform the actual download with progress indication"""
-        import threading
-        import requests
-        
-        # Update button and status
-        self.download_btn.config(state='disabled', text='Downloading...')
-        self.model_status_label.config(text="⏳ Downloading...", fg='orange')
-        
-        def download_thread():
-            try:
-                # Download with progress
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                
-                with open(save_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            # Update progress
-                            if total_size > 0:
-                                progress = int((downloaded / total_size) * 100)
-                                self.dialog.after(0, lambda p=progress: 
-                                    self.model_status_label.config(
-                                        text=f"⏳ Downloading... {p}%", 
-                                        fg='orange'
-                                    ))
-                
-                # Success - update UI in main thread
-                self.dialog.after(0, self._download_complete, save_path, model_name)
-                
-            except requests.exceptions.RequestException as e:
-                # Error - update UI in main thread
-                self.dialog.after(0, self._download_failed, str(e))
-            except Exception as e:
-                self.dialog.after(0, self._download_failed, str(e))
-        
-        # Start download in background thread
-        thread = threading.Thread(target=download_thread, daemon=True)
-        thread.start()
-
-    def _try_load_model(self, method: str, model_path: str):
-        """Try to load a model and update status"""
-        try:
-            self.model_status_label.config(text="⏳ Loading model...", fg='orange')
-            self.dialog.update_idletasks()
-            
-            # Try to load using LocalInpainter
-            from local_inpainter import LocalInpainter
-            test_inpainter = LocalInpainter()
-            
-            if test_inpainter.load_model(method, model_path):
-                self.model_status_label.config(
-                    text=f"✅ {method.upper()} model loaded and ready",
-                    fg='green'
-                )
-                # Store in settings
-                if 'inpainting' not in self.settings:
-                    self.settings['inpainting'] = {}
-                self.settings['inpainting'][f'{method}_model_path'] = model_path
-            else:
-                self.model_status_label.config(
-                    text="⚠️ Model found but failed to load",
-                    fg='orange'
-                )
-        except Exception as e:
-            self.model_status_label.config(
-                text=f"❌ Error loading model: {str(e)[:50]}",
-                fg='red'
-            )
-        
-    def _download_complete(self, save_path: str, model_name: str):
-        """Handle successful download"""
-        self.download_btn.config(state='normal', text='Download')
-        self.local_model_path.set(save_path)
-        
-        # Auto-load the downloaded model
-        self._try_load_model(model_name, save_path)
-        
-        # Save the path
-        if 'inpainting' not in self.settings:
-            self.settings['inpainting'] = {}
-        self.settings['inpainting'][f'{model_name}_model_path'] = save_path
-        
-        messagebox.showinfo("Success", f"{model_name.upper()} model downloaded and loaded!")
-
-    def _download_failed(self, error: str):
-        """Handle download failure"""
-        self.download_btn.config(state='normal', text='Download')
-        self.model_status_label.config(text="❌ Download failed", fg='red')
-        messagebox.showerror("Download Failed", f"Failed to download model:\n{error}")
+    def _set_mask_preset(self, dilation, iterations):
+        """Set mask dilation preset values"""
+        self.mask_dilation_var.set(dilation)
+        self.dilation_iterations_var.set(iterations)
     
     def _create_cloud_api_tab(self, parent):
             """Create cloud API settings tab"""
@@ -1166,83 +857,6 @@ class MangaSettingsDialog:
             # Performance Settings
             perf_frame = tk.LabelFrame(frame, text="Performance Settings", padx=15, pady=10)
             perf_frame.pack(fill='x', padx=20, pady=(20, 0))
-
-            # Mask Settings
-            mask_frame = tk.LabelFrame(frame, text="Mask Settings", padx=15, pady=10)
-            mask_frame.pack(fill='x', padx=20, pady=(20, 0))
-            
-            # Mask dilation size
-            dilation_frame = tk.Frame(mask_frame)
-            dilation_frame.pack(fill='x', pady=5)
-            
-            tk.Label(dilation_frame, text="Mask Dilation:", width=15, anchor='w').pack(side='left')
-            self.mask_dilation_var = tk.IntVar(value=self.settings.get('mask_dilation', 15))
-            dilation_spinbox = tb.Spinbox(
-                dilation_frame,
-                from_=0,
-                to=50,
-                textvariable=self.mask_dilation_var,
-                increment=5,
-                width=10
-            )
-            dilation_spinbox.pack(side='left', padx=10)
-            tk.Label(dilation_frame, text="pixels (0 = exact text bounds)").pack(side='left')
-            
-            # Dilation iterations
-            iterations_frame = tk.Frame(mask_frame)
-            iterations_frame.pack(fill='x', pady=5)
-            
-            tk.Label(iterations_frame, text="Iterations:", width=15, anchor='w').pack(side='left')
-            self.dilation_iterations_var = tk.IntVar(value=self.settings.get('dilation_iterations', 2))
-            iterations_spinbox = tb.Spinbox(
-                iterations_frame,
-                from_=1,
-                to=5,
-                textvariable=self.dilation_iterations_var,
-                width=10
-            )
-            iterations_spinbox.pack(side='left', padx=10)
-            tk.Label(iterations_frame, text="times").pack(side='left')
-            
-            # Quick presets
-            preset_frame = tk.Frame(mask_frame)
-            preset_frame.pack(fill='x', pady=(10, 5))
-            
-            tk.Label(preset_frame, text="Quick Presets:").pack(side='left', padx=(0, 10))
-            
-            tb.Button(
-                preset_frame,
-                text="Tight",
-                command=lambda: self._set_mask_preset(5, 1),
-                bootstyle="secondary",
-                width=9
-            ).pack(side='left', padx=2)
-            
-            tb.Button(
-                preset_frame,
-                text="Standard",
-                command=lambda: self._set_mask_preset(15, 2),
-                bootstyle="secondary",
-                width=9
-            ).pack(side='left', padx=2)
-            
-            tb.Button(
-                preset_frame,
-                text="Aggressive",
-                command=lambda: self._set_mask_preset(25, 3),
-                bootstyle="secondary",
-                width=9
-            ).pack(side='left', padx=2)
-            
-            # Help text
-            tk.Label(
-                mask_frame,
-                text="💡 Lower values = tighter masks, may miss text edges\n"
-                     "💡 Higher values = looser masks, may affect surrounding art",
-                font=('Arial', 9),
-                fg='gray',
-                justify='left'
-            ).pack(anchor='w', pady=(10, 0))
     
             # Timeout
             timeout_frame = tk.Frame(perf_frame)
@@ -1325,11 +939,6 @@ class MangaSettingsDialog:
             
             # Show/hide SD-specific options based on model
             self._on_cloud_model_change()
-
-    def _set_mask_preset(self, dilation, iterations):
-        """Set mask dilation preset values"""
-        self.mask_dilation_var.set(dilation)
-        self.dilation_iterations_var.set(iterations)
     
     def _on_cloud_model_change(self):
         """Handle cloud model selection change"""
@@ -1487,21 +1096,23 @@ class MangaSettingsDialog:
         nearby_spinbox.pack(side='left', padx=10)
         tk.Label(nearby_frame, text="pixels").pack(side='left')
 
-        # Azure-specific settings 
-        azure_frame = tk.Frame(merge_frame)
-        azure_frame.pack(fill='x', pady=(10, 5))
+        # Azure-specific OCR settings (create this AFTER the merge_frame, not inside it)
+        azure_ocr_frame = tk.LabelFrame(content_frame, text="Azure OCR Settings", padx=15, pady=10)
+        azure_ocr_frame.pack(fill='x', padx=20, pady=(10, 0))
 
-        tk.Label(azure_frame, text="Azure Merge Multiplier:", width=20, anchor='w').pack(side='left')
+        # Azure merge multiplier (moved from merge_frame)
+        merge_mult_frame = tk.Frame(azure_ocr_frame)
+        merge_mult_frame.pack(fill='x', pady=5)
+        tk.Label(merge_mult_frame, text="Merge Multiplier:", width=20, anchor='w').pack(side='left')
 
         self.azure_merge_multiplier = tk.DoubleVar(
             value=self.settings['ocr'].get('azure_merge_multiplier', 2.0)
         )
-
         azure_scale = tk.Scale(
-            azure_frame,
+            merge_mult_frame,
             from_=1.0,
             to=5.0,
-            resolution=0.5,
+            resolution=0.1,
             orient='horizontal',
             variable=self.azure_merge_multiplier,
             length=200,
@@ -1509,19 +1120,116 @@ class MangaSettingsDialog:
         )
         azure_scale.pack(side='left', padx=10)
 
-        self.azure_label = tk.Label(azure_frame, text="2.0x", width=5)
+        self.azure_label = tk.Label(merge_mult_frame, text="2.0x", width=5)
         self.azure_label.pack(side='left')
+        self._update_azure_label()
 
-        # FIX: Initialize the label with the loaded value
-        self._update_azure_label()  # ADD THIS LINE
-
-        # Help text
         tk.Label(
-            azure_frame,
-            text="(Multiplies merge distance for Azure OCR)",
+            merge_mult_frame,
+            text="(multiplies merge distance for Azure lines)",
             font=('Arial', 9),
             fg='gray'
         ).pack(side='left', padx=5)
+
+        # Reading order
+        reading_order_frame = tk.Frame(azure_ocr_frame)
+        reading_order_frame.pack(fill='x', pady=5)
+        tk.Label(reading_order_frame, text="Reading Order:", width=20, anchor='w').pack(side='left')
+
+        self.azure_reading_order = tk.StringVar(
+            value=self.settings['ocr'].get('azure_reading_order', 'natural')
+        )
+        order_combo = ttk.Combobox(
+            reading_order_frame,
+            textvariable=self.azure_reading_order,
+            values=['basic', 'natural'],
+            state='readonly',
+            width=15
+        )
+        order_combo.pack(side='left', padx=10)
+
+        tk.Label(
+            reading_order_frame,
+            text="(natural = better for complex layouts)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side='left', padx=5)
+
+        # Model version
+        model_version_frame = tk.Frame(azure_ocr_frame)
+        model_version_frame.pack(fill='x', pady=5)
+        tk.Label(model_version_frame, text="Model Version:", width=20, anchor='w').pack(side='left')
+
+        self.azure_model_version = tk.StringVar(
+            value=self.settings['ocr'].get('azure_model_version', 'latest')
+        )
+        version_combo = ttk.Combobox(
+            model_version_frame,
+            textvariable=self.azure_model_version,
+            values=['latest', '2022-04-30', '2022-01-30', '2021-09-30'],
+            width=15
+        )
+        version_combo.pack(side='left', padx=10)
+
+        tk.Label(
+            model_version_frame,
+            text="(use 'latest' for newest features)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side='left', padx=5)
+
+        # Timeout settings
+        timeout_frame = tk.Frame(azure_ocr_frame)
+        timeout_frame.pack(fill='x', pady=5)
+
+        tk.Label(timeout_frame, text="Max Wait Time:", width=20, anchor='w').pack(side='left')
+
+        self.azure_max_wait = tk.IntVar(
+            value=self.settings['ocr'].get('azure_max_wait', 60)
+        )
+        wait_spinbox = tb.Spinbox(
+            timeout_frame,
+            from_=10,
+            to=120,
+            textvariable=self.azure_max_wait,
+            increment=5,
+            width=10
+        )
+        wait_spinbox.pack(side='left', padx=10)
+        tk.Label(timeout_frame, text="seconds").pack(side='left')
+
+        # Poll interval
+        poll_frame = tk.Frame(azure_ocr_frame)
+        poll_frame.pack(fill='x', pady=5)
+
+        tk.Label(poll_frame, text="Poll Interval:", width=20, anchor='w').pack(side='left')
+
+        self.azure_poll_interval = tk.DoubleVar(
+            value=self.settings['ocr'].get('azure_poll_interval', 0.5)
+        )
+        poll_scale = tk.Scale(
+            poll_frame,
+            from_=0.1,
+            to=2.0,
+            resolution=0.1,
+            orient='horizontal',
+            variable=self.azure_poll_interval,
+            length=200
+        )
+        poll_scale.pack(side='left', padx=10)
+
+        tk.Label(poll_frame, textvariable=self.azure_poll_interval, width=5).pack(side='left')
+        tk.Label(poll_frame, text="sec").pack(side='left')
+
+        # Help text
+        tk.Label(
+            azure_ocr_frame,
+            text="💡 Azure Read API auto-detects language well\n"
+                 "💡 Natural reading order works better for manga panels",
+            font=('Arial', 9),
+            fg='gray',
+            justify='left'
+        ).pack(anchor='w', pady=(10, 0))
         
         # Rotation correction
         rotation_frame = tk.Frame(merge_frame)
@@ -1655,7 +1363,7 @@ class MangaSettingsDialog:
             yolo_conf_frame,
             from_=0.1,
             to=0.9,
-            resolution=0.1,
+            resolution=0.01,
             orient='horizontal',
             variable=self.bubble_confidence,
             length=200,
@@ -1771,7 +1479,7 @@ class MangaSettingsDialog:
             rtdetr_conf_frame,
             from_=0.1,
             to=0.9,
-            resolution=0.05,
+            resolution=0.01,
             orient='horizontal',
             variable=self.rtdetr_confidence,
             length=200,
@@ -2220,15 +1928,19 @@ class MangaSettingsDialog:
         self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
         self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
         self.settings['ocr']['rtdetr_model_url'] = self.rtdetr_model_url.get()
+        self.settings['ocr']['azure_reading_order'] = self.azure_reading_order.get()
+        self.settings['ocr']['azure_model_version'] = self.azure_model_version.get()
+        self.settings['ocr']['azure_max_wait'] = self.azure_max_wait.get()
+        self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
         
         # Inpainting settings
-        if hasattr(self, 'inpaint_method_var'):
-            self.settings['inpainting'] = {
-                'method': self.inpaint_method_var.get(),
-                'local_method': self.local_method_var.get() if hasattr(self, 'local_method_var') else 'anime',
-                'local_model_path': self.local_model_path.get() if hasattr(self, 'local_model_path') else '',
-                'batch_size': self.inpaint_batch_size.get() if hasattr(self, 'inpaint_batch_size') else 1,
-                }
+        if hasattr(self, 'inpaint_batch_size'):
+            if 'inpainting' not in self.settings:
+                self.settings['inpainting'] = {}
+            self.settings['inpainting']['batch_size'] = self.inpaint_batch_size.get()
+            self.settings['inpainting']['enable_cache'] = self.enable_cache_var.get()
+            self.settings['mask_dilation'] = self.mask_dilation_var.get()
+            self.settings['dilation_iterations'] = self.dilation_iterations_var.get()
         
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
@@ -2246,8 +1958,6 @@ class MangaSettingsDialog:
             self.settings['cloud_negative_prompt'] = self.cloud_negative_prompt_var.get()
             self.settings['cloud_inference_steps'] = self.cloud_steps_var.get()
             self.settings['cloud_timeout'] = self.cloud_timeout_var.get()
-            self.settings['mask_dilation'] = self.mask_dilation_var.get()
-            self.settings['dilation_iterations'] = self.dilation_iterations_var.get()
             
         # Clear bubble detector cache to force reload with new settings
         if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, 'translator'):
