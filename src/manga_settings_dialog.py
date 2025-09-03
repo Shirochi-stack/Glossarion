@@ -1068,7 +1068,6 @@ class MangaSettingsDialog:
         )
         mode_combo.pack(side='left', padx=10)
         
-        # Add tooltips for detection modes
         tk.Label(
             mode_frame, 
             text="(document = better for manga, text = simple layouts)",
@@ -1274,7 +1273,7 @@ class MangaSettingsDialog:
             'YOLOv8 Manga': 'ogkalu/manga-text-detector-yolov8s'
         }
         
-        # Get saved detector type for backward compatibility
+        # Get saved detector type
         saved_type = self.settings['ocr'].get('detector_type', 'rtdetr')
         if saved_type == 'rtdetr':
             initial_selection = 'RT-DETR'
@@ -1295,12 +1294,12 @@ class MangaSettingsDialog:
         detector_combo.pack(side='left', padx=(10, 0))
         detector_combo.bind('<<ComboboxSelected>>', lambda e: self._on_detector_type_changed())
         
-        # Store as detector_radio_widgets for compatibility
+        # Store for compatibility
         self.detector_radio_widgets = [detector_combo]
 
-        # Unified settings frame
+        # Settings frames
         self.yolo_settings_frame = tk.LabelFrame(bubble_frame, text="Model Settings", padx=10, pady=5)
-        self.rtdetr_settings_frame = self.yolo_settings_frame  # Both point to same frame
+        self.rtdetr_settings_frame = self.yolo_settings_frame  # Alias
 
         # Model path/URL
         model_frame = tk.Frame(self.yolo_settings_frame)
@@ -1308,11 +1307,10 @@ class MangaSettingsDialog:
 
         tk.Label(model_frame, text="Model:", width=12, anchor='w').pack(side='left')
 
-        # Use existing variables for compatibility
         self.bubble_model_path = tk.StringVar(
             value=self.settings['ocr'].get('bubble_model_path', '')
         )
-        self.rtdetr_model_url = self.bubble_model_path  # Alias for compatibility
+        self.rtdetr_model_url = self.bubble_model_path  # Alias
 
         self.bubble_model_entry = tk.Entry(
             model_frame,
@@ -1361,7 +1359,6 @@ class MangaSettingsDialog:
         )
         self.rtdetr_load_btn.pack(side='left')
 
-        # RT-DETR status label
         self.rtdetr_status_label = tk.Label(
             button_frame,
             text="",
@@ -1369,7 +1366,7 @@ class MangaSettingsDialog:
         )
         self.rtdetr_status_label.pack(side='left', padx=(15, 0))
 
-        # Detection classes (for RT-DETR)
+        # RT-DETR Detection classes
         rtdetr_classes_frame = tk.Frame(self.yolo_settings_frame)
         rtdetr_classes_frame.pack(fill='x', pady=(10, 0))
 
@@ -1378,46 +1375,47 @@ class MangaSettingsDialog:
         self.detect_empty_bubbles = tk.BooleanVar(
             value=self.settings['ocr'].get('detect_empty_bubbles', True)
         )
-        tk.Checkbutton(
+        empty_cb = tk.Checkbutton(
             rtdetr_classes_frame,
             text="Empty Bubbles",
             variable=self.detect_empty_bubbles
-        ).pack(side='left', padx=(0, 10))
+        )
+        empty_cb.pack(side='left', padx=(0, 10))
 
         self.detect_text_bubbles = tk.BooleanVar(
             value=self.settings['ocr'].get('detect_text_bubbles', True)
         )
-        tk.Checkbutton(
+        text_cb = tk.Checkbutton(
             rtdetr_classes_frame,
             text="Text Bubbles",
             variable=self.detect_text_bubbles
-        ).pack(side='left', padx=(0, 10))
+        )
+        text_cb.pack(side='left', padx=(0, 10))
 
         self.detect_free_text = tk.BooleanVar(
             value=self.settings['ocr'].get('detect_free_text', True)
         )
-        tk.Checkbutton(
+        free_cb = tk.Checkbutton(
             rtdetr_classes_frame,
             text="Free Text",
             variable=self.detect_free_text
-        ).pack(side='left')
+        )
+        free_cb.pack(side='left')
         
-        # Store classes frame for show/hide
         self.rtdetr_classes_frame = rtdetr_classes_frame
 
-        # Confidence settings
+        # Confidence
         conf_frame = tk.Frame(self.yolo_settings_frame)
         conf_frame.pack(fill='x', pady=(10, 0))
 
         tk.Label(conf_frame, text="Confidence:", width=12, anchor='w').pack(side='left')
 
-        # Use appropriate confidence based on detector type
         default_conf = 0.3 if 'RT-DETR' in self.detector_type.get() else 0.5
         
         self.bubble_confidence = tk.DoubleVar(
             value=self.settings['ocr'].get('bubble_confidence', default_conf)
         )
-        self.rtdetr_confidence = self.bubble_confidence  # Alias
+        self.rtdetr_confidence = self.bubble_confidence
 
         self.bubble_conf_scale = tk.Scale(
             conf_frame,
@@ -1430,13 +1428,13 @@ class MangaSettingsDialog:
             command=lambda v: self.bubble_conf_label.config(text=f"{float(v):.2f}")
         )
         self.bubble_conf_scale.pack(side='left', padx=(0, 10))
-        self.rtdetr_conf_scale = self.bubble_conf_scale  # Alias
+        self.rtdetr_conf_scale = self.bubble_conf_scale
 
         self.bubble_conf_label = tk.Label(conf_frame, text=f"{self.bubble_confidence.get():.2f}", width=5)
         self.bubble_conf_label.pack(side='left')
-        self.rtdetr_conf_label = self.bubble_conf_label  # Alias
+        self.rtdetr_conf_label = self.bubble_conf_label
 
-        # Overall status label
+        # Status label
         self.bubble_status_label = tk.Label(
             bubble_frame,
             text="",
@@ -1444,7 +1442,7 @@ class MangaSettingsDialog:
         )
         self.bubble_status_label.pack(anchor='w', pady=(10, 0))
 
-        # Store controls for enable/disable
+        # Store controls
         self.bubble_controls = [
             detector_combo,
             self.bubble_model_entry,
@@ -1460,9 +1458,9 @@ class MangaSettingsDialog:
             self.rtdetr_load_btn,
             self.rtdetr_download_btn,
             self.rtdetr_conf_scale,
-            self.detect_empty_bubbles,
-            self.detect_text_bubbles,
-            self.detect_free_text
+            empty_cb,
+            text_cb,
+            free_cb
         ]
 
         self.yolo_controls = [
@@ -1475,14 +1473,13 @@ class MangaSettingsDialog:
         # Initialize control states
         self._toggle_bubble_controls()
 
-        # Only call _on_detector_type_changed if bubble detection is enabled
         if self.bubble_detection_enabled.get():
             self._on_detector_type_changed()
             self._update_bubble_status()
 
-        # Check RT-DETR status after dialog is ready
+        # Check status after dialog ready
         self.dialog.after(500, self._check_rtdetr_status)
-
+    
     def _on_detector_type_changed(self):
         """Handle detector type change"""
         if not hasattr(self, 'bubble_detection_enabled'):
