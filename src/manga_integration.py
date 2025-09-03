@@ -3202,11 +3202,31 @@ class MangaTranslationTab:
             self._log("\n⏸️ Stopping translation...", "warning")
     
     def _reset_ui_state(self):
-        """Reset UI to ready state"""
-        self.is_running = False
-        self.start_button.config(state=tk.NORMAL)
-        self.stop_button.config(state=tk.DISABLED)
-        
-        # Re-enable file modification
-        for widget in [self.file_listbox]:
-            widget.config(state=tk.NORMAL)
+        """Reset UI to ready state - with widget existence checks"""
+        try:
+            # Check if the dialog still exists
+            if not hasattr(self, 'dialog') or not self.dialog or not self.dialog.winfo_exists():
+                return
+                
+            # Reset running flag
+            self.is_running = False
+            
+            # Check and update start_button if it exists
+            if hasattr(self, 'start_button') and self.start_button and self.start_button.winfo_exists():
+                self.start_button.config(state=tk.NORMAL)
+            
+            # Check and update stop_button if it exists
+            if hasattr(self, 'stop_button') and self.stop_button and self.stop_button.winfo_exists():
+                self.stop_button.config(state=tk.DISABLED)
+            
+            # Re-enable file modification - check if listbox exists
+            if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.winfo_exists():
+                self.file_listbox.config(state=tk.NORMAL)
+                
+        except tk.TclError:
+            # Widget has been destroyed, nothing to do
+            pass
+        except Exception as e:
+            # Log the error but don't crash
+            if hasattr(self, '_log'):
+                self._log(f"Error resetting UI state: {str(e)}", "warning")
