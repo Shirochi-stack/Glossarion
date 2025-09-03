@@ -218,7 +218,7 @@ class UpdateManager:
             elif line.strip() in ['---', '***', '___']:
                 text_widget.insert('end', '─' * 40 + '\n')
             
-            # Handle code blocks - just indent them
+            # Handle code blocks - just skip the markers
             elif line.strip().startswith('```'):
                 continue  # Skip code fence markers
             
@@ -286,10 +286,10 @@ class UpdateManager:
         dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
             self.main_gui.master,
             title,
-            width=700,
-            height=500,
+            width=None,
+            height=None,
             max_width_ratio=0.5,
-            max_height_ratio=0.7
+            max_height_ratio=0.8
         )
         
         # Show dialog immediately
@@ -303,6 +303,9 @@ class UpdateManager:
         # Main container
         main_frame = ttk.Frame(scrollable_frame)
         main_frame.pack(fill='both', expand=True, padx=20, pady=20)
+        
+        # Initialize selected_asset to None
+        self.selected_asset = None
         
         # Version info
         version_frame = ttk.LabelFrame(main_frame, text="Version Information", padding=10)
@@ -323,42 +326,63 @@ class UpdateManager:
                          foreground='green',
                          font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
         
-        # Only show asset selection if update is available
-        if self.update_available and self.latest_release:
-            exe_assets = [a for a in self.latest_release['assets'] if a['name'].endswith('.exe')]
+        # ALWAYS show asset selection when we have the first release data (current or latest)
+        release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
+        
+        if release_to_check:
+            # Get exe files from the first/latest release
+            exe_assets = [a for a in release_to_check.get('assets', []) 
+                         if a['name'].lower().endswith('.exe')]
             
-            if len(exe_assets) > 1:
-                # Add asset selection frame
-                asset_frame = ttk.LabelFrame(main_frame, text="Select Version", padding=10)
+            print(f"[DEBUG] Found {len(exe_assets)} exe files in release {release_to_check.get('tag_name')}")
+            
+            # Show selection UI if there are exe files
+            if exe_assets:
+                # Determine the title based on whether there are multiple variants
+                if len(exe_assets) > 1:
+                    frame_title = "Select Version to Download"
+                else:
+                    frame_title = "Available Download"
+                
+                asset_frame = ttk.LabelFrame(main_frame, text=frame_title, padding=10)
                 asset_frame.pack(fill='x', pady=(0, 10))
                 
-                # Create radio buttons for each exe
-                self.asset_var = tk.StringVar()
-                for i, asset in enumerate(exe_assets):
-                    # Extract meaningful info from filename
-                    filename = asset['name']
-                    size_mb = asset['size'] / (1024 * 1024)
-                    label_text = f"{filename} ({size_mb:.1f} MB)"
+                if len(exe_assets) > 1:
+                    # Multiple exe files - show radio buttons to choose
+                    self.asset_var = tk.StringVar()
+                    for i, asset in enumerate(exe_assets):
+                        filename = asset['name']
+                        size_mb = asset['size'] / (1024 * 1024)
+                        
+                        # Try to identify variant type from filename
+                        if 'full' in filename.lower():
+                            variant_label = f"Full Version - {filename} ({size_mb:.1f} MB)"
+                        else:
+                            variant_label = f"Standard Version - {filename} ({size_mb:.1f} MB)"
+                        
+                        rb = ttk.Radiobutton(asset_frame, text=variant_label, 
+                                            variable=self.asset_var, 
+                                            value=str(i))
+                        rb.pack(anchor='w', pady=2)
+                        
+                        # Select first option by default
+                        if i == 0:
+                            self.asset_var.set(str(i))
+                            self.selected_asset = asset
                     
-                    rb = ttk.Radiobutton(asset_frame, text=label_text, 
-                                        variable=self.asset_var, 
-                                        value=str(i))
-                    rb.pack(anchor='w', pady=2)
+                    # Add listener for selection changes
+                    def on_asset_change(*args):
+                        idx = int(self.asset_var.get())
+                        self.selected_asset = exe_assets[idx]
                     
-                    # Select first option by default
-                    if i == 0:
-                        self.asset_var.set(str(i))
-                        self.selected_asset = asset
-                
-                # Add listener for selection changes
-                def on_asset_change(*args):
-                    idx = int(self.asset_var.get())
-                    self.selected_asset = exe_assets[idx]
-                
-                self.asset_var.trace_add('write', on_asset_change)
-            else:
-                # Only one exe file, select it automatically
-                self.selected_asset = exe_assets[0] if exe_assets else None
+                    self.asset_var.trace_add('write', on_asset_change)
+                else:
+                    # Only one exe file - just show it and set it as selected
+                    self.selected_asset = exe_assets[0]
+                    filename = exe_assets[0]['name']
+                    size_mb = exe_assets[0]['size'] / (1024 * 1024)
+                    ttk.Label(asset_frame, 
+                             text=f"{filename} ({size_mb:.1f} MB)").pack(anchor='w')
         
         # Create notebook for version history
         notebook = ttk.Notebook(main_frame)
@@ -410,7 +434,6 @@ class UpdateManager:
                 notes_text.config(state='disabled')  # Make read-only
                 
                 # Don't set background color as it causes rendering artifacts
-                # The tab label already indicates which is latest/current
         else:
             # Fallback to simple display if no releases fetched
             notes_frame = ttk.LabelFrame(main_frame, text="Release Notes", padding=10)
@@ -454,10 +477,12 @@ class UpdateManager:
                 
             self.progress_frame.pack(fill='x', pady=(0, 10), before=button_frame)
             download_btn.config(state='disabled')
-            if remind_btn:
+            if 'remind_btn' in locals():
                 remind_btn.config(state='disabled')
-            if skip_btn:
+            if 'skip_btn' in locals():
                 skip_btn.config(state='disabled')
+            if 'close_btn' in locals():
+                close_btn.config(state='disabled')
             
             # Reset progress
             self.progress_bar['value'] = 0
@@ -468,9 +493,8 @@ class UpdateManager:
                                     args=(dialog,), daemon=True)
             thread.start()
         
-        # Initialize these as None in case we don't create them
-        remind_btn = None
-        skip_btn = None
+        # Always show download button if we have exe files
+        has_exe_files = self.selected_asset is not None
         
         if self.update_available:
             # Show update-specific buttons
@@ -486,17 +510,35 @@ class UpdateManager:
                                command=lambda: self.skip_version(dialog), 
                                bootstyle="link")
             skip_btn.pack(side='left', padx=5)
-        else:
-            # We're up to date - show download button if exe files are available
-            if self.selected_asset or (self.latest_release and 
-                                      any(a['name'].endswith('.exe') for a in self.latest_release.get('assets', []))):
-                download_btn = tb.Button(button_frame, text="Download", 
-                                       command=start_download, bootstyle="primary")
-                download_btn.pack(side='left', padx=(0, 5))
+        elif has_exe_files:
+            # We're up to date but have downloadable files
+            # Check if there are multiple exe files
+            release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
+            exe_count = 0
+            if release_to_check:
+                exe_count = len([a for a in release_to_check.get('assets', []) 
+                               if a['name'].lower().endswith('.exe')])
             
-            tb.Button(button_frame, text="Close", 
-                     command=dialog.destroy, 
-                     bootstyle="secondary").pack(side='left', padx=(0, 5))
+            if exe_count > 1:
+                # Multiple versions available
+                download_btn = tb.Button(button_frame, text="Download Different Path", 
+                                       command=start_download, bootstyle="info")
+            else:
+                # Single version available
+                download_btn = tb.Button(button_frame, text="Re-download", 
+                                       command=start_download, bootstyle="secondary")
+            download_btn.pack(side='left', padx=(0, 5))
+            
+            close_btn = tb.Button(button_frame, text="Close", 
+                                command=dialog.destroy, 
+                                bootstyle="secondary")
+            close_btn.pack(side='left', padx=(0, 5))
+        else:
+            # No downloadable files
+            close_btn = tb.Button(button_frame, text="Close", 
+                                command=dialog.destroy, 
+                                bootstyle="primary")
+            close_btn.pack(side='left', padx=(0, 5))
         
         # Add "View All Releases" link button
         def open_releases_page():
@@ -508,7 +550,7 @@ class UpdateManager:
                  bootstyle="link").pack(side='right', padx=5)
         
         # Auto-resize at the end
-        dialog.after(100, lambda: self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.7))
+        dialog.after(100, lambda: self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.8))
     
         # Handle window close
         dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
@@ -547,7 +589,7 @@ class UpdateManager:
                     
             if not asset:
                 dialog.after(0, lambda: messagebox.showerror("Download Error", 
-                                                           "No Windows executable found in release"))
+                                                           "No file selected for download."))
                 return
             
             # Get the current executable path
