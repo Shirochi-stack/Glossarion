@@ -436,7 +436,7 @@ class MangaSettingsDialog:
         self.contrast_threshold = tk.DoubleVar(value=self.settings['preprocessing']['contrast_threshold'])
         contrast_scale = tk.Scale(
             contrast_frame,
-            from_=0.1, to=1.0,
+            from_=0.0, to=1.0,
             resolution=0.01,
             orient='horizontal',
             variable=self.contrast_threshold,
@@ -459,7 +459,7 @@ class MangaSettingsDialog:
         self.sharpness_threshold = tk.DoubleVar(value=self.settings['preprocessing']['sharpness_threshold'])
         sharpness_scale = tk.Scale(
             sharpness_frame,
-            from_=0.1, to=1.0,
+            from_=0.0, to=1.0,
             resolution=0.01,
             orient='horizontal',
             variable=self.sharpness_threshold,
@@ -482,7 +482,7 @@ class MangaSettingsDialog:
         self.enhancement_strength = tk.DoubleVar(value=self.settings['preprocessing']['enhancement_strength'])
         enhance_scale = tk.Scale(
             enhance_frame,
-            from_=0.1, to=3.0,
+            from_=0.0, to=3.0,
             resolution=0.01,
             orient='horizontal',
             variable=self.enhancement_strength,
@@ -1045,7 +1045,7 @@ class MangaSettingsDialog:
         self.confidence_threshold = tk.DoubleVar(value=self.settings['ocr']['confidence_threshold'])
         conf_scale = tk.Scale(
             conf_frame,
-            from_=0.1, to=1.0,
+            from_=0.0, to=1.0,
             resolution=0.01,
             orient='horizontal',
             variable=self.confidence_threshold,
@@ -1208,7 +1208,7 @@ class MangaSettingsDialog:
         )
         poll_scale = tk.Scale(
             poll_frame,
-            from_=0.1,
+            from_=0.0,
             to=2.0,
             resolution=0.01,
             orient='horizontal',
@@ -1419,7 +1419,7 @@ class MangaSettingsDialog:
 
         self.bubble_conf_scale = tk.Scale(
             conf_frame,
-            from_=0.1,
+            from_=0.0,
             to=0.9,
             resolution=0.01,
             orient='horizontal',
