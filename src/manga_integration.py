@@ -370,72 +370,7 @@ class MangaTranslationTab:
             font=('Arial', 10)
         )
         self.rolling_status_label.pack(anchor=tk.W)
-        
-        # Separator
-        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-        
-        # Full Page Context Translation Settings
-        full_page_frame = tk.Frame(context_frame)
-        full_page_frame.pack(fill=tk.X)
-        
-        tk.Label(
-            full_page_frame,
-            text="Full Page Context Mode (Manga-specific):",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W, pady=(0, 5))
-        
-        # Enable/disable toggle
-        self.full_page_context_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_full_page_context', True)
-        )
-        
-        toggle_frame = tk.Frame(full_page_frame)
-        toggle_frame.pack(fill=tk.X, padx=(20, 0))
-        
-        self.context_checkbox = tb.Checkbutton(
-            toggle_frame,
-            text="Enable Full Page Context Translation (Recommended)",
-            variable=self.full_page_context_var,
-            command=self._on_context_toggle,
-            bootstyle="round-toggle"
-        )
-        self.context_checkbox.pack(side=tk.LEFT)
-        
-        # Edit prompt button
-        tb.Button(
-            toggle_frame,
-            text="Edit Prompt",
-            command=self._edit_context_prompt,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Help text
-        help_text = tk.Label(
-            full_page_frame,
-            text="Full page context sends all text regions from the page together in a single request.\n"
-                 "This allows the AI to see all text at once for more contextually accurate translations,\n"
-                 "especially useful for maintaining character name consistency and understanding\n"
-                 "conversation flow across multiple speech bubbles.",
-            font=('Arial', 10),
-            fg='gray',
-            justify=tk.LEFT
-        )
-        help_text.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
-        
-        # Pros and cons
-        pros_cons_frame = tk.Frame(full_page_frame)
-        pros_cons_frame.pack(fill=tk.X, padx=(20, 0), pady=(5, 0))
-        
-        pros_label = tk.Label(
-            pros_cons_frame,
-            text="✅ Better context awareness, consistent translations\n"
-                 "❌ Single API call failure affects all text, may use more tokens",
-            font=('Arial', 8),
-            fg='gray',
-            justify=tk.LEFT
-        )
-        pros_label.pack(anchor=tk.W)
-        
+
         # Refresh button to update from main GUI
         tb.Button(
             context_frame,
@@ -443,6 +378,124 @@ class MangaTranslationTab:
             command=self._refresh_context_settings,
             bootstyle="secondary"
         ).pack(pady=(10, 0))
+        
+        # Separator
+        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        # Full Page Context Translation Settings
+        full_page_frame = tk.Frame(context_frame)
+        full_page_frame.pack(fill=tk.X)
+
+        tk.Label(
+            full_page_frame,
+            text="Full Page Context Mode (Manga-specific):",
+            font=('Arial', 10, 'bold')
+        ).pack(anchor=tk.W, pady=(0, 5))
+
+        # Enable/disable toggle
+        self.full_page_context_var = tk.BooleanVar(
+            value=self.main_gui.config.get('manga_full_page_context', True)
+        )
+
+        toggle_frame = tk.Frame(full_page_frame)
+        toggle_frame.pack(fill=tk.X, padx=(20, 0))
+
+        self.context_checkbox = tb.Checkbutton(
+            toggle_frame,
+            text="Enable Full Page Context Translation",
+            variable=self.full_page_context_var,
+            command=self._on_context_toggle,
+            bootstyle="round-toggle"
+        )
+        self.context_checkbox.pack(side=tk.LEFT)
+
+        # Edit prompt button
+        tb.Button(
+            toggle_frame,
+            text="Edit Prompt",
+            command=self._edit_context_prompt,
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Help button for full page context
+        tb.Button(
+            toggle_frame,
+            text="?",
+            command=lambda: self._show_help_dialog(
+                "Full Page Context Mode",
+                "Full page context sends all text regions from the page together in a single request.\n\n"
+                "This allows the AI to see all text at once for more contextually accurate translations, "
+                "especially useful for maintaining character name consistency and understanding "
+                "conversation flow across multiple speech bubbles.\n\n"
+                "✅ Pros:\n"
+                "• Better context awareness\n"
+                "• Consistent character names\n"
+                "• Understanding of conversation flow\n"
+                "• Maintains tone across bubbles\n\n"
+                "❌ Cons:\n"
+                "• Single API call failure affects all text\n"
+                "• May use more tokens\n"
+                "• Slower for pages with many text regions"
+            ),
+            bootstyle="info",
+            width=2
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Separator
+        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+
+        # Visual Context Settings (for non-vision model support)
+        visual_frame = tk.Frame(context_frame)
+        visual_frame.pack(fill=tk.X)
+
+        tk.Label(
+            visual_frame,
+            text="Visual Context (Image Support):",
+            font=('Arial', 10, 'bold')
+        ).pack(anchor=tk.W, pady=(0, 5))
+
+        # Visual context toggle
+        self.visual_context_enabled_var = tk.BooleanVar(
+            value=self.main_gui.config.get('manga_visual_context_enabled', True)
+        )
+
+        visual_toggle_frame = tk.Frame(visual_frame)
+        visual_toggle_frame.pack(fill=tk.X, padx=(20, 0))
+
+        self.visual_context_checkbox = tb.Checkbutton(
+            visual_toggle_frame,
+            text="Include page image in translation requests",
+            variable=self.visual_context_enabled_var,
+            command=self._on_visual_context_toggle,
+            bootstyle="round-toggle"
+        )
+        self.visual_context_checkbox.pack(side=tk.LEFT)
+
+        # Help button for visual context
+        tb.Button(
+            visual_toggle_frame,
+            text="?",
+            command=lambda: self._show_help_dialog(
+                "Visual Context Settings",
+                "Visual context includes the manga page image with translation requests.\n\n"
+                "⚠️ WHEN TO DISABLE:\n"
+                "• Using text-only models (Claude, GPT-3.5, standard Gemini)\n"
+                "• Model doesn't support images\n"
+                "• Want to reduce token usage\n"
+                "• Testing text-only translation\n\n"
+                "✅ WHEN TO ENABLE:\n"
+                "• Using vision models (Gemini Vision, GPT-4V, Claude 3)\n"
+                "• Want spatial awareness of text position\n"
+                "• Need visual context for better translation\n\n"
+                "Impact:\n"
+                "• Disabled: Only text is sent (compatible with any model)\n"
+                "• Enabled: Text + image sent (requires vision model)\n\n"
+                "Note: Disabling may reduce translation quality as the AI won't see\n"
+                "the artwork context or spatial layout of the text."
+            ),
+            bootstyle="info",
+            width=2
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         # Text Rendering Settings Frame
         render_frame = tk.LabelFrame(
@@ -986,7 +1039,7 @@ class MangaTranslationTab:
         self.font_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
         self.font_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
         
-# Font color selection
+        # Font color selection
         color_frame = tk.Frame(render_frame)
         color_frame.pack(fill=tk.X, pady=5)
         
@@ -1255,6 +1308,97 @@ class MangaTranslationTab:
         self.log_text.tag_config('success', foreground='green')
         self.log_text.tag_config('warning', foreground='orange')
         self.log_text.tag_config('error', foreground='red')
+
+    def _show_help_dialog(self, title: str, message: str):
+        """Show a help dialog with the given title and message"""
+        # Create a simple dialog
+        help_dialog = tk.Toplevel(self.dialog)
+        help_dialog.title(title)
+        help_dialog.geometry("500x400")
+        help_dialog.transient(self.dialog)
+        help_dialog.grab_set()
+        
+        # Center the dialog
+        help_dialog.update_idletasks()
+        x = (help_dialog.winfo_screenwidth() // 2) - (help_dialog.winfo_width() // 2)
+        y = (help_dialog.winfo_screenheight() // 2) - (help_dialog.winfo_height() // 2)
+        help_dialog.geometry(f"+{x}+{y}")
+        
+        # Main frame with padding
+        main_frame = tk.Frame(help_dialog, padx=20, pady=20)
+        main_frame.pack(fill='both', expand=True)
+        
+        # Icon and title
+        title_frame = tk.Frame(main_frame)
+        title_frame.pack(fill='x', pady=(0, 10))
+        
+        tk.Label(
+            title_frame,
+            text="ℹ️",
+            font=('Arial', 20)
+        ).pack(side='left', padx=(0, 10))
+        
+        tk.Label(
+            title_frame,
+            text=title,
+            font=('Arial', 12, 'bold')
+        ).pack(side='left')
+        
+        # Help text in a scrollable frame
+        text_frame = tk.Frame(main_frame)
+        text_frame.pack(fill='both', expand=True)
+        
+        # Scrollbar
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side='right', fill='y')
+        
+        # Text widget
+        text_widget = tk.Text(
+            text_frame,
+            wrap='word',
+            yscrollcommand=scrollbar.set,
+            font=('Arial', 10),
+            padx=10,
+            pady=10
+        )
+        text_widget.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=text_widget.yview)
+        
+        # Insert the help text
+        text_widget.insert('1.0', message)
+        text_widget.config(state='disabled')  # Make read-only
+        
+        # Close button
+        tb.Button(
+            main_frame,
+            text="Close",
+            command=help_dialog.destroy,
+            bootstyle="secondary"
+        ).pack(pady=(10, 0))
+        
+        # Bind Escape key to close
+        help_dialog.bind('<Escape>', lambda e: help_dialog.destroy())
+
+    def _on_visual_context_toggle(self):
+        """Handle visual context toggle"""
+        enabled = self.visual_context_enabled_var.get()
+        self.main_gui.config['manga_visual_context_enabled'] = enabled
+        
+        # Update translator if it exists
+        if self.translator:
+            self.translator.visual_context_enabled = enabled
+        
+        # Save config
+        if hasattr(self.main_gui, 'save_config'):
+            self.main_gui.save_config(show_message=False)
+        
+        # Log the change
+        if enabled:
+            self._log("📷 Visual context ENABLED - Images will be sent to API", "info")
+            self._log("   Make sure you're using a vision-capable model", "warning")
+        else:
+            self._log("📝 Visual context DISABLED - Text-only mode", "info")
+            self._log("   Compatible with non-vision models (Claude, GPT-3.5, etc.)", "success")
  
     def _on_ocr_provider_change(self, event=None):
         """Handle OCR provider change"""
@@ -1469,7 +1613,10 @@ class MangaTranslationTab:
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all segments."
         )
-        
+        # Visual context setting
+        self.visual_context_enabled_var = tk.BooleanVar(
+            value=self.main_gui.config.get('manga_visual_context_enabled', True)
+        )
         # Output settings
         self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
  
