@@ -1437,7 +1437,7 @@ class MangaSettingsDialog:
         conf_scale = tk.Scale(
             conf_frame,
             from_=0.1, to=1.0,
-            resolution=0.05,
+            resolution=0.01,
             orient='horizontal',
             variable=self.confidence_threshold,
             length=250
