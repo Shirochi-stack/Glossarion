@@ -556,19 +556,45 @@ class MangaTranslator:
             print(message)
 
     def _is_primarily_english(self, text: str) -> bool:
-        """Check if text is primarily English characters"""
+        """Check if text is primarily English/ASCII characters"""
         if not text:
             return False
         
-        # Count English letters (a-z, A-Z)
-        english_chars = sum(1 for char in text if char.isalpha() and ord(char) < 128)
+        # Strip whitespace for analysis
+        text_stripped = text.strip()
+        
+        # Special case: Single ASCII letters should always be excluded
+        # This catches standalone "I", "a", "A", etc. on shirts
+        if len(text_stripped) == 1 and text_stripped.isalpha() and ord(text_stripped) < 128:
+            self._log(f"   Excluding single English letter: '{text_stripped}'", "debug")
+            return True
+        
+        # For very short text (2-3 chars), be more aggressive
+        # This catches things like "OK", "NO", "LA", etc.
+        if len(text_stripped) <= 3:
+            ascii_letters = sum(1 for char in text_stripped if char.isalpha() and ord(char) < 128)
+            if ascii_letters >= len(text_stripped) * 0.5:  # If 50% or more are English letters
+                self._log(f"   Excluding short English text: '{text_stripped}'", "debug")
+                return True
+        
+        # Count all ASCII printable characters (letters, numbers, punctuation, symbols)
+        ascii_chars = sum(1 for char in text if 32 <= ord(char) <= 126)
+        
+        # Count only non-whitespace characters for comparison
         total_chars = sum(1 for char in text if not char.isspace())
         
         if total_chars == 0:
             return False
         
-        # Return True if more than 70% English characters
-        return (english_chars / total_chars) > 0.7
+        # Calculate ratio
+        ratio = ascii_chars / total_chars
+        
+        # Return True if more than 70% ASCII characters
+        if ratio > 0.7:
+            self._log(f"   Excluding English text ({ratio:.0%} ASCII): '{text[:30]}...'", "debug")
+            return True
+        
+        return False
             
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
         """Detect text regions using configured OCR provider"""
