@@ -1146,7 +1146,7 @@ class MangaSettingsDialog:
         
         tk.Label(min_length_frame, text="Min Text Length:", width=20, anchor='w').pack(side='left')
         self.min_text_length_var = tk.IntVar(
-            value=self.settings['ocr'].get('min_text_length', 2)
+            value=self.settings['ocr'].get('min_text_length', 0)
         )
         min_length_spinbox = tb.Spinbox(
             min_length_frame,
@@ -1171,7 +1171,7 @@ class MangaSettingsDialog:
         exclude_english_frame.pack(fill='x', pady=(5, 0))
         
         self.exclude_english_var = tk.BooleanVar(
-            value=self.settings['ocr'].get('exclude_english_text', True)
+            value=self.settings['ocr'].get('exclude_english_text', False)
         )
         
         tb.Checkbutton(
