@@ -551,6 +551,21 @@ class MangaTranslator:
             self.log_callback(message, level)
         else:
             print(message)
+
+    def _is_primarily_english(self, text: str) -> bool:
+        """Check if text is primarily English characters"""
+        if not text:
+            return False
+        
+        # Count English letters (a-z, A-Z)
+        english_chars = sum(1 for char in text if char.isalpha() and ord(char) < 128)
+        total_chars = sum(1 for char in text if not char.isspace())
+        
+        if total_chars == 0:
+            return False
+        
+        # Return True if more than 70% English characters
+        return (english_chars / total_chars) > 0.7
             
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
         """Detect text regions using configured OCR provider (Google or Azure)"""
@@ -562,6 +577,10 @@ class MangaTranslator:
             manga_settings = self.main_gui.config.get('manga_settings', {})
             preprocessing = manga_settings.get('preprocessing', {})
             ocr_settings = manga_settings.get('ocr', {})
+            
+            # Get text filtering settings
+            min_text_length = ocr_settings.get('min_text_length', 2)
+            exclude_english = ocr_settings.get('exclude_english_text', True)
             
             # Load and preprocess image if enabled
             if preprocessing.get('enabled', True):
@@ -611,7 +630,6 @@ class MangaTranslator:
                 # Process each page (usually just one for manga)
                 for page in response.full_text_annotation.pages:
                     for block in page.blocks:
-                        # [YOUR EXISTING BLOCK PROCESSING CODE - keep it exactly as is]
                         # Extract text first to check if it's worth processing
                         block_text = ""
                         total_confidence = 0.0
@@ -632,6 +650,17 @@ class MangaTranslator:
                                     self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
                         
                         block_text = block_text.strip()
+                        
+                        # TEXT FILTERING SECTION - ADD THIS
+                        # Skip if text is too short
+                        if len(block_text) < min_text_length:
+                            self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
+                            continue
+                        
+                        # Skip if primarily English and exclude_english is enabled
+                        if exclude_english and self._is_primarily_english(block_text):
+                            self._log(f"   Skipping English text: {block_text[:50]}...")
+                            continue
                         
                         # Skip if no confident words found
                         if word_count == 0 or not block_text:
@@ -770,6 +799,17 @@ class MangaTranslator:
                             self._log(f"   Processing page {page_num + 1}/{len(result.analyze_result.read_results)}")
                         
                         for line in page.lines:
+                            # TEXT FILTERING FOR AZURE - ADD THIS
+                            # Skip if text is too short
+                            if len(line.text) < min_text_length:
+                                self._log(f"   Skipping short text ({len(line.text)} chars): {line.text}")
+                                continue
+                            
+                            # Skip if primarily English and exclude_english is enabled
+                            if exclude_english and self._is_primarily_english(line.text):
+                                self._log(f"   Skipping English text: {line.text[:50]}...")
+                                continue
+                            
                             # Azure provides 8-point bounding box
                             bbox = line.bounding_box
                             vertices = [
@@ -2180,7 +2220,7 @@ class MangaTranslator:
             return {}
                 
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
-        """Create mask only for regions marked for inpainting"""
+        """Create mask with per-text-type dilation settings"""
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
         
         regions_masked = 0
@@ -2188,52 +2228,110 @@ class MangaTranslator:
         
         self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
         
+        # Get manga settings
+        manga_settings = self.main_gui.config.get('manga_settings', {})
+        
+        # Get per-type dilation settings
+        base_dilation_size = manga_settings.get('mask_dilation', 15)
+        bubble_iterations = manga_settings.get('bubble_dilation_iterations', 2)
+        free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
+        
+        # Create separate masks for different text types
+        bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        free_text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        bubble_count = 0
+        free_text_count = 0
+        
         for i, region in enumerate(regions):
             # CHECK: Should this region be inpainted?
             if not getattr(region, 'should_inpaint', True):
                 # Skip this region - it shouldn't be inpainted
                 regions_skipped += 1
-                self._log(f"   Region {i+1}: SKIPPED (filtered by RT-DETR settings)", "debug")
+                self._log(f"   Region {i+1}: SKIPPED (filtered by settings)", "debug")
                 continue
             
             regions_masked += 1
             
+            # Determine if this is a bubble or free text
+            # Check if bubble detection was used
+            is_bubble = False
+            
+            # Check if region has bubble_type attribute (from bubble detection)
+            if hasattr(region, 'bubble_type'):
+                # RT-DETR classifications
+                if region.bubble_type in ['empty_bubble', 'text_bubble']:
+                    is_bubble = True
+                else:  # 'free_text' or others
+                    is_bubble = False
+            else:
+                # Fallback: use simple heuristics if no bubble detection
+                # You can customize this logic based on your needs
+                x, y, w, h = region.bounding_box
+                aspect_ratio = w / h if h > 0 else 1
+                
+                # Heuristic: bubbles tend to be more square-ish or tall
+                # Free text tends to be wide and short
+                if aspect_ratio < 2.5 and w > 50 and h > 50:
+                    is_bubble = True
+                else:
+                    is_bubble = False
+            
+            # Draw region on appropriate mask
+            target_mask = bubble_mask if is_bubble else free_text_mask
+            
+            if is_bubble:
+                bubble_count += 1
+                mask_type = "BUBBLE"
+            else:
+                free_text_count += 1
+                mask_type = "FREE TEXT"
+            
             # Check if this is a merged region with original regions
             if hasattr(region, 'original_regions') and region.original_regions:
                 # Use original regions for precise masking
-                self._log(f"   Region {i+1}: Using {len(region.original_regions)} original regions", "debug")
+                self._log(f"   Region {i+1} ({mask_type}): Using {len(region.original_regions)} original regions", "debug")
                 
                 for orig_region in region.original_regions:
                     if hasattr(orig_region, 'vertices') and orig_region.vertices:
                         pts = np.array(orig_region.vertices, np.int32)
                         pts = pts.reshape((-1, 1, 2))
-                        cv2.fillPoly(mask, [pts], 255)
+                        cv2.fillPoly(target_mask, [pts], 255)
                     else:
                         x, y, w, h = orig_region.bounding_box
-                        cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
+                        cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
             else:
                 # Normal region
                 if hasattr(region, 'vertices') and region.vertices and len(region.vertices) <= 8:
                     pts = np.array(region.vertices, np.int32)
                     pts = pts.reshape((-1, 1, 2))
-                    cv2.fillPoly(mask, [pts], 255)
-                    self._log(f"   Region {i+1}: Using polygon", "debug")
+                    cv2.fillPoly(target_mask, [pts], 255)
+                    self._log(f"   Region {i+1} ({mask_type}): Using polygon", "debug")
                 else:
                     x, y, w, h = region.bounding_box
-                    cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
-                    self._log(f"   Region {i+1}: Using bounding box", "debug")
+                    cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
+                    self._log(f"   Region {i+1} ({mask_type}): Using bounding box", "debug")
         
-        self._log(f"📊 Mask summary: {regions_masked} regions masked, {regions_skipped} regions skipped", "info")
+        self._log(f"📊 Mask breakdown: {bubble_count} bubbles, {free_text_count} free text regions, {regions_skipped} skipped", "info")
         
-        # Apply dilation
-        manga_settings = self.main_gui.config.get('manga_settings', {})
-        dilation_size = manga_settings.get('mask_dilation', 15)
-        dilation_iterations = manga_settings.get('dilation_iterations', 2)
+        # Apply different dilation settings to each mask type
+        if base_dilation_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilation_size, base_dilation_size))
+            
+            # Apply dilation to bubble mask
+            if bubble_count > 0 and bubble_iterations > 0:
+                self._log(f"📏 Applying bubble dilation: {base_dilation_size}px, {bubble_iterations} iterations", "info")
+                bubble_mask = cv2.dilate(bubble_mask, kernel, iterations=bubble_iterations)
+            
+            # Apply dilation to free text mask
+            if free_text_count > 0 and free_text_iterations > 0:
+                self._log(f"📏 Applying free text dilation: {base_dilation_size}px, {free_text_iterations} iterations", "info")
+                free_text_mask = cv2.dilate(free_text_mask, kernel, iterations=free_text_iterations)
+            elif free_text_count > 0 and free_text_iterations == 0:
+                self._log(f"📏 No dilation for free text (iterations=0, perfect for B&W panels)", "info")
         
-        if dilation_size > 0 and regions_masked > 0:
-            self._log(f"📏 Applying dilation: {dilation_size}px, {dilation_iterations} iterations", "info")
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
-            mask = cv2.dilate(mask, kernel, iterations=dilation_iterations)
+        # Combine masks
+        mask = cv2.bitwise_or(bubble_mask, free_text_mask)
         
         coverage_percent = (np.sum(mask > 0) / mask.size) * 100
         self._log(f"📊 Final mask coverage: {coverage_percent:.1f}% of image", "info")
