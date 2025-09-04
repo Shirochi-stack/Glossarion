@@ -102,6 +102,477 @@ class MangaTranslationTab:
         spinbox.bind("<MouseWheel>", lambda e: "break")
         spinbox.bind("<Button-4>", lambda e: "break")  # Linux scroll up
         spinbox.bind("<Button-5>", lambda e: "break")  # Linux scroll down
+
+    def _download_hf_model(self):
+        """Download HuggingFace models with progress tracking"""
+        provider = self.ocr_provider_var.get()
+        
+        # Model sizes (approximate)
+        model_sizes = {
+            'manga-ocr': 450,  # MB
+            'pororo': 500,     # MB
+        }
+        
+        # Create download dialog
+        download_dialog = tk.Toplevel(self.dialog)
+        download_dialog.title(f"Download {provider} Model")
+        download_dialog.geometry("550x350")
+        download_dialog.transient(self.dialog)
+        download_dialog.grab_set()
+        
+        # Center dialog
+        download_dialog.update_idletasks()
+        x = (download_dialog.winfo_screenwidth() // 2) - (download_dialog.winfo_width() // 2)
+        y = (download_dialog.winfo_screenheight() // 2) - (download_dialog.winfo_height() // 2)
+        download_dialog.geometry(f"+{x}+{y}")
+        
+        # Info label
+        info_text = {
+            'manga-ocr': "📚 Manga OCR Model\n• Source: HuggingFace (kha-white/manga-ocr-base)\n• Size: ~450MB\n• Optimized for Japanese manga text\n• Auto-downloads on first use",
+            'pororo': "🇰🇷 Pororo OCR Model\n• Source: Kakao Brain\n• Size: ~500MB\n• Optimized for Korean manhwa\n• Includes text detection + recognition",
+        }.get(provider, f"Model for {provider}")
+        
+        tk.Label(download_dialog, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack(pady=20)
+        
+        # Progress frame
+        progress_frame = tk.Frame(download_dialog)
+        progress_frame.pack(pady=20, padx=20, fill=tk.X)
+        
+        # Progress label (shows MB)
+        progress_label = tk.Label(progress_frame, text="Ready to download", font=('Arial', 10))
+        progress_label.pack()
+        
+        # Progress bar
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(
+            progress_frame,
+            length=500,
+            mode='determinate',
+            variable=progress_var
+        )
+        progress_bar.pack(pady=10)
+        
+        # Size label
+        size_label = tk.Label(progress_frame, text="", font=('Arial', 9))
+        size_label.pack()
+        
+        # Speed label
+        speed_label = tk.Label(progress_frame, text="", font=('Arial', 9))
+        speed_label.pack()
+        
+        # Status label
+        status_label = tk.Label(download_dialog, text="Click 'Download' to begin", font=('Arial', 9))
+        status_label.pack(pady=10)
+        
+        # Buttons
+        button_frame = tk.Frame(download_dialog)
+        button_frame.pack(pady=20)
+        
+        # Download tracking variables
+        download_active = {'value': False}
+        
+        def download_with_progress():
+            """Download model with real progress tracking"""
+            import requests
+            import time
+            
+            download_active['value'] = True
+            total_size = model_sizes.get(provider, 500) * 1024 * 1024  # Convert to bytes
+            
+            try:
+                if provider == 'manga-ocr':
+                    # For manga-ocr, we track the pip install and model download
+                    progress_label.config(text="Installing manga-ocr package...")
+                    
+                    # Install package
+                    import subprocess
+                    import sys
+                    
+                    # First install the package
+                    subprocess.check_call([
+                        sys.executable, "-m", "pip", "install", 
+                        "manga-ocr", "--upgrade"
+                    ])
+                    
+                    progress_label.config(text="Downloading model from HuggingFace...")
+                    progress_var.set(10)
+                    
+                    # Now trigger model download by importing
+                    from manga_ocr import MangaOcr
+                    
+                    # Track HuggingFace cache directory
+                    import os
+                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+                    
+                    # Monitor cache directory size change
+                    initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
+                    
+                    # Initialize model (this triggers download)
+                    def init_model_with_progress():
+                        start_time = time.time()
+                        last_size = initial_size
+                        
+                        # Start model initialization in separate thread
+                        import threading
+                        model_ready = threading.Event()
+                        model_instance = [None]
+                        
+                        def init_model():
+                            model_instance[0] = MangaOcr()
+                            model_ready.set()
+                        
+                        init_thread = threading.Thread(target=init_model)
+                        init_thread.start()
+                        
+                        # Monitor progress
+                        while not model_ready.is_set() and download_active['value']:
+                            current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
+                            downloaded = current_size - initial_size
+                            
+                            if downloaded > 0:
+                                # Calculate progress
+                                progress = min((downloaded / total_size) * 100, 99)
+                                progress_var.set(progress)
+                                
+                                # Calculate speed
+                                elapsed = time.time() - start_time
+                                if elapsed > 0:
+                                    speed = downloaded / elapsed  # bytes/sec
+                                    speed_mb = speed / (1024 * 1024)
+                                    speed_label.config(text=f"Speed: {speed_mb:.1f} MB/s")
+                                
+                                # Update size label
+                                mb_downloaded = downloaded / (1024 * 1024)
+                                mb_total = total_size / (1024 * 1024)
+                                size_label.config(text=f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
+                                progress_label.config(text=f"Downloading: {progress:.1f}%")
+                            
+                            time.sleep(0.5)
+                        
+                        init_thread.join(timeout=1)
+                        return model_instance[0]
+                    
+                    model = init_model_with_progress()
+                    
+                    if model:
+                        # Success!
+                        progress_var.set(100)
+                        size_label.config(text=f"{model_sizes[provider]} MB / {model_sizes[provider]} MB")
+                        progress_label.config(text="✅ Download complete!")
+                        status_label.config(text="Model ready to use!")
+                        
+                        # Update OCR manager
+                        self.ocr_manager.get_provider('manga-ocr').model = model
+                        self.ocr_manager.get_provider('manga-ocr').is_loaded = True
+                        self.ocr_manager.get_provider('manga-ocr').is_installed = True
+                        
+                        # Update main UI
+                        self.dialog.after(0, self._check_provider_status)
+                        
+                elif provider == 'pororo':
+                    # Similar process for Pororo
+                    progress_label.config(text="Installing Pororo package...")
+                    
+                    import subprocess
+                    import sys
+                    
+                    subprocess.check_call([
+                        sys.executable, "-m", "pip", "install", 
+                        "pororo", "--upgrade"
+                    ])
+                    
+                    progress_label.config(text="Downloading Pororo models...")
+                    progress_var.set(10)
+                    
+                    # Import and initialize Pororo
+                    from pororo import Pororo
+                    
+                    # Initialize with progress tracking
+                    # Pororo downloads models automatically
+                    model = Pororo(task="ocr", lang="ko")
+                    
+                    progress_var.set(100)
+                    progress_label.config(text="✅ Download complete!")
+                    status_label.config(text="Model ready to use!")
+                    
+                    # Update OCR manager
+                    self.ocr_manager.get_provider('pororo').model = model
+                    self.ocr_manager.get_provider('pororo').is_loaded = True
+                    self.ocr_manager.get_provider('pororo').is_installed = True
+                    
+                    self.dialog.after(0, self._check_provider_status)
+                    
+            except Exception as e:
+                progress_label.config(text="❌ Download failed")
+                status_label.config(text=f"Error: {str(e)[:50]}")
+                self._log(f"Download error: {str(e)}", "error")
+            
+            finally:
+                download_active['value'] = False
+        
+        def get_dir_size(path):
+            """Get total size of directory"""
+            total = 0
+            try:
+                for dirpath, dirnames, filenames in os.walk(path):
+                    for filename in filenames:
+                        filepath = os.path.join(dirpath, filename)
+                        if os.path.exists(filepath):
+                            total += os.path.getsize(filepath)
+            except:
+                pass
+            return total
+        
+        def start_download():
+            """Start download in background thread"""
+            download_btn.config(state=tk.DISABLED)
+            cancel_btn.config(text="Cancel")
+            
+            import threading
+            download_thread = threading.Thread(target=download_with_progress, daemon=True)
+            download_thread.start()
+        
+        def cancel_download():
+            """Cancel or close dialog"""
+            if download_active['value']:
+                download_active['value'] = False
+                status_label.config(text="Cancelling...")
+            else:
+                download_dialog.destroy()
+        
+        # Buttons
+        download_btn = tb.Button(button_frame, text="Download", command=start_download, bootstyle="primary")
+        download_btn.pack(side=tk.LEFT, padx=5)
+        
+        cancel_btn = tb.Button(button_frame, text="Close", command=cancel_download, bootstyle="secondary")
+        cancel_btn.pack(side=tk.LEFT, padx=5)
+
+    def _check_provider_status(self):
+        """Check and display OCR provider status"""
+        provider = self.ocr_provider_var.get()
+        
+        # Hide ALL buttons first
+        if hasattr(self, 'provider_setup_btn'):
+            self.provider_setup_btn.pack_forget()
+        if hasattr(self, 'download_model_btn'):
+            self.download_model_btn.pack_forget()
+        
+        if provider == 'google':
+            # Google - check for credentials file
+            google_creds = self.main_gui.config.get('google_vision_credentials', '')
+            if google_creds and os.path.exists(google_creds):
+                self.provider_status_label.config(text="✅ Ready", fg="green")
+            else:
+                self.provider_status_label.config(text="❌ Credentials needed", fg="red")
+            
+        elif provider == 'azure':
+            # Azure - check for API key
+            azure_key = self.main_gui.config.get('azure_vision_key', '')
+            if azure_key:
+                self.provider_status_label.config(text="✅ Ready", fg="green")
+            else:
+                self.provider_status_label.config(text="❌ Key needed", fg="red")
+            
+        else:
+            # Local OCR providers
+            if not hasattr(self, 'ocr_manager'):
+                from ocr_manager import OCRManager
+                self.ocr_manager = OCRManager(log_callback=self._log)
+                
+            status = self.ocr_manager.check_provider_status(provider)
+            
+            if status['loaded']:
+                self.provider_status_label.config(text="✅ Model loaded", fg="green")
+                # Show reload button for all local providers
+                self.provider_setup_btn.config(text="Reload", bootstyle="secondary")
+                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                
+            elif status['installed']:
+                self.provider_status_label.config(text="📦 Installed (not loaded)", fg="orange")
+                # Show load button
+                self.provider_setup_btn.config(text="Load", bootstyle="primary")
+                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                
+            else:
+                # Not installed
+                self.provider_status_label.config(text="❌ Not installed", fg="red")
+                
+                # Determine if this is a HuggingFace model or pip package
+                huggingface_providers = ['manga-ocr', 'pororo']
+                pip_providers = ['easyocr', 'paddleocr', 'doctr']
+                
+                if provider in huggingface_providers:
+                    # HuggingFace models need special download
+                    self.download_model_btn.config(text=f"📥 Download {provider}")
+                    self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
+                    
+                elif provider in pip_providers:
+                    # Check if running as .exe
+                    if getattr(sys, 'frozen', False):
+                        # Running as .exe - can't pip install
+                        self.provider_status_label.config(
+                            text="❌ Not available in .exe", 
+                            fg="red"
+                        )
+                        self._log(f"⚠️ {provider} cannot be installed in standalone .exe version", "warning")
+                    else:
+                        # Running from Python - can pip install
+                        self.provider_setup_btn.config(text="Install", bootstyle="success")
+                        self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+
+    def _setup_ocr_provider(self):
+        """Setup/install/load OCR provider"""
+        provider = self.ocr_provider_var.get()
+        
+        if provider in ['google', 'azure']:
+            return  # Cloud providers don't need setup
+        
+        status = self.ocr_manager.check_provider_status(provider)
+        
+        # Create progress dialog
+        progress_dialog = tk.Toplevel(self.dialog)
+        progress_dialog.title(f"Setting up {provider}")
+        progress_dialog.geometry("400x150")
+        progress_dialog.transient(self.dialog)
+        progress_dialog.grab_set()
+        
+        # Center dialog
+        progress_dialog.update_idletasks()
+        x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
+        y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
+        progress_dialog.geometry(f"+{x}+{y}")
+        
+        # Progress widgets
+        progress_label = tk.Label(progress_dialog, text="", font=('Arial', 10))
+        progress_label.pack(pady=20)
+        
+        progress_bar = ttk.Progressbar(
+            progress_dialog,
+            length=350,
+            mode='indeterminate'
+        )
+        progress_bar.pack(pady=10)
+        progress_bar.start(10)
+        
+        # Status label
+        status_label = tk.Label(progress_dialog, text="", font=('Arial', 9))
+        status_label.pack()
+        
+        def update_progress(message, percent=None):
+            """Update progress display"""
+            progress_label.config(text=message)
+            if percent is not None:
+                progress_bar.stop()
+                progress_bar.config(mode='determinate', value=percent)
+        
+        def setup_thread():
+            """Run setup in background thread"""
+            try:
+                success = False
+                
+                if not status['installed']:
+                    # Install provider
+                    update_progress(f"Installing {provider}...")
+                    success = self.ocr_manager.install_provider(provider, update_progress)
+                    
+                    if not success:
+                        update_progress("❌ Installation failed!", 0)
+                        self._log(f"Failed to install {provider}", "error")
+                        return
+                
+                # Load model
+                update_progress(f"Loading {provider} model...")
+                success = self.ocr_manager.load_provider(provider)
+                
+                if success:
+                    update_progress(f"✅ {provider} ready!", 100)
+                    self._log(f"✅ {provider} is ready to use", "success")
+                    
+                    # Update UI in main thread
+                    self.dialog.after(0, self._check_provider_status)
+                else:
+                    update_progress("❌ Failed to load model!", 0)
+                    self._log(f"Failed to load {provider} model", "error")
+                
+            except Exception as e:
+                update_progress(f"❌ Error: {str(e)}", 0)
+                self._log(f"Setup error: {str(e)}", "error")
+            
+            finally:
+                # Close dialog after delay
+                self.dialog.after(2000, progress_dialog.destroy)
+        
+        # Start setup in background
+        threading.Thread(target=setup_thread, daemon=True).start()
+
+    def _on_ocr_provider_change(self, event=None):
+        """Handle OCR provider change"""
+        provider = self.ocr_provider_var.get()
+        
+        # Hide ALL provider-specific frames first
+        if hasattr(self, 'google_creds_frame'):
+            self.google_creds_frame.pack_forget()
+        if hasattr(self, 'azure_frame'):
+            self.azure_frame.pack_forget()
+        
+        # Update the API label based on provider
+        api_label_text = {
+            'google': "OCR: Google Cloud Vision | Translation: API Key",
+            'azure': "OCR: Azure Computer Vision | Translation: API Key",
+            'manga-ocr': "OCR: Manga OCR (Japanese) | Translation: API Key",
+            'pororo': "OCR: Pororo (Korean) | Translation: API Key",
+            'easyocr': "OCR: EasyOCR (Multi-lang) | Translation: API Key",
+            'paddleocr': "OCR: PaddleOCR | Translation: API Key",
+            'doctr': "OCR: DocTR | Translation: API Key"
+        }.get(provider, f"OCR: {provider} | Translation: API Key")
+        
+        # Update the label in the UI
+        for widget in self.parent_frame.winfo_children():
+            if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Frame):
+                        for subchild in child.winfo_children():
+                            if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
+                                subchild.config(text=api_label_text)
+                                break
+        
+        # Show only the relevant settings frame for the selected provider
+        if provider == 'google':
+            # Show Google credentials frame
+            self.google_creds_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
+            
+        elif provider == 'azure':
+            # Show Azure settings frame  
+            self.azure_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
+            
+        # For all other providers (manga-ocr, pororo, easyocr, paddleocr, doctr)
+        # Don't show any cloud credential frames - they use local models
+        
+        # Check provider status to show appropriate buttons
+        self._check_provider_status()
+        
+        # Log the change
+        provider_descriptions = {
+            'google': "Google Cloud Vision (requires credentials)",
+            'azure': "Azure Computer Vision (requires API key)",
+            'manga-ocr': "Manga OCR - optimized for Japanese manga",
+            'pororo': "Pororo - optimized for Korean manhwa", 
+            'easyocr': "EasyOCR - multi-language support",
+            'paddleocr': "PaddleOCR - CJK language support",
+            'doctr': "DocTR - document text recognition"
+        }
+        
+        self._log(f"📋 OCR provider changed to: {provider_descriptions.get(provider, provider)}", "info")
+        
+        # Save the selection
+        self.main_gui.config['manga_ocr_provider'] = provider
+        if hasattr(self.main_gui, 'save_config'):
+            self.main_gui.save_config(show_message=False)
+        
+        # IMPORTANT: Reset translator to force recreation with new OCR provider
+        if hasattr(self, 'translator') and self.translator:
+            self._log(f"OCR provider changed to {provider.upper()}. Translator will be recreated on next run.", "info")
+            self.translator = None  # Force recreation on next translation
     
     def _build_interface(self):
         """Build the enhanced manga translation interface"""
@@ -241,22 +712,73 @@ class MangaTranslationTab:
         tk.Label(api_frame, text=f"Model: {current_model}", 
                 font=('Arial', 10, 'italic'), fg='gray').pack(side=tk.RIGHT)
 
-        # OCR Provider Selection
+        # OCR Provider Selection - ENHANCED VERSION
         self.ocr_provider_frame = tk.Frame(settings_frame)
         self.ocr_provider_frame.pack(fill=tk.X, pady=(0, 10))
 
         tk.Label(self.ocr_provider_frame, text="OCR Provider:", width=20, anchor='w').pack(side=tk.LEFT)
 
+        # Expanded provider list with descriptions
+        ocr_providers = [
+            ('google', 'Google Cloud Vision'),
+            ('azure', 'Azure Computer Vision'),
+            ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
+            ('pororo', '🇰🇷 Pororo (Korean)'),
+            ('easyocr', '🌏 EasyOCR (Multi-lang)'),
+            ('paddleocr', '🐼 PaddleOCR'),
+            ('doctr', '📄 DocTR')
+        ]
+
+        # Just the values for the combobox
+        provider_values = [p[0] for p in ocr_providers]
+        provider_display = [f"{p[0]} - {p[1]}" for p in ocr_providers]
+
         self.ocr_provider_var = tk.StringVar(value=self.main_gui.config.get('manga_ocr_provider', 'google'))
         provider_combo = ttk.Combobox(
             self.ocr_provider_frame,
             textvariable=self.ocr_provider_var,
-            values=['google', 'azure'],
+            values=provider_values,
             state='readonly',
             width=15
         )
         provider_combo.pack(side=tk.LEFT, padx=10)
         provider_combo.bind('<<ComboboxSelected>>', self._on_ocr_provider_change)
+
+        # Provider status indicator with more detail
+        self.provider_status_label = tk.Label(
+            self.ocr_provider_frame,
+            text="",
+            font=('Arial', 9),
+            width=25
+        )
+        self.provider_status_label.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Setup/Install button for non-cloud providers - ALWAYS VISIBLE for local providers
+        self.provider_setup_btn = tb.Button(
+            self.ocr_provider_frame,
+            text="Setup",
+            command=self._setup_ocr_provider,
+            bootstyle="info",
+            width=12
+        )
+        # Don't pack yet, let _check_provider_status handle it
+
+        # Add explicit download button for Hugging Face models
+        self.download_model_btn = tb.Button(
+            self.ocr_provider_frame,
+            text="📥 Download",
+            command=self._download_hf_model,
+            bootstyle="success",
+            width=10
+        )
+        # Don't pack yet
+
+        # Initialize OCR manager
+        from ocr_manager import OCRManager
+        self.ocr_manager = OCRManager(log_callback=self._log)
+
+        # Check initial provider status
+        self._check_provider_status()
 
         # Google Cloud Credentials section (now in a frame that can be hidden)
         self.google_creds_frame = tk.Frame(settings_frame)
@@ -1393,49 +1915,6 @@ class MangaTranslationTab:
         else:
             self._log("📝 Visual context DISABLED - Text-only mode", "info")
             self._log("   Compatible with non-vision models (Claude, GPT-3.5, etc.)", "success")
- 
-    def _on_ocr_provider_change(self, event=None):
-        """Handle OCR provider change"""
-        provider = self.ocr_provider_var.get()
-        
-        if provider == 'azure':
-            # Hide Google, show Azure
-            self.google_creds_frame.pack_forget()
-            self.azure_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
-            
-            # Update API label
-            for widget in self.parent_frame.winfo_children():
-                if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
-                    for child in widget.winfo_children():
-                        if isinstance(child, tk.Frame):
-                            for subchild in child.winfo_children():
-                                if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
-                                    subchild.config(text="OCR: Azure Computer Vision | Translation: API Key")
-                                    break
-        else:
-            # Hide Azure, show Google
-            self.azure_frame.pack_forget()
-            self.google_creds_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
-            
-            # Update API label
-            for widget in self.parent_frame.winfo_children():
-                if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
-                    for child in widget.winfo_children():
-                        if isinstance(child, tk.Frame):
-                            for subchild in child.winfo_children():
-                                if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
-                                    subchild.config(text="OCR: Google Cloud Vision | Translation: API Key")
-                                    break
-        
-        # Save the selection
-        self.main_gui.config['manga_ocr_provider'] = provider
-        if hasattr(self.main_gui, 'save_config'):
-            self.main_gui.save_config(show_message=False)
-        
-        # IMPORTANT: Reset translator to force recreation with new OCR provider
-        if self.translator:
-            self._log(f"OCR provider changed to {provider.upper()}. Translator will be recreated on next run.", "info")
-            self.translator = None  # Force recreation on next translation
  
     def _open_advanced_settings(self):
         """Open the manga advanced settings dialog"""
@@ -2879,9 +3358,21 @@ class MangaTranslationTab:
         self.file_listbox.delete(0, tk.END)
         self.selected_files.clear()
     
-    def _log(self, message: str, level: str = 'info'):
-        """Thread-safe logging to GUI"""
-        self.update_queue.put(('log', message, level))
+    def _log(self, message: str, level: str = "info"):
+        """Log message to GUI text widget or console"""
+        # Check if log_text widget exists yet
+        if hasattr(self, 'log_text') and self.log_text:
+            # Thread-safe logging to GUI
+            if threading.current_thread() == threading.main_thread():
+                # We're in the main thread, update directly
+                self.log_text.insert(tk.END, message + '\n', level)
+                self.log_text.see(tk.END)
+            else:
+                # We're in a background thread, use queue
+                self.update_queue.put(('log', message, level))
+        else:
+            # Widget doesn't exist yet or we're in initialization, print to console
+            print(message)
     
     def _update_progress(self, current: int, total: int, status: str):
         """Thread-safe progress update"""
@@ -3052,13 +3543,15 @@ class MangaTranslationTab:
         self._log(f"Using OCR provider: {ocr_config['provider'].upper()}", "info")
         if ocr_config['provider'] == 'google':
             self._log(f"Using Google Vision credentials: {os.path.basename(ocr_config['google_credentials_path'])}", "info")
-        else:
+        elif ocr_config['provider'] == 'azure':
             self._log(f"Using Azure endpoint: {ocr_config['azure_endpoint']}", "info")
-        self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
-        self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
-        self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
-        self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
-        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+        else:
+            self._log(f"Using local OCR provider: {ocr_config['provider'].upper()}", "info")
+            self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
+            self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
+            self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
+            self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
+            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
         
         # Start translation thread
         self.translation_thread = threading.Thread(
