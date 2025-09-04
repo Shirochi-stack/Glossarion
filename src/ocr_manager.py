@@ -60,64 +60,116 @@ class OCRProvider:
 
 
 class MangaOCRProvider(OCRProvider):
-    """Manga OCR provider for Japanese manga text"""
+    """Manga OCR provider using HuggingFace model directly"""
     
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        self.processor = None
+        self.model = None
+        self.tokenizer = None
+        
     def check_installation(self) -> bool:
-        """Check if manga-ocr is installed"""
+        """Check if transformers is installed"""
         try:
-            import manga_ocr
+            import transformers
+            import torch
             self.is_installed = True
             return True
         except ImportError:
             return False
     
     def install(self, progress_callback=None) -> bool:
-        """Install manga-ocr"""
+        """Install transformers and torch"""
         try:
-            self._log("📦 Installing manga-ocr...")
+            self._log("📦 Installing transformers for manga OCR...")
             if progress_callback:
-                progress_callback("Installing manga-ocr package...", 0)
+                progress_callback("Installing transformers...", 0)
             
-            # Install manga-ocr
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install", 
-                "manga-ocr", "--upgrade"
+                "transformers", "torch", "pillow", "--upgrade"
             ])
             
             if progress_callback:
-                progress_callback("manga-ocr installed successfully!", 100)
+                progress_callback("Transformers installed successfully!", 100)
             
             self.is_installed = True
-            self._log("✅ manga-ocr installed successfully")
+            self._log("✅ Transformers installed successfully")
             return True
             
         except Exception as e:
-            self._log(f"❌ Failed to install manga-ocr: {str(e)}", "error")
+            self._log(f"❌ Failed to install transformers: {str(e)}", "error")
             return False
     
     def load_model(self) -> bool:
-        """Load manga-ocr model"""
+        """Load the manga-ocr model from HuggingFace"""
         try:
             if not self.is_installed and not self.check_installation():
-                self._log("❌ manga-ocr not installed", "error")
+                self._log("❌ Transformers not installed", "error")
                 return False
             
-            self._log("📥 Loading manga-ocr model...")
-            from manga_ocr import MangaOcr
+            self._log("📥 Loading manga-ocr model from HuggingFace...")
             
-            # This will automatically download the model from HuggingFace on first run
-            self.model = MangaOcr()
+            from transformers import VisionEncoderDecoderModel, AutoTokenizer, AutoImageProcessor
+            import torch
+            
+            # Load the model directly from HuggingFace
+            model_name = "kha-white/manga-ocr-base"
+            
+            self._log(f"   Loading tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            
+            self._log(f"   Loading image processor...")
+            self.processor = AutoImageProcessor.from_pretrained(model_name)
+            
+            self._log(f"   Loading model...")
+            self.model = VisionEncoderDecoderModel.from_pretrained(model_name)
+            
+            # Set to eval mode
+            self.model.eval()
+            
+            # Move to GPU if available
+            if torch.cuda.is_available():
+                self.model = self.model.cuda()
+                self._log("   ✅ Model loaded on GPU")
+            else:
+                self._log("   ✅ Model loaded on CPU")
+            
             self.is_loaded = True
-            
-            self._log("✅ manga-ocr model loaded successfully")
+            self._log("✅ Manga OCR model ready")
             return True
             
         except Exception as e:
-            self._log(f"❌ Failed to load manga-ocr: {str(e)}", "error")
+            self._log(f"❌ Failed to load manga-ocr model: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
             return False
     
+    def _run_ocr(self, pil_image):
+        """Run OCR on a PIL image using the HuggingFace model"""
+        import torch
+        
+        # Process image
+        pixel_values = self.processor(pil_image, return_tensors="pt").pixel_values
+        
+        # Move to same device as model
+        if next(self.model.parameters()).is_cuda:
+            pixel_values = pixel_values.cuda()
+        
+        # Generate text
+        with torch.no_grad():
+            generated_ids = self.model.generate(pixel_values)
+        
+        # Decode
+        generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        
+        return generated_text
+    
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
-        """Detect Japanese text using manga-ocr"""
+        """
+        Process the ENTIRE image as a single region.
+        Uses confidence from kwargs or defaults to settings value.
+        """
         results = []
         
         try:
@@ -125,37 +177,46 @@ class MangaOCRProvider(OCRProvider):
                 if not self.load_model():
                     return results
             
-            # Convert numpy array to PIL Image
-            if isinstance(image, np.ndarray):
-                import cv2
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(image_rgb)
-            else:
-                pil_image = image
+            import cv2
+            from PIL import Image
             
-            # manga-ocr processes the entire image at once
-            # It doesn't provide bounding boxes, so we'll need to use a text detector first
-            # For now, we'll process the whole image
-            text = self.model(pil_image)
+            # Get confidence from kwargs (passed from manga_translator.py)
+            # This should be the actual confidence_threshold from manga_settings
+            confidence = kwargs.get('confidence', 0.7)  # Default matches manga_settings_dialog.py
             
-            if text and text.strip():
-                # Return as single region covering the whole image
-                h, w = image.shape[:2] if isinstance(image, np.ndarray) else pil_image.size[::-1]
-                results.append(OCRResult(
-                    text=text,
-                    bbox=(0, 0, w, h),
-                    confidence=0.95,  # manga-ocr doesn't provide confidence
-                    vertices=[(0, 0), (w, 0), (w, h), (0, h)]
-                ))
+            # Convert numpy array to PIL
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            h, w = image.shape[:2]
+            
+            self._log("📝 Processing full image with manga-ocr...")
+            
+            # Run OCR on the entire image
+            try:
+                text = self._run_ocr(pil_image)
                 
-                self._log(f"✅ Detected text: {text[:50]}...")
+                if text and text.strip():
+                    # Use the actual confidence value from settings
+                    results.append(OCRResult(
+                        text=text.strip(),
+                        bbox=(0, 0, w, h),
+                        confidence=confidence,  # Use the actual value
+                        vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                    ))
+                    self._log(f"✅ Detected text with confidence {confidence:.2f}: {text[:50]}...")
+                else:
+                    self._log("⚠️ No text detected in image", "warning")
+                    
+            except Exception as e:
+                self._log(f"❌ OCR failed: {str(e)}", "error")
             
         except Exception as e:
-            self._log(f"❌ Error in manga-ocr detection: {str(e)}", "error")
+            self._log(f"❌ Error in manga-ocr: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
         
         return results
-
-
+        
 class PororoOCRProvider(OCRProvider):
     """Pororo OCR provider for Korean text"""
     
