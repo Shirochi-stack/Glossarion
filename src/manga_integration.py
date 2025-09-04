@@ -938,8 +938,6 @@ class MangaTranslationTab:
 
         tk.Label(min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
-        self.min_readable_size_var = tk.IntVar(value=self.main_gui.config.get('manga_min_readable_size', 16))
-
         min_size_spinbox = ttk.Spinbox(
             min_size_frame,
             from_=10,
@@ -965,8 +963,6 @@ class MangaTranslationTab:
 
         tk.Label(max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
-        self.max_font_size_var = tk.IntVar(value=self.main_gui.config.get('manga_max_font_size', 24))
-
         max_size_spinbox = ttk.Spinbox(
             max_size_frame,
             from_=20,
@@ -988,8 +984,6 @@ class MangaTranslationTab:
         # Text wrapping mode
         wrap_frame = tk.Frame(render_frame)
         wrap_frame.pack(fill=tk.X, pady=5)
-
-        self.strict_text_wrapping_var = tk.BooleanVar(value=self.main_gui.config.get('manga_strict_text_wrapping', False))
 
         self.strict_wrap_checkbox = tb.Checkbutton(
             wrap_frame,
@@ -1568,142 +1562,239 @@ class MangaTranslationTab:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             if model_type == self.local_model_type_var.get():
                 self.local_model_path_var = tk.StringVar(value=path)
-        config = self.main_gui.config
         
         # Initialize with defaults
         self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
+        self.bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace right after creation
+        
         self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'circle'))
+        self.bg_style_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.bg_reduction_var = tk.DoubleVar(value=config.get('manga_bg_reduction', 1.0))
+        self.bg_reduction_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.font_size_var = tk.IntVar(value=config.get('manga_font_size', 0))
+        self.font_size_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.selected_font_path = config.get('manga_font_path', None)
         self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', True))
         self.inpaint_quality_var = tk.StringVar(value=config.get('manga_inpaint_quality', 'high'))
         self.inpaint_dilation_var = tk.IntVar(value=config.get('manga_inpaint_dilation', 15))
         self.inpaint_passes_var = tk.IntVar(value=config.get('manga_inpaint_passes', 2))
+        
         self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
+        self.font_size_mode_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
+        self.font_size_multiplier_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
+        self.constrain_to_bubble_var.trace('w', lambda *args: self._save_rendering_settings())
+        
+        self.min_readable_size_var = tk.IntVar(value=config.get('manga_min_readable_size', 16))
+        self.min_readable_size_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace RIGHT after creation
+        
         self.max_font_size_var = tk.IntVar(value=config.get('manga_max_font_size', 24))
+        self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace RIGHT after creation
+        
         self.strict_text_wrapping_var = tk.BooleanVar(value=config.get('manga_strict_text_wrapping', False))
+        self.strict_text_wrapping_var.trace('w', lambda *args: self._save_rendering_settings())
         
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
         self.text_color_r = tk.IntVar(value=manga_text_color[0])
+        self.text_color_r.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.text_color_g = tk.IntVar(value=manga_text_color[1])
+        self.text_color_g.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.text_color_b = tk.IntVar(value=manga_text_color[2])
+        self.text_color_b.trace('w', lambda *args: self._save_rendering_settings())
         
         # Shadow settings
         self.shadow_enabled_var = tk.BooleanVar(value=config.get('manga_shadow_enabled', True))
+        self.shadow_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         manga_shadow_color = config.get('manga_shadow_color', [204, 128, 128])
         self.shadow_color_r = tk.IntVar(value=manga_shadow_color[0])
+        self.shadow_color_r.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.shadow_color_g = tk.IntVar(value=manga_shadow_color[1])
+        self.shadow_color_g.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.shadow_color_b = tk.IntVar(value=manga_shadow_color[2])
+        self.shadow_color_b.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.shadow_offset_x_var = tk.IntVar(value=config.get('manga_shadow_offset_x', 2))
+        self.shadow_offset_x_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.shadow_offset_y_var = tk.IntVar(value=config.get('manga_shadow_offset_y', 2))
+        self.shadow_offset_y_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.shadow_blur_var = tk.IntVar(value=config.get('manga_shadow_blur', 0))
+        self.shadow_blur_var.trace('w', lambda *args: self._save_rendering_settings())
         
         # Initialize font_style_var with saved value or default
         saved_font_style = config.get('manga_font_style', 'Default')
         self.font_style_var = tk.StringVar(value=saved_font_style)
+        self.font_style_var.trace('w', lambda *args: self._save_rendering_settings())
         
         # Full page context settings
         self.full_page_context_var = tk.BooleanVar(value=config.get('manga_full_page_context', False))
+        self.full_page_context_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
             "You will receive multiple text segments from a manga page. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all segments."
         )
+        
         # Visual context setting
         self.visual_context_enabled_var = tk.BooleanVar(
             value=self.main_gui.config.get('manga_visual_context_enabled', True)
         )
+        self.visual_context_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         # Output settings
         self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
- 
-    def _set_min_size(self, size):
-        """Set minimum font size from preset"""
-        self.min_readable_size_var.set(size)
-        self._save_rendering_settings()
+        self.create_subfolder_var.trace('w', lambda *args: self._save_rendering_settings())
     
     def _save_rendering_settings(self):
-        # Ensure manga_settings structure exists
+        """Save rendering settings with validation"""
         # Don't save during initialization
         if hasattr(self, '_initializing') and self._initializing:
             return
-        if 'manga_settings' not in self.main_gui.config:
-            self.main_gui.config['manga_settings'] = {}
-        if 'inpainting' not in self.main_gui.config['manga_settings']:
-            self.main_gui.config['manga_settings']['inpainting'] = {}
         
-        # Save to nested location
-        inpaint = self.main_gui.config['manga_settings']['inpainting']
-        inpaint['method'] = self.inpaint_method_var.get()
-        inpaint['local_method'] = self.local_model_type_var.get()
-        
-        # Save model path for current type
-        model_type = self.local_model_type_var.get()
-        inpaint[f'{model_type}_model_path'] = self.local_model_path_var.get()
-
+        # Validate that variables exist and have valid values before saving
+        try:
+            # Ensure manga_settings structure exists
+            if 'manga_settings' not in self.main_gui.config:
+                self.main_gui.config['manga_settings'] = {}
+            if 'inpainting' not in self.main_gui.config['manga_settings']:
+                self.main_gui.config['manga_settings']['inpainting'] = {}
             
-        # Add new inpainting settings
-        self.main_gui.config['manga_inpaint_method'] = self.inpaint_method_var.get()
-        self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
-        
-        # Save model paths for each type
-        for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
+            # Save to nested location
+            inpaint = self.main_gui.config['manga_settings']['inpainting']
+            if hasattr(self, 'inpaint_method_var'):
+                inpaint['method'] = self.inpaint_method_var.get()
             if hasattr(self, 'local_model_type_var'):
-                if model_type == self.local_model_type_var.get():
-                    path = self.local_model_path_var.get()
-                    if path:
-                        self.main_gui.config[f'manga_{model_type}_model_path'] = path
-                    
-        # Update Manga GUI config
-        self.main_gui.config['manga_bg_opacity'] = self.bg_opacity_var.get()
-        self.main_gui.config['manga_bg_style'] = self.bg_style_var.get()
-        self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_var.get()
-        self.main_gui.config['manga_font_size'] = self.font_size_var.get()
-        self.main_gui.config['manga_font_path'] = self.selected_font_path
-        self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
-        self.main_gui.config['manga_inpaint_quality'] = self.inpaint_quality_var.get()
-        self.main_gui.config['manga_inpaint_dilation'] = self.inpaint_dilation_var.get()
-        self.main_gui.config['manga_inpaint_passes'] = self.inpaint_passes_var.get()
-        self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
-        self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
-        self.main_gui.config['manga_font_style'] = self.font_style_var.get()
-        self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
-        self.main_gui.config['manga_min_readable_size'] = self.min_readable_size_var.get()
-        self.main_gui.config['manga_max_font_size'] = self.max_font_size_var.get()
-        self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_var.get()
-        
-        # Save font color as list
-        self.main_gui.config['manga_text_color'] = [
-            self.text_color_r.get(),
-            self.text_color_g.get(),
-            self.text_color_b.get()
-        ]
-        
-        # Save shadow settings
-        self.main_gui.config['manga_shadow_enabled'] = self.shadow_enabled_var.get()
-        self.main_gui.config['manga_shadow_color'] = [
-            self.shadow_color_r.get(),
-            self.shadow_color_g.get(),
-            self.shadow_color_b.get()
-        ]
-        self.main_gui.config['manga_shadow_offset_x'] = self.shadow_offset_x_var.get()
-        self.main_gui.config['manga_shadow_offset_y'] = self.shadow_offset_y_var.get()
-        self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_var.get()
-        
-        # Save output settings
-        if hasattr(self, 'create_subfolder_var'):
-            self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_var.get()
-        
-        # Save full page context settings
-        self.main_gui.config['manga_full_page_context'] = self.full_page_context_var.get()
-        self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
-        
-        # Call main GUI's save_config to persist to file
-        if hasattr(self.main_gui, 'save_config'):
-            self.main_gui.save_config(show_message=False)
+                inpaint['local_method'] = self.local_model_type_var.get()
+                model_type = self.local_model_type_var.get()
+                if hasattr(self, 'local_model_path_var'):
+                    inpaint[f'{model_type}_model_path'] = self.local_model_path_var.get()
+            
+            # Add new inpainting settings
+            if hasattr(self, 'inpaint_method_var'):
+                self.main_gui.config['manga_inpaint_method'] = self.inpaint_method_var.get()
+            if hasattr(self, 'local_model_type_var'):
+                self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
+            
+            # Save model paths for each type
+            for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
+                if hasattr(self, 'local_model_type_var'):
+                    if model_type == self.local_model_type_var.get():
+                        if hasattr(self, 'local_model_path_var'):
+                            path = self.local_model_path_var.get()
+                            if path:
+                                self.main_gui.config[f'manga_{model_type}_model_path'] = path
+            
+            # Save all other settings with validation
+            if hasattr(self, 'bg_opacity_var'):
+                self.main_gui.config['manga_bg_opacity'] = self.bg_opacity_var.get()
+            if hasattr(self, 'bg_style_var'):
+                self.main_gui.config['manga_bg_style'] = self.bg_style_var.get()
+            if hasattr(self, 'bg_reduction_var'):
+                self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_var.get()
+            
+            # CRITICAL: Font size settings - validate before saving
+            if hasattr(self, 'font_size_var'):
+                try:
+                    value = self.font_size_var.get()
+                    self.main_gui.config['manga_font_size'] = value
+                except tk.TclError:
+                    pass  # Skip if variable is in invalid state
+            
+            if hasattr(self, 'min_readable_size_var'):
+                try:
+                    value = self.min_readable_size_var.get()
+                    # Validate the value is reasonable
+                    if 0 <= value <= 100:
+                        self.main_gui.config['manga_min_readable_size'] = value
+                except (tk.TclError, ValueError):
+                    pass  # Skip if variable is in invalid state
+            
+            if hasattr(self, 'max_font_size_var'):
+                try:
+                    value = self.max_font_size_var.get()
+                    # Validate the value is reasonable
+                    if 0 <= value <= 200:
+                        self.main_gui.config['manga_max_font_size'] = value
+                except (tk.TclError, ValueError):
+                    pass  # Skip if variable is in invalid state
+            
+            # Continue with other settings
+            self.main_gui.config['manga_font_path'] = self.selected_font_path
+            
+            if hasattr(self, 'skip_inpainting_var'):
+                self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
+            if hasattr(self, 'inpaint_quality_var'):
+                self.main_gui.config['manga_inpaint_quality'] = self.inpaint_quality_var.get()
+            if hasattr(self, 'inpaint_dilation_var'):
+                self.main_gui.config['manga_inpaint_dilation'] = self.inpaint_dilation_var.get()
+            if hasattr(self, 'inpaint_passes_var'):
+                self.main_gui.config['manga_inpaint_passes'] = self.inpaint_passes_var.get()
+            if hasattr(self, 'font_size_mode_var'):
+                self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
+            if hasattr(self, 'font_size_multiplier_var'):
+                self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
+            if hasattr(self, 'font_style_var'):
+                self.main_gui.config['manga_font_style'] = self.font_style_var.get()
+            if hasattr(self, 'constrain_to_bubble_var'):
+                self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
+            if hasattr(self, 'strict_text_wrapping_var'):
+                self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_var.get()
+            
+            # Save font color as list
+            if hasattr(self, 'text_color_r') and hasattr(self, 'text_color_g') and hasattr(self, 'text_color_b'):
+                self.main_gui.config['manga_text_color'] = [
+                    self.text_color_r.get(),
+                    self.text_color_g.get(),
+                    self.text_color_b.get()
+                ]
+            
+            # Save shadow settings
+            if hasattr(self, 'shadow_enabled_var'):
+                self.main_gui.config['manga_shadow_enabled'] = self.shadow_enabled_var.get()
+            if hasattr(self, 'shadow_color_r') and hasattr(self, 'shadow_color_g') and hasattr(self, 'shadow_color_b'):
+                self.main_gui.config['manga_shadow_color'] = [
+                    self.shadow_color_r.get(),
+                    self.shadow_color_g.get(),
+                    self.shadow_color_b.get()
+                ]
+            if hasattr(self, 'shadow_offset_x_var'):
+                self.main_gui.config['manga_shadow_offset_x'] = self.shadow_offset_x_var.get()
+            if hasattr(self, 'shadow_offset_y_var'):
+                self.main_gui.config['manga_shadow_offset_y'] = self.shadow_offset_y_var.get()
+            if hasattr(self, 'shadow_blur_var'):
+                self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_var.get()
+            
+            # Save output settings
+            if hasattr(self, 'create_subfolder_var'):
+                self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_var.get()
+            
+            # Save full page context settings
+            if hasattr(self, 'full_page_context_var'):
+                self.main_gui.config['manga_full_page_context'] = self.full_page_context_var.get()
+            if hasattr(self, 'full_page_context_prompt'):
+                self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
+            
+            # Call main GUI's save_config to persist to file
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+                
+        except Exception as e:
+            # Log error but don't crash
+            print(f"Error saving manga settings: {e}")
     
     def _on_context_toggle(self):
         """Handle full page context toggle"""
