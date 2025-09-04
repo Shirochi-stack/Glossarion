@@ -134,7 +134,10 @@ class MangaTranslator:
                 self.azure_creds(azure_key)
             )
         else:
-            raise ValueError(f"Unknown OCR provider: {self.ocr_provider}")
+            # New OCR providers handled by OCR manager
+            from ocr_manager import OCRManager
+            self.ocr_manager = OCRManager(log_callback=log_callback)
+            print(f"Initialized OCR Manager for {self.ocr_provider}")
         
         self.client = unified_client
         self.main_gui = main_gui
@@ -568,7 +571,7 @@ class MangaTranslator:
         return (english_chars / total_chars) > 0.7
             
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
-        """Detect text regions using configured OCR provider (Google or Azure)"""
+        """Detect text regions using configured OCR provider"""
         self._log(f"🔍 Detecting text regions in: {os.path.basename(image_path)}")
         self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
         
@@ -581,6 +584,7 @@ class MangaTranslator:
             # Get text filtering settings
             min_text_length = ocr_settings.get('min_text_length', 2)
             exclude_english = ocr_settings.get('exclude_english_text', True)
+            confidence_threshold = ocr_settings.get('confidence_threshold', 0.1)
             
             # Load and preprocess image if enabled
             if preprocessing.get('enabled', True):
@@ -592,10 +596,10 @@ class MangaTranslator:
                     processed_image_data = image_file.read()
             
             regions = []
-            confidence_threshold = ocr_settings.get('confidence_threshold', 0.1)
             
             # Route to appropriate provider
             if self.ocr_provider == 'google':
+                # === GOOGLE CLOUD VISION (unchanged) ===
                 # Create Vision API image object
                 image = vision.Image(content=processed_image_data)
                 
@@ -651,7 +655,7 @@ class MangaTranslator:
                         
                         block_text = block_text.strip()
                         
-                        # TEXT FILTERING SECTION - ADD THIS
+                        # TEXT FILTERING SECTION
                         # Skip if text is too short
                         if len(block_text) < min_text_length:
                             self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
@@ -688,8 +692,9 @@ class MangaTranslator:
                         )
                         regions.append(region)
                         self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
-            #            
+                        
             elif self.ocr_provider == 'azure':
+                # === AZURE COMPUTER VISION (unchanged) ===
                 import io
                 import time
                 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
@@ -710,7 +715,7 @@ class MangaTranslator:
                 image_stream = io.BytesIO(processed_image_data)
                 
                 # Get Azure-specific settings
-                reading_order = ocr_settings.get('azure_reading_order', 'natural')  # 'basic' or 'natural'
+                reading_order = ocr_settings.get('azure_reading_order', 'natural')
                 model_version = ocr_settings.get('azure_model_version', 'latest')
                 max_wait = ocr_settings.get('azure_max_wait', 60)
                 poll_interval = ocr_settings.get('azure_poll_interval', 0.5)
@@ -799,7 +804,7 @@ class MangaTranslator:
                             self._log(f"   Processing page {page_num + 1}/{len(result.analyze_result.read_results)}")
                         
                         for line in page.lines:
-                            # TEXT FILTERING FOR AZURE - ADD THIS
+                            # TEXT FILTERING FOR AZURE
                             # Skip if text is too short
                             if len(line.text) < min_text_length:
                                 self._log(f"   Skipping short text ({len(line.text)} chars): {line.text}")
@@ -897,10 +902,175 @@ class MangaTranslator:
                 else:
                     # Timeout or other status
                     raise Exception(f"Azure OCR ended with status: {result.status} after {wait_time}s")
+                    
             else:
-                raise ValueError(f"Unknown OCR provider: {self.ocr_provider}")
+                # === NEW OCR PROVIDERS (manga-ocr, pororo, easyocr, paddleocr, doctr) ===
+                import cv2
+                import numpy as np
+                from ocr_manager import OCRManager
+                
+                # Load image as numpy array
+                if isinstance(processed_image_data, bytes):
+                    # Convert bytes to numpy array
+                    nparr = np.frombuffer(processed_image_data, np.uint8)
+                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                else:
+                    # Load from file path
+                    image = cv2.imread(image_path)
+                    if image is None:
+                        # Try with PIL for Unicode paths
+                        from PIL import Image as PILImage
+                        pil_image = PILImage.open(image_path)
+                        image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                
+                # Create OCR manager if not exists
+                if not hasattr(self, 'ocr_manager'):
+                    self.ocr_manager = OCRManager(log_callback=self._log)
+                
+                # Check provider status and load if needed
+                provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
+                
+                if not provider_status['installed']:
+                    self._log(f"❌ {self.ocr_provider} is not installed", "error")
+                    self._log(f"   Please install it from the GUI settings", "error")
+                    raise Exception(f"{self.ocr_provider} OCR provider is not installed")
+                
+                if not provider_status['loaded']:
+                    self._log(f"📥 Loading {self.ocr_provider} model...")
+                    if not self.ocr_manager.load_provider(self.ocr_provider):
+                        raise Exception(f"Failed to load {self.ocr_provider} model")
+                
+                # Special handling for manga-ocr (needs region detection first)
+                if self.ocr_provider == 'manga-ocr':
+                    # manga-ocr processes whole image, so we need a text detector first
+                    # Use a different provider for detection, then manga-ocr for recognition
+                    self._log("📝 manga-ocr requires text detection first, using EasyOCR for detection...")
+                    
+                    # Use EasyOCR for detection only
+                    detector_status = self.ocr_manager.check_provider_status('easyocr')
+                    if not detector_status['loaded']:
+                        self._log("📥 Loading EasyOCR for text detection...")
+                        # Configure EasyOCR with appropriate languages
+                        language_hints = ocr_settings.get('language_hints', ['ja'])
+                        easyocr_provider = self.ocr_manager.get_provider('easyocr')
+                        if easyocr_provider:
+                            easyocr_provider.languages = language_hints
+                        if not self.ocr_manager.load_provider('easyocr'):
+                            self._log("⚠️ Failed to load EasyOCR, using whole image", "warning")
+                            # Fall back to processing whole image
+                            ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                        else:
+                            # Get bounding boxes from EasyOCR
+                            detection_results = self.ocr_manager.detect_text(image, 'easyocr')
+                            ocr_results = []
+                            
+                            # Process each detected region with manga-ocr
+                            for det_result in detection_results:
+                                x, y, w, h = det_result.bbox
+                                # Crop region from image
+                                cropped = image[y:y+h, x:x+w]
+                                
+                                # Process with manga-ocr
+                                manga_results = self.ocr_manager.detect_text(cropped, 'manga-ocr')
+                                if manga_results:
+                                    # Update bbox to original image coordinates
+                                    manga_results[0].bbox = det_result.bbox
+                                    manga_results[0].vertices = det_result.vertices
+                                    manga_results[0].confidence = max(manga_results[0].confidence, det_result.confidence)
+                                    ocr_results.append(manga_results[0])
+                    else:
+                        # Process each region
+                        detection_results = self.ocr_manager.detect_text(image, 'easyocr')
+                        ocr_results = []
+                        
+                        for det_result in detection_results:
+                            x, y, w, h = det_result.bbox
+                            cropped = image[y:y+h, x:x+w]
+                            manga_results = self.ocr_manager.detect_text(cropped, 'manga-ocr')
+                            if manga_results:
+                                manga_results[0].bbox = det_result.bbox
+                                manga_results[0].vertices = det_result.vertices
+                                ocr_results.append(manga_results[0])
+                
+                elif self.ocr_provider == 'pororo':
+                    # Configure Pororo for appropriate language
+                    language_hints = ocr_settings.get('language_hints', ['ko'])
+                    # Pororo primarily supports Korean
+                    self._log("🇰🇷 Pororo OCR optimized for Korean text")
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                
+                elif self.ocr_provider == 'easyocr':
+                    # Configure EasyOCR languages based on settings
+                    language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'en'])
+                    easyocr_provider = self.ocr_manager.get_provider('easyocr')
+                    if easyocr_provider:
+                        # Reload with correct languages if needed
+                        if easyocr_provider.languages != language_hints:
+                            easyocr_provider.languages = language_hints
+                            easyocr_provider.is_loaded = False
+                            self._log(f"📥 Reloading EasyOCR with languages: {language_hints}")
+                            self.ocr_manager.load_provider('easyocr')
+                    
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                
+                elif self.ocr_provider == 'paddleocr':
+                    # Configure PaddleOCR language
+                    language_hints = ocr_settings.get('language_hints', ['ja'])
+                    # Map to PaddleOCR language codes
+                    lang_map = {'ja': 'japan', 'ko': 'korean', 'zh': 'ch', 'en': 'en'}
+                    paddle_lang = lang_map.get(language_hints[0] if language_hints else 'ja', 'japan')
+                    
+                    # Reload if language changed
+                    paddle_provider = self.ocr_manager.get_provider('paddleocr')
+                    if paddle_provider and paddle_provider.is_loaded:
+                        if hasattr(paddle_provider.model, 'lang') and paddle_provider.model.lang != paddle_lang:
+                            from paddleocr import PaddleOCR
+                            paddle_provider.model = PaddleOCR(
+                                use_angle_cls=True,
+                                lang=paddle_lang,
+                                use_gpu=True,
+                                show_log=False
+                            )
+                            self._log(f"📥 Reloaded PaddleOCR with language: {paddle_lang}")
+                    
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                
+                else:
+                    # Default processing for other providers
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                
+                # Convert OCR results to TextRegion format
+                for result in ocr_results:
+                    # Apply filtering
+                    if len(result.text) < min_text_length:
+                        self._log(f"   Skipping short text ({len(result.text)} chars): {result.text}")
+                        continue
+                    
+                    if exclude_english and self._is_primarily_english(result.text):
+                        self._log(f"   Skipping English text: {result.text[:50]}...")
+                        continue
+                    
+                    if result.confidence < confidence_threshold:
+                        self._log(f"   Skipping low confidence ({result.confidence:.2f}): {result.text[:30]}...")
+                        continue
+                    
+                    # Create TextRegion
+                    region = TextRegion(
+                        text=result.text,
+                        vertices=result.vertices if result.vertices else [
+                            (result.bbox[0], result.bbox[1]),
+                            (result.bbox[0] + result.bbox[2], result.bbox[1]),
+                            (result.bbox[0] + result.bbox[2], result.bbox[1] + result.bbox[3]),
+                            (result.bbox[0], result.bbox[1] + result.bbox[3])
+                        ],
+                        bounding_box=result.bbox,
+                        confidence=result.confidence,
+                        region_type='text_block'
+                    )
+                    regions.append(region)
+                    self._log(f"   Found text ({result.confidence:.2f}): {result.text[:50]}...")
             
-            # MERGING SECTION - THIS IS THE PART TO UPDATE
+            # MERGING SECTION (applies to all providers)
             # Check if bubble detection is enabled
             if ocr_settings.get('bubble_detection_enabled', False):
                 self._log("🤖 Using AI bubble detection for merging")
@@ -909,15 +1079,21 @@ class MangaTranslator:
                 # Traditional merging
                 merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
                 
-                # Apply Azure multiplier if using Azure
+                # Apply provider-specific adjustments
                 if self.ocr_provider == 'azure':
                     azure_multiplier = ocr_settings.get('azure_merge_multiplier', 2.0)
                     merge_threshold = int(merge_threshold * azure_multiplier)
-                    self._log(f"📋 Using Azure-adjusted merge threshold: {merge_threshold}px (base: {ocr_settings.get('merge_nearby_threshold', 20)}px, multiplier: {azure_multiplier}x)")
+                    self._log(f"📋 Using Azure-adjusted merge threshold: {merge_threshold}px")
                     
                     # Pre-group Azure lines if the method exists
                     if hasattr(self, '_pregroup_azure_lines'):
                         regions = self._pregroup_azure_lines(regions, merge_threshold)
+                
+                elif self.ocr_provider in ['paddleocr', 'easyocr', 'doctr']:
+                    # These providers often return smaller text segments
+                    line_multiplier = ocr_settings.get('line_ocr_merge_multiplier', 1.5)
+                    merge_threshold = int(merge_threshold * line_multiplier)
+                    self._log(f"📋 Using line-based OCR adjusted threshold: {merge_threshold}px")
                 
                 # Apply standard merging
                 regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
@@ -933,8 +1109,10 @@ class MangaTranslator:
             
         except Exception as e:
             self._log(f"❌ Error detecting text: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
             raise
-
+        
     def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
         """Pre-group Azure lines that are obviously part of the same text block
         This makes them more like Google's blocks before the main merge logic"""
