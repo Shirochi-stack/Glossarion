@@ -71,6 +71,28 @@ class MangaSettingsDialog:
         
         # Show dialog
         self.show_dialog()
+            
+    def _disable_spinbox_scroll(self, widget):
+        """Disable mouse wheel scrolling on a spinbox"""
+        def dummy_scroll(event):
+            # Return "break" to prevent the default scroll behavior
+            return "break"
+        
+        # Bind mouse wheel events to the dummy handler
+        widget.bind("<MouseWheel>", dummy_scroll)  # Windows
+        widget.bind("<Button-4>", dummy_scroll)    # Linux scroll up
+        widget.bind("<Button-5>", dummy_scroll)    # Linux scroll down
+
+    def _disable_all_spinbox_scrolling(self, parent):
+        """Recursively find and disable scrolling on all spinboxes"""
+        for widget in parent.winfo_children():
+            # Check if it's a Spinbox (both ttk and tk versions)
+            if isinstance(widget, (tb.Spinbox, tk.Spinbox, tb.Spinbox)):
+                self._disable_spinbox_scroll(widget)
+            # Recursively check frames and other containers
+            elif hasattr(widget, 'winfo_children'):
+                self._disable_all_spinbox_scrolling(widget)
+            
     def _create_font_size_controls(self, parent_frame):
         """Create improved font size controls with presets"""
         
@@ -115,7 +137,7 @@ class MangaSettingsDialog:
         tk.Label(self.fixed_size_frame, text="Size:").pack(side=tk.LEFT)
         
         self.fixed_font_size_var = tk.IntVar(value=16)
-        fixed_spin = ttk.Spinbox(
+        fixed_spin = tb.Spinbox(
             self.fixed_size_frame,
             from_=8,
             to=72,
@@ -192,7 +214,7 @@ class MangaSettingsDialog:
         
         tk.Label(constraints_frame, text="Min:").pack(side=tk.LEFT, padx=(10, 2))
         self.min_font_size_var = tk.IntVar(value=10)
-        ttk.Spinbox(
+        tb.Spinbox(
             constraints_frame,
             from_=6,
             to=20,
@@ -203,7 +225,7 @@ class MangaSettingsDialog:
         
         tk.Label(constraints_frame, text="Max:").pack(side=tk.LEFT, padx=(10, 2))
         self.max_font_size_var = tk.IntVar(value=28)
-        ttk.Spinbox(
+        tb.Spinbox(
             constraints_frame,
             from_=16,
             to=48,
@@ -352,6 +374,8 @@ class MangaSettingsDialog:
         notebook.add(self.cloud_tab, text="Cloud API")
         self._create_cloud_api_tab(self.cloud_tab)
         
+        # DISABLE SCROLL WHEEL ON ALL SPINBOXES
+        self.dialog.after(10, lambda: self._disable_all_spinbox_scrolling(self.dialog))       
         
         # Button frame at bottom (inside scrollable frame for proper scrolling)
         button_frame = tk.Frame(scrollable_frame)
@@ -639,7 +663,7 @@ class MangaSettingsDialog:
         tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
 
     def _create_inpainting_tab(self, notebook):
-        """Create inpainting settings tab - general settings only"""
+        """Create inpainting settings tab with per-text-type dilation"""
         frame = ttk.Frame(notebook)
         notebook.add(frame, text="Inpainting")
         
@@ -667,23 +691,46 @@ class MangaSettingsDialog:
         dilation_spinbox.pack(side='left', padx=10)
         tk.Label(dilation_frame, text="pixels (expand mask beyond text)").pack(side='left')
         
-        # Dilation iterations  
-        iterations_frame = tk.Frame(mask_frame)
-        iterations_frame.pack(fill='x', pady=5)
+        # Per-Text-Type Iterations - NEW SECTION
+        iterations_label_frame = tk.LabelFrame(mask_frame, text="Per-Text-Type Iterations", padx=10, pady=5)
+        iterations_label_frame.pack(fill='x', pady=(10, 5))
         
-        tk.Label(iterations_frame, text="Iterations:", width=15, anchor='w').pack(side='left')
-        self.dilation_iterations_var = tk.IntVar(value=self.settings.get('dilation_iterations', 2))
-        iterations_spinbox = tb.Spinbox(
-            iterations_frame,
-            from_=1,
+        # Bubble iterations
+        bubble_iter_frame = tk.Frame(iterations_label_frame)
+        bubble_iter_frame.pack(fill='x', pady=5)
+        
+        tk.Label(bubble_iter_frame, text="Speech Bubbles:", width=15, anchor='w').pack(side='left')
+        self.bubble_iterations_var = tk.IntVar(value=self.settings.get('bubble_dilation_iterations', 2))
+        bubble_iter_spinbox = tb.Spinbox(
+            bubble_iter_frame,
+            from_=0,
             to=5,
-            textvariable=self.dilation_iterations_var,
+            textvariable=self.bubble_iterations_var,
             width=10
         )
-        iterations_spinbox.pack(side='left', padx=10)
-        tk.Label(iterations_frame, text="times (smoothing passes)").pack(side='left')
+        bubble_iter_spinbox.pack(side='left', padx=10)
+        tk.Label(bubble_iter_frame, text="iterations (for complex bubble shapes)").pack(side='left')
         
-        # Quick presets
+        # Free text iterations
+        free_text_iter_frame = tk.Frame(iterations_label_frame)
+        free_text_iter_frame.pack(fill='x', pady=5)
+        
+        tk.Label(free_text_iter_frame, text="Free Text:", width=15, anchor='w').pack(side='left')
+        self.free_text_iterations_var = tk.IntVar(value=self.settings.get('free_text_dilation_iterations', 0))
+        free_text_iter_spinbox = tb.Spinbox(
+            free_text_iter_frame,
+            from_=0,
+            to=5,
+            textvariable=self.free_text_iterations_var,
+            width=10
+        )
+        free_text_iter_spinbox.pack(side='left', padx=10)
+        tk.Label(free_text_iter_frame, text="iterations (0 = perfect for B&W panels)").pack(side='left')
+        
+        # Legacy iterations (backwards compatibility)
+        self.dilation_iterations_var = self.bubble_iterations_var  # Link to bubble for legacy
+        
+        # Quick presets - ENHANCED VERSION
         preset_frame = tk.Frame(mask_frame)
         preset_frame.pack(fill='x', pady=(10, 5))
         
@@ -691,16 +738,16 @@ class MangaSettingsDialog:
         
         tb.Button(
             preset_frame,
-            text="Tight",
-            command=lambda: self._set_mask_preset(5, 1),
+            text="B&W",
+            command=lambda: self._set_mask_preset(15, 2, 0),
             bootstyle="secondary",
-            width=9
+            width=12
         ).pack(side='left', padx=2)
         
         tb.Button(
             preset_frame,
-            text="Standard",
-            command=lambda: self._set_mask_preset(15, 2),
+            text="Colored",
+            command=lambda: self._set_mask_preset(15, 2, 3),
             bootstyle="secondary",
             width=9
         ).pack(side='left', padx=2)
@@ -708,26 +755,19 @@ class MangaSettingsDialog:
         tb.Button(
             preset_frame,
             text="Aggressive",
-            command=lambda: self._set_mask_preset(25, 3),
+            command=lambda: self._set_mask_preset(25, 3, 1),
             bootstyle="secondary",
             width=9
         ).pack(side='left', padx=2)
         
-        tb.Button(
-            preset_frame,
-            text="Extra Wide",
-            command=lambda: self._set_mask_preset(40, 4),
-            bootstyle="secondary",
-            width=9
-        ).pack(side='left', padx=2)
         
-        # Help text
+        # Help text - UPDATED
         tk.Label(
             mask_frame,
-            text="💡 Tight: For clean backgrounds with clear text boundaries\n"
+            text="💡 B&W Optimized: Perfect for black & white manga with clean panels\n"
                  "💡 Standard: General purpose, works for most manga\n"
                  "💡 Aggressive: For complex backgrounds or stylized text\n"
-                 "💡 Extra Wide: For text with effects, gradients, or shadows",
+                 "ℹ️ Set Free Text iterations to 0 for crisp B&W panels without bleeding",
             font=('Arial', 9),
             fg='gray',
             justify='left'
@@ -790,10 +830,11 @@ class MangaSettingsDialog:
             justify='left'
         ).pack(anchor='w')
 
-    def _set_mask_preset(self, dilation, iterations):
-        """Set mask dilation preset values"""
+    def _set_mask_preset(self, dilation, bubble_iterations, free_text_iterations):
+        """Set mask dilation preset values with per-text-type iterations"""
         self.mask_dilation_var.set(dilation)
-        self.dilation_iterations_var.set(iterations)
+        self.bubble_iterations_var.set(bubble_iterations)
+        self.free_text_iterations_var.set(free_text_iterations)
     
     def _create_cloud_api_tab(self, parent):
             """Create cloud API settings tab"""
@@ -1094,6 +1135,67 @@ class MangaSettingsDialog:
         )
         nearby_spinbox.pack(side='left', padx=10)
         tk.Label(nearby_frame, text="pixels").pack(side='left')
+
+        # Text Filtering Setting
+        filter_frame = tk.LabelFrame(content_frame, text="Text Filtering", padx=15, pady=10)
+        filter_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        # Minimum text length
+        min_length_frame = tk.Frame(filter_frame)
+        min_length_frame.pack(fill='x', pady=5)
+        
+        tk.Label(min_length_frame, text="Min Text Length:", width=20, anchor='w').pack(side='left')
+        self.min_text_length_var = tk.IntVar(
+            value=self.settings['ocr'].get('min_text_length', 2)
+        )
+        min_length_spinbox = tb.Spinbox(
+            min_length_frame,
+            from_=1,
+            to=10,
+            textvariable=self.min_text_length_var,
+            increment=1,
+            width=10
+        )
+        min_length_spinbox.pack(side='left', padx=10)
+        tk.Label(min_length_frame, text="characters").pack(side='left')
+        
+        tk.Label(
+            min_length_frame,
+            text="(skip text shorter than this)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side='left', padx=10)
+        
+        # Exclude English text checkbox
+        exclude_english_frame = tk.Frame(filter_frame)
+        exclude_english_frame.pack(fill='x', pady=(5, 0))
+        
+        self.exclude_english_var = tk.BooleanVar(
+            value=self.settings['ocr'].get('exclude_english_text', True)
+        )
+        
+        tb.Checkbutton(
+            exclude_english_frame,
+            text="Exclude primarily English text (>70% English characters)",
+            variable=self.exclude_english_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        
+        # Help text
+        tk.Label(
+            filter_frame,
+            text="💡 Text filtering helps skip:\n"
+                 "   • UI elements and watermarks\n"
+                 "   • Page numbers and copyright text\n"
+                 "   • Single characters or symbols\n"
+                 "   • Non-target language text",
+            font=('Arial', 9),
+            fg='gray',
+            justify='left'
+        ).pack(anchor='w', pady=(10, 0))
+        
+        # Azure-specific OCR settings (existing code continues here)
+        azure_ocr_frame = tk.LabelFrame(content_frame, text="Azure OCR Settings", padx=15, pady=10)
 
         # Azure-specific OCR settings
         azure_ocr_frame = tk.LabelFrame(content_frame, text="Azure OCR Settings", padx=15, pady=10)
@@ -1816,6 +1918,8 @@ class MangaSettingsDialog:
         self.settings['ocr']['azure_model_version'] = self.azure_model_version.get()
         self.settings['ocr']['azure_max_wait'] = self.azure_max_wait.get()
         self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
+        self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
+        self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
         
         # Save the detector type as the backend expects
         detector_display = self.detector_type.get()
@@ -1826,14 +1930,18 @@ class MangaSettingsDialog:
         else:
             self.settings['ocr']['detector_type'] = 'auto'
         
-        # Inpainting settings
+        # Inpainting settings - UPDATE THIS SECTION
         if hasattr(self, 'inpaint_batch_size'):
             if 'inpainting' not in self.settings:
                 self.settings['inpainting'] = {}
             self.settings['inpainting']['batch_size'] = self.inpaint_batch_size.get()
             self.settings['inpainting']['enable_cache'] = self.enable_cache_var.get()
+            
+            # Save all dilation settings
             self.settings['mask_dilation'] = self.mask_dilation_var.get()
-            self.settings['dilation_iterations'] = self.dilation_iterations_var.get()
+            self.settings['bubble_dilation_iterations'] = self.bubble_iterations_var.get()
+            self.settings['free_text_dilation_iterations'] = self.free_text_iterations_var.get()
+            self.settings['dilation_iterations'] = self.bubble_iterations_var.get()  # Legacy support
         
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
