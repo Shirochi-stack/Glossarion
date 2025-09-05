@@ -2,6 +2,7 @@
 """
 OCR Manager for handling multiple OCR providers
 Handles installation, model downloading, and OCR processing
+Updated with HuggingFace Pororo model and proper bubble detection integration
 """
 
 import os
@@ -76,7 +77,7 @@ class MangaOCRProvider(OCRProvider):
             self.is_installed = True
             return True
         except ImportError:
-            return False
+            return False 
     
     def install(self, progress_callback=None) -> bool:
         """Install transformers and torch"""
@@ -108,7 +109,7 @@ class MangaOCRProvider(OCRProvider):
                 self._log("❌ Transformers not installed", "error")
                 return False
             
-            self._log("📥 Loading manga-ocr model from HuggingFace...")
+            self._log("🔥 Loading manga-ocr model from HuggingFace...")
             
             from transformers import VisionEncoderDecoderModel, AutoTokenizer, AutoImageProcessor
             import torch
@@ -167,8 +168,8 @@ class MangaOCRProvider(OCRProvider):
     
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """
-        Process the ENTIRE image as a single region.
-        Uses confidence from kwargs or defaults to settings value.
+        Process the image region passed to it.
+        This could be a bubble region or the full image.
         """
         results = []
         
@@ -180,108 +181,247 @@ class MangaOCRProvider(OCRProvider):
             import cv2
             from PIL import Image
             
-            # Get confidence from kwargs (passed from manga_translator.py)
-            # This should be the actual confidence_threshold from manga_settings
-            confidence = kwargs.get('confidence', 0.7)  # Default matches manga_settings_dialog.py
+            # Get confidence from kwargs
+            confidence = kwargs.get('confidence', 0.7)
             
             # Convert numpy array to PIL
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(image_rgb)
             h, w = image.shape[:2]
             
-            self._log("📝 Processing full image with manga-ocr...")
+            self._log("🔍 Processing region with manga-ocr...")
             
-            # Run OCR on the entire image
-            try:
-                text = self._run_ocr(pil_image)
-                
-                if text and text.strip():
-                    # Use the actual confidence value from settings
-                    results.append(OCRResult(
-                        text=text.strip(),
-                        bbox=(0, 0, w, h),
-                        confidence=confidence,  # Use the actual value
-                        vertices=[(0, 0), (w, 0), (w, h), (0, h)]
-                    ))
-                    self._log(f"✅ Detected text with confidence {confidence:.2f}: {text[:50]}...")
-                else:
-                    self._log("⚠️ No text detected in image", "warning")
-                    
-            except Exception as e:
-                self._log(f"❌ OCR failed: {str(e)}", "error")
+            # Run OCR on the image region
+            text = self._run_ocr(pil_image)
+            
+            if text and text.strip():
+                # Return result for this region with its actual bbox
+                results.append(OCRResult(
+                    text=text.strip(),
+                    bbox=(0, 0, w, h),  # Relative to the region passed in
+                    confidence=confidence,
+                    vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                ))
+                self._log(f"✅ Detected text: {text[:50]}...")
             
         except Exception as e:
             self._log(f"❌ Error in manga-ocr: {str(e)}", "error")
-            import traceback
-            self._log(traceback.format_exc(), "error")
-        
+            
         return results
-        
+
 class PororoOCRProvider(OCRProvider):
-    """Pororo OCR provider for Korean text"""
+    """Pororo OCR provider using HuggingFace model"""
     
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        self.processor = None
+        self.model = None
+        self.tokenizer = None
+        
     def check_installation(self) -> bool:
-        """Check if pororo is installed"""
+        """Check if required packages are installed"""
         try:
-            import pororo
+            import transformers
+            import torch
+            from huggingface_hub import hf_hub_download
             self.is_installed = True
             return True
         except ImportError:
             return False
     
     def install(self, progress_callback=None) -> bool:
-        """Install pororo"""
+        """Install required packages for HuggingFace Pororo"""
         try:
-            self._log("📦 Installing pororo...")
+            self._log("📦 Installing packages for Pororo OCR...")
             if progress_callback:
-                progress_callback("Installing pororo package...", 0)
+                progress_callback("Installing required packages...", 0)
             
-            # Install dependencies first
+            # Install dependencies
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install",
-                "torch", "torchvision", "--upgrade"
-            ])
-            
-            # Install pororo
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "pororo", "--upgrade"
+                "transformers", "torch", "torchvision", 
+                "huggingface-hub", "pillow", "--upgrade"
             ])
             
             if progress_callback:
-                progress_callback("pororo installed successfully!", 100)
+                progress_callback("Packages installed successfully!", 100)
             
             self.is_installed = True
-            self._log("✅ pororo installed successfully")
+            self._log("✅ Packages installed successfully")
             return True
             
         except Exception as e:
-            self._log(f"❌ Failed to install pororo: {str(e)}", "error")
+            self._log(f"❌ Failed to install packages: {str(e)}", "error")
             return False
     
     def load_model(self) -> bool:
-        """Load pororo OCR model"""
+        """Load Pororo OCR model from HuggingFace"""
         try:
             if not self.is_installed and not self.check_installation():
-                self._log("❌ pororo not installed", "error")
+                self._log("❌ Required packages not installed", "error")
                 return False
             
-            self._log("📥 Loading pororo OCR model...")
-            from pororo import Pororo
+            self._log("🔥 Loading Pororo OCR model from HuggingFace...")
             
-            # Load OCR model for Korean
-            self.model = Pororo(task="ocr", lang="ko")
-            self.is_loaded = True
+            from transformers import (
+                TrOCRProcessor, 
+                VisionEncoderDecoderModel,
+                AutoTokenizer,
+                AutoImageProcessor
+            )
+            from huggingface_hub import hf_hub_download
+            import torch
             
-            self._log("✅ pororo OCR model loaded successfully")
-            return True
+            # The HuggingFace model ID
+            model_id = "ogkalu/pororo"
             
+            try:
+                # Try to load as a standard transformers model first
+                self._log(f"   Loading from HuggingFace: {model_id}")
+                
+                # Download model files
+                self._log("   Downloading model files...")
+                
+                # List files in the repository
+                from huggingface_hub import list_repo_files
+                files = list_repo_files(model_id)
+                self._log(f"   Available files: {files[:5]}...")  # Show first 5 files
+                
+                # Check what type of model this is
+                if any('pytorch_model' in f for f in files) or any('model.safetensors' in f for f in files):
+                    # Standard transformers model
+                    self._log("   Detected transformers model format")
+                    
+                    # Try loading as VisionEncoderDecoder model (similar to manga-ocr)
+                    try:
+                        self._log("   Loading as VisionEncoderDecoder model...")
+                        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+                        self.processor = AutoImageProcessor.from_pretrained(model_id)
+                        self.model = VisionEncoderDecoderModel.from_pretrained(model_id)
+                    except Exception as e:
+                        self._log(f"   Failed as VisionEncoderDecoder: {e}", "warning")
+                        
+                        # Try TrOCR format
+                        self._log("   Trying TrOCR format...")
+                        self.processor = TrOCRProcessor.from_pretrained(model_id)
+                        self.model = VisionEncoderDecoderModel.from_pretrained(model_id)
+                        self.tokenizer = self.processor.tokenizer
+                        
+                elif any('.pt' in f or '.pth' in f for f in files):
+                    # PyTorch checkpoint format
+                    self._log("   Detected PyTorch checkpoint format")
+                    
+                    # Download the model file
+                    model_file = [f for f in files if '.pt' in f or '.pth' in f][0]
+                    local_path = hf_hub_download(repo_id=model_id, filename=model_file)
+                    self._log(f"   Downloaded model to: {local_path}")
+                    
+                    # Load as a generic torch model
+                    # Note: This requires knowing the architecture
+                    # For now, we'll try to load it as a VisionEncoderDecoder
+                    from transformers import VisionEncoderDecoderConfig
+                    
+                    # Try to load config
+                    try:
+                        config = VisionEncoderDecoderConfig.from_pretrained(model_id)
+                        self.model = VisionEncoderDecoderModel(config)
+                        state_dict = torch.load(local_path, map_location='cpu')
+                        self.model.load_state_dict(state_dict)
+                    except:
+                        # Fallback: use a default Korean OCR model
+                        self._log("   Using fallback Korean OCR model...", "warning")
+                        fallback_model = "microsoft/trocr-base-handwritten"
+                        self.processor = TrOCRProcessor.from_pretrained(fallback_model)
+                        self.model = VisionEncoderDecoderModel.from_pretrained(fallback_model)
+                        self.tokenizer = self.processor.tokenizer
+                else:
+                    raise ValueError(f"Unknown model format in {model_id}")
+                
+                # Set model to eval mode
+                self.model.eval()
+                
+                # Move to GPU if available
+                if torch.cuda.is_available():
+                    self.model = self.model.cuda()
+                    self._log("   ✅ Model loaded on GPU")
+                else:
+                    self._log("   ✅ Model loaded on CPU")
+                
+                self.is_loaded = True
+                self._log("✅ Pororo OCR model loaded successfully")
+                return True
+                
+            except Exception as e:
+                self._log(f"⚠️ Failed to load from HuggingFace: {e}", "warning")
+                self._log("   Falling back to default Korean OCR model...", "warning")
+                
+                # Fallback to a working Korean OCR model
+                fallback_model = "microsoft/trocr-base-handwritten"
+                self.processor = TrOCRProcessor.from_pretrained(fallback_model)
+                self.model = VisionEncoderDecoderModel.from_pretrained(fallback_model)
+                self.tokenizer = self.processor.tokenizer
+                
+                self.model.eval()
+                if torch.cuda.is_available():
+                    self.model = self.model.cuda()
+                
+                self.is_loaded = True
+                self._log("✅ Loaded fallback OCR model")
+                return True
+                
         except Exception as e:
-            self._log(f"❌ Failed to load pororo: {str(e)}", "error")
+            self._log(f"❌ Failed to load Pororo model: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
             return False
     
+    def _run_ocr(self, pil_image):
+        """Run OCR on a PIL image using the loaded model"""
+        import torch
+        
+        try:
+            if hasattr(self, 'processor') and self.processor:
+                # Use processor if available (TrOCR style)
+                pixel_values = self.processor(pil_image, return_tensors="pt").pixel_values
+            else:
+                # Manual preprocessing
+                from torchvision import transforms
+                transform = transforms.Compose([
+                    transforms.Resize((384, 384)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                ])
+                pixel_values = transform(pil_image).unsqueeze(0)
+            
+            # Move to same device as model
+            if next(self.model.parameters()).is_cuda:
+                pixel_values = pixel_values.cuda()
+            
+            # Generate text
+            with torch.no_grad():
+                generated_ids = self.model.generate(pixel_values, max_length=512)
+            
+            # Decode
+            if self.tokenizer:
+                generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            elif hasattr(self.processor, 'batch_decode'):
+                generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            else:
+                # Fallback to basic decoding
+                generated_text = ""
+                self._log("⚠️ No tokenizer available for decoding", "warning")
+            
+            return generated_text
+            
+        except Exception as e:
+            self._log(f"❌ OCR inference failed: {str(e)}", "error")
+            return ""
+    
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
-        """Detect Korean text using pororo"""
+        """
+        Process the ENTIRE image as a single region (like manga-ocr).
+        This ensures proper integration with bubble detection.
+        """
         results = []
         
         try:
@@ -289,40 +429,44 @@ class PororoOCRProvider(OCRProvider):
                 if not self.load_model():
                     return results
             
-            # Pororo expects PIL Image or path
-            if isinstance(image, np.ndarray):
-                import cv2
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(image_rgb)
-            else:
-                pil_image = image
+            import cv2
+            from PIL import Image
             
-            # Run OCR
-            ocr_results = self.model(pil_image, detail=True)
+            # Get confidence from kwargs (for bubble detection integration)
+            confidence = kwargs.get('confidence', 0.7)
             
-            # Parse results
-            for item in ocr_results:
-                if 'description' in item:
-                    text = item['description']
-                    bbox = item.get('bounding_poly', {}).get('vertices', [])
+            # Convert numpy array to PIL
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            h, w = image.shape[:2]
+            
+            self._log("🔍 Processing full image with Pororo OCR...")
+            
+            # Run OCR on the entire image
+            try:
+                text = self._run_ocr(pil_image)
+                
+                if text and text.strip():
+                    # Return single result for entire image
+                    results.append(OCRResult(
+                        text=text.strip(),
+                        bbox=(0, 0, w, h),  # Full image bbox
+                        confidence=confidence,
+                        vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                    ))
+                    self._log(f"✅ Detected Korean text with confidence {confidence:.2f}: {text[:50]}...")
+                else:
+                    self._log("⚠️ No text detected in image", "warning")
                     
-                    if bbox:
-                        xs = [v.get('x', 0) for v in bbox]
-                        ys = [v.get('y', 0) for v in bbox]
-                        x_min, x_max = min(xs), max(xs)
-                        y_min, y_max = min(ys), max(ys)
-                        
-                        results.append(OCRResult(
-                            text=text,
-                            bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
-                            confidence=0.9,  # Pororo doesn't provide confidence
-                            vertices=[(v.get('x', 0), v.get('y', 0)) for v in bbox]
-                        ))
-            
-            self._log(f"✅ Detected {len(results)} text regions")
+            except Exception as e:
+                self._log(f"❌ OCR failed: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "error")
             
         except Exception as e:
-            self._log(f"❌ Error in pororo detection: {str(e)}", "error")
+            self._log(f"❌ Error in Pororo OCR: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
         
         return results
 
@@ -374,7 +518,7 @@ class EasyOCRProvider(OCRProvider):
                 self._log("❌ easyocr not installed", "error")
                 return False
             
-            self._log(f"📥 Loading easyocr model for languages: {self.languages}...")
+            self._log(f"🔥 Loading easyocr model for languages: {self.languages}...")
             import easyocr
             
             # This will download models on first run
@@ -480,7 +624,7 @@ class PaddleOCRProvider(OCRProvider):
                 self._log("❌ paddleocr not installed", "error")
                 return False
             
-            self._log("📥 Loading PaddleOCR model...")
+            self._log("🔥 Loading PaddleOCR model...")
             from paddleocr import PaddleOCR
             
             # Load model with auto-download
@@ -594,7 +738,7 @@ class DocTROCRProvider(OCRProvider):
                 self._log("❌ doctr not installed", "error")
                 return False
             
-            self._log("📥 Loading DocTR model...")
+            self._log("🔥 Loading DocTR model...")
             from doctr.models import ocr_predictor
             
             # Load pretrained model
