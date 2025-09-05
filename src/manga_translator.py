@@ -2517,6 +2517,7 @@ class MangaTranslator:
             else:
                 # Fallback: use simple heuristics if no bubble detection
                 x, y, w, h = region.bounding_box
+                x, y, w, h = int(x), int(y), int(w), int(h)
                 aspect_ratio = w / h if h > 0 else 1
                 
                 # Check if region has text
@@ -2559,6 +2560,7 @@ class MangaTranslator:
                         cv2.fillPoly(target_mask, [pts], 255)
                     else:
                         x, y, w, h = orig_region.bounding_box
+                        x, y, w, h = int(x), int(y), int(w), int(h)
                         cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
             else:
                 # Normal region
@@ -2569,6 +2571,7 @@ class MangaTranslator:
                     self._log(f"   Region {i+1} ({mask_type}): Using polygon", "debug")
                 else:
                     x, y, w, h = region.bounding_box
+                    x, y, w, h = int(x), int(y), int(w), int(h)
                     cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
                     self._log(f"   Region {i+1} ({mask_type}): Using bounding box", "debug")
         
