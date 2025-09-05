@@ -852,7 +852,7 @@ class ProgressManager:
             print(f"🔄 Removed {cleaned_count} entries - will retranslate")
     
     def migrate_to_content_hash(self, chapters):
-        """Change keys to match actual_num values for proper mapping"""
+        """Change keys to match actual_num values for proper mapping and sort by chapter number"""
         
         new_chapters = {}
         migrated_count = 0
@@ -883,8 +883,24 @@ class ProgressManager:
                 print(f"  ⚠️ Warning: No actual_num for key '{old_key}', keeping as-is")
                 new_chapters[old_key] = chapter_info
         
+        # Sort chapters by actual_num field, then by key as fallback
+        def sort_key(item):
+            key, chapter_info = item
+            actual_num = chapter_info.get("actual_num")
+            if actual_num is not None:
+                return actual_num
+            else:
+                # Fallback to key if no actual_num
+                try:
+                    return int(key)
+                except ValueError:
+                    # For non-numeric keys, sort them at the end
+                    return float('inf')
+        
+        sorted_chapters = dict(sorted(new_chapters.items(), key=sort_key))
+        
         if migrated_count > 0:
-            # Also migrate chapter_chunks if they exist
+            # Also migrate and sort chapter_chunks if they exist
             if "chapter_chunks" in self.prog:
                 new_chunks = {}
                 for old_key, chunk_data in self.prog["chapter_chunks"].items():
@@ -893,11 +909,22 @@ class ProgressManager:
                         new_chunks[new_key] = chunk_data
                     else:
                         new_chunks[old_key] = chunk_data
-                self.prog["chapter_chunks"] = new_chunks
+                
+                # Sort chapter_chunks using the same sorting logic
+                sorted_chunks = dict(sorted(new_chunks.items(), key=sort_key))
+                self.prog["chapter_chunks"] = sorted_chunks
             
-            self.prog["chapters"] = new_chapters
+            self.prog["chapters"] = sorted_chapters
             self.save()
-            print(f"✅ Migrated {migrated_count} entries to use actual_num as key")
+            print(f"✅ Migrated {migrated_count} entries to use actual_num as key and sorted by chapter number")
+        else:
+            # Even if no migration occurred, still apply sorting
+            self.prog["chapters"] = sorted_chapters
+            if "chapter_chunks" in self.prog:
+                sorted_chunks = dict(sorted(self.prog["chapter_chunks"].items(), key=sort_key))
+                self.prog["chapter_chunks"] = sorted_chunks
+            self.save()
+            print("✅ Sorted chapters by chapter number")
     
     def get_stats(self, output_dir):
         """Get statistics about translation progress"""
