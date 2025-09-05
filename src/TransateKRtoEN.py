@@ -852,11 +852,50 @@ class ProgressManager:
             print(f"🔄 Removed {cleaned_count} entries - will retranslate")
     
     def migrate_to_content_hash(self, chapters):
-            """Migration disabled - using index-based tracking only"""
-            # Update version to indicate migration complete (but we're staying index-based)
-            if not self.prog.get("version") or self.prog["version"] < "3.0":
-                self.prog["version"] = "3.0"
-            pass
+        """Auto-fix any key/actual_num mismatches in progress tracker"""
+        
+        # Check for any mismatched entries
+        mismatches = {}
+        for key, chapter_info in list(self.prog["chapters"].items()):
+            actual_num = chapter_info.get("actual_num")
+            
+            if actual_num is not None:
+                expected_key = str(actual_num)
+                
+                # If the key doesn't match actual_num, it needs fixing
+                if key != expected_key:
+                    mismatches[key] = (expected_key, chapter_info)
+        
+        # Fix any mismatches found
+        if mismatches:
+            print(f"🔧 Found {len(mismatches)} key/actual_num mismatches. Fixing...")
+            
+            for old_key, (new_key, chapter_info) in mismatches.items():
+                # Check if target key already exists
+                if new_key in self.prog["chapters"]:
+                    # Compare timestamps, keep the newer one
+                    existing = self.prog["chapters"][new_key]
+                    if chapter_info.get("last_updated", 0) > existing.get("last_updated", 0):
+                        print(f"  ⚠️ Key '{new_key}' exists. Replacing with newer entry from '{old_key}'")
+                        self.prog["chapters"][new_key] = chapter_info
+                    else:
+                        print(f"  ⚠️ Key '{new_key}' exists with newer data. Discarding '{old_key}'")
+                else:
+                    # Move to correct key
+                    self.prog["chapters"][new_key] = chapter_info
+                    print(f"  ✅ Remapped: '{old_key}' → '{new_key}' (actual_num: {chapter_info.get('actual_num')})")
+                
+                # Remove the old key
+                del self.prog["chapters"][old_key]
+                
+                # Also fix chapter_chunks if it exists
+                if old_key in self.prog.get("chapter_chunks", {}):
+                    self.prog["chapter_chunks"][new_key] = self.prog["chapter_chunks"][old_key]
+                    del self.prog["chapter_chunks"][old_key]
+            
+            # Save the corrections
+            self.save()
+            print(f"✅ Fixed {len(mismatches)} mismatched entries")
     
     def get_stats(self, output_dir):
         """Get statistics about translation progress"""
