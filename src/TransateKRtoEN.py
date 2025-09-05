@@ -754,7 +754,8 @@ class ProgressManager:
     
     def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
         """Update progress for a chapter"""
-        chapter_key = str(idx)
+        # CHANGE THIS LINE - Use actual_num instead of idx
+        chapter_key = str(actual_num)  # WAS: chapter_key = str(idx)
         
         chapter_info = {
             "actual_num": actual_num,
@@ -787,7 +788,8 @@ class ProgressManager:
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
         """Check if a chapter needs translation - PURE PROGRESS TRACKING ONLY"""
         
-        chapter_key = str(chapter_idx)
+        # CHANGE THIS LINE - Use actual_num instead of chapter_idx
+        chapter_key = str(actual_num)  # WAS: chapter_key = str(chapter_idx)
         
         if chapter_key not in self.prog["chapters"]:
             return True, None, None
