@@ -1219,8 +1219,8 @@ def calculate_semantic_fingerprint_similarity(text1, text2):
     cache_text1 = text1[:100000] if len(text1) > 100000 else text1
     cache_text2 = text2[:100000] if len(text2) > 100000 else text2
     
-    sig1 = _extract_semantic_fingerprint_for_similarity(cache_text1)
-    sig2 = _extract_semantic_fingerprint_for_similarity(cache_text2)
+    fingerprint1, sig1 = extract_semantic_fingerprint(cache_text1)
+    fingerprint2, sig2 = extract_semantic_fingerprint(cache_text2)
     
     similarities = []
     
