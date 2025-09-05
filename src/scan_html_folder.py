@@ -3108,16 +3108,34 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
             # Try to create a new entry if we can determine the chapter number
             import re
             matches = re.findall(r'(\d+)', faulty_filename)
+            # When creating a new qa_failed entry (around line 116-132)
+            # When creating a new qa_failed entry (around line 116-132)
             if matches:
                 chapter_num = int(matches[-1])
                 
-                # Create a placeholder entry for qa_failed
-                # Use a temporary key based on filename
-                temp_key = f"qa_failed_{faulty_filename}"
-                prog["chapters"][temp_key] = {
-                    "status": "qa_failed",
-                    "output_file": faulty_filename,
+                # Use actual_num as key
+                chapter_key = str(chapter_num)
+                
+                # Calculate content hash from the file if possible
+                content_hash = None
+                if os.path.exists(os.path.join(folder_path, faulty_filename)):
+                    try:
+                        with open(os.path.join(folder_path, faulty_filename), 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        import hashlib
+                        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                    except:
+                        pass
+                
+                # Create entry with proper field order matching regular entries
+                prog["chapters"][chapter_key] = {
                     "actual_num": chapter_num,
+                    "content_hash": content_hash,  # Include if we could calculate it
+                    "output_file": faulty_filename,
+                    "status": "qa_failed",
+                    "last_updated": time.time(),  # Use same field name as regular entries
+                    "zero_adjusted": False,  # Default to False since we don't know
+                    # QA-specific fields come after the standard fields
                     "qa_issues": True,
                     "qa_timestamp": time.time(),
                     "qa_issues_found": faulty_row.get("issues", []),
