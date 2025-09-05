@@ -3269,8 +3269,7 @@ Recent translations to summarize:
             
             response_path = os.path.join(output_dir, expected_response)
             
-            # Check various ways to find the translation
-            translation_found = False
+            # Check various ways to find the translation progress info
             matched_info = None
             
             # Method 1: Check by original basename
@@ -3279,45 +3278,65 @@ Recent translations to summarize:
                 if entries:
                     _, chapter_info = entries[0]
                     matched_info = chapter_info
-                    translation_found = True
             
             # Method 2: Check by response file (with corrected extension)
-            if not translation_found and expected_response in response_file_to_progress:
+            if not matched_info and expected_response in response_file_to_progress:
                 entries = response_file_to_progress[expected_response]
                 if entries:
                     _, chapter_info = entries[0]
                     matched_info = chapter_info
-                    translation_found = True
             
-            # Method 3: Check file existence directly
-            if not translation_found:
-                if os.path.exists(response_path):
-                    translation_found = True
-                    spine_ch['status'] = 'completed'
-                    spine_ch['output_file'] = expected_response
+            # Method 3: Search through all progress entries for matching output file
+            if not matched_info:
+                for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                    if chapter_info.get('output_file') == expected_response:
+                        matched_info = chapter_info
+                        break
             
-            # Update spine chapter with status
+            # Method 4: CRUCIAL - Match by chapter number (actual_num vs file_chapter_num)
+            if not matched_info:
+                for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                    actual_num = chapter_info.get('actual_num')
+                    # Also check 'chapter_num' as fallback
+                    if actual_num is None:
+                        actual_num = chapter_info.get('chapter_num')
+                    
+                    if actual_num is not None and actual_num == chapter_num:
+                        matched_info = chapter_info
+                        break
+            
+            # Determine if translation file exists
+            file_exists = os.path.exists(response_path)
+            
+            # Set status and output file based on findings
             if matched_info:
+                # We found progress tracking info - use its status
                 spine_ch['status'] = matched_info.get('status', 'unknown')
                 spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                spine_ch['progress_entry'] = matched_info
+                
+                # Handle null output_file (common for failed/in_progress chapters)
+                if not spine_ch['output_file']:
+                    spine_ch['output_file'] = expected_response
+                
                 # FIX: Ensure output_file uses .html extension
                 if spine_ch['output_file'].endswith(('.xhtml', '.htm')):
                     base_name = os.path.splitext(spine_ch['output_file'])[0]
                     spine_ch['output_file'] = f"{base_name}.html"
-                spine_ch['progress_entry'] = matched_info
                 
-                # Verify file actually exists
+                # Verify file actually exists for completed status
                 if spine_ch['status'] == 'completed':
                     output_path = os.path.join(output_dir, spine_ch['output_file'])
                     if not os.path.exists(output_path):
                         spine_ch['status'] = 'file_missing'
-            elif translation_found and not matched_info:
-                # File exists but not in progress tracking
+            
+            elif file_exists:
+                # File exists but no progress tracking - mark as completed
                 spine_ch['status'] = 'completed'
-                if not spine_ch.get('output_file'):
-                    spine_ch['output_file'] = expected_response
+                spine_ch['output_file'] = expected_response
+            
             else:
-                # No translation found
+                # No file and no progress tracking - not translated
                 spine_ch['status'] = 'not_translated'
                 spine_ch['output_file'] = expected_response
         
