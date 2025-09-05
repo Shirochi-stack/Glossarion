@@ -785,17 +785,51 @@ class ProgressManager:
         
         self.prog["chapters"][chapter_key] = chapter_info
         
-    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
-        """Check if a chapter needs translation - auto-add ONLY if not tracked at all"""
+    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, chapter_obj=None):
+        """Check if a chapter needs translation"""
         
         chapter_key = str(actual_num)
         
-        # Determine what the output filename would be
-        output_filename = f"response_chapter{actual_num:04d}.html"
-        output_path = os.path.join(output_dir, output_filename)
+        # Check if we have tracking for this chapter
+        if chapter_key in self.prog["chapters"]:
+            chapter_info = self.prog["chapters"][chapter_key]
+            status = chapter_info.get("status")
+            
+            # Failed statuses ALWAYS trigger retranslation
+            if status in ["qa_failed", "failed", "error", "file_missing"]:
+                return True, None, None
+            
+            # Completed - check file exists
+            if status in ["completed", "completed_empty", "completed_image_only"]:
+                output_file = chapter_info.get("output_file")
+                if output_file:
+                    output_path = os.path.join(output_dir, output_file)
+                    if os.path.exists(output_path):
+                        return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+                
+                # File missing - retranslate
+                del self.prog["chapters"][chapter_key]
+                if chapter_key in self.prog.get("chapter_chunks", {}):
+                    del self.prog["chapter_chunks"][chapter_key]
+                self.save()
+                return True, None, None
+            
+            # Any other status - retranslate
+            return True, None, None
         
-        if chapter_key not in self.prog["chapters"]:
-            # Not in tracker at all - check if file exists for auto-discovery
+        # BEFORE auto-discovery, check if ANY entry exists for this chapter's file
+        if chapter_obj:
+            from TransateKRtoEN import FileUtilities
+            output_filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
+            
+            # Check if ANY entry has this output file
+            for key, info in self.prog["chapters"].items():
+                if info.get("output_file") == output_filename:
+                    # Entry exists somewhere else - don't auto-discover
+                    return True, None, None
+            
+            # NOW check if file exists for auto-discovery
+            output_path = os.path.join(output_dir, output_filename)
             if os.path.exists(output_path):
                 print(f"📁 Found existing file for chapter {actual_num}: {output_filename}")
                 
@@ -810,34 +844,8 @@ class ProgressManager:
                 
                 self.save()
                 return False, f"Chapter {actual_num} already exists: {output_filename}", output_filename
-            
-            # File doesn't exist, needs translation
-            return True, None, None
         
-        # Entry exists - check its status
-        chapter_info = self.prog["chapters"][chapter_key]
-        status = chapter_info.get("status")
-        output_file = chapter_info.get("output_file", output_filename)
-        
-        # Handle qa_failed and other failure statuses - these NEED retranslation
-        if status in ["qa_failed", "failed", "file_missing", "error"]:
-            return True, None, None
-        
-        # Handle completed status - verify file exists
-        if status in ["completed", "completed_empty", "completed_image_only"]:
-            output_path = os.path.join(output_dir, output_file)
-            
-            if os.path.exists(output_path):
-                return False, f"Chapter {actual_num} already translated: {output_file}", output_file
-            else:
-                # File missing - delete entry and force retranslation
-                del self.prog["chapters"][chapter_key]
-                if chapter_key in self.prog.get("chapter_chunks", {}):
-                    del self.prog["chapter_chunks"][chapter_key]
-                self.save()
-                return True, None, None
-        
-        # Any other status - retranslate
+        # No entry and no file - needs translation
         return True, None, None
         
     def cleanup_missing_files(self, output_dir):
@@ -7978,22 +7986,31 @@ def main(log_callback=None, stop_callback=None):
     progress_manager.cleanup_missing_files(out)
     progress_manager.save()
 
-    # Reset failed chapters logic
+    # Reset failed chapters logic - but NOT qa_failed
     if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
         reset_count = 0
         for chapter_key, chapter_info in list(progress_manager.prog["chapters"].items()):
             status = chapter_info.get("status")
             
-            # Include all failure states for reset
-            if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted", "in_progress"]:
-                # Delete the chapter entry completely (with safety check)
-                if chapter_key in progress_manager.prog["chapters"]:  # ← ADD THIS CHECK
-                    del progress_manager.prog["chapters"][chapter_key]
+            # Reset these statuses but NOT qa_failed
+            if status in ["failed", "file_missing", "error", "file_deleted", "in_progress"]:
+                # Skip if file exists and is actually complete
+                if status == "in_progress":
+                    output_file = chapter_info.get("output_file")
+                    if output_file:
+                        output_path = os.path.join(out, output_file)
+                        if os.path.exists(output_path):
+                            # File exists - mark as completed instead of deleting
+                            progress_manager.prog["chapters"][chapter_key]["status"] = "completed"
+                            print(f"🔄 Recovered in_progress chapter {chapter_key} as completed")
+                            continue
+                
+                # Delete the entry for actual failures
+                del progress_manager.prog["chapters"][chapter_key]
                 
                 # Also delete by actual_num to ensure it's really gone
                 actual_num = chapter_info.get("actual_num")
                 if actual_num:
-                    # Check all entries for matching actual_num
                     for other_key, other_info in list(progress_manager.prog["chapters"].items()):
                         if other_info.get("actual_num") == actual_num:
                             del progress_manager.prog["chapters"][other_key]
@@ -8004,7 +8021,7 @@ def main(log_callback=None, stop_callback=None):
                 reset_count += 1
         
         if reset_count > 0:
-            print(f"🔄 Reset {reset_count} failed/deleted/incomplete chapters for re-translation")
+            print(f"🔄 Reset {reset_count} failed/incomplete chapters for re-translation")
             progress_manager.save()
 
     if check_stop():
@@ -8624,7 +8641,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Check if chapter needs translation
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out
+                idx, actual_num, content_hash, out, c  # Pass the chapter object
             )
             # Add explicit file check for supposedly completed chapters
             if not needs_translation and existing_file:
@@ -8917,7 +8934,7 @@ def main(log_callback=None, stop_callback=None):
                 continue
             
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out
+                idx, actual_num, content_hash, out, c  # Pass the chapter object
             )
             # Add explicit file check for supposedly completed chapters
             if not needs_translation and existing_file:
