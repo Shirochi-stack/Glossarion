@@ -2972,20 +2972,22 @@ def update_progress_file(folder_path, results, log):
     with open(prog_path, "w", encoding="utf-8") as pf:
         json.dump(prog, pf, indent=2, ensure_ascii=False)
     
-    # Log affected chapters
-    affected_chapters = []
+    # Log affected chapters - use the already extracted chapter numbers
     affected_chapters_for_log = []
     for faulty_row in faulty_chapters:
-        # For internal use (progress file updates, etc.)
-        chapter_num = faulty_row.get("file_index", 0) + 1
-        if faulty_row.get("filename"):
-            match = re.search(r'response_(\d+)', faulty_row["filename"])
-            if match:
-                chapter_num = int(match.group(1))
-        affected_chapters.append(chapter_num)
-        
-        # For the log display - use the same chapter_num, not file_index
-        affected_chapters_for_log.append(chapter_num)
+        # Use the chapter_num that was already extracted during scan
+        chapter_num = faulty_row.get("chapter_num")
+        if chapter_num is not None:
+            affected_chapters_for_log.append(chapter_num)
+        else:
+            # Fallback if somehow chapter_num wasn't extracted
+            fallback_num = faulty_row.get("file_index", 0) + 1
+            if faulty_row.get("filename"):
+                match = re.search(r'response_(\d+)', faulty_row["filename"])
+                if match:
+                    fallback_num = int(match.group(1))
+            affected_chapters_for_log.append(fallback_num)
+
     if affected_chapters_for_log:
         log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters_for_log))}")
 
