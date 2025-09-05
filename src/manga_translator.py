@@ -975,31 +975,62 @@ class MangaTranslator:
                 
                 # Special handling for manga-ocr (needs region detection first)
                 if self.ocr_provider == 'manga-ocr':
-                    # Process the full image with manga-ocr
-                    self._log("📝 Processing full image with manga-ocr...")
+                    ocr_results = []
                     
-                    # Pass confidence threshold to manga-ocr
-                    ocr_results = self.ocr_manager.detect_text(
-                        image, 
-                        self.ocr_provider,
-                        confidence=confidence_threshold
-                    )
-                    
-                    # manga-ocr returns one result with all text for the full image
-                    # Bubble detection will handle splitting this into proper regions
-
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for manga-ocr...")
+                        
+                        # Run bubble detection to get regions
+                        # This reuses your existing bubble detection code
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        if self.bubble_detector.load_rtdetr_model():
+                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                                image_path=image_path,
+                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
+                                return_all_bubbles=False
+                            )
+                            
+                            # Collect all regions
+                            all_regions = []
+                            all_regions.extend(rtdetr_detections.get('bubbles', []))
+                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # Process each region with manga-ocr
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
+                                if result and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                    else:
+                        # Fallback to full image
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)
+                        
+                        for det_result in detection_results:
+                            x, y, w, h = det_result.bbox
+                            cropped = image[y:y+h, x:x+w]
+                            manga_results = self.ocr_manager.detect_text(cropped, 'manga-ocr')
+                            if manga_results:
+                                manga_results[0].bbox = det_result.bbox
+                                manga_results[0].vertices = det_result.vertices
+                                ocr_results.append(manga_results[0])
+                
                 elif self.ocr_provider == 'pororo':
-                    # Process full image with Pororo
-                    self._log("🇰🇷 Processing full image with Pororo OCR...")
-                    
-                    ocr_results = self.ocr_manager.detect_text(
-                        image, 
-                        self.ocr_provider,
-                        confidence=confidence_threshold
-                    )
-
+                    # Configure Pororo for appropriate language
+                    language_hints = ocr_settings.get('language_hints', ['ko'])
+                    # Pororo primarily supports Korean
+                    self._log("🇰🇷 Pororo OCR optimized for Korean text")
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                
                 elif self.ocr_provider == 'easyocr':
-                    # EasyOCR returns multiple regions by design
+                    # Configure EasyOCR languages based on settings
                     language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'en'])
                     easyocr_provider = self.ocr_manager.get_provider('easyocr')
                     if easyocr_provider:
@@ -1011,10 +1042,11 @@ class MangaTranslator:
                             self.ocr_manager.load_provider('easyocr')
                     
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-
+                
                 elif self.ocr_provider == 'paddleocr':
                     # Configure PaddleOCR language
                     language_hints = ocr_settings.get('language_hints', ['ja'])
+                    # Map to PaddleOCR language codes
                     lang_map = {'ja': 'japan', 'ko': 'korean', 'zh': 'ch', 'en': 'en'}
                     paddle_lang = lang_map.get(language_hints[0] if language_hints else 'ja', 'japan')
                     
@@ -1032,7 +1064,7 @@ class MangaTranslator:
                             self._log(f"📥 Reloaded PaddleOCR with language: {paddle_lang}")
                     
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-
+                
                 else:
                     # Default processing for other providers
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
