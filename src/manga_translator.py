@@ -560,36 +560,43 @@ class MangaTranslator:
         if not text:
             return False
         
-        # Strip whitespace for analysis
+        # Check for CJK characters FIRST - if found, it's NOT English
+        has_cjk = any(
+            '\u4e00' <= char <= '\u9fff' or  # Chinese
+            '\u3040' <= char <= '\u309f' or  # Hiragana  
+            '\u30a0' <= char <= '\u30ff' or  # Katakana
+            '\uac00' <= char <= '\ud7af' or  # Korean
+            '\uff00' <= char <= '\uffef'     # Full-width characters
+            for char in text
+        )
+        
+        if has_cjk:
+            return False  # Has Asian characters, NOT English
+        
+        # Only NOW check for English patterns
         text_stripped = text.strip()
         
-        # Special case: Single ASCII letters should always be excluded
-        # This catches standalone "I", "a", "A", etc. on shirts
+        # Single ASCII letters
         if len(text_stripped) == 1 and text_stripped.isalpha() and ord(text_stripped) < 128:
             self._log(f"   Excluding single English letter: '{text_stripped}'", "debug")
             return True
         
-        # For very short text (2-3 chars), be more aggressive
-        # This catches things like "OK", "NO", "LA", etc.
+        # Short English text
         if len(text_stripped) <= 3:
             ascii_letters = sum(1 for char in text_stripped if char.isalpha() and ord(char) < 128)
-            if ascii_letters >= len(text_stripped) * 0.5:  # If 50% or more are English letters
+            if ascii_letters >= len(text_stripped) * 0.5:
                 self._log(f"   Excluding short English text: '{text_stripped}'", "debug")
                 return True
         
-        # Count all ASCII printable characters (letters, numbers, punctuation, symbols)
-        ascii_chars = sum(1 for char in text if 32 <= ord(char) <= 126)
-        
-        # Count only non-whitespace characters for comparison
+        # Count ASCII (excluding spaces which manga-ocr adds)
+        ascii_chars = sum(1 for char in text if 33 <= ord(char) <= 126)
         total_chars = sum(1 for char in text if not char.isspace())
         
         if total_chars == 0:
             return False
         
-        # Calculate ratio
         ratio = ascii_chars / total_chars
         
-        # Return True if more than 70% ASCII characters
         if ratio > 0.7:
             self._log(f"   Excluding English text ({ratio:.0%} ASCII): '{text[:30]}...'", "debug")
             return True
@@ -968,65 +975,31 @@ class MangaTranslator:
                 
                 # Special handling for manga-ocr (needs region detection first)
                 if self.ocr_provider == 'manga-ocr':
-                    # manga-ocr processes whole image, so we need a text detector first
-                    # Use a different provider for detection, then manga-ocr for recognition
-                    self._log("📝 manga-ocr requires text detection first, using EasyOCR for detection...")
+                    # Process the full image with manga-ocr
+                    self._log("📝 Processing full image with manga-ocr...")
                     
-                    # Use EasyOCR for detection only
-                    detector_status = self.ocr_manager.check_provider_status('easyocr')
-                    if not detector_status['loaded']:
-                        self._log("📥 Loading EasyOCR for text detection...")
-                        # Configure EasyOCR with appropriate languages
-                        language_hints = ocr_settings.get('language_hints', ['ja'])
-                        easyocr_provider = self.ocr_manager.get_provider('easyocr')
-                        if easyocr_provider:
-                            easyocr_provider.languages = language_hints
-                        if not self.ocr_manager.load_provider('easyocr'):
-                            self._log("⚠️ Failed to load EasyOCR, using whole image", "warning")
-                            # Fall back to processing whole image
-                            ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                        else:
-                            # Get bounding boxes from EasyOCR
-                            detection_results = self.ocr_manager.detect_text(image, 'easyocr')
-                            ocr_results = []
-                            
-                            # Process each detected region with manga-ocr
-                            for det_result in detection_results:
-                                x, y, w, h = det_result.bbox
-                                # Crop region from image
-                                cropped = image[y:y+h, x:x+w]
-                                
-                                # Process with manga-ocr
-                                manga_results = self.ocr_manager.detect_text(cropped, 'manga-ocr')
-                                if manga_results:
-                                    # Update bbox to original image coordinates
-                                    manga_results[0].bbox = det_result.bbox
-                                    manga_results[0].vertices = det_result.vertices
-                                    manga_results[0].confidence = max(manga_results[0].confidence, det_result.confidence)
-                                    ocr_results.append(manga_results[0])
-                    else:
-                        # Process each region
-                        detection_results = self.ocr_manager.detect_text(image, 'easyocr')
-                        ocr_results = []
-                        
-                        for det_result in detection_results:
-                            x, y, w, h = det_result.bbox
-                            cropped = image[y:y+h, x:x+w]
-                            manga_results = self.ocr_manager.detect_text(cropped, 'manga-ocr')
-                            if manga_results:
-                                manga_results[0].bbox = det_result.bbox
-                                manga_results[0].vertices = det_result.vertices
-                                ocr_results.append(manga_results[0])
-                
+                    # Pass confidence threshold to manga-ocr
+                    ocr_results = self.ocr_manager.detect_text(
+                        image, 
+                        self.ocr_provider,
+                        confidence=confidence_threshold
+                    )
+                    
+                    # manga-ocr returns one result with all text for the full image
+                    # Bubble detection will handle splitting this into proper regions
+
                 elif self.ocr_provider == 'pororo':
-                    # Configure Pororo for appropriate language
-                    language_hints = ocr_settings.get('language_hints', ['ko'])
-                    # Pororo primarily supports Korean
-                    self._log("🇰🇷 Pororo OCR optimized for Korean text")
-                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+                    # Process full image with Pororo
+                    self._log("🇰🇷 Processing full image with Pororo OCR...")
+                    
+                    ocr_results = self.ocr_manager.detect_text(
+                        image, 
+                        self.ocr_provider,
+                        confidence=confidence_threshold
+                    )
+
                 elif self.ocr_provider == 'easyocr':
-                    # Configure EasyOCR languages based on settings
+                    # EasyOCR returns multiple regions by design
                     language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'en'])
                     easyocr_provider = self.ocr_manager.get_provider('easyocr')
                     if easyocr_provider:
@@ -1038,11 +1011,10 @@ class MangaTranslator:
                             self.ocr_manager.load_provider('easyocr')
                     
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+
                 elif self.ocr_provider == 'paddleocr':
                     # Configure PaddleOCR language
                     language_hints = ocr_settings.get('language_hints', ['ja'])
-                    # Map to PaddleOCR language codes
                     lang_map = {'ja': 'japan', 'ko': 'korean', 'zh': 'ch', 'en': 'en'}
                     paddle_lang = lang_map.get(language_hints[0] if language_hints else 'ja', 'japan')
                     
@@ -1060,7 +1032,7 @@ class MangaTranslator:
                             self._log(f"📥 Reloaded PaddleOCR with language: {paddle_lang}")
                     
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+
                 else:
                     # Default processing for other providers
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
