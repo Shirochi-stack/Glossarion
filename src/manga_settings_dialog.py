@@ -663,7 +663,7 @@ class MangaSettingsDialog:
         tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
 
     def _create_inpainting_tab(self, notebook):
-        """Create inpainting settings tab with per-text-type dilation"""
+        """Create inpainting settings tab with comprehensive per-text-type dilation controls"""
         frame = ttk.Frame(notebook)
         notebook.add(frame, text="Inpainting")
         
@@ -691,46 +691,114 @@ class MangaSettingsDialog:
         dilation_spinbox.pack(side='left', padx=10)
         tk.Label(dilation_frame, text="pixels (expand mask beyond text)").pack(side='left')
         
-        # Per-Text-Type Iterations - NEW SECTION
-        iterations_label_frame = tk.LabelFrame(mask_frame, text="Per-Text-Type Iterations", padx=10, pady=5)
+        # Per-Text-Type Iterations - EXPANDED SECTION
+        iterations_label_frame = tk.LabelFrame(mask_frame, text="Dilation Iterations Control", padx=10, pady=5)
         iterations_label_frame.pack(fill='x', pady=(10, 5))
         
-        # Bubble iterations
-        bubble_iter_frame = tk.Frame(iterations_label_frame)
-        bubble_iter_frame.pack(fill='x', pady=5)
+        # All Iterations Master Control (NEW)
+        all_iter_frame = tk.Frame(iterations_label_frame)
+        all_iter_frame.pack(fill='x', pady=5)
         
-        tk.Label(bubble_iter_frame, text="Speech Bubbles:", width=15, anchor='w').pack(side='left')
-        self.bubble_iterations_var = tk.IntVar(value=self.settings.get('bubble_dilation_iterations', 2))
-        bubble_iter_spinbox = tb.Spinbox(
-            bubble_iter_frame,
+        # Checkbox to enable/disable uniform iterations
+        self.use_all_iterations_var = tk.BooleanVar(value=self.settings.get('use_all_iterations', False))
+        all_iter_checkbox = tb.Checkbutton(
+            all_iter_frame,
+            text="Use Same For All:",
+            variable=self.use_all_iterations_var,
+            command=self._toggle_iteration_controls,
+            bootstyle="round-toggle"
+        )
+        all_iter_checkbox.pack(side='left', padx=(0, 10))
+        
+        self.all_iterations_var = tk.IntVar(value=self.settings.get('all_iterations', 2))
+        self.all_iterations_spinbox = tb.Spinbox(
+            all_iter_frame,
             from_=0,
             to=5,
-            textvariable=self.bubble_iterations_var,
+            textvariable=self.all_iterations_var,
+            width=10,
+            state='disabled' if not self.use_all_iterations_var.get() else 'normal'
+        )
+        self.all_iterations_spinbox.pack(side='left', padx=10)
+        tk.Label(all_iter_frame, text="iterations (applies to all text types)").pack(side='left')
+        
+        # Separator
+        ttk.Separator(iterations_label_frame, orient='horizontal').pack(fill='x', pady=(10, 5))
+        
+        # Individual Controls Label
+        tk.Label(
+            iterations_label_frame, 
+            text="Individual Text Type Controls:",
+            font=('Arial', 9, 'bold')
+        ).pack(anchor='w', pady=(5, 5))
+        
+        # Text Bubble iterations (modified from original bubble iterations)
+        text_bubble_iter_frame = tk.Frame(iterations_label_frame)
+        text_bubble_iter_frame.pack(fill='x', pady=5)
+        
+        text_bubble_label = tk.Label(text_bubble_iter_frame, text="Text Bubbles:", width=15, anchor='w')
+        text_bubble_label.pack(side='left')
+        self.text_bubble_iterations_var = tk.IntVar(value=self.settings.get('text_bubble_dilation_iterations', 
+                                                                            self.settings.get('bubble_dilation_iterations', 2)))
+        self.text_bubble_iter_spinbox = tb.Spinbox(
+            text_bubble_iter_frame,
+            from_=0,
+            to=5,
+            textvariable=self.text_bubble_iterations_var,
             width=10
         )
-        bubble_iter_spinbox.pack(side='left', padx=10)
-        tk.Label(bubble_iter_frame, text="iterations (for complex bubble shapes)").pack(side='left')
+        self.text_bubble_iter_spinbox.pack(side='left', padx=10)
+        tk.Label(text_bubble_iter_frame, text="iterations (speech/dialogue bubbles)").pack(side='left')
+        
+        # Empty Bubble iterations (NEW)
+        empty_bubble_iter_frame = tk.Frame(iterations_label_frame)
+        empty_bubble_iter_frame.pack(fill='x', pady=5)
+        
+        empty_bubble_label = tk.Label(empty_bubble_iter_frame, text="Empty Bubbles:", width=15, anchor='w')
+        empty_bubble_label.pack(side='left')
+        self.empty_bubble_iterations_var = tk.IntVar(value=self.settings.get('empty_bubble_dilation_iterations', 3))
+        self.empty_bubble_iter_spinbox = tb.Spinbox(
+            empty_bubble_iter_frame,
+            from_=0,
+            to=5,
+            textvariable=self.empty_bubble_iterations_var,
+            width=10
+        )
+        self.empty_bubble_iter_spinbox.pack(side='left', padx=10)
+        tk.Label(empty_bubble_iter_frame, text="iterations (empty speech bubbles)").pack(side='left')
         
         # Free text iterations
         free_text_iter_frame = tk.Frame(iterations_label_frame)
         free_text_iter_frame.pack(fill='x', pady=5)
         
-        tk.Label(free_text_iter_frame, text="Free Text:", width=15, anchor='w').pack(side='left')
+        free_text_label = tk.Label(free_text_iter_frame, text="Free Text:", width=15, anchor='w')
+        free_text_label.pack(side='left')
         self.free_text_iterations_var = tk.IntVar(value=self.settings.get('free_text_dilation_iterations', 0))
-        free_text_iter_spinbox = tb.Spinbox(
+        self.free_text_iter_spinbox = tb.Spinbox(
             free_text_iter_frame,
             from_=0,
             to=5,
             textvariable=self.free_text_iterations_var,
             width=10
         )
-        free_text_iter_spinbox.pack(side='left', padx=10)
+        self.free_text_iter_spinbox.pack(side='left', padx=10)
         tk.Label(free_text_iter_frame, text="iterations (0 = perfect for B&W panels)").pack(side='left')
         
-        # Legacy iterations (backwards compatibility)
-        self.dilation_iterations_var = self.bubble_iterations_var  # Link to bubble for legacy
+        # Store individual control widgets for enable/disable
+        self.individual_iteration_controls = [
+            (text_bubble_label, self.text_bubble_iter_spinbox),
+            (empty_bubble_label, self.empty_bubble_iter_spinbox),
+            (free_text_label, self.free_text_iter_spinbox)
+        ]
         
-        # Quick presets - ENHANCED VERSION
+        # Apply initial state
+        self._toggle_iteration_controls()
+        
+        # Legacy iterations (backwards compatibility)
+        self.bubble_iterations_var = self.text_bubble_iterations_var  # Link to text bubble for legacy
+        self.dilation_iterations_var = self.text_bubble_iterations_var  # Legacy support
+        
+        # Quick presets - UPDATED VERSION
         preset_frame = tk.Frame(mask_frame)
         preset_frame.pack(fill='x', pady=(10, 5))
         
@@ -738,8 +806,8 @@ class MangaSettingsDialog:
         
         tb.Button(
             preset_frame,
-            text="B&W",
-            command=lambda: self._set_mask_preset(15, 2, 0),
+            text="B&W Manga",
+            command=lambda: self._set_mask_preset(15, False, 2, 2, 3, 0),
             bootstyle="secondary",
             width=12
         ).pack(side='left', padx=2)
@@ -747,27 +815,28 @@ class MangaSettingsDialog:
         tb.Button(
             preset_frame,
             text="Colored",
-            command=lambda: self._set_mask_preset(15, 2, 3),
+            command=lambda: self._set_mask_preset(15, False, 2, 2, 3, 3),
             bootstyle="secondary",
-            width=9
+            width=12
         ).pack(side='left', padx=2)
         
         tb.Button(
             preset_frame,
-            text="Aggressive",
-            command=lambda: self._set_mask_preset(25, 3, 1),
+            text="Uniform",
+            command=lambda: self._set_mask_preset(15, True, 2, 2, 2, 2),
             bootstyle="secondary",
-            width=9
+            width=12
         ).pack(side='left', padx=2)
-        
         
         # Help text - UPDATED
         tk.Label(
             mask_frame,
-            text="💡 B&W Optimized: Perfect for black & white manga with clean panels\n"
-                 "💡 Standard: General purpose, works for most manga\n"
-                 "💡 Aggressive: For complex backgrounds or stylized text\n"
-                 "ℹ️ Set Free Text iterations to 0 for crisp B&W panels without bleeding",
+            text="💡 B&W Manga: Optimized for black & white panels with clean bubbles\n"
+                 "💡 Colored: For colored manga with complex backgrounds\n"
+                 "💡 Aggressive: For difficult text removal cases\n"
+                 "💡 Uniform: Same iterations for all text types\n"
+                 "ℹ️ Empty bubbles often need more iterations than text bubbles\n"
+                 "ℹ️ Set Free Text to 0 for crisp B&W panels without bleeding",
             font=('Arial', 9),
             fg='gray',
             justify='left'
@@ -830,11 +899,29 @@ class MangaSettingsDialog:
             justify='left'
         ).pack(anchor='w')
 
-    def _set_mask_preset(self, dilation, bubble_iterations, free_text_iterations):
-        """Set mask dilation preset values with per-text-type iterations"""
+    def _toggle_iteration_controls(self):
+        """Enable/disable individual iteration controls based on 'use all' checkbox"""
+        use_all = self.use_all_iterations_var.get()
+        
+        # Enable/disable the all iterations spinbox
+        self.all_iterations_spinbox.config(state='normal' if use_all else 'disabled')
+        
+        # Enable/disable individual controls
+        for label, spinbox in self.individual_iteration_controls:
+            state = 'disabled' if use_all else 'normal'
+            spinbox.config(state=state)
+            # Gray out labels when disabled
+            label.config(fg='gray' if use_all else 'white')
+
+    def _set_mask_preset(self, dilation, use_all, all_iter, text_bubble_iter, empty_bubble_iter, free_text_iter):
+        """Set mask dilation preset values with comprehensive iteration controls"""
         self.mask_dilation_var.set(dilation)
-        self.bubble_iterations_var.set(bubble_iterations)
-        self.free_text_iterations_var.set(free_text_iterations)
+        self.use_all_iterations_var.set(use_all)
+        self.all_iterations_var.set(all_iter)
+        self.text_bubble_iterations_var.set(text_bubble_iter)
+        self.empty_bubble_iterations_var.set(empty_bubble_iter)
+        self.free_text_iterations_var.set(free_text_iter)
+        self._toggle_iteration_controls()
     
     def _create_cloud_api_tab(self, parent):
             """Create cloud API settings tab"""
@@ -1886,7 +1973,7 @@ class MangaSettingsDialog:
         self.workers_label.config(fg='white' if enabled else 'gray')
     
     def _save_settings(self):
-        """Save all settings"""
+        """Save all settings including expanded iteration controls"""
         # Collect all settings
         self.settings['preprocessing']['enabled'] = self.preprocess_enabled.get()
         self.settings['preprocessing']['auto_detect_quality'] = self.auto_detect.get()
@@ -1930,18 +2017,28 @@ class MangaSettingsDialog:
         else:
             self.settings['ocr']['detector_type'] = 'auto'
         
-        # Inpainting settings - UPDATE THIS SECTION
+        # Inpainting settings - EXPANDED SECTION
         if hasattr(self, 'inpaint_batch_size'):
             if 'inpainting' not in self.settings:
                 self.settings['inpainting'] = {}
             self.settings['inpainting']['batch_size'] = self.inpaint_batch_size.get()
             self.settings['inpainting']['enable_cache'] = self.enable_cache_var.get()
             
-            # Save all dilation settings
+            # Save all dilation settings - EXPANDED
             self.settings['mask_dilation'] = self.mask_dilation_var.get()
-            self.settings['bubble_dilation_iterations'] = self.bubble_iterations_var.get()
+            
+            # Save master control settings
+            self.settings['use_all_iterations'] = self.use_all_iterations_var.get()
+            self.settings['all_iterations'] = self.all_iterations_var.get()
+            
+            # Save individual iteration settings
+            self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
+            self.settings['empty_bubble_dilation_iterations'] = self.empty_bubble_iterations_var.get()
             self.settings['free_text_dilation_iterations'] = self.free_text_iterations_var.get()
-            self.settings['dilation_iterations'] = self.bubble_iterations_var.get()  # Legacy support
+            
+            # Legacy support - map old names to new ones
+            self.settings['bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
+            self.settings['dilation_iterations'] = self.text_bubble_iterations_var.get()
         
         # Advanced settings
         self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
