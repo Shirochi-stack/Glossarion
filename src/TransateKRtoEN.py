@@ -786,44 +786,54 @@ class ProgressManager:
         self.prog["chapters"][chapter_key] = chapter_info
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
-        """Check if a chapter needs translation - PURE PROGRESS TRACKING ONLY"""
+        """Check if a chapter needs translation - auto-add existing files to tracker"""
         
-        # CHANGE THIS LINE - Use actual_num instead of chapter_idx
-        chapter_key = str(actual_num)  # WAS: chapter_key = str(chapter_idx)
+        chapter_key = str(actual_num)
+        
+        # Determine what the output filename would be for this chapter
+        # This should match the logic in the translation process
+        output_filename = f"response_chapter{actual_num:04d}.html"
+        output_path = os.path.join(output_dir, output_filename)
         
         if chapter_key not in self.prog["chapters"]:
+            # Not in tracker - check if the file exists
+            if os.path.exists(output_path):
+                # File exists! Add it to progress tracker
+                print(f"📁 Found existing file for chapter {actual_num}: {output_filename}")
+                
+                self.prog["chapters"][chapter_key] = {
+                    "actual_num": actual_num,
+                    "content_hash": content_hash,
+                    "output_file": output_filename,
+                    "status": "completed",
+                    "last_updated": os.path.getmtime(output_path),
+                    "auto_discovered": True
+                }
+                
+                self.save()
+                return False, f"Chapter {actual_num} already exists: {output_filename}", output_filename
+            
+            # File doesn't exist, needs translation
             return True, None, None
         
+        # Entry exists in tracker - verify the file still exists
         chapter_info = self.prog["chapters"][chapter_key]
         status = chapter_info.get("status")
-        output_file = chapter_info.get("output_file", "")
+        output_file = chapter_info.get("output_file", output_filename)  # Use expected filename if missing
         
-        # If status says completed but file doesn't exist - DELETE THE ENTRY AND RETRANSLATE
         if status in ["completed", "completed_empty", "completed_image_only"]:
-            if output_file:
-                # Try both original and stripped filenames
-                output_path = os.path.join(output_dir, output_file)
-                
-                # Also try stripped version if original has .htm.html
-                stripped_output = output_file.replace('.htm.html', '.html') if '.htm.html' in output_file else output_file
-                stripped_path = os.path.join(output_dir, stripped_output)
-                
-                if os.path.exists(output_path) or os.path.exists(stripped_path):
-                    # File exists (either version) - skip translation
-                    return False, f"Chapter {actual_num} already translated: {output_file}", output_file
-                else:
-                    # File missing (both versions) - delete entry and force retranslation
-                    if chapter_key in self.prog["chapters"]:
-                        del self.prog["chapters"][chapter_key]
-                    if chapter_key in self.prog.get("chapter_chunks", {}):
-                        del self.prog["chapter_chunks"][chapter_key]
-                    self.save()
-                    return True, None, None
+            output_path = os.path.join(output_dir, output_file)
+            
+            if os.path.exists(output_path):
+                return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
-                # No output file recorded - retranslate
+                # File missing - delete entry and force retranslation
+                del self.prog["chapters"][chapter_key]
+                if chapter_key in self.prog.get("chapter_chunks", {}):
+                    del self.prog["chapter_chunks"][chapter_key]
+                self.save()
                 return True, None, None
         
-        # Always retranslate anything not completed with existing file
         return True, None, None
         
     def cleanup_missing_files(self, output_dir):
