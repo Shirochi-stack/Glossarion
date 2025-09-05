@@ -54,7 +54,19 @@ class MangaSettingsDialog:
                 'enable_rotation_correction': True,
                 'bubble_detection_enabled': False,
                 'bubble_model_path': '',
-                'bubble_confidence': 0.5
+                'bubble_confidence': 0.5,
+                'detector_type': 'rtdetr',
+                'rtdetr_confidence': 0.3,
+                'detect_empty_bubbles': True,
+                'detect_text_bubbles': True,
+                'detect_free_text': True,
+                'rtdetr_model_url': '',
+                'azure_reading_order': 'natural',
+                'azure_model_version': 'latest',
+                'azure_max_wait': 60,
+                'azure_poll_interval': 0.5,
+                'min_text_length': 0,
+                'exclude_english_text': False
             },
             'advanced': {
                 'format_detection': True,
@@ -63,7 +75,28 @@ class MangaSettingsDialog:
                 'save_intermediate': False,
                 'parallel_processing': False,
                 'max_workers': 4
-            }
+            },
+            'inpainting': {
+                'batch_size': 1,
+                'enable_cache': True
+            },
+            # Mask dilation settings with new iteration controls
+            'mask_dilation': 15,
+            'use_all_iterations': True,  # Master control - use same for all by default
+            'all_iterations': 2,  # Value when using same for all
+            'text_bubble_dilation_iterations': 2,  # Text-filled speech bubbles
+            'empty_bubble_dilation_iterations': 3,  # Empty speech bubbles
+            'free_text_dilation_iterations': 0,  # Free text (0 for clean B&W)
+            'bubble_dilation_iterations': 2,  # Legacy support
+            'dilation_iterations': 2,  # Legacy support
+            
+            # Cloud inpainting settings
+            'cloud_inpaint_model': 'ideogram-v2',
+            'cloud_custom_version': '',
+            'cloud_inpaint_prompt': 'clean background, smooth surface',
+            'cloud_negative_prompt': 'text, writing, letters',
+            'cloud_inference_steps': 20,
+            'cloud_timeout': 60
         }
         
         # Merge with existing config
@@ -700,7 +733,7 @@ class MangaSettingsDialog:
         all_iter_frame.pack(fill='x', pady=5)
         
         # Checkbox to enable/disable uniform iterations
-        self.use_all_iterations_var = tk.BooleanVar(value=self.settings.get('use_all_iterations', False))
+        self.use_all_iterations_var = tk.BooleanVar(value=self.settings.get('use_all_iterations', True))
         all_iter_checkbox = tb.Checkbutton(
             all_iter_frame,
             text="Use Same For All:",
