@@ -786,19 +786,17 @@ class ProgressManager:
         self.prog["chapters"][chapter_key] = chapter_info
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
-        """Check if a chapter needs translation - auto-add existing files to tracker"""
+        """Check if a chapter needs translation - auto-add ONLY if not tracked at all"""
         
         chapter_key = str(actual_num)
         
-        # Determine what the output filename would be for this chapter
-        # This should match the logic in the translation process
+        # Determine what the output filename would be
         output_filename = f"response_chapter{actual_num:04d}.html"
         output_path = os.path.join(output_dir, output_filename)
         
         if chapter_key not in self.prog["chapters"]:
-            # Not in tracker - check if the file exists
+            # Not in tracker at all - check if file exists for auto-discovery
             if os.path.exists(output_path):
-                # File exists! Add it to progress tracker
                 print(f"📁 Found existing file for chapter {actual_num}: {output_filename}")
                 
                 self.prog["chapters"][chapter_key] = {
@@ -816,11 +814,16 @@ class ProgressManager:
             # File doesn't exist, needs translation
             return True, None, None
         
-        # Entry exists in tracker - verify the file still exists
+        # Entry exists - check its status
         chapter_info = self.prog["chapters"][chapter_key]
         status = chapter_info.get("status")
-        output_file = chapter_info.get("output_file", output_filename)  # Use expected filename if missing
+        output_file = chapter_info.get("output_file", output_filename)
         
+        # Handle qa_failed and other failure statuses - these NEED retranslation
+        if status in ["qa_failed", "failed", "file_missing", "error"]:
+            return True, None, None
+        
+        # Handle completed status - verify file exists
         if status in ["completed", "completed_empty", "completed_image_only"]:
             output_path = os.path.join(output_dir, output_file)
             
@@ -834,6 +837,7 @@ class ProgressManager:
                 self.save()
                 return True, None, None
         
+        # Any other status - retranslate
         return True, None, None
         
     def cleanup_missing_files(self, output_dir):
