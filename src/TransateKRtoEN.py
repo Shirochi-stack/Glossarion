@@ -852,50 +852,52 @@ class ProgressManager:
             print(f"🔄 Removed {cleaned_count} entries - will retranslate")
     
     def migrate_to_content_hash(self, chapters):
-        """Auto-fix any key/actual_num mismatches in progress tracker"""
+        """Change keys to match actual_num values for proper mapping"""
         
-        # Check for any mismatched entries
-        mismatches = {}
-        for key, chapter_info in list(self.prog["chapters"].items()):
+        new_chapters = {}
+        migrated_count = 0
+        
+        for old_key, chapter_info in self.prog["chapters"].items():
             actual_num = chapter_info.get("actual_num")
             
             if actual_num is not None:
-                expected_key = str(actual_num)
+                new_key = str(actual_num)
                 
-                # If the key doesn't match actual_num, it needs fixing
-                if key != expected_key:
-                    mismatches[key] = (expected_key, chapter_info)
-        
-        # Fix any mismatches found
-        if mismatches:
-            print(f"🔧 Found {len(mismatches)} key/actual_num mismatches. Fixing...")
-            
-            for old_key, (new_key, chapter_info) in mismatches.items():
-                # Check if target key already exists
-                if new_key in self.prog["chapters"]:
-                    # Compare timestamps, keep the newer one
-                    existing = self.prog["chapters"][new_key]
-                    if chapter_info.get("last_updated", 0) > existing.get("last_updated", 0):
-                        print(f"  ⚠️ Key '{new_key}' exists. Replacing with newer entry from '{old_key}'")
-                        self.prog["chapters"][new_key] = chapter_info
+                # If key needs to change
+                if old_key != new_key:
+                    print(f"  Migrating: key '{old_key}' → '{new_key}' (actual_num: {actual_num})")
+                    migrated_count += 1
+                    
+                    # Check for collision
+                    if new_key in new_chapters:
+                        print(f"    ⚠️ Warning: Key '{new_key}' already exists, keeping newer entry")
+                        if chapter_info.get("last_updated", 0) > new_chapters[new_key].get("last_updated", 0):
+                            new_chapters[new_key] = chapter_info
                     else:
-                        print(f"  ⚠️ Key '{new_key}' exists with newer data. Discarding '{old_key}'")
+                        new_chapters[new_key] = chapter_info
                 else:
-                    # Move to correct key
-                    self.prog["chapters"][new_key] = chapter_info
-                    print(f"  ✅ Remapped: '{old_key}' → '{new_key}' (actual_num: {chapter_info.get('actual_num')})")
-                
-                # Remove the old key
-                del self.prog["chapters"][old_key]
-                
-                # Also fix chapter_chunks if it exists
-                if old_key in self.prog.get("chapter_chunks", {}):
-                    self.prog["chapter_chunks"][new_key] = self.prog["chapter_chunks"][old_key]
-                    del self.prog["chapter_chunks"][old_key]
+                    # Key already matches actual_num
+                    new_chapters[old_key] = chapter_info
+            else:
+                # No actual_num, keep as-is
+                print(f"  ⚠️ Warning: No actual_num for key '{old_key}', keeping as-is")
+                new_chapters[old_key] = chapter_info
+        
+        if migrated_count > 0:
+            # Also migrate chapter_chunks if they exist
+            if "chapter_chunks" in self.prog:
+                new_chunks = {}
+                for old_key, chunk_data in self.prog["chapter_chunks"].items():
+                    if old_key in self.prog["chapters"] and "actual_num" in self.prog["chapters"][old_key]:
+                        new_key = str(self.prog["chapters"][old_key]["actual_num"])
+                        new_chunks[new_key] = chunk_data
+                    else:
+                        new_chunks[old_key] = chunk_data
+                self.prog["chapter_chunks"] = new_chunks
             
-            # Save the corrections
+            self.prog["chapters"] = new_chapters
             self.save()
-            print(f"✅ Fixed {len(mismatches)} mismatched entries")
+            print(f"✅ Migrated {migrated_count} entries to use actual_num as key")
     
     def get_stats(self, output_dir):
         """Get statistics about translation progress"""
