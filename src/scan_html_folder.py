@@ -2984,8 +2984,8 @@ def update_progress_file(folder_path, results, log):
                 chapter_num = int(match.group(1))
         affected_chapters.append(chapter_num)
         
-        # For the log display (to match HTML report)
-        affected_chapters_for_log.append(faulty_row.get("file_index", 0))
+        # For the log display - use the same chapter_num, not file_index
+        affected_chapters_for_log.append(chapter_num)
     if affected_chapters_for_log:
         log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters_for_log))}")
 
