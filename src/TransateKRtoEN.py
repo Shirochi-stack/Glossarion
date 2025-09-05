@@ -3163,7 +3163,7 @@ class TranslationProcessor:
         if detection_mode == 'ai-hunter':
             # Try to get content_hash from the current chapter info
             # The idx parameter represents the chapter index
-            chapter_key = str(idx)
+            chapter_key = str(actual_num)
             if chapter_key in prog.get("chapters", {}):
                 chapter_info = prog["chapters"][chapter_key]
                 content_hash = chapter_info.get("content_hash")
@@ -7986,44 +7986,6 @@ def main(log_callback=None, stop_callback=None):
     progress_manager.cleanup_missing_files(out)
     progress_manager.save()
 
-    # Reset failed chapters logic - but NOT qa_failed
-    if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
-        reset_count = 0
-        for chapter_key, chapter_info in list(progress_manager.prog["chapters"].items()):
-            status = chapter_info.get("status")
-            
-            # Reset these statuses but NOT qa_failed
-            if status in ["failed", "file_missing", "error", "file_deleted", "in_progress"]:
-                # Skip if file exists and is actually complete
-                if status == "in_progress":
-                    output_file = chapter_info.get("output_file")
-                    if output_file:
-                        output_path = os.path.join(out, output_file)
-                        if os.path.exists(output_path):
-                            # File exists - mark as completed instead of deleting
-                            progress_manager.prog["chapters"][chapter_key]["status"] = "completed"
-                            print(f"🔄 Recovered in_progress chapter {chapter_key} as completed")
-                            continue
-                
-                # Delete the entry for actual failures
-                del progress_manager.prog["chapters"][chapter_key]
-                
-                # Also delete by actual_num to ensure it's really gone
-                actual_num = chapter_info.get("actual_num")
-                if actual_num:
-                    for other_key, other_info in list(progress_manager.prog["chapters"].items()):
-                        if other_info.get("actual_num") == actual_num:
-                            del progress_manager.prog["chapters"][other_key]
-                
-                if chapter_key in progress_manager.prog.get("chapter_chunks", {}):
-                    del progress_manager.prog["chapter_chunks"][chapter_key]
-                    
-                reset_count += 1
-        
-        if reset_count > 0:
-            print(f"🔄 Reset {reset_count} failed/incomplete chapters for re-translation")
-            progress_manager.save()
-
     if check_stop():
         return
 
@@ -8530,7 +8492,7 @@ def main(log_callback=None, stop_callback=None):
         
         chapters_to_process += 1
         
-        chapter_key = str(idx)
+        chapter_key = str(actual_num)
         if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
             pass
         
@@ -9161,7 +9123,7 @@ def main(log_callback=None, stop_callback=None):
                         c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
+                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress")
                 progress_manager.save()
 
 
