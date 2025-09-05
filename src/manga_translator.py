@@ -2339,43 +2339,69 @@ class MangaTranslator:
             all_originals = []
             all_translations = []
             
-            for i, region in enumerate(regions):
+            # Extract translation values in order
+            translation_values = list(translations.values()) if translations else []
+            
+            # Use position-based mapping if counts match
+            if len(translation_values) >= len(regions) - 1:  # Allow 1 missing
+                self._log(f"📊 Using position-based mapping ({len(translation_values)} translations for {len(regions)} regions)")
                 
-                # CHECK 9: During mapping (in case there are many regions)
-                if i % 10 == 0 and self._check_stop():  # Check every 10 regions
-                    self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
-                    return result  #
-                
-                key = f"[{i}] {region.text}"
-                
-                # First try with the indexed key
-                if key in translations:
-                    translated = translations[key]
-                    self._log(f"  ✅ Found translation with indexed key for region {i}")
-                # Then try with just the text (without index)
-                elif region.text in translations:
-                    translated = translations[region.text]
-                    self._log(f"  ✅ Found translation with text-only key for region {i}")
-                else:
-                    self._log(f"⚠️ No translation found for region {i}", "warning")
-                    self._log(f"   Tried keys: '{key}' and '{region.text}'", "warning")
-                    self._log(f"   Available keys sample: {list(translations.keys())[:2]}...", "warning")
-                    translated = region.text  # Use original as fallback
-                
-                # Apply glossary
-                if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
-                    for entry in self.main_gui.manual_glossary:
-                        if 'source' in entry and 'target' in entry:
-                            if entry['source'] in translated:
-                                translated = translated.replace(entry['source'], entry['target'])
-                
-                result[region.text] = translated
-                
-                if translated != region.text:
-                    self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
-                    # Collect all text for combined history entry
-                    all_originals.append(f"[{i+1}] {region.text}")
-                    all_translations.append(f"[{i+1}] {translated}")
+                for i, region in enumerate(regions):
+                    # CHECK 9: During mapping
+                    if i % 10 == 0 and self._check_stop():
+                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                        return result
+                    
+                    # Use position-based translation
+                    if i < len(translation_values):
+                        translated = translation_values[i]
+                    else:
+                        translated = region.text  # Fallback
+                    
+                    # Apply glossary
+                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                        for entry in self.main_gui.manual_glossary:
+                            if 'source' in entry and 'target' in entry:
+                                if entry['source'] in translated:
+                                    translated = translated.replace(entry['source'], entry['target'])
+                    
+                    result[region.text] = translated
+                    region.translated_text = translated
+                    self._log(f"  ✅ Applied translation for: '{region.text[:40]}...'", "info")
+                    
+                    if translated != region.text:
+                        all_originals.append(f"[{i+1}] {region.text}")
+                        all_translations.append(f"[{i+1}] {translated}")
+            else:
+                # Fallback to key-based matching
+                for i, region in enumerate(regions):
+                    if i % 10 == 0 and self._check_stop():
+                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                        return result
+                    
+                    key = f"[{i}] {region.text}"
+                    
+                    if key in translations:
+                        translated = translations[key]
+                    elif region.text in translations:
+                        translated = translations[region.text]
+                    else:
+                        translated = region.text
+                    
+                    # Apply glossary
+                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                        for entry in self.main_gui.manual_glossary:
+                            if 'source' in entry and 'target' in entry:
+                                if entry['source'] in translated:
+                                    translated = translated.replace(entry['source'], entry['target'])
+                    
+                    result[region.text] = translated
+                    region.translated_text = translated
+                    
+                    if translated != region.text:
+                        self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
+                        all_originals.append(f"[{i+1}] {region.text}")
+                        all_translations.append(f"[{i+1}] {translated}")
             
             # Save as ONE combined history entry for the entire page
             if self.history_manager and self.contextual_enabled and all_originals:
@@ -2424,7 +2450,7 @@ class MangaTranslator:
             return {}
                 
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
-        """Create mask with per-text-type dilation settings"""
+        """Create mask with comprehensive per-text-type dilation settings"""
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
         
         regions_masked = 0
@@ -2435,16 +2461,35 @@ class MangaTranslator:
         # Get manga settings
         manga_settings = self.main_gui.config.get('manga_settings', {})
         
-        # Get per-type dilation settings
+        # Get dilation settings
         base_dilation_size = manga_settings.get('mask_dilation', 15)
-        bubble_iterations = manga_settings.get('bubble_dilation_iterations', 2)
-        free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
+        
+        # Check if using uniform iterations for all text types
+        use_all_iterations = manga_settings.get('use_all_iterations', False)
+        
+        if use_all_iterations:
+            # Use the same iteration count for all text types
+            all_iterations = manga_settings.get('all_iterations', 2)
+            text_bubble_iterations = all_iterations
+            empty_bubble_iterations = all_iterations
+            free_text_iterations = all_iterations
+            self._log(f"📏 Using uniform iterations: {all_iterations} for all text types", "info")
+        else:
+            # Use individual iteration settings
+            text_bubble_iterations = manga_settings.get('text_bubble_dilation_iterations',
+                                                       manga_settings.get('bubble_dilation_iterations', 2))
+            empty_bubble_iterations = manga_settings.get('empty_bubble_dilation_iterations', 3)
+            free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
+            self._log(f"📏 Using individual iterations - Text bubbles: {text_bubble_iterations}, "
+                     f"Empty bubbles: {empty_bubble_iterations}, Free text: {free_text_iterations}", "info")
         
         # Create separate masks for different text types
-        bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        text_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        empty_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
         free_text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
         
-        bubble_count = 0
+        text_bubble_count = 0
+        empty_bubble_count = 0
         free_text_count = 0
         
         for i, region in enumerate(regions):
@@ -2457,37 +2502,48 @@ class MangaTranslator:
             
             regions_masked += 1
             
-            # Determine if this is a bubble or free text
-            # Check if bubble detection was used
-            is_bubble = False
+            # Determine text type
+            text_type = 'free_text'  # default
             
             # Check if region has bubble_type attribute (from bubble detection)
             if hasattr(region, 'bubble_type'):
                 # RT-DETR classifications
-                if region.bubble_type in ['empty_bubble', 'text_bubble']:
-                    is_bubble = True
+                if region.bubble_type == 'empty_bubble':
+                    text_type = 'empty_bubble'
+                elif region.bubble_type == 'text_bubble':
+                    text_type = 'text_bubble'
                 else:  # 'free_text' or others
-                    is_bubble = False
+                    text_type = 'free_text'
             else:
                 # Fallback: use simple heuristics if no bubble detection
-                # You can customize this logic based on your needs
                 x, y, w, h = region.bounding_box
                 aspect_ratio = w / h if h > 0 else 1
+                
+                # Check if region has text
+                has_text = hasattr(region, 'text') and region.text and len(region.text.strip()) > 0
                 
                 # Heuristic: bubbles tend to be more square-ish or tall
                 # Free text tends to be wide and short
                 if aspect_ratio < 2.5 and w > 50 and h > 50:
-                    is_bubble = True
+                    if has_text:
+                        text_type = 'text_bubble'
+                    else:
+                        # Could be empty bubble if it's round/oval shaped
+                        text_type = 'empty_bubble'
                 else:
-                    is_bubble = False
+                    text_type = 'free_text'
             
-            # Draw region on appropriate mask
-            target_mask = bubble_mask if is_bubble else free_text_mask
-            
-            if is_bubble:
-                bubble_count += 1
-                mask_type = "BUBBLE"
+            # Select appropriate mask and increment counter
+            if text_type == 'text_bubble':
+                target_mask = text_bubble_mask
+                text_bubble_count += 1
+                mask_type = "TEXT BUBBLE"
+            elif text_type == 'empty_bubble':
+                target_mask = empty_bubble_mask
+                empty_bubble_count += 1
+                mask_type = "EMPTY BUBBLE"
             else:
+                target_mask = free_text_mask
                 free_text_count += 1
                 mask_type = "FREE TEXT"
             
@@ -2516,16 +2572,22 @@ class MangaTranslator:
                     cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
                     self._log(f"   Region {i+1} ({mask_type}): Using bounding box", "debug")
         
-        self._log(f"📊 Mask breakdown: {bubble_count} bubbles, {free_text_count} free text regions, {regions_skipped} skipped", "info")
+        self._log(f"📊 Mask breakdown: {text_bubble_count} text bubbles, {empty_bubble_count} empty bubbles, "
+                 f"{free_text_count} free text regions, {regions_skipped} skipped", "info")
         
         # Apply different dilation settings to each mask type
         if base_dilation_size > 0:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilation_size, base_dilation_size))
             
-            # Apply dilation to bubble mask
-            if bubble_count > 0 and bubble_iterations > 0:
-                self._log(f"📏 Applying bubble dilation: {base_dilation_size}px, {bubble_iterations} iterations", "info")
-                bubble_mask = cv2.dilate(bubble_mask, kernel, iterations=bubble_iterations)
+            # Apply dilation to text bubble mask
+            if text_bubble_count > 0 and text_bubble_iterations > 0:
+                self._log(f"📏 Applying text bubble dilation: {base_dilation_size}px, {text_bubble_iterations} iterations", "info")
+                text_bubble_mask = cv2.dilate(text_bubble_mask, kernel, iterations=text_bubble_iterations)
+            
+            # Apply dilation to empty bubble mask
+            if empty_bubble_count > 0 and empty_bubble_iterations > 0:
+                self._log(f"📏 Applying empty bubble dilation: {base_dilation_size}px, {empty_bubble_iterations} iterations", "info")
+                empty_bubble_mask = cv2.dilate(empty_bubble_mask, kernel, iterations=empty_bubble_iterations)
             
             # Apply dilation to free text mask
             if free_text_count > 0 and free_text_iterations > 0:
@@ -2534,8 +2596,9 @@ class MangaTranslator:
             elif free_text_count > 0 and free_text_iterations == 0:
                 self._log(f"📏 No dilation for free text (iterations=0, perfect for B&W panels)", "info")
         
-        # Combine masks
-        mask = cv2.bitwise_or(bubble_mask, free_text_mask)
+        # Combine all masks
+        mask = cv2.bitwise_or(text_bubble_mask, empty_bubble_mask)
+        mask = cv2.bitwise_or(mask, free_text_mask)
         
         coverage_percent = (np.sum(mask > 0) / mask.size) * 100
         self._log(f"📊 Final mask coverage: {coverage_percent:.1f}% of image", "info")
