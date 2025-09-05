@@ -1823,7 +1823,6 @@ Recent translations to summarize:
             ('translate_book_title_var', 'translate_book_title', True),
             ('enable_auto_glossary_var', 'enable_auto_glossary', False),
             ('append_glossary_var', 'append_glossary', False),
-            ('reset_failed_chapters_var', 'reset_failed_chapters', True),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('enable_image_translation_var', 'enable_image_translation', False),
@@ -8127,7 +8126,6 @@ Provide translations in the same numbered format."""
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
             'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
-            'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
             'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
@@ -13055,13 +13053,6 @@ Important rules:
         tk.Label(section_frame, text="Detect chapters like 1.1, 1.2 in EPUB files\n(Text files always use decimal chapters when split)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        tb.Checkbutton(section_frame, text="Reset Failed Chapters on Start", 
-                      variable=self.reset_failed_chapters_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        tk.Label(section_frame, text="Automatically retry failed/deleted chapters\non each translation run",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-        
         # === CHAPTER EXTRACTION SETTINGS ===
         # Main extraction frame
         extraction_frame = tk.LabelFrame(section_frame, text="Chapter Extraction Settings", padx=10, pady=5)
@@ -14170,7 +14161,6 @@ Important rules:
                     'book_title_prompt': getattr(self, 'book_title_prompt', 
                         "Translate this book title to English while retaining any acronyms:"),
                     'emergency_paragraph_restore': self.emergency_restore_var.get(),
-                    'reset_failed_chapters': self.reset_failed_chapters_var.get(),
                     'disable_chapter_merging': self.disable_chapter_merging_var.get(),
                     'disable_epub_gallery': self.disable_epub_gallery_var.get(),
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
@@ -14262,7 +14252,6 @@ Important rules:
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
                     "BOOK_TITLE_PROMPT": self.book_title_prompt,
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
-                    "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
                     'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
                     "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
                     "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
@@ -14870,7 +14859,6 @@ Important rules:
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var.get(), 10)
-            self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
             self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var.get(), 5)
             self.config['token_limit_disabled'] = self.token_limit_disabled
