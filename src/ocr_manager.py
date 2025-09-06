@@ -671,12 +671,11 @@ class PaddleOCRProvider(OCRProvider):
             self._log("🔥 Loading PaddleOCR model...")
             from paddleocr import PaddleOCR
             
-            # Load model with auto-download
+            # Updated API - minimal parameters only
             self.model = PaddleOCR(
                 use_angle_cls=True,
-                lang='japan',  # Supports japan, korean, ch, en
-                use_gpu=True,
-                show_log=False
+                lang='ch'  # Supports japan, korean, ch, en
+                # Removed use_gpu and show_log - not supported anymore
             )
             self.is_loaded = True
             
@@ -685,23 +684,28 @@ class PaddleOCRProvider(OCRProvider):
             
         except Exception as e:
             self._log(f"❌ Failed to load paddleocr: {str(e)}", "error")
-            # Try CPU mode
+            
+            # Try with even fewer parameters
             try:
                 from paddleocr import PaddleOCR
-                self.model = PaddleOCR(
-                    use_angle_cls=True,
-                    lang='japan',
-                    use_gpu=False,
-                    show_log=False
-                )
+                self.model = PaddleOCR(lang='japan')  # Just language
                 self.is_loaded = True
-                self._log("✅ PaddleOCR loaded in CPU mode")
+                self._log("✅ PaddleOCR loaded with minimal config")
                 return True
             except:
-                return False
+                # Final fallback - absolute minimal
+                try:
+                    from paddleocr import PaddleOCR
+                    self.model = PaddleOCR()  # Default everything
+                    self.is_loaded = True
+                    self._log("✅ PaddleOCR loaded with defaults")
+                    return True
+                except Exception as e:
+                    self._log(f"❌ PaddleOCR completely failed: {str(e)}", "error")
+                    return False
     
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
-        """Detect text using paddleocr"""
+        """Detect text using paddleocr with better error handling"""
         results = []
         
         try:
@@ -709,32 +713,109 @@ class PaddleOCRProvider(OCRProvider):
                 if not self.load_model():
                     return results
             
+            # Ensure image is in the correct format for PaddleOCR
+            import cv2
+            if len(image.shape) == 2:  # Grayscale
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            
             # Run OCR
-            ocr_results = self.model.ocr(image)
+            try:
+                ocr_results = self.model.ocr(image)
+            except Exception as ocr_error:
+                self._log(f"PaddleOCR failed on image: {ocr_error}", "error")
+                return results
             
-            if ocr_results and ocr_results[0]:
-                for line in ocr_results[0]:
-                    bbox_points = line[0]
-                    text = line[1][0]
-                    confidence = line[1][1]
-                    
-                    # Convert points to bbox
-                    xs = [p[0] for p in bbox_points]
-                    ys = [p[1] for p in bbox_points]
-                    x_min, x_max = min(xs), max(xs)
-                    y_min, y_max = min(ys), max(ys)
-                    
-                    results.append(OCRResult(
-                        text=text,
-                        bbox=(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)),
-                        confidence=confidence,
-                        vertices=[(int(p[0]), int(p[1])) for p in bbox_points]
-                    ))
+            # Debug: Check what PaddleOCR actually returned
+            self._log(f"PaddleOCR returned type: {type(ocr_results)}", "debug")
             
-            self._log(f"✅ Detected {len(results)} text regions")
+            # Handle various return types from PaddleOCR
+            if ocr_results is None:
+                self._log("PaddleOCR returned None", "debug")
+                return results
+            
+            if isinstance(ocr_results, int):
+                # Sometimes returns status code
+                if ocr_results == 0:
+                    self._log("PaddleOCR returned status 0 (no text found)", "debug")
+                else:
+                    self._log(f"PaddleOCR returned status code: {ocr_results}", "debug")
+                return results
+            
+            if not isinstance(ocr_results, list):
+                self._log(f"Unexpected PaddleOCR result type: {type(ocr_results)}", "warning")
+                return results
+            
+            # Handle empty list
+            if len(ocr_results) == 0:
+                self._log("No text detected by PaddleOCR", "debug")
+                return results
+            
+            # Check first element to determine format
+            first_element = ocr_results[0] if ocr_results else None
+            
+            # If first element is None or empty, skip
+            if first_element is None or (isinstance(first_element, list) and len(first_element) == 0):
+                self._log("PaddleOCR returned empty results", "debug")
+                return results
+            
+            # Process results based on format
+            if isinstance(first_element, list):
+                # Standard format: list of detection results
+                for item in ocr_results:
+                    if not item:  # Skip None or empty
+                        continue
+                        
+                    # Each item should be a list of detections for this image
+                    if isinstance(item, list):
+                        for detection in item:
+                            if not detection or len(detection) < 2:
+                                continue
+                            
+                            try:
+                                # detection[0] = bbox points
+                                # detection[1] = (text, confidence)
+                                bbox_points = detection[0]
+                                text_data = detection[1]
+                                
+                                if not isinstance(text_data, tuple) or len(text_data) < 2:
+                                    continue
+                                
+                                text = str(text_data[0])  # Ensure it's a string
+                                confidence = float(text_data[1])  # Ensure it's a float
+                                
+                                if not text.strip():
+                                    continue
+                                
+                                # Calculate bounding box
+                                xs = [float(p[0]) for p in bbox_points]
+                                ys = [float(p[1]) for p in bbox_points]
+                                x_min, x_max = min(xs), max(xs)
+                                y_min, y_max = min(ys), max(ys)
+                                
+                                results.append(OCRResult(
+                                    text=text,
+                                    bbox=(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)),
+                                    confidence=confidence,
+                                    vertices=[(int(p[0]), int(p[1])) for p in bbox_points]
+                                ))
+                                
+                            except Exception as e:
+                                self._log(f"Failed to parse detection: {e}", "debug")
+                                continue
+            else:
+                self._log(f"Unknown PaddleOCR result format: {type(first_element)}", "warning")
+            
+            if results:
+                self._log(f"✅ Detected {len(results)} text regions", "info")
+            else:
+                self._log("No valid text regions found", "debug")
             
         except Exception as e:
-            self._log(f"❌ Error in paddleocr detection: {str(e)}", "error")
+            # Better error message
+            error_msg = str(e) if str(e) else type(e).__name__
+            self._log(f"❌ Error in paddleocr detection: {error_msg}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
         
         return results
 
