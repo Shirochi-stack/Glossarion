@@ -856,7 +856,7 @@ class MangaSettingsDialog:
         tb.Button(
             preset_frame,
             text="Uniform",
-            command=lambda: self._set_mask_preset(15, True, 2, 2, 2, 2),
+            command=lambda: self._set_mask_preset(0, True, 2, 2, 2, 0),
             bootstyle="secondary",
             width=12
         ).pack(side='left', padx=2)
@@ -867,7 +867,7 @@ class MangaSettingsDialog:
             text="💡 B&W Manga: Optimized for black & white panels with clean bubbles\n"
                  "💡 Colored: For colored manga with complex backgrounds\n"
                  "💡 Aggressive: For difficult text removal cases\n"
-                 "💡 Uniform: Same iterations for all text types\n"
+                 "💡 Uniform: Good for Manga-OCR\n"
                  "ℹ️ Empty bubbles often need more iterations than text bubbles\n"
                  "ℹ️ Set Free Text to 0 for crisp B&W panels without bleeding",
             font=('Arial', 9),
