@@ -374,7 +374,7 @@ class PororoOCRProvider(OCRProvider):
             import traceback
             self._log(traceback.format_exc(), "error")
             return False
-    
+        
     def _run_ocr(self, pil_image):
         """Run OCR on a PIL image using the loaded model"""
         import torch
@@ -411,6 +411,24 @@ class PororoOCRProvider(OCRProvider):
                 generated_text = ""
                 self._log("⚠️ No tokenizer available for decoding", "warning")
             
+            # IMPORTANT: Clean and normalize the text to prevent encoding issues
+            if generated_text:
+                # Remove any control characters and normalize unicode
+                import unicodedata
+                import re
+                
+                # Normalize unicode (NFC form for Korean)
+                generated_text = unicodedata.normalize('NFC', generated_text)
+                
+                # Remove control characters except normal whitespace
+                generated_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', generated_text)
+                
+                # Clean up excessive whitespace
+                generated_text = ' '.join(generated_text.split())
+                
+                # Ensure it's properly encoded as UTF-8
+                generated_text = generated_text.encode('utf-8', errors='ignore').decode('utf-8')
+            
             return generated_text
             
         except Exception as e:
@@ -419,8 +437,7 @@ class PororoOCRProvider(OCRProvider):
     
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """
-        Process the ENTIRE image as a single region (like manga-ocr).
-        This ensures proper integration with bubble detection.
+        Process the image region with proper encoding handling.
         """
         results = []
         
@@ -432,7 +449,7 @@ class PororoOCRProvider(OCRProvider):
             import cv2
             from PIL import Image
             
-            # Get confidence from kwargs (for bubble detection integration)
+            # Get confidence from kwargs
             confidence = kwargs.get('confidence', 0.7)
             
             # Convert numpy array to PIL
@@ -440,23 +457,31 @@ class PororoOCRProvider(OCRProvider):
             pil_image = Image.fromarray(image_rgb)
             h, w = image.shape[:2]
             
-            self._log("🔍 Processing full image with Pororo OCR...")
+            self._log("🔍 Processing region with Pororo OCR...")
             
-            # Run OCR on the entire image
+            # Run OCR on the image
             try:
                 text = self._run_ocr(pil_image)
                 
                 if text and text.strip():
-                    # Return single result for entire image
-                    results.append(OCRResult(
-                        text=text.strip(),
-                        bbox=(0, 0, w, h),  # Full image bbox
-                        confidence=confidence,
-                        vertices=[(0, 0), (w, 0), (w, h), (0, h)]
-                    ))
-                    self._log(f"✅ Detected Korean text with confidence {confidence:.2f}: {text[:50]}...")
+                    # Ensure text is clean before returning
+                    clean_text = text.strip()
+                    
+                    # Additional validation for Korean text
+                    if clean_text:
+                        # Check if text contains valid Korean characters
+                        has_korean = any('\uAC00' <= c <= '\uD7AF' for c in clean_text)
+                        if has_korean:
+                            self._log(f"✅ Detected Korean text: {clean_text[:30]}...")
+                        
+                        results.append(OCRResult(
+                            text=clean_text,
+                            bbox=(0, 0, w, h),
+                            confidence=confidence,
+                            vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                        ))
                 else:
-                    self._log("⚠️ No text detected in image", "warning")
+                    self._log("⚠️ No text detected in region", "warning")
                     
             except Exception as e:
                 self._log(f"❌ OCR failed: {str(e)}", "error")
