@@ -294,6 +294,89 @@ class ContentProcessor:
             html_content,
             flags=re.IGNORECASE | re.DOTALL
         )
+
+        def fix_apostrophe_tag(match):
+            tag_name = match.group(1)  # e.g., "maiden's breath"
+            content = match.group(2) or ''  # content between tags
+            
+            content = content.strip()
+            if content:
+                return f'[{tag_name}: {content}]'
+            else:
+                return f'[{tag_name}]'
+
+        # Fix apostrophe tags like <maiden's breath="">content</maiden's>
+        html_content = re.sub(
+            r'<([^<>]*\'[^<>]*?)(?:\s+[^<>]*?)?=""[^<>]*?>(.*?)</[^<>]*\'[^<>]*?>',
+            fix_apostrophe_tag,
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        
+        def fix_punctuation_tag(match):
+            tag_name = match.group(1)  # e.g., "you......!!"
+            content = match.group(2) or ''  # content between tags
+            
+            content = content.strip()
+            if content:
+                return f'[{tag_name}: {content}]'
+            else:
+                return f'[{tag_name}]'
+
+        # Fix tags with dots/exclamation marks: <you......!!></you......!!>
+        html_content = re.sub(
+            r'<([^<>]*[\.!]+[^<>]*)></\1>',
+            fix_punctuation_tag,
+            html_content,
+            flags=re.IGNORECASE
+        )
+
+        # Fix tags with dots/exclamation marks that have content: <you......!!>content</you......!!>
+        html_content = re.sub(
+            r'<([^<>]*[\.!]+[^<>]*)>(.*?)</\1>',
+            fix_punctuation_tag,
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )        
+
+        def fix_invalid_char_tag(match):
+            tag_name = match.group(1)  # e.g., "hmm?", "don't die."
+            content = match.group(2) or ''  # content between tags
+            
+            content = content.strip()
+            if content:
+                return f'[{tag_name}: {content}]'
+            else:
+                return f'[{tag_name}]'
+
+        # ONLY target the specific problematic patterns - much less aggressive
+
+        # Fix apostrophe tags: <maiden's breath="">content</maiden's>
+        html_content = re.sub(
+            r'<([^<>]*\'[^<>]*?)=""[^<>]*?>(.*?)</[^<>]*\'[^<>]*?>',
+            lambda m: f'[{m.group(1)}: {m.group(2).strip()}]' if m.group(2).strip() else f'[{m.group(1)}]',
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        # Fix question mark tags: <hmm?></hmm?>
+        html_content = re.sub(
+            r'<([a-zA-Z]+\?)></\1>',
+            lambda m: f'[{m.group(1)}]',
+            html_content,
+            flags=re.IGNORECASE
+        )
+
+        # Fix period tags: <don't die.=""></don't>
+        html_content = re.sub(
+            r'<([^<>]*\.)=""[^<>]*?></[^<>]*>',
+            lambda m: f'[{m.group(1)}]',
+            html_content,
+            flags=re.IGNORECASE
+        )
+
+        # Remove any leftover fragments
+        html_content = re.sub(r'</[^<>]*[\'?\.][^<>]*>', '', html_content)
         
         # Fix common entity issues first
         html_content = html_content.replace('&&', '&amp;&amp;')
