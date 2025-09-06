@@ -2108,10 +2108,16 @@ class MangaTranslator:
             if '\\\\' in translated or '\\n' in translated:
                 self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
                 try:
-                    # Unescape the string
+                    # DON'T use unicode_escape for Korean text - it corrupts it
+                    # Instead, just replace the escape sequences manually
                     before = translated
-                    translated = translated.encode().decode('unicode_escape')
-                    self._log(f"📦 Unescaped: '{before[:50]}...' -> '{translated[:50]}...'")
+                    translated = translated.replace('\\n', '\n')
+                    translated = translated.replace('\\"', '"')
+                    translated = translated.replace('\\\\', '\\')
+                    translated = translated.replace('\\/', '/')
+                    translated = translated.replace('\\t', '\t')
+                    translated = translated.replace('\\r', '\r')
+                    self._log(f"📦 Unescaped safely: '{before[:50]}...' -> '{translated[:50]}...'")
                 except Exception as e:
                     self._log(f"⚠️ Failed to unescape: {e}", "warning")
             
@@ -2482,10 +2488,15 @@ class MangaTranslator:
             if '\\\\' in response_text or '\\n' in response_text:
                 self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
                 try:
-                    # Unescape the string
-                    before = response_text
-                    response_text = response_text.encode().decode('unicode_escape')
-                    self._log(f"📦 Unescaped content")
+                    # DON'T use unicode_escape for Korean text - it corrupts it
+                    # Instead, just replace the escape sequences manually
+                    response_text = response_text.replace('\\n', '\n')
+                    response_text = response_text.replace('\\"', '"')
+                    response_text = response_text.replace('\\\\', '\\')
+                    response_text = response_text.replace('\\/', '/')
+                    response_text = response_text.replace('\\t', '\t')
+                    response_text = response_text.replace('\\r', '\r')
+                    self._log(f"📦 Unescaped content safely")
                 except Exception as e:
                     self._log(f"⚠️ Failed to unescape: {e}", "warning")
             
@@ -2513,49 +2524,58 @@ class MangaTranslator:
                 self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
                 self._log(f"Response preview: {response_text[:200]}...", "warning")
                 
-                # Fallback: try to fix common JSON issues
+                # Fix encoding issues first
+                response_text = self._fix_encoding_issues(response_text)
+                
+                # Try parsing JSON again after fixing encoding
                 try:
-                    self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
-                    
-                    # Method 1: Use json.dumps to properly escape the string, then parse it
-                    import re
-                    
-                    # First, try to extract key-value pairs manually
-                    translations = {}
-                    
-                    # Pattern to match "key": "value" pairs, handling quotes and newlines
-                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
-                    matches = re.findall(pattern, response_text)
-                    
-                    for key, value in matches:
-                        # Unescape the value
-                        try:
-                            # Replace literal \n with actual newlines
-                            value = value.replace('\\n', '\n')
-                            value = value.replace('\\"', '"')
-                            value = value.replace('\\\\', '\\')
-                            translations[key] = value
-                            self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
-                        except Exception as ex:
-                            self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
-                    
-                    if translations:
-                        self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
-                    else:
-                        # Method 2: Try to clean and re-parse
-                        cleaned = response_text
-                        # Remove any actual newlines within string values
-                        cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
-                        cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
-                        cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
+                    translations = json.loads(response_text)
+                    self._log(f"✅ Successfully parsed {len(translations)} translations after encoding fix", "success")
+                except json.JSONDecodeError:
+                    # If it still fails, continue with the existing fallback
+                    # Fallback: try to fix common JSON issues
+                    try:
+                        self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
                         
-                        translations = json.loads(cleaned)
-                        self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
+                        # Method 1: Use json.dumps to properly escape the string, then parse it
+                        import re
                         
-                except Exception as e2:
-                    self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
-                    self._log(f"   Returning empty translations", "error")
-                    return {}
+                        # First, try to extract key-value pairs manually
+                        translations = {}
+                        
+                        # Pattern to match "key": "value" pairs, handling quotes and newlines
+                        pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                        matches = re.findall(pattern, response_text)
+                        
+                        for key, value in matches:
+                            # Unescape the value
+                            try:
+                                # Replace literal \n with actual newlines
+                                value = value.replace('\\n', '\n')
+                                value = value.replace('\\"', '"')
+                                value = value.replace('\\\\', '\\')
+                                translations[key] = value
+                                self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
+                            except Exception as ex:
+                                self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
+                        
+                        if translations:
+                            self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
+                        else:
+                            # Method 2: Try to clean and re-parse
+                            cleaned = response_text
+                            # Remove any actual newlines within string values
+                            cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
+                            cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
+                            cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
+                            
+                            translations = json.loads(cleaned)
+                            self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
+                            
+                    except Exception as e2:
+                        self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
+                        self._log(f"   Returning empty translations", "error")
+                        return {}
             
             # Map translations back to regions
             result = {}
@@ -2671,6 +2691,43 @@ class MangaTranslator:
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
             return {}
+
+    def _fix_encoding_issues(self, text: str) -> str:
+        """Fix common encoding issues in text, especially for Korean"""
+        if not text:
+            return text
+        
+        # Check for mojibake indicators (UTF-8 misinterpreted as Latin-1)
+        mojibake_indicators = ['ë', 'ì', 'ê°', 'ã', 'Ã', 'â', 'ä', 'ð', 'í', 'ë­', 'ì´']
+        
+        if any(indicator in text for indicator in mojibake_indicators):
+            self._log("🔧 Detected mojibake encoding issue, attempting fixes...", "debug")
+            
+            # Try multiple encoding fixes
+            encodings_to_try = [
+                ('latin-1', 'utf-8'),
+                ('windows-1252', 'utf-8'),
+                ('iso-8859-1', 'utf-8'),
+                ('cp1252', 'utf-8')
+            ]
+            
+            for from_enc, to_enc in encodings_to_try:
+                try:
+                    fixed = text.encode(from_enc, errors='ignore').decode(to_enc, errors='ignore')
+                    
+                    # Check if the fix actually improved things
+                    # Should have Korean characters (Hangul range) or be cleaner
+                    if any('\uAC00' <= c <= '\uD7AF' for c in fixed) or fixed.count('�') < text.count('�'):
+                        self._log(f"✅ Fixed encoding using {from_enc} -> {to_enc}", "debug")
+                        return fixed
+                except:
+                    continue
+        
+        # Clean up any remaining control characters
+        import re
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text)
+        
+        return text
                 
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Create mask with comprehensive per-text-type dilation settings"""
