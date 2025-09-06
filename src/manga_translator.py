@@ -3831,25 +3831,35 @@ class MangaTranslator:
         # Binary search with preference for LARGER sizes
         low = min_font_size
         high = initial_estimate
-        best_size = min_font_size
+        best_size = initial_estimate  # Start with the estimate
         best_lines = []
-        
-        # First, try to find the largest size that fits
-        while low <= high:
-            mid = (low + high) // 2
-            font = self._get_font(mid)
-            lines = self._wrap_text(text, font, usable_width, draw)
-            
-            # Less strict height check - use more vertical space
-            line_height = mid * 1.25  # Reduced from 1.3 for tighter spacing
-            total_height = len(lines) * line_height
-            
-            if total_height <= usable_height:  # No padding, use full height
-                best_size = mid
-                best_lines = lines
-                low = mid + 1  # Try even larger
-            else:
-                high = mid - 1
+
+        # First try the initial estimate
+        font = self._get_font(initial_estimate)
+        lines = self._wrap_text(text, font, usable_width, draw)
+        best_size = initial_estimate
+        best_lines = lines
+
+        # Only shrink if constrain_to_bubble is enabled
+        if self.constrain_to_bubble:
+            # Original binary search for fitting
+            while low <= high:
+                mid = (low + high) // 2
+                font = self._get_font(mid)
+                lines = self._wrap_text(text, font, usable_width, draw)
+                
+                line_height = mid * 1.25
+                total_height = len(lines) * line_height
+                
+                if total_height <= usable_height:
+                    best_size = mid
+                    best_lines = lines
+                    low = mid + 1  # Try even larger
+                else:
+                    high = mid - 1
+        else:
+            # Don't constrain - use the initial size even if it overflows
+            self._log(f"  Overflow allowed - using size {best_size} regardless of fit", "info")
         
         # Apply multiplier if needed
         if self.font_size_mode == 'multiplier' and self.constrain_to_bubble:
@@ -3927,6 +3937,11 @@ class MangaTranslator:
         # Handle empty text
         if not text.strip():
             return []
+        
+        # Only enforce width check if constrain_to_bubble is enabled
+        if self.constrain_to_bubble and max_width <= 0:
+            self._log(f"  ⚠️ Invalid max_width: {max_width}, using fallback", "warning")
+            return [text[:20] + "..."] if len(text) > 20 else [text]
         
         words = text.split()
         lines = []
