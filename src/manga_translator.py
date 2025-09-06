@@ -609,6 +609,19 @@ class MangaTranslator:
         self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
         
         try:
+            # CLEAR ANY CACHED STATE FROM PREVIOUS IMAGE
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                # Clear any cached results in OCR manager
+                if hasattr(self.ocr_manager, 'last_results'):
+                    self.ocr_manager.last_results = None
+                if hasattr(self.ocr_manager, 'cache'):
+                    self.ocr_manager.cache = {}
+            
+            # Clear bubble detector cache if it exists
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                if hasattr(self.bubble_detector, 'last_detections'):
+                    self.bubble_detector.last_detections = None
+            
             # Get manga settings from main_gui config
             manga_settings = self.main_gui.config.get('manga_settings', {})
             preprocessing = manga_settings.get('preprocessing', {})
@@ -937,7 +950,7 @@ class MangaTranslator:
                     raise Exception(f"Azure OCR ended with status: {result.status} after {wait_time}s")
                     
             else:
-                # === NEW OCR PROVIDERS (manga-ocr, pororo, easyocr, paddleocr, doctr) ===
+                # === NEW OCR PROVIDERS ===
                 import cv2
                 import numpy as np
                 from ocr_manager import OCRManager
@@ -969,12 +982,16 @@ class MangaTranslator:
                     raise Exception(f"{self.ocr_provider} OCR provider is not installed")
                 
                 if not provider_status['loaded']:
-                    self._log(f"📥 Loading {self.ocr_provider} model...")
+                    self._log(f"🔥 Loading {self.ocr_provider} model...")
                     if not self.ocr_manager.load_provider(self.ocr_provider):
                         raise Exception(f"Failed to load {self.ocr_provider} model")
                 
+                # Initialize ocr_results here before any provider-specific code
+                ocr_results = []
+                
                 # Special handling for manga-ocr (needs region detection first)
                 if self.ocr_provider == 'manga-ocr':
+                    # IMPORTANT: Initialize fresh results list
                     ocr_results = []
                     
                     # Check if we should use bubble detection for regions
@@ -982,46 +999,56 @@ class MangaTranslator:
                         self._log("📝 Using bubble detection regions for manga-ocr...")
                         
                         # Run bubble detection to get regions
-                        # This reuses your existing bubble detection code
                         if self.bubble_detector is None:
                             from bubble_detector import BubbleDetector
                             self.bubble_detector = BubbleDetector()
                         
-                        # Get regions from bubble detector
+                        # Get regions from bubble detector - ensure fresh detection
                         if self.bubble_detector.load_rtdetr_model():
+                            # IMPORTANT: Get fresh detections for this specific image
                             rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
                                 image_path=image_path,
                                 confidence=ocr_settings.get('rtdetr_confidence', 0.3),
                                 return_all_bubbles=False
                             )
                             
-                            # Collect all regions
+                            # Process detections immediately and don't store
                             all_regions = []
-                            all_regions.extend(rtdetr_detections.get('bubbles', []))
-                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
-                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # ONLY ADD TEXT-CONTAINING REGIONS
+                            # Skip empty bubbles since they shouldn't have text
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # DO NOT ADD empty bubbles - they're duplicates of text_bubbles
+                            # if 'bubbles' in rtdetr_detections:  # <-- REMOVE THIS
+                            #     all_regions.extend(rtdetr_detections.get('bubbles', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text-containing regions (skipping empty bubbles)")
+                            
+                            # Clear detection results after extracting regions
+                            rtdetr_detections = None
                             
                             # Process each region with manga-ocr
                             for i, (x, y, w, h) in enumerate(all_regions):
                                 cropped = image[y:y+h, x:x+w]
                                 result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
-                                if result and result[0].text.strip():
+                                if result and len(result) > 0 and result[0].text.strip():
                                     result[0].bbox = (x, y, w, h)
                                     result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
                                     ocr_results.append(result[0])
+                                    self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
+                                    self._log(f"✅ Detected text: {result[0].text[:50]}...")
+                            
+                            # Clear regions list after processing
+                            all_regions = None
                     else:
-                        # Fallback to full image
-                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)
-                        
-                        for det_result in detection_results:
-                            x, y, w, h = det_result.bbox
-                            cropped = image[y:y+h, x:x+w]
-                            manga_results = self.ocr_manager.detect_text(cropped, 'manga-ocr')
-                            if manga_results:
-                                manga_results[0].bbox = det_result.bbox
-                                manga_results[0].vertices = det_result.vertices
-                                ocr_results.append(manga_results[0])
-                
+                        # NO bubble detection - just process full image
+                        self._log("📝 Processing full image with manga-ocr (no bubble detection)")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)  
+                    
                 elif self.ocr_provider == 'pororo':
                     # Configure Pororo for appropriate language
                     language_hints = ocr_settings.get('language_hints', ['ko'])
@@ -1030,15 +1057,17 @@ class MangaTranslator:
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
                 
                 elif self.ocr_provider == 'easyocr':
-                    # Configure EasyOCR languages based on settings
-                    language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'en'])
+                    # Configure EasyOCR languages based on settings with validation
+                    language_hints = ocr_settings.get('language_hints', ['ja', 'en'])  # Fixed default
+                    validated_languages = self._validate_easyocr_languages(language_hints)
+                    
                     easyocr_provider = self.ocr_manager.get_provider('easyocr')
                     if easyocr_provider:
                         # Reload with correct languages if needed
-                        if easyocr_provider.languages != language_hints:
-                            easyocr_provider.languages = language_hints
+                        if easyocr_provider.languages != validated_languages:
+                            easyocr_provider.languages = validated_languages
                             easyocr_provider.is_loaded = False
-                            self._log(f"📥 Reloading EasyOCR with languages: {language_hints}")
+                            self._log(f"🔥 Reloading EasyOCR with languages: {validated_languages}")
                             self.ocr_manager.load_provider('easyocr')
                     
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
@@ -1061,12 +1090,12 @@ class MangaTranslator:
                                 use_gpu=True,
                                 show_log=False
                             )
-                            self._log(f"📥 Reloaded PaddleOCR with language: {paddle_lang}")
+                            self._log(f"🔥 Reloaded PaddleOCR with language: {paddle_lang}")
                     
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
                 
                 else:
-                    # Default processing for other providers
+                    # Default processing for other providers (including doctr)
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
                 
                 # Convert OCR results to TextRegion format
@@ -1142,7 +1171,30 @@ class MangaTranslator:
             import traceback
             self._log(traceback.format_exc(), "error")
             raise
+
+    def _validate_easyocr_languages(self, languages):
+        """Validate EasyOCR language combinations"""
+        # EasyOCR compatibility rules
+        incompatible_sets = [
+            {'ja', 'ko'},  # Japanese + Korean
+            {'ja', 'zh'},  # Japanese + Chinese  
+            {'ko', 'zh'}   # Korean + Chinese
+        ]
         
+        lang_set = set(languages)
+        
+        for incompatible in incompatible_sets:
+            if incompatible.issubset(lang_set):
+                # Conflict detected - keep first language + English
+                primary_lang = languages[0] if languages else 'en'
+                result = [primary_lang, 'en'] if primary_lang != 'en' else ['en']
+                
+                self._log(f"⚠️ EasyOCR: {' + '.join(incompatible)} not compatible", "warning")
+                self._log(f"🔧 Auto-adjusted from {languages} to {result}", "info")
+                return result
+        
+        return languages
+    
     def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
         """Pre-group Azure lines that are obviously part of the same text block
         This makes them more like Google's blocks before the main merge logic"""
@@ -4380,6 +4432,29 @@ class MangaTranslator:
         
         return regions
 
+    def reset_for_new_image(self):
+        """Reset internal state for processing a new image"""
+        # Clear any cached detection results
+        if hasattr(self, 'last_detection_results'):
+            del self.last_detection_results
+        
+        # Clear OCR manager cache if it exists
+        if hasattr(self, 'ocr_manager') and self.ocr_manager:
+            if hasattr(self.ocr_manager, 'last_results'):
+                self.ocr_manager.last_results = None
+            if hasattr(self.ocr_manager, 'cache'):
+                self.ocr_manager.cache = {}
+        
+        # Don't clear translation context if using rolling history
+        if not self.rolling_history_enabled:
+            self.translation_context = []
+        
+        # Clear any cached regions
+        if hasattr(self, '_cached_regions'):
+            del self._cached_regions
+        
+        self._log("🔄 Reset translator state for new image", "debug")
+
     def _translate_single_region_parallel(self, region: TextRegion, index: int, total: int, image_path: str) -> Optional[str]:
         """Translate a single region for parallel processing"""
         try:
@@ -4700,6 +4775,8 @@ class MangaTranslator:
         self.history_manager = None
         self.history_manager_initialized = False
         self.history_output_dir = None
+        self.translation_context = []
+        self._log("📚 Reset history manager for new batch", "debug")
     
     def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
         """Process webtoon in chunks for better OCR"""
