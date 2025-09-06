@@ -315,7 +315,10 @@ class ContentProcessor:
         
         def fix_punctuation_tag(match):
             tag_name = match.group(1)  # e.g., "you......!!"
-            content = match.group(2) or ''  # content between tags
+            try:
+                content = match.group(2) or ''  # content between tags
+            except IndexError:
+                content = match.group(1) if match.lastindex >= 1 else ''
             
             content = content.strip()
             if content:
@@ -951,8 +954,11 @@ class XHTMLConverter:
                          css_links: Optional[List[str]] = None) -> str:
         """Ensure HTML content is XHTML-compliant"""
         try:
-            # Clean content first
-            html_content = ContentProcessor.clean_chapter_content(html_content)
+            # Clean content first - with error handling
+            try:
+                html_content = ContentProcessor.clean_chapter_content(html_content)
+            except Exception as e:
+                log(f"[WARNING] Content cleaning failed: {e}, skipping cleanup")
             
             # Parse with BeautifulSoup
             soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
@@ -1046,7 +1052,10 @@ class XHTMLConverter:
                 
                 # Final cleanup: ensure no double-escaping of entities
                 # Sometimes BeautifulSoup double-escapes things like &amp;amp;
-                body_html = re.sub(r'&amp;(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);', r'&\1;', body_html)
+                try:
+                    body_html = re.sub(r'&amp;(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);', r'&\1;', body_html)
+                except re.error:
+                    pass  # Skip if regex fails
                 
                 return body_html
                 
@@ -1238,8 +1247,12 @@ class XHTMLConverter:
         content = ContentProcessor.fix_self_closing_tags(content)
         
         # Fix unquoted attributes
-        content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
-        
+        # Fix unquoted attributes
+        try:
+            content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
+        except re.error:
+            pass  # Skip if regex fails      
+            
         # Clean for XML
         content = XMLValidator.clean_for_xml(content)
         
@@ -2248,6 +2261,8 @@ class EPUBCompiler:
             return True
             
         except Exception as e:
+            import traceback
+            print(f"FULL ERROR TRACEBACK: {traceback.format_exc()}")
             self.log(f"[ERROR] Failed to process chapter {num}: {e}")
             # Add placeholder with consistent numbering
             try:
