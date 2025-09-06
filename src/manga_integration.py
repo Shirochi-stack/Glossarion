@@ -3662,6 +3662,10 @@ class MangaTranslationTab:
                     self._log("\n⏹️ Translation stopped by user", "warning")
                     break
                 
+                # IMPORTANT: Reset translator state for each new image
+                if hasattr(self.translator, 'reset_for_new_image'):
+                    self.translator.reset_for_new_image()
+                
                 self.current_file_index = index
                 filename = os.path.basename(filepath)
                 
