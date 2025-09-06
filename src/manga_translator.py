@@ -2138,6 +2138,11 @@ class MangaTranslator:
                 except Exception as e:
                     self._log(f"⚠️ Failed to unescape: {e}", "warning")
             
+            # Clean up unwanted trailing apostrophes/quotes
+            import re
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
             self._log(f"🎯 Final translation result: '{translated[:50]}...'")
             
             # Apply glossary if available
@@ -2534,6 +2539,11 @@ class MangaTranslator:
                 except Exception as e:
                     self._log(f"⚠️ Failed to unescape: {e}", "warning")
             
+            # Clean up unwanted trailing apostrophes/quotes
+            import re
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
             # Try to parse as JSON
             translations = {}
             try:
