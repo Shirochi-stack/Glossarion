@@ -312,6 +312,14 @@ class ContentProcessor:
             html_content,
             flags=re.IGNORECASE | re.DOTALL
         )
+
+        # Fix orphaned tags with punctuation: <warning!>
+        html_content = re.sub(
+            r'<([^<>]*[\.!?]+[^<>/]*?)(?:\s+[^<>]*)?>(?!</)',
+            lambda m: f'[{m.group(1)}]',
+            html_content,
+            flags=re.IGNORECASE
+        )
         
         def fix_punctuation_tag(match):
             tag_name = match.group(1)  # e.g., "you......!!"
