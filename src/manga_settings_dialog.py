@@ -1642,7 +1642,7 @@ class MangaSettingsDialog:
         self.bubble_conf_scale = tk.Scale(
             conf_frame,
             from_=0.0,
-            to=0.9,
+            to=0.99,
             resolution=0.01,
             orient='horizontal',
             variable=self.bubble_confidence,
