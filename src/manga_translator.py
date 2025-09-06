@@ -3300,105 +3300,100 @@ class MangaTranslator:
         return (x_right - x_left) * (y_bottom - y_top)
 
     def _adjust_overlapping_regions(self, regions: List[TextRegion], image_width: int, image_height: int) -> List[TextRegion]:
-        """Adjust positions of overlapping regions to prevent overlap"""
+        """Adjust positions of overlapping regions to prevent overlap while preserving text mapping"""
         if len(regions) <= 1:
             return regions
         
-        # Create a copy of regions to modify
+        # Create a copy of regions with preserved indices
         adjusted_regions = []
-        for region in regions:
+        for idx, region in enumerate(regions):
             # Create a new TextRegion with copied values
             adjusted_region = TextRegion(
                 text=region.text,
                 vertices=list(region.vertices),
-                bounding_box=list(region.bounding_box),  # Make it mutable
+                bounding_box=list(region.bounding_box),
                 confidence=region.confidence,
                 region_type=region.region_type
             )
             if hasattr(region, 'translated_text'):
                 adjusted_region.translated_text = region.translated_text
+            
+            # IMPORTANT: Preserve original index to maintain text mapping
+            adjusted_region.original_index = idx
+            adjusted_region.original_bbox = tuple(region.bounding_box)  # Store original position
+            
             adjusted_regions.append(adjusted_region)
         
-        # Sort by y-coordinate (top to bottom) then x-coordinate (left to right)
-        adjusted_regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        # DON'T SORT - This breaks the text-to-region mapping!
+        # Process in original order to maintain associations
+        
+        # Track which regions have been moved to avoid cascade effects
+        moved_regions = set()
         
         # Adjust overlapping regions
         for i in range(len(adjusted_regions)):
+            if i in moved_regions:
+                continue  # Skip if already moved
+                
             for j in range(i + 1, len(adjusted_regions)):
+                if j in moved_regions:
+                    continue  # Skip if already moved
+                    
                 region1 = adjusted_regions[i]
                 region2 = adjusted_regions[j]
                 
                 if self._regions_overlap(region1, region2):
-                    # Calculate overlap
-                    overlap_area = self._calculate_overlap_area(region1, region2)
                     x1, y1, w1, h1 = region1.bounding_box
                     x2, y2, w2, h2 = region2.bounding_box
                     
-                    # Determine adjustment direction based on relative positions
-                    center1_x = x1 + w1 / 2
-                    center1_y = y1 + h1 / 2
-                    center2_x = x2 + w2 / 2
-                    center2_y = y2 + h2 / 2
+                    # Calculate centers using ORIGINAL positions for better logic
+                    orig_x1, orig_y1, _, _ = region1.original_bbox
+                    orig_x2, orig_y2, _, _ = region2.original_bbox
                     
-                    # Calculate minimum separation needed
-                    min_gap = 10  # Minimum pixels between regions
-                    
-                    # Prefer vertical adjustment for manga (usually vertical text flow)
-                    vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
-                    horizontal_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
-                    
-                    if vertical_overlap < horizontal_overlap:
-                        # Adjust vertically
-                        if center2_y > center1_y:
-                            # Move region2 down
-                            new_y2 = y1 + h1 + min_gap
+                    # Determine which region to move based on original positions
+                    # Move the one that's naturally "later" in reading order
+                    if orig_y2 > orig_y1 + h1/2:  # region2 is below
+                        # Move region2 down slightly
+                        min_gap = 10
+                        new_y2 = y1 + h1 + min_gap
+                        if new_y2 + h2 <= image_height:
+                            region2.bounding_box = (x2, new_y2, w2, h2)
+                            moved_regions.add(j)
+                            self._log(f"  📍 Adjusted region {j} down (preserving order)", "debug")
+                    elif orig_y1 > orig_y2 + h2/2:  # region1 is below
+                        # Move region1 down slightly
+                        min_gap = 10
+                        new_y1 = y2 + h2 + min_gap
+                        if new_y1 + h1 <= image_height:
+                            region1.bounding_box = (x1, new_y1, w1, h1)
+                            moved_regions.add(i)
+                            self._log(f"  📍 Adjusted region {i} down (preserving order)", "debug")
+                    elif orig_x2 > orig_x1 + w1/2:  # region2 is to the right
+                        # Move region2 right slightly
+                        min_gap = 10
+                        new_x2 = x1 + w1 + min_gap
+                        if new_x2 + w2 <= image_width:
+                            region2.bounding_box = (new_x2, y2, w2, h2)
+                            moved_regions.add(j)
+                            self._log(f"  📍 Adjusted region {j} right (preserving order)", "debug")
+                    else:
+                        # Minimal adjustment - just separate them slightly
+                        # without changing their relative order
+                        min_gap = 5
+                        if y2 >= y1:  # region2 is lower or same level
+                            new_y2 = y2 + min_gap
                             if new_y2 + h2 <= image_height:
                                 region2.bounding_box = (x2, new_y2, w2, h2)
-                                self._log(f"  📍 Moved region down to prevent overlap", "info")
-                            else:
-                                # Move region1 up if region2 can't go down
-                                new_y1 = y2 - h1 - min_gap
-                                if new_y1 >= 0:
-                                    region1.bounding_box = (x1, new_y1, w1, h1)
-                                    self._log(f"  📍 Moved region up to prevent overlap", "info")
-                        else:
-                            # Move region2 up
-                            new_y2 = y1 - h2 - min_gap
-                            if new_y2 >= 0:
-                                region2.bounding_box = (x2, new_y2, w2, h2)
-                                self._log(f"  📍 Moved region up to prevent overlap", "info")
-                            else:
-                                # Move region1 down if region2 can't go up
-                                new_y1 = y2 + h2 + min_gap
-                                if new_y1 + h1 <= image_height:
-                                    region1.bounding_box = (x1, new_y1, w1, h1)
-                                    self._log(f"  📍 Moved region down to prevent overlap", "info")
-                    else:
-                        # Adjust horizontally
-                        if center2_x > center1_x:
-                            # Move region2 right
-                            new_x2 = x1 + w1 + min_gap
-                            if new_x2 + w2 <= image_width:
-                                region2.bounding_box = (new_x2, y2, w2, h2)
-                                self._log(f"  📍 Moved region right to prevent overlap", "info")
-                            else:
-                                # Move region1 left if region2 can't go right
-                                new_x1 = x2 - w1 - min_gap
-                                if new_x1 >= 0:
-                                    region1.bounding_box = (new_x1, y1, w1, h1)
-                                    self._log(f"  📍 Moved region left to prevent overlap", "info")
-                        else:
-                            # Move region2 left
-                            new_x2 = x1 - w2 - min_gap
-                            if new_x2 >= 0:
-                                region2.bounding_box = (new_x2, y2, w2, h2)
-                                self._log(f"  📍 Moved region left to prevent overlap", "info")
-                            else:
-                                # Move region1 right if region2 can't go left
-                                new_x1 = x2 + w2 + min_gap
-                                if new_x1 + w1 <= image_width:
-                                    region1.bounding_box = (new_x1, y1, w1, h1)
-                                    self._log(f"  📍 Moved region right to prevent overlap", "info")
+                                moved_regions.add(j)
+                        else:  # region1 is lower
+                            new_y1 = y1 + min_gap
+                            if new_y1 + h1 <= image_height:
+                                region1.bounding_box = (x1, new_y1, w1, h1)
+                                moved_regions.add(i)
+        
+        # IMPORTANT: Return in ORIGINAL order to preserve text mapping
+        # Sort by original_index to restore the original order
+        adjusted_regions.sort(key=lambda r: r.original_index)
         
         return adjusted_regions
 
