@@ -1050,32 +1050,115 @@ class MangaTranslator:
                         ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)  
                     
                 elif self.ocr_provider == 'pororo':
+                    # Initialize results list
+                    ocr_results = []
+                    
                     # Configure Pororo for appropriate language
                     language_hints = ocr_settings.get('language_hints', ['ko'])
-                    # Pororo primarily supports Korean
                     self._log("🇰🇷 Pororo OCR optimized for Korean text")
-                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for Pororo...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        if self.bubble_detector.load_rtdetr_model():
+                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                                image_path=image_path,
+                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
+                                return_all_bubbles=False
+                            )
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Pororo")
+                            
+                            # Process each region with Pororo
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'pororo', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Pororo")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
                 elif self.ocr_provider == 'easyocr':
-                    # Configure EasyOCR languages based on settings with validation
-                    language_hints = ocr_settings.get('language_hints', ['ja', 'en'])  # Fixed default
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure EasyOCR languages
+                    language_hints = ocr_settings.get('language_hints', ['ja', 'en'])
                     validated_languages = self._validate_easyocr_languages(language_hints)
                     
                     easyocr_provider = self.ocr_manager.get_provider('easyocr')
                     if easyocr_provider:
-                        # Reload with correct languages if needed
                         if easyocr_provider.languages != validated_languages:
                             easyocr_provider.languages = validated_languages
                             easyocr_provider.is_loaded = False
                             self._log(f"🔥 Reloading EasyOCR with languages: {validated_languages}")
                             self.ocr_manager.load_provider('easyocr')
                     
-                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for EasyOCR...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        if self.bubble_detector.load_rtdetr_model():
+                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                                image_path=image_path,
+                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
+                                return_all_bubbles=False
+                            )
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with EasyOCR")
+                            
+                            # Process each region with EasyOCR
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'easyocr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with EasyOCR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
                 elif self.ocr_provider == 'paddleocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
                     # Configure PaddleOCR language
                     language_hints = ocr_settings.get('language_hints', ['ja'])
-                    # Map to PaddleOCR language codes
                     lang_map = {'ja': 'japan', 'ko': 'korean', 'zh': 'ch', 'en': 'en'}
                     paddle_lang = lang_map.get(language_hints[0] if language_hints else 'ja', 'japan')
                     
@@ -1092,10 +1175,94 @@ class MangaTranslator:
                             )
                             self._log(f"🔥 Reloaded PaddleOCR with language: {paddle_lang}")
                     
-                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for PaddleOCR...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        if self.bubble_detector.load_rtdetr_model():
+                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                                image_path=image_path,
+                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
+                                return_all_bubbles=False
+                            )
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with PaddleOCR")
+                            
+                            # Process each region with PaddleOCR
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'paddleocr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with PaddleOCR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'doctr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    self._log("📄 DocTR OCR for document text recognition")
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for DocTR...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        if self.bubble_detector.load_rtdetr_model():
+                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                                image_path=image_path,
+                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
+                                return_all_bubbles=False
+                            )
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with DocTR")
+                            
+                            # Process each region with DocTR
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'doctr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with DocTR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
                 else:
-                    # Default processing for other providers (including doctr)
+                    # Default processing for any other providers
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
                 
                 # Convert OCR results to TextRegion format
