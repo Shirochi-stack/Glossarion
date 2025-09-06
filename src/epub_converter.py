@@ -264,6 +264,19 @@ class ContentProcessor:
         - <magic>Teleport</magic> → [magic: Teleport]
         - <anythingcustom>Content</anythingcustom> → [anythingcustom: Content]
         """
+        # Protect XML declarations and DOCTYPE declarations FIRST
+        xml_declarations = []
+        def protect_xml_declaration(match):
+            xml_declarations.append(match.group(0))
+            return f"__XML_DECLARATION_{len(xml_declarations)-1}__"
+
+        # Protect <?xml ...?> and <!DOCTYPE ...> 
+        html_content = re.sub(
+            r'<\?[^>]+\?>|<!DOCTYPE[^>]*>',
+            protect_xml_declaration,
+            html_content,
+            flags=re.IGNORECASE
+        )
         
             # Pattern: <tagname, anything> ... </tagname,>
         def fix_comma_tag(match):
@@ -632,6 +645,10 @@ class ContentProcessor:
             html_content = str(soup)
         except:
             pass
+            
+        # Restore XML declarations
+        for i, declaration in enumerate(xml_declarations):
+            html_content = html_content.replace(f"__XML_DECLARATION_{i}__", declaration)            
         
         return html_content
     
