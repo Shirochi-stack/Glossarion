@@ -3412,10 +3412,15 @@ class MangaTranslator:
         pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         
         # Get image dimensions for boundary checking
-        image_height, image_width = image.shape[:2]
+        image_height, image_width = image.shape[:2]  # <-- Add this line
         
-        # Adjust overlapping regions before rendering
-        adjusted_regions = self._adjust_overlapping_regions(regions, image_width, image_height)
+        # Only adjust overlapping regions if constraining to bubbles
+        if self.constrain_to_bubble:
+            adjusted_regions = self._adjust_overlapping_regions(regions, image_width, image_height)
+        else:
+            # Skip adjustment when not constraining (allows overflow)
+            adjusted_regions = regions
+            self._log("  📝 Using original regions (overflow allowed)", "info")
         
         # Check if any regions still overlap after adjustment (shouldn't happen, but let's verify)
         has_overlaps = False
