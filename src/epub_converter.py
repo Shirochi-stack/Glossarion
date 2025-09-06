@@ -233,28 +233,7 @@ class XMLValidator:
 
 
 class ContentProcessor:
-    """Handles content cleaning and processing using lxml for robust HTML parsing"""
-    
-    # Valid EPUB 3.3 XHTML tags
-    VALID_HTML_TAGS = {
-        'html', 'head', 'body', 'title', 'meta', 'link', 'base', 'style', 'script', 'noscript',
-        'section', 'nav', 'article', 'aside', 'header', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
-        'address', 'hgroup', 'main', 'p', 'hr', 'pre', 'blockquote', 'ol', 'ul', 'li', 'dl', 'dt', 'dd', 
-        'figure', 'figcaption', 'div', 'a', 'em', 'strong', 'small', 's', 'cite', 'q', 'dfn', 'abbr',
-        'data', 'time', 'code', 'var', 'samp', 'kbd', 'sub', 'sup', 'i', 'b', 'u', 'mark', 'bdi', 'bdo',
-        'span', 'br', 'wbr', 'ruby', 'rt', 'rp', 'rb', 'rtc', 'ins', 'del', 'img', 'iframe', 'embed', 
-        'object', 'param', 'video', 'audio', 'source', 'track', 'picture', 'svg', 'math', 'canvas', 
-        'map', 'area', 'table', 'caption', 'colgroup', 'col', 'tbody', 'thead', 'tfoot', 'tr', 'td', 'th',
-        'form', 'label', 'input', 'button', 'select', 'datalist', 'optgroup', 'option', 'textarea', 
-        'output', 'progress', 'meter', 'fieldset', 'legend', 'details', 'summary', 'dialog', 'menu',
-        'template', 'center', 'font', 'big', 'strike', 'tt'
-    }
-    
-    # Self-closing elements that need special handling
-    VOID_ELEMENTS = {
-        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-        'link', 'meta', 'param', 'source', 'track', 'wbr'
-    }
+    """Handles content cleaning and processing - UPDATED WITH UNICODE PRESERVATION"""
     
     @staticmethod
     def safe_escape(text: str) -> str:
@@ -262,6 +241,7 @@ class ContentProcessor:
         if not text:
             return ''
         
+        # Only escape the 5 XML special characters
         text = str(text)
         text = text.replace('&', '&amp;')
         text = text.replace('<', '&lt;')
@@ -272,249 +252,466 @@ class ContentProcessor:
         return text
     
     @staticmethod
-    @staticmethod
     def fix_malformed_tags(html_content: str) -> str:
-        """Fix malformed tags using lxml's robust HTML parser"""
-        try:
-            from lxml import html
-            
-            if not html_content or not html_content.strip():
-                return html_content
-            
-            # AGGRESSIVELY remove ALL XML declarations and DOCTYPE
-            original_content = html_content
-            
-            # Store what we find for restoration
-            preserved_parts = []
-            
-            # Find and store XML declarations
-            for match in re.finditer(r'<\?xml[^>]*\?>', html_content, re.IGNORECASE):
-                preserved_parts.append(('xml', match.group(0)))
-            
-            # Find and store DOCTYPE declarations  
-            for match in re.finditer(r'<!DOCTYPE[^>]*>', html_content, re.IGNORECASE):
-                preserved_parts.append(('doctype', match.group(0)))
-            
-            # COMPLETELY STRIP ALL XML/DOCTYPE declarations
-            html_content = re.sub(r'<\?xml[^>]*\?>\s*', '', html_content, flags=re.IGNORECASE)
-            html_content = re.sub(r'<!DOCTYPE[^>]*>\s*', '', html_content, flags=re.IGNORECASE)
-            
-            # Double-check: if "<?xml" still exists anywhere, we have a problem
-            if '<?xml' in html_content.lower():
-                # Nuclear option: split and rebuild
-                lines = html_content.split('\n')
-                clean_lines = [line for line in lines if not line.strip().lower().startswith('<?xml')]
-                html_content = '\n'.join(clean_lines)
-            
-            html_content = html_content.strip()
-            
-            # If content is empty after cleaning, return original
-            if not html_content:
-                return original_content
-                
-            # Parse with lxml - should not have any XML declarations now
-            doc = html.fromstring(html_content, parser=html.HTMLParser(recover=True))
-            
-            # Convert invalid tags
-            ContentProcessor._convert_invalid_tags(doc)
-            
-            # Convert back to string
-            result = html.tostring(doc, encoding='unicode', method='html')
-            
-            # Fix self-closing tags
-            result = ContentProcessor.fix_self_closing_tags(result)
-            
-            # Restore preserved declarations at the beginning
-            if preserved_parts:
-                restored = []
-                for part_type, content in preserved_parts:
-                    restored.append(content)
-                restored.append(result)
-                result = '\n'.join(restored)
-            
-            return result
-            
-        except Exception as e:
-            log(f"[WARNING] lxml processing failed: {e}, using fallback")
-            return ContentProcessor._fallback_fix_malformed_tags(html_content)
-    
-    @staticmethod
-    def _convert_invalid_tags(element):
-        """Recursively convert invalid HTML tags to bracketed format"""
-        from lxml.html import HtmlElement
+        """Fix various types of malformed tags - CONVERTS all non-standard tags to preserve content
         
-        if not hasattr(element, 'tag'):
-            return
+        This method is genre-agnostic and converts ANY non-standard HTML tags to bracketed format.
+        This ensures we preserve all content regardless of the novel type or custom markup used.
         
-        # Process children first (depth-first)
-        for child in list(element):
-            ContentProcessor._convert_invalid_tags(child)
+        Examples:
+        - <skill>Fireball</skill> → [skill: Fireball]
+        - <cultivation>Golden Core</cultivation> → [cultivation: Golden Core]  
+        - <magic>Teleport</magic> → [magic: Teleport]
+        - <anythingcustom>Content</anythingcustom> → [anythingcustom: Content]
+        """
         
-        # Check if this element's tag is invalid
-        tag_name = str(element.tag).lower() if element.tag else ''
-        
-        if tag_name and tag_name not in ContentProcessor.VALID_HTML_TAGS:
-            # Convert this invalid tag to bracketed format
-            bracket_text = ContentProcessor._element_to_bracket_text(element)
+            # Pattern: <tagname, anything> ... </tagname,>
+        def fix_comma_tag(match):
+            tag_name = match.group(1)  # e.g., "reply"
+            attributes = match.group(2) or ''  # e.g., ' rachel=""'
+            content = match.group(3) or ''  # content between tags
             
-            # Replace this element with text
-            if element.getparent() is not None:
-                parent = element.getparent()
-                
-                # Get the element's position in parent
-                element_index = list(parent).index(element)
-                
-                # Create new text content
-                if element_index == 0:
-                    # First child - add to parent's text
-                    if parent.text:
-                        parent.text += bracket_text
-                    else:
-                        parent.text = bracket_text
-                else:
-                    # Not first child - add to previous sibling's tail
-                    prev_sibling = list(parent)[element_index - 1]
-                    if prev_sibling.tail:
-                        prev_sibling.tail += bracket_text
-                    else:
-                        prev_sibling.tail = bracket_text
-                
-                # Remove the element
-                parent.remove(element)
-    
-    @staticmethod
-    def _element_to_bracket_text(element):
-        """Convert an HTML element to bracketed text format"""
-        tag_name = element.tag
+            # Try to extract meaningful info from the attributes part
+            attr_text = attributes.strip()
+            if attr_text:
+                # Remove quotes and equals signs to get cleaner text
+                attr_text = re.sub(r'[="\']+', ' ', attr_text).strip()
+            
+            # Build replacement
+            if content and attr_text:
+                return f'[{tag_name}: {attr_text} - {content}]'
+            elif content:
+                return f'[{tag_name}: {content}]'
+            elif attr_text:
+                return f'[{tag_name}: {attr_text}]'
+            else:
+                return ''  # Empty tag, remove it
         
-        # Get element content (text + children text)
-        content_parts = []
-        
-        # Add element's direct text
-        if element.text and element.text.strip():
-            content_parts.append(element.text.strip())
-        
-        # Add children's text (since we're converting the whole element)
-        for child in element:
-            if hasattr(child, 'text_content'):
-                child_text = child.text_content().strip()
-                if child_text:
-                    content_parts.append(child_text)
-        
-        # Add tail text
-        if element.tail and element.tail.strip():
-            content_parts.append(element.tail.strip())
-        
-        content = ' '.join(content_parts).strip()
-        
-        # Extract meaningful attributes
-        attr_parts = []
-        if element.attrib:
-            for attr_name in ['name', 'value', 'type', 'id', 'class']:
-                if attr_name in element.attrib:
-                    attr_parts.append(element.attrib[attr_name])
-        
-        # Build bracketed text
-        if content and attr_parts:
-            return f'[{tag_name}: {" - ".join(attr_parts)} - {content}]'
-        elif content:
-            return f'[{tag_name}: {content}]'
-        elif attr_parts:
-            return f'[{tag_name}: {" - ".join(attr_parts)}]'
-        else:
-            return f'[{tag_name}]'
-    
-    @staticmethod
-    def _fallback_fix_malformed_tags(html_content: str) -> str:
-        """Fallback regex-based processing when lxml is not available"""
-        # Simple regex-based cleanup for most common cases
-        
-        # Convert obvious custom tags
+        # Fix opening and closing tags with commas
         html_content = re.sub(
-            r'<([a-zA-Z][\w\-]*[\.!?]+[^<>]*)>(.*?)</\1>',
-            lambda m: f'[{m.group(1)}: {m.group(2).strip()}]' if m.group(2).strip() else f'[{m.group(1)}]',
+            r'<([a-zA-Z][\w\-]*),([^>]*)>(.*?)</\1,\s*>',
+            fix_comma_tag,
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        def fix_apostrophe_tag(match):
+            tag_name = match.group(1)  # e.g., "maiden's breath"
+            content = match.group(2) or ''  # content between tags
+            
+            content = content.strip()
+            if content:
+                return f'[{tag_name}: {content}]'
+            else:
+                return f'[{tag_name}]'
+
+        # Fix apostrophe tags like <maiden's breath="">content</maiden's>
+        html_content = re.sub(
+            r'<([^<>]*\'[^<>]*?)(?:\s+[^<>]*?)?=""[^<>]*?>(.*?)</[^<>]*\'[^<>]*?>',
+            fix_apostrophe_tag,
             html_content,
             flags=re.IGNORECASE | re.DOTALL
         )
         
-        # Convert orphaned tags with punctuation
+        def fix_punctuation_tag(match):
+            tag_name = match.group(1)  # e.g., "you......!!"
+            content = match.group(2) or ''  # content between tags
+            
+            content = content.strip()
+            if content:
+                return f'[{tag_name}: {content}]'
+            else:
+                return f'[{tag_name}]'
+
+        # Fix tags with dots/exclamation marks: <you......!!></you......!!>
         html_content = re.sub(
-            r'<([^<>]*[\.!?]+[^<>/]*?)(?:\s+[^<>]*)?>(?!</)',
+            r'<([^<>]*[\.!]+[^<>]*)></\1>',
+            fix_punctuation_tag,
+            html_content,
+            flags=re.IGNORECASE
+        )
+
+        # Fix tags with dots/exclamation marks that have content: <you......!!>content</you......!!>
+        html_content = re.sub(
+            r'<([^<>]*[\.!]+[^<>]*)>(.*?)</\1>',
+            fix_punctuation_tag,
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )        
+
+        def fix_invalid_char_tag(match):
+            tag_name = match.group(1)  # e.g., "hmm?", "don't die."
+            content = match.group(2) or ''  # content between tags
+            
+            content = content.strip()
+            if content:
+                return f'[{tag_name}: {content}]'
+            else:
+                return f'[{tag_name}]'
+
+        # ONLY target the specific problematic patterns - much less aggressive
+
+        # Fix apostrophe tags: <maiden's breath="">content</maiden's>
+        html_content = re.sub(
+            r'<([^<>]*\'[^<>]*?)=""[^<>]*?>(.*?)</[^<>]*\'[^<>]*?>',
+            lambda m: f'[{m.group(1)}: {m.group(2).strip()}]' if m.group(2).strip() else f'[{m.group(1)}]',
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        # Fix question mark tags: <hmm?></hmm?>
+        html_content = re.sub(
+            r'<([a-zA-Z]+\?)></\1>',
             lambda m: f'[{m.group(1)}]',
             html_content,
             flags=re.IGNORECASE
         )
-        
-        # Basic entity fixing
+
+        # Fix period tags: <don't die.=""></don't>
         html_content = re.sub(
-            r'&(?!(?:amp|lt|gt|quot|apos|[a-zA-Z][a-zA-Z0-9]{1,31}|#[0-9]{1,7}|#x[0-9a-fA-F]{1,6});)',
+            r'<([^<>]*\.)=""[^<>]*?></[^<>]*>',
+            lambda m: f'[{m.group(1)}]',
+            html_content,
+            flags=re.IGNORECASE
+        )
+
+        # Remove any leftover fragments
+        html_content = re.sub(r'</[^<>]*[\'?\.][^<>]*>', '', html_content)
+        
+        # Fix common entity issues first
+        html_content = html_content.replace('&&', '&amp;&amp;')
+        html_content = html_content.replace('& ', '&amp; ')
+        html_content = html_content.replace(' & ', ' &amp; ')
+        
+        # Fix unescaped ampersands more thoroughly
+        html_content = re.sub(
+            r'&(?!(?:'
+            r'amp|lt|gt|quot|apos|'
+            r'[a-zA-Z][a-zA-Z0-9]{0,30}|'
+            r'#[0-9]{1,7}|'
+            r'#x[0-9a-fA-F]{1,6}'
+            r');)',
             '&amp;',
             html_content
         )
+        
+        # Remove completely broken tags with ="" patterns
+        html_content = re.sub(r'<[^>]*?=\s*""\s*[^>]*?=\s*""[^>]*?>', '', html_content)
+        html_content = re.sub(r'<[^>]*?="""[^>]*?>', '', html_content)
+        html_content = re.sub(r'<[^>]*?="{3,}[^>]*?>', '', html_content)
+        
+        # Fix tags with extra < characters
+        html_content = re.sub(r'<([a-zA-Z][\w\-]*)<+', r'<\1', html_content)  # <p< becomes <p
+        html_content = re.sub(r'</([a-zA-Z][\w\-]*)<+>', r'</\1>', html_content)  # </p<> becomes </p>
+        html_content = re.sub(r'<([a-zA-Z][\w\-]*)<\s+', r'<\1 ', html_content)  # <p< body= becomes <p body=
+        
+        # Define valid EPUB 3.3 XHTML tags
+        # Based on:
+        # - EPUB 3.3 spec: https://www.w3.org/TR/epub-33/
+        # - EPUB Content Documents 3.3: https://www.w3.org/TR/epub-33/#sec-xhtml
+        # - HTML5 elements allowed in XHTML syntax
+        # 
+        # EPUB 3.3 uses XHTML5 (XML serialization of HTML5).
+        # This list includes ALL tags that are technically valid in EPUB 3.3,
+        # regardless of reader support. If it's valid XHTML5, we keep it!
+        valid_html_tags = {
+            # Document structure
+            'html', 'head', 'body', 'title', 'meta', 'link', 'base',
+            
+            # Content sectioning
+            'section', 'nav', 'article', 'aside', 'header', 'footer', 
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'address',
+            'hgroup',  # Removed from HTML5 Living Standard but still valid XHTML5
+            'main',  # Main content area
+            
+            # Text content blocks
+            'p', 'hr', 'pre', 'blockquote', 'ol', 'ul', 'li', 
+            'dl', 'dt', 'dd', 'figure', 'figcaption', 'div',
+            
+            # Inline text semantics
+            'a', 'em', 'strong', 'small', 's', 'cite', 'q', 'dfn', 'abbr',
+            'data', 'time', 'code', 'var', 'samp', 'kbd', 'sub', 'sup',
+            'i', 'b', 'u', 'mark', 'bdi', 'bdo',
+            'span', 'br', 'wbr',
+            
+            # Ruby annotations (important for Asian languages)
+            'ruby', 'rt', 'rp',  # Standard HTML5 ruby
+            'rb', 'rtc',  # Extended ruby support
+            
+            # Edits
+            'ins', 'del',
+            
+            # Embedded content - ALL valid in EPUB 3.3
+            'img', 'iframe', 'embed', 'object', 'param',
+            'video', 'audio', 'source', 'track',
+            'picture',  # Responsive images
+            'svg',  # SVG support
+            'math',  # MathML support
+            'canvas',  # Valid even if scripting is disabled
+            'map', 'area',  # Image maps
+            
+            # Tabular data
+            'table', 'caption', 'colgroup', 'col', 'tbody', 'thead', 'tfoot',
+            'tr', 'td', 'th',
+            
+            # Forms - ALL technically valid in EPUB 3.3
+            'form', 'label', 'input', 'button', 'select', 'datalist', 'optgroup',
+            'option', 'textarea', 'output', 'progress', 'meter', 'fieldset', 
+            'legend', 'keygen',  # Deprecated but still valid XHTML
+            
+            # Interactive elements - valid in EPUB 3.3
+            'details', 'summary', 'dialog',
+            'menu',  # Valid in XHTML5 even if removed from HTML Living Standard
+            
+            # Scripting - valid in EPUB 3.3 (reader support varies)
+            'script', 'noscript', 'template',
+            
+            # Document metadata
+            'style',  # For embedded CSS
+            
+            # Obsolete but still valid in XHTML5/EPUB for compatibility
+            'acronym',  # Use 'abbr' in new content but valid if present
+            'center',  # Use CSS instead but valid
+            'font',    # Use CSS instead but valid
+            'big',     # Use CSS instead but valid
+            'strike', 's',  # Use <del> or CSS but valid
+            'tt',      # Use <code> or CSS but valid
+            'basefont',  # Obsolete but won't break EPUB
+            'dir',  # Obsolete but valid XHTML
+            
+            # These are NOT valid in any modern HTML/XHTML:
+            # 'applet' - use <object> instead
+            # 'bgsound' - IE only, never standard
+            # 'blink' - Never standard
+            # 'frame', 'frameset', 'noframes' - Not allowed in EPUB
+            # 'isindex' - Obsolete
+            # 'listing', 'plaintext', 'xmp' - Obsolete
+            # 'marquee' - Never standard
+            # 'multicol' - Never standard
+            # 'nextid' - Obsolete
+            # 'nobr' - Never standard
+            # 'noembed' - Never standard
+            # 'spacer' - Never standard
+            # 'menuitem' - Removed from spec
+            # 'slot' - Web Components, not in EPUB
+        }
+        
+        # Convert ALL non-standard tags to bracketed format
+        # This regex finds any tag that looks like <something>content</something>
+        def convert_custom_tag(match):
+            tag_name = match.group(1)
+            attributes = match.group(2) or ''
+            content = match.group(3) or ''
+            
+            # If it's a valid HTML tag, leave it alone
+            if tag_name in valid_html_tags:
+                return match.group(0)
+            
+            # For custom tags, convert to bracketed format
+            content = content.strip()
+            
+            # Try to extract meaningful attributes like name, value, type, etc.
+            attr_text = ''
+            if attributes:
+                # Look for common meaningful attributes
+                name_match = re.search(r'(?:name|value|type|id)\s*=\s*["\']([^"\']+)["\']', attributes, re.IGNORECASE)
+                if name_match:
+                    attr_text = name_match.group(1).strip()
+            
+            # Build the bracketed version
+            if attr_text and not content:
+                # Attribute but no content: [tag: attribute_value]
+                return f'[{tag_name}: {attr_text}]'
+            elif content and not attr_text:
+                # Content but no meaningful attribute: [tag: content]
+                return f'[{tag_name}: {content}]'
+            elif attr_text and content:
+                # Both attribute and content: [tag: attribute_value - content]
+                return f'[{tag_name}: {attr_text} - {content}]'
+            else:
+                # Empty tag, remove it
+                return ''
+        
+        # Pattern to match ANY tag with content
+        pattern = r'<([a-zA-Z][\w\-]*)((?:\s+[^>]*)?)>(.*?)</\1>'
+        html_content = re.sub(pattern, convert_custom_tag, html_content, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Handle self-closing custom tags
+        def convert_self_closing(match):
+            tag_name = match.group(1)
+            attributes = match.group(2) or ''
+            
+            # If it's a valid HTML tag, leave it alone
+            if tag_name in valid_html_tags:
+                return match.group(0)
+            
+            # Extract meaningful content from attributes
+            content_parts = []
+            
+            # Look for various attribute patterns that might contain content
+            patterns = [
+                r'(?:name|value|content|text|title|label)\s*=\s*["\']([^"\']+)["\']',
+                r'(?:type|class|id)\s*=\s*["\']([^"\']+)["\']',
+                # Also handle bare attributes like <skill="Fireball">
+                r'^=\s*["\']([^"\']+)["\']'
+            ]
+            
+            for attr_pattern in patterns:
+                attr_matches = re.findall(attr_pattern, attributes, re.IGNORECASE)
+                content_parts.extend(attr_matches)
+            
+            if content_parts:
+                # Join all found content
+                content = ' - '.join(content_parts)
+                return f'[{tag_name}: {content}]'
+            else:
+                # No meaningful content found, remove the tag
+                return ''
+        
+        # Pattern for self-closing tags or tags without closing tag
+        self_closing_pattern = r'<([a-zA-Z][\w\-]*)((?:\s+[^>]*)?)\s*/?>'
+        
+        # First pass: find and mark tags that have closing tags
+        tags_with_closing = set()
+        for match in re.finditer(r'</([a-zA-Z][\w\-]*)>', html_content, re.IGNORECASE):
+            tags_with_closing.add(match.group(1))
+        
+        # Second pass: convert self-closing and standalone tags
+        def convert_if_no_closing(match):
+            tag_name = match.group(1)
+            # Only convert if this tag doesn't have a closing tag elsewhere
+            # or if it's explicitly self-closing (ends with />)
+            if tag_name not in tags_with_closing or match.group(0).rstrip('>').endswith('/'):
+                return convert_self_closing(match)
+            return match.group(0)
+        
+        html_content = re.sub(self_closing_pattern, convert_if_no_closing, html_content, flags=re.IGNORECASE)
+        
+        # Clean up any remaining unmatched closing tags for custom elements
+        def remove_unmatched_closing(match):
+            tag_name = match.group(1)
+            if tag_name not in valid_html_tags:
+                return ''  # Remove unmatched custom closing tags
+            return match.group(0)
+        
+        html_content = re.sub(r'</([a-zA-Z][\w\-]*)>', remove_unmatched_closing, html_content, flags=re.IGNORECASE)
+        
+        # Fix attributes without quotes (for remaining valid HTML tags)
+        html_content = re.sub(r'<(\w+)\s+(\w+)=([^\s"\'>]+)(\s|>)', r'<\1 \2="\3"\4', html_content)
+        
+        # Fix unclosed tags at end
+        if html_content.rstrip().endswith('<'):
+            html_content = html_content.rstrip()[:-1]
+        
+        # Final cleanup with BeautifulSoup
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
+            
+            # Fix nested paragraphs (not allowed in XHTML)
+            for p in soup.find_all('p'):
+                nested_ps = p.find_all('p')
+                for nested_p in nested_ps:
+                    nested_p.unwrap()
+            
+            # Remove empty tags that might cause issues (but only standard HTML tags)
+            for tag in soup.find_all():
+                if (not tag.get_text(strip=True) and 
+                    not tag.find_all() and 
+                    tag.name in valid_html_tags and
+                    tag.name not in ['br', 'hr', 'img', 'meta', 'link', 'input', 'area', 'col']):
+                    tag.decompose()
+            
+            html_content = str(soup)
+        except:
+            pass
         
         return html_content
     
     @staticmethod
     def fix_self_closing_tags(content: str) -> str:
         """Fix self-closing tags for XHTML compliance"""
-        # Don't use lxml here - just use regex like the original
         void_elements = ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
                         'link', 'meta', 'param', 'source', 'track', 'wbr']
         
         for tag in void_elements:
             # Fix simple tags
-            content = re.sub(rf'<{tag}>', rf'<{tag} />', content)
+            content = re.sub(f'<{tag}>', f'<{tag} />', content)
             
-            # Fix tags with attributes
-            content = re.sub(rf'<{tag}(\s+[^/>]*?)(?<!/)>', rf'<{tag}\1 />', content)
+            # Fix tags with attributes - IMPROVED REGEX
+            content = re.sub(f'<{tag}(\\s+[^/>]*?)(?<!/)>', f'<{tag}\\1 />', content)
             
             # Remove any closing tags for void elements
-            content = re.sub(rf'</{tag}>', '', content)
+            content = re.sub(f'</{tag}>', '', content)
         
         return content
     
     @staticmethod
     def clean_chapter_content(html_content: str) -> str:
-        """Clean and prepare chapter content for XHTML conversion"""
-        if not html_content or not html_content.strip():
-            return html_content
+        """Clean and prepare chapter content for XHTML conversion - PRESERVES UNICODE"""
         
-        try:
-            # Basic preprocessing
-            html_content = html_content.strip()
+        # FIX COMMA TAGS IMMEDIATELY - BEFORE BeautifulSoup converts to lowercase
+        # This must happen FIRST before any other processing
+        
+        # Handle tags like <Reply, Rachel=""> -> [Reply: Rachel]
+        def fix_comma_tag_early(match):
+            tag_part = match.group(1)  # 'Reply'
+            attr_part = match.group(2)  # ' Rachel=""'
             
-            # Fix smart quotes early
-            html_content = re.sub(r'[\u201c\u201d]', '"', html_content)
-            html_content = re.sub(r'[\u2018\u2019]', "'", html_content)
+            # Extract the attribute name (before the =)
+            attr_match = re.match(r'\s*(\w+)', attr_part)
+            if attr_match:
+                attr_name = attr_match.group(1)  # 'Rachel'
+                return f'[{tag_part}: {attr_name}]'
             
-            # Decode HTML entities
-            html_content = HTMLEntityDecoder.decode(html_content)
-            
-            # Remove control characters
-            html_content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', html_content)
-            
-            # Remove Unicode control characters
-            control_chars = ''.join(chr(i) for i in range(0x7F, 0xA0))
-            html_content = html_content.translate(str.maketrans('', '', control_chars))
-            
-            # Fix malformed tags (this now uses lxml)
-            html_content = ContentProcessor.fix_malformed_tags(html_content)
-            
-            # Remove BOM
-            if html_content.startswith('\ufeff'):
-                html_content = html_content[1:]
-            
-            # Clean for XML
-            html_content = XMLValidator.clean_for_xml(html_content)
-            
-            # Normalize line endings
-            html_content = html_content.replace('\r\n', '\n').replace('\r', '\n')
-            
-            return html_content
-            
-        except Exception as e:
-            log(f"[WARNING] Content cleaning failed: {e}")
-            return html_content
+            return f'[{tag_part}]'
+        
+        # Fix opening tags with commas - PRESERVES ORIGINAL CASE
+        html_content = re.sub(r'<([^,>/]+),([^>]*)>', fix_comma_tag_early, html_content)
+        
+        # Remove closing tags with commas
+        html_content = re.sub(r'</([^,>]+),\s*>', '', html_content)
+        
+        # Fix any smart quotes that might be in the content
+        # Using Unicode escape sequences to avoid parsing issues
+        html_content = re.sub(r'[\u201c\u201d\u2018\u2019\u201a\u201e]', '"', html_content)
+        html_content = re.sub(r'[\u2018\u2019\u0027]', "'", html_content)
+        
+        # Decode entities first - NOW PRESERVES UNICODE
+        html_content = HTMLEntityDecoder.decode(html_content)
+        
+        # Remove XML declarations and DOCTYPE (we'll add clean ones later)
+        html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content, flags=re.IGNORECASE)
+        html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content, flags=re.IGNORECASE)
+        html_content = re.sub(r'<html[^>]*>', '<html>', html_content, flags=re.IGNORECASE)
+        
+        # Remove control characters
+        html_content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', html_content)
+        
+        # Remove Unicode control characters
+        control_chars = ''.join(
+            chr(i) for i in range(0x00, 0x20) if i not in [0x09, 0x0A, 0x0D]
+        ) + ''.join(chr(i) for i in range(0x7F, 0xA0))
+        
+        translator = str.maketrans('', '', control_chars)
+        html_content = html_content.translate(translator)
+        
+        # Fix malformed tags
+        html_content = ContentProcessor.fix_malformed_tags(html_content)
+        
+        # Remove BOM
+        if html_content.startswith('\ufeff'):
+            html_content = html_content[1:]
+        
+        # Clean for XML - PRESERVES VALID UNICODE
+        html_content = XMLValidator.clean_for_xml(html_content)
+        
+        # Normalize line endings
+        html_content = html_content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # DO NOT convert Unicode to XML character references
+        # Keep characters like "同期 (dōki)" as-is
+        
+        return html_content
 
 
 class TitleExtractor:
@@ -1013,7 +1210,8 @@ class XHTMLConverter:
     
     @staticmethod
     def validate(content: str) -> str:
-        """Validate and fix XHTML content - SIMPLIFIED"""
+        """Validate and fix XHTML content - WITH DEBUGGING"""
+        import re
         # Ensure XML declaration
         if not content.strip().startswith('<?xml'):
             content = '<?xml version="1.0" encoding="utf-8"?>\n' + content
@@ -1039,14 +1237,60 @@ class XHTMLConverter:
         # Fix self-closing tags
         content = ContentProcessor.fix_self_closing_tags(content)
         
+        # Fix unquoted attributes
+        content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
+        
         # Clean for XML
         content = XMLValidator.clean_for_xml(content)
         
-        # REMOVE THE PROBLEMATIC ET.fromstring() VALIDATION
-        # It's throwing false positives on valid HTML tags
+        # Try to parse for validation
+        try:
+            ET.fromstring(content.encode('utf-8'))
+        except ET.ParseError as e:
+            log(f"[WARNING] XHTML validation failed: {e}")
+            
+            # DEBUG: Show what's at the error location
+            import re
+            match = re.search(r'line (\d+), column (\d+)', str(e))
+            if match:
+                line_num = int(match.group(1))
+                col_num = int(match.group(2))
+                
+                lines = content.split('\n')
+                log(f"[DEBUG] Error at line {line_num}, column {col_num}")
+                log(f"[DEBUG] Total lines in content: {len(lines)}")
+                
+                if line_num <= len(lines):
+                    problem_line = lines[line_num - 1]
+                    log(f"[DEBUG] Full problem line: {problem_line!r}")
+                    
+                    # Show the problem area
+                    if col_num <= len(problem_line):
+                        # Show 40 characters before and after
+                        start = max(0, col_num - 40)
+                        end = min(len(problem_line), col_num + 40)
+                        
+                        log(f"[DEBUG] Context around error: {problem_line[start:end]!r}")
+                        log(f"[DEBUG] Character at column {col_num}: {problem_line[col_num-1]!r} (U+{ord(problem_line[col_num-1]):04X})")
+                        
+                        # Show 5 characters before and after with hex
+                        for i in range(max(0, col_num-5), min(len(problem_line), col_num+5)):
+                            char = problem_line[i]
+                            marker = " <-- ERROR" if i == col_num-1 else ""
+                            log(f"[DEBUG] Col {i+1}: {char!r} (U+{ord(char):04X}){marker}")
+                    else:
+                        log(f"[DEBUG] Column {col_num} is beyond line length {len(problem_line)}")
+                else:
+                    log(f"[DEBUG] Line {line_num} doesn't exist (only {len(lines)} lines)")
+                    # Show last few lines
+                    for i in range(max(0, len(lines)-3), len(lines)):
+                        log(f"[DEBUG] Line {i+1}: {lines[i][:100]!r}...")
+            
+            # Try to recover
+            content = XHTMLConverter._attempt_recovery(content, e)
         
         return content
-        
+    
     @staticmethod
     def _attempt_recovery(content: str, error: ET.ParseError) -> str:
         """Attempt to recover from XML parse errors - ENHANCED"""
