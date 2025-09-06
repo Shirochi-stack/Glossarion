@@ -3518,6 +3518,43 @@ class MangaTranslationTab:
             
             # Update rendering settings
             self._apply_rendering_settings()
+            
+            # Ensure inpainting settings are properly synchronized
+            if hasattr(self, 'inpainting_mode_var'):
+                inpainting_mode = self.inpainting_mode_var.get()
+                
+                if inpainting_mode == 'skip':
+                    self.translator.skip_inpainting = True
+                    self.translator.use_cloud_inpainting = False
+                    self._log("Inpainting: SKIP", "debug")
+                    
+                elif inpainting_mode == 'local':
+                    self.translator.skip_inpainting = False
+                    self.translator.use_cloud_inpainting = False
+                    self._log("Inpainting: LOCAL", "debug")
+                    
+                elif inpainting_mode == 'cloud':
+                    self.translator.skip_inpainting = False
+                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+                    if saved_api_key:
+                        self.translator.use_cloud_inpainting = True
+                        self.translator.replicate_api_key = saved_api_key
+                        self._log("Inpainting: CLOUD (Replicate)", "debug")
+                    else:
+                        # Fallback to local if no API key
+                        self.translator.use_cloud_inpainting = False
+                        self._log("Inpainting: LOCAL (no Replicate key, fallback)", "warning")
+            else:
+                # Default to local inpainting if variable doesn't exist
+                self.translator.skip_inpainting = False
+                self.translator.use_cloud_inpainting = False
+                self._log("Inpainting: LOCAL (default)", "debug")
+
+            # Double-check the settings are applied correctly
+            self._log(f"Inpainting final status:", "debug")
+            self._log(f"  - Skip: {self.translator.skip_inpainting}", "debug")
+            self._log(f"  - Cloud: {self.translator.use_cloud_inpainting}", "debug")
+            self._log(f"  - Mode: {'SKIP' if self.translator.skip_inpainting else 'CLOUD' if self.translator.use_cloud_inpainting else 'LOCAL'}", "debug")
         
         # Clear log
         self.log_text.delete('1.0', tk.END)
@@ -3611,8 +3648,29 @@ class MangaTranslationTab:
             if hasattr(self, 'constrain_to_bubble_var'):
                 self.translator.constrain_to_bubble = self.constrain_to_bubble_var.get()
             
-            if hasattr(self, 'skip_inpainting_var'):
-                self.translator.skip_inpainting = self.skip_inpainting_var.get()
+            # Handle inpainting mode (3 radio buttons: skip/local/cloud)
+            if hasattr(self, 'inpainting_mode_var'):
+                mode = self.inpainting_mode_var.get()
+                
+                if mode == 'skip':
+                    self.translator.skip_inpainting = True
+                    self.translator.use_cloud_inpainting = False
+                    self._log("  Inpainting: Skipped", "info")
+                elif mode == 'local':
+                    self.translator.skip_inpainting = False
+                    self.translator.use_cloud_inpainting = False
+                    self._log("  Inpainting: Local", "info")
+                elif mode == 'cloud':
+                    self.translator.skip_inpainting = False
+                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+                    if saved_api_key:
+                        self.translator.use_cloud_inpainting = True
+                        self.translator.replicate_api_key = saved_api_key
+                        self._log("  Inpainting: Cloud (Replicate)", "info")
+                    else:
+                        # Fallback to local if no API key
+                        self.translator.use_cloud_inpainting = False
+                        self._log("  Inpainting: Local (no Replicate key, fallback)", "warning")
             
             # Set full page context mode
             self.translator.set_full_page_context(
@@ -3641,16 +3699,6 @@ class MangaTranslationTab:
             self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
             self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
-            
-            # Apply cloud inpainting settings
-            saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-            if saved_api_key:
-                self.translator.use_cloud_inpainting = True
-                self.translator.replicate_api_key = saved_api_key
-                self._log(f"  Cloud Inpainting: Enabled", "info")
-            else:
-                self.translator.use_cloud_inpainting = False
-                self.translator.replicate_api_key = None
     
     def _translation_worker(self):
         """Worker thread for translation"""
