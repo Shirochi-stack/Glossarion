@@ -2105,18 +2105,35 @@ class MangaTranslator:
                     translated = temp
             
             # Additional check for escaped content
-            if '\\\\' in translated or '\\n' in translated:
+            if '\\\\' in translated or '\\n' in translated or "\\'" in translated or '\\"' in translated:
                 self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
                 try:
                     # DON'T use unicode_escape for Korean text - it corrupts it
                     # Instead, just replace the escape sequences manually
                     before = translated
+                    
+                    # Handle quotes and apostrophes
+                    translated = translated.replace("\\'", "'")  # Escaped apostrophe
+                    translated = translated.replace('\\"', '"')  # Escaped quote
+                    translated = translated.replace("\\`", "`")  # Escaped backtick
+                    translated = translated.replace("\\u2019", "'")  # Unicode right single quote
+                    translated = translated.replace("\\u2018", "'")  # Unicode left single quote
+                    translated = translated.replace("\\u201c", '"')  # Unicode left double quote
+                    translated = translated.replace("\\u201d", '"')  # Unicode right double quote
+                    
+                    # Handle newlines and other escapes
                     translated = translated.replace('\\n', '\n')
-                    translated = translated.replace('\\"', '"')
                     translated = translated.replace('\\\\', '\\')
                     translated = translated.replace('\\/', '/')
                     translated = translated.replace('\\t', '\t')
                     translated = translated.replace('\\r', '\r')
+                    
+                    # Clean up smart quotes using Unicode escape codes
+                    translated = translated.replace('\u2018', "'")  # Left single quotation mark
+                    translated = translated.replace('\u2019', "'")  # Right single quotation mark
+                    translated = translated.replace('\u201c', '"')  # Left double quotation mark
+                    translated = translated.replace('\u201d', '"')  # Right double quotation mark
+                    
                     self._log(f"📦 Unescaped safely: '{before[:50]}...' -> '{translated[:50]}...'")
                 except Exception as e:
                     self._log(f"⚠️ Failed to unescape: {e}", "warning")
@@ -2485,17 +2502,34 @@ class MangaTranslator:
                         self._log(f"📦 Regex extracted: '{response_text[:50]}...'")
             
             # Additional check for escaped content
-            if '\\\\' in response_text or '\\n' in response_text:
+            if '\\\\' in response_text or '\\n' in response_text or "\\'" in response_text or '\\"' in response_text:
                 self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
                 try:
                     # DON'T use unicode_escape for Korean text - it corrupts it
                     # Instead, just replace the escape sequences manually
+                    
+                    # Handle quotes and apostrophes
+                    response_text = response_text.replace("\\'", "'")  # Escaped apostrophe
+                    response_text = response_text.replace('\\"', '"')  # Escaped quote
+                    response_text = response_text.replace("\\`", "`")  # Escaped backtick
+                    response_text = response_text.replace("\\u2019", "'")  # Unicode right single quote
+                    response_text = response_text.replace("\\u2018", "'")  # Unicode left single quote
+                    response_text = response_text.replace("\\u201c", '"')  # Unicode left double quote
+                    response_text = response_text.replace("\\u201d", '"')  # Unicode right double quote
+                    
+                    # Handle newlines and other escapes
                     response_text = response_text.replace('\\n', '\n')
-                    response_text = response_text.replace('\\"', '"')
                     response_text = response_text.replace('\\\\', '\\')
                     response_text = response_text.replace('\\/', '/')
                     response_text = response_text.replace('\\t', '\t')
                     response_text = response_text.replace('\\r', '\r')
+                    
+                    # Clean up smart quotes using Unicode escape codes
+                    response_text = response_text.replace('\u2018', "'")  # Left single quotation mark
+                    response_text = response_text.replace('\u2019', "'")  # Right single quotation mark
+                    response_text = response_text.replace('\u201c', '"')  # Left double quotation mark
+                    response_text = response_text.replace('\u201d', '"')  # Right double quotation mark
+                    
                     self._log(f"📦 Unescaped content safely")
                 except Exception as e:
                     self._log(f"⚠️ Failed to unescape: {e}", "warning")
