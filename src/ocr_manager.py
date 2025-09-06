@@ -474,9 +474,28 @@ class PororoOCRProvider(OCRProvider):
 class EasyOCRProvider(OCRProvider):
     """EasyOCR provider for multiple languages"""
     
-    def __init__(self, log_callback=None, languages=['ja', 'ko', 'en']):
+    def __init__(self, log_callback=None, languages=None):
         super().__init__(log_callback)
-        self.languages = languages
+        # Default to safe language combination
+        self.languages = languages or ['ja', 'en']  # Safe default
+        self._validate_language_combination()
+
+    def _validate_language_combination(self):
+        """Validate and fix EasyOCR language combinations"""
+        # EasyOCR language compatibility rules
+        incompatible_pairs = [
+            (['ja', 'ko'], 'Japanese and Korean cannot be used together'),
+            (['ja', 'zh'], 'Japanese and Chinese cannot be used together'),
+            (['ko', 'zh'], 'Korean and Chinese cannot be used together')
+        ]
+        
+        for incompatible, reason in incompatible_pairs:
+            if all(lang in self.languages for lang in incompatible):
+                self._log(f"⚠️ EasyOCR: {reason}", "warning")
+                # Keep first language + English
+                self.languages = [self.languages[0], 'en']
+                self._log(f"🔧 Auto-adjusted to: {self.languages}", "info")
+                break
     
     def check_installation(self) -> bool:
         """Check if easyocr is installed"""
@@ -781,8 +800,20 @@ class DocTROCRProvider(OCRProvider):
                 for block in page.blocks:
                     for line in block.lines:
                         for word in line.words:
+                            # Handle different geometry formats
+                            geometry = word.geometry
+                            
+                            if len(geometry) == 4:
+                                # Standard format: (x1, y1, x2, y2)
+                                x1, y1, x2, y2 = geometry
+                            elif len(geometry) == 2:
+                                # Alternative format: ((x1, y1), (x2, y2))
+                                (x1, y1), (x2, y2) = geometry
+                            else:
+                                self._log(f"Unexpected geometry format: {geometry}", "warning")
+                                continue
+                            
                             # Convert relative coordinates to absolute
-                            x1, y1, x2, y2 = word.geometry
                             x1, x2 = int(x1 * w), int(x2 * w)
                             y1, y2 = int(y1 * h), int(y2 * h)
                             
@@ -799,10 +830,12 @@ class DocTROCRProvider(OCRProvider):
             except:
                 pass
             
-            self._log(f"✅ Detected {len(results)} text regions")
+            self._log(f"DocTR detected {len(results)} text regions")
             
         except Exception as e:
-            self._log(f"❌ Error in doctr detection: {str(e)}", "error")
+            self._log(f"Error in doctr detection: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
         
         return results
 
