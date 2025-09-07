@@ -109,7 +109,7 @@ class CustomAPIProvider(OCRProvider):
         
         # Image settings from existing compression variables
         self.image_format = 'jpeg' if os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') != 'png' else 'png'
-        self.image_quality = int(os.environ.get('JPEG_QUALITY', '85'))
+        self.image_quality = int(os.environ.get('JPEG_QUALITY', '100'))
         
         # Simple defaults
         self.api_format = 'openai'  # Most custom endpoints are OpenAI-compatible
@@ -350,7 +350,7 @@ class CustomAPIProvider(OCRProvider):
             pil_image = Image.fromarray(image_rgb)
             h, w = image.shape[:2]
             
-            # Convert PIL Image to base64 string (what send_image expects)
+            # Convert PIL Image to base64 string
             buffer = io.BytesIO()
             
             # Use the image format from settings
@@ -362,10 +362,39 @@ class CustomAPIProvider(OCRProvider):
             buffer.seek(0)
             image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
             
-            # Use UnifiedClient's send_image method with base64 data
-            content, finish_reason = self.client.send_image(
-                messages=[{"role": "user", "content": self.ocr_prompt}],
-                image_data=image_base64  # Now passing base64 string
+            # For OpenAI vision models, we need BOTH:
+            # 1. System prompt with instructions
+            # 2. User message that includes the image
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.ocr_prompt  # The OCR instruction as system prompt
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Image:"  # Minimal text, just to have something
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ]
+            
+            # Now send this properly formatted message
+            # The UnifiedClient should handle this correctly
+            # But we're NOT using send_image, we're using regular send
+            content, finish_reason = self.client.send(
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                context='ocr'  # Set context to 'ocr'
             )
             
             # Check the content directly
@@ -373,6 +402,19 @@ class CustomAPIProvider(OCRProvider):
                 # Filter out error messages
                 if "[" in content and "FAILED]" in content:
                     self._log(f"⚠️ API returned error: {content}", "warning")
+                    return results
+                
+                # Also filter out "I can't extract" responses
+                error_phrases = [
+                    "I can't extract", "I cannot extract", 
+                    "I'm sorry", "I am sorry",
+                    "I'm unable", "I am unable",
+                    "cannot process images"
+                ]
+                
+                if any(phrase in content for phrase in error_phrases):
+                    self._log(f"❌ Model refusing to extract: {content[:100]}", "error")
+                    self._log(f"Model might not have vision capabilities or image format issue", "warning")
                     return results
                     
                 text = content.strip()
