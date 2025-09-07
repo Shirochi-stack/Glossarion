@@ -1754,9 +1754,9 @@ class MangaSettingsDialog:
                 from huggingface_hub import hf_hub_download
                 
                 filename_map = {
-                    'ogkalu/comic-speech-bubble-detector-yolov8m': 'comic-speech-bubble-detector-yolov8m.pt',
-                    'ogkalu/comic-text-segmenter-yolov8m': 'comic-text-segmenter-yolov8m.pt',
-                    'ogkalu/manga-text-detector-yolov8s': 'manga-text-detector-yolov8s.pt'
+                    'ogkalu/comic-speech-bubble-detector-yolov8m': 'comic-speech-bubble-detector.pt',
+                    'ogkalu/comic-text-segmenter-yolov8m': 'comic-text-segmenter.pt',
+                    'ogkalu/manga-text-detector-yolov8s': 'manga-text-detector.pt'
                 }
                 
                 filename = filename_map.get(model_url, 'model.pt')
