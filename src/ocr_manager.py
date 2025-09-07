@@ -16,12 +16,15 @@ import numpy as np
 from dataclasses import dataclass
 from PIL import Image
 import logging
-# At the top of ocr_manager.py or in the Qwen2VL class
 try:
-    import bitsandbytes
-    HAS_QUANTIZATION = True
+    import auto_gptq
+    HAS_GPTQ = True
 except ImportError:
-    HAS_QUANTIZATION = False
+    try:
+        import gptqmodel
+        HAS_GPTQ = True
+    except ImportError:
+        HAS_GPTQ = False
 
 try:
     import optimum
