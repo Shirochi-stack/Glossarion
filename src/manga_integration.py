@@ -691,6 +691,7 @@ class MangaTranslationTab:
             
             def confirm_selection():
                 selected = selected_model.get()
+                self._log(f"DEBUG: Radio button selection = {selected}")
                 if selected == "4":
                     # Custom model
                     if not custom_model_id.get().strip():
@@ -719,6 +720,7 @@ class MangaTranslationTab:
                 return
             
             model_size = model_confirmed['size']
+            self._log(f"DEBUG: Dialog closed, model_size set to: {model_size}")
         
         # Create progress dialog
         progress_dialog = tk.Toplevel(self.dialog)
@@ -758,6 +760,7 @@ class MangaTranslationTab:
         
         def setup_thread():
             """Run setup in background thread"""
+            nonlocal model_size
             try:
                 success = False
                 
@@ -776,6 +779,7 @@ class MangaTranslationTab:
                 
                 # Special handling for Qwen2-VL - pass model_size
                 if provider == 'Qwen2-VL':
+                    self._log(f"DEBUG: In thread, about to load with model_size={model_size}")  # ADD THIS
                     # Use the OCRManager's load_provider which accepts kwargs
                     if model_size:
                         success = self.ocr_manager.load_provider(provider, model_size=model_size)
@@ -3734,6 +3738,16 @@ class MangaTranslationTab:
         
         # Build OCR configuration
         ocr_config = {'provider': self.ocr_provider_var.get()}
+
+        if ocr_config['provider'] == 'Qwen2-VL':
+            # Check if model is already loaded and get its size
+            qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
+            if qwen_provider and hasattr(qwen_provider, 'loaded_model_size'):
+                # Map display name back to option number
+                size_map = {'2B': '1', '7B': '2', '72B': '3'}
+                model_size = size_map.get(qwen_provider.loaded_model_size, '2')
+                ocr_config['model_size'] = model_size
+                self._log(f"Passing Qwen2-VL model size: {qwen_provider.loaded_model_size} (option {model_size})", "info")
         
         if ocr_config['provider'] == 'google':
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
