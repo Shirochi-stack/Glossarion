@@ -253,12 +253,15 @@ class Qwen2VL(OCRProvider):
     
     def load_model(self, model_size=None) -> bool:
         """Load Qwen2-VL model with size selection"""
+        self._log(f"DEBUG: load_model called with model_size={model_size}")  # Add this
         try:
             if not self.is_installed and not self.check_installation():
                 self._log("❌ Not installed", "error")
                 return False
             
             self._log("🔥 Loading Qwen2-VL for Advanced OCR...")
+
+
             
             from transformers import AutoProcessor, AutoTokenizer
             import torch
@@ -276,7 +279,7 @@ class Qwen2VL(OCRProvider):
             if model_size is None:
                 # Try to get from environment or config
                 import os
-                model_size = os.environ.get('QWEN2VL_MODEL_SIZE', '2')  # Default to '2' which is 7B
+                model_size = os.environ.get('QWEN2VL_MODEL_SIZE', '1')  # Default to '2' which is 7B
             
             # Determine which model to load
             if model_size and str(model_size).startswith("custom:"):
@@ -304,9 +307,9 @@ class Qwen2VL(OCRProvider):
                     self.loaded_model_size = "72B"
             else:
                 # CHANGE: Default to 7B (option "2") instead of 2B
-                model_id = model_options["2"]  # Changed from "1" to "2"
-                self.loaded_model_size = "7B"   # Changed from "2B" to "7B"
-                self._log("No model size specified, defaulting to 7B")  # Changed message
+                model_id = model_options["1"]  # Changed from "1" to "2"
+                self.loaded_model_size = "2B"   # Changed from "2B" to "7B"
+                self._log("No model size specified, defaulting to 2B")  # Changed message
             
             self._log(f"Loading model: {model_id}")
             
@@ -345,8 +348,8 @@ class Qwen2VL(OCRProvider):
             self._log(f"❌ Failed to load: {str(e)}", "error")
             import traceback
             self._log(traceback.format_exc(), "debug")
-            return False
-        
+            return False       
+
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """Process image with Qwen2-VL for Korean text extraction"""
         results = []
@@ -367,7 +370,8 @@ class Qwen2VL(OCRProvider):
             
             self._log(f"🔍 Processing with Qwen2-VL ({w}x{h} pixels)...")
             
-            # Create conversation for OCR task
+            # FIXED: Clear, unambiguous prompt that only asks for text extraction
+            # Don't ask for transcription, translation, or explanation
             messages = [
                 {
                     "role": "user",
@@ -378,11 +382,22 @@ class Qwen2VL(OCRProvider):
                         },
                         {
                             "type": "text", 
-                            "text": "Extract and transcribe all Korean text from this image. Output only the text, nothing else."
+                            # CHANGED: More explicit prompt to prevent translation
+                            "text": (
+                                "Output ONLY the exact raw text you see in this image. "
+                                "Do not translate. Do not explain. Do not add any commentary. "
+                                "If you see Korean text, output the Korean text exactly as written. "
+                                "If you see Japanese text, output the Japanese text exactly as written. "
+                                "If you see Chinese text, output the Chinese text exactly as written. "
+                                "If there is no text, output nothing."
+                            )
                         }
                     ]
                 }
             ]
+            
+            # Alternative simpler prompt if the above still causes issues:
+            # "text": "OCR: Extract text as-is"
             
             # Process with Qwen2-VL
             text = self.processor.apply_chat_template(
@@ -402,13 +417,15 @@ class Qwen2VL(OCRProvider):
             if torch.cuda.is_available():
                 inputs = inputs.to("cuda")
             
-            # Generate text
+            # Generate text with stricter parameters to avoid creative responses
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=256,
-                    do_sample=False,
-                    temperature=0.01
+                    do_sample=False,  # Deterministic output
+                    temperature=0.01,  # Very low temperature to reduce creativity
+                    top_p=1.0,  # No nucleus sampling
+                    repetition_penalty=1.0  # No repetition penalty
                 )
             
             # Decode the output
@@ -424,10 +441,44 @@ class Qwen2VL(OCRProvider):
             if output_text and output_text.strip():
                 text = output_text.strip()
                 
+                # ADDED: Filter out any response that looks like an explanation or apology
+                # Common patterns that indicate the model is being "helpful" instead of just extracting
+                unwanted_patterns = [
+                    "죄송합니다",  # "I apologize"
+                    "sorry",
+                    "apologize",
+                    "이미지에는",  # "in this image"
+                    "텍스트가 없습니다",  # "there is no text"
+                    "I cannot",
+                    "I don't see",
+                    "There is no",
+                    "질문이 있으시면",  # "if you have questions"
+                ]
+                
+                # Check if response contains unwanted patterns
+                text_lower = text.lower()
+                is_explanation = any(pattern.lower() in text_lower for pattern in unwanted_patterns)
+                
+                # Also check if the response is suspiciously long for a bubble
+                # Most manga bubbles are short, if we get 50+ chars it might be an explanation
+                is_too_long = len(text) > 100 and ('.' in text or ',' in text or '!' in text)
+                
+                if is_explanation or is_too_long:
+                    self._log(f"⚠️ Model returned explanation instead of text, ignoring", "warning")
+                    # Return empty result or just skip this region
+                    return results
+                
                 # Check language
                 has_korean = any('\uAC00' <= c <= '\uD7AF' for c in text)
+                has_japanese = any('\u3040' <= c <= '\u309F' or '\u30A0' <= c <= '\u30FF' for c in text)
+                has_chinese = any('\u4E00' <= c <= '\u9FFF' for c in text)
+                
                 if has_korean:
                     self._log(f"✅ Korean detected: {text[:50]}...")
+                elif has_japanese:
+                    self._log(f"✅ Japanese detected: {text[:50]}...")
+                elif has_chinese:
+                    self._log(f"✅ Chinese detected: {text[:50]}...")
                 else:
                     self._log(f"✅ Text: {text[:50]}...")
                 
@@ -439,14 +490,14 @@ class Qwen2VL(OCRProvider):
                 ))
             else:
                 self._log("⚠️ No text detected", "warning")
-            
+        
         except Exception as e:
             self._log(f"❌ Error: {str(e)}", "error")
             import traceback
             self._log(traceback.format_exc(), "debug")
         
         return results
-
+    
 class EasyOCRProvider(OCRProvider):
     """EasyOCR provider for multiple languages"""
     
