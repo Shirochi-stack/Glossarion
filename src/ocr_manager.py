@@ -2,7 +2,7 @@
 """
 OCR Manager for handling multiple OCR providers
 Handles installation, model downloading, and OCR processing
-Updated with HuggingFace Pororo model and proper bubble detection integration
+Updated with HuggingFace donut model and proper bubble detection integration
 """
 
 import os
@@ -209,236 +209,190 @@ class MangaOCRProvider(OCRProvider):
             
         return results
 
-class PororoOCRProvider(OCRProvider):
-    """Pororo OCR provider using HuggingFace model"""
+class Qwen2VL(OCRProvider):
+    """OCR using Qwen2-VL - Vision Language Model that can read Korean text"""
     
     def __init__(self, log_callback=None):
         super().__init__(log_callback)
         self.processor = None
         self.model = None
         self.tokenizer = None
+        self.loaded_model_size = None  # Track which model size is loaded
+        self.loaded_model_id = None    # Track which model ID is loaded
         
     def check_installation(self) -> bool:
         """Check if required packages are installed"""
         try:
             import transformers
             import torch
-            from huggingface_hub import hf_hub_download
+            from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
             self.is_installed = True
             return True
         except ImportError:
             return False
     
     def install(self, progress_callback=None) -> bool:
-        """Install required packages for HuggingFace Pororo"""
+        """Install requirements for Qwen2-VL"""
         try:
-            self._log("📦 Installing packages for Pororo OCR...")
+            self._log("📦 Installing Qwen2-VL dependencies...")
             if progress_callback:
-                progress_callback("Installing required packages...", 0)
+                progress_callback("Installing Qwen2-VL...", 0)
             
-            # Install dependencies
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install",
-                "transformers", "torch", "torchvision", 
-                "huggingface-hub", "pillow", "--upgrade"
+                "transformers>=4.37.0", "torch", "torchvision", 
+                "pillow", "accelerate", "sentencepiece", "protobuf", "--upgrade"
             ])
             
             if progress_callback:
-                progress_callback("Packages installed successfully!", 100)
+                progress_callback("Done!", 100)
             
             self.is_installed = True
-            self._log("✅ Packages installed successfully")
+            self._log("✅ Installed")
             return True
             
         except Exception as e:
-            self._log(f"❌ Failed to install packages: {str(e)}", "error")
+            self._log(f"❌ Failed: {str(e)}", "error")
             return False
     
-    def load_model(self) -> bool:
-        """Load Pororo OCR model from HuggingFace"""
+    def load_model(self, model_size=None) -> bool:
+        """Load Qwen2-VL model with size selection"""
         try:
             if not self.is_installed and not self.check_installation():
-                self._log("❌ Required packages not installed", "error")
+                self._log("❌ Not installed", "error")
                 return False
             
-            self._log("🔥 Loading Pororo OCR model from HuggingFace...")
+            # If model already loaded with same size, just return success
+            if self.is_loaded and self.model is not None:
+                if model_size is None or str(model_size) == str(self.loaded_model_size):
+                    self._log("✅ Model already loaded")
+                    return True
+                else:
+                    # Different size requested, need to reload
+                    self._log(f"Unloading current model to load size {model_size}")
+                    self.model = None
+                    self.processor = None
+                    self.tokenizer = None
+                    self.is_loaded = False
             
-            from transformers import (
-                TrOCRProcessor, 
-                VisionEncoderDecoderModel,
-                AutoTokenizer,
-                AutoImageProcessor
-            )
-            from huggingface_hub import hf_hub_download
+            self._log("🔥 Loading Qwen2-VL for Korean OCR...")
+            
+            from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
             import torch
             
-            # The HuggingFace model ID
-            model_id = "ogkalu/pororo"
+            # Model options
+            model_options = {
+                "1": {"id": "Qwen/Qwen2-VL-2B-Instruct", "name": "2B"},
+                "2": {"id": "Qwen/Qwen2-VL-7B-Instruct", "name": "7B"},
+                "3": {"id": "Qwen/Qwen2-VL-72B-Instruct", "name": "72B"},
+            }
             
-            try:
-                # Try to load as a standard transformers model first
-                self._log(f"   Loading from HuggingFace: {model_id}")
+            # Determine model to load
+            if model_size and str(model_size) in model_options:
+                model_id = model_options[str(model_size)]["id"]
+                model_name = model_options[str(model_size)]["name"]
+                self.loaded_model_size = model_name
+            else:
+                # Default to 2B if not specified
+                model_id = model_options["1"]["id"]
+                model_name = "2B"
+                self.loaded_model_size = model_name
+                model_size = "1"
+            
+            self.loaded_model_id = model_id
+            self._log(f"Loading {model_name} model: {model_id}")
+            
+            # Check GPU availability
+            if torch.cuda.is_available():
+                gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+                self._log(f"GPU available: {torch.cuda.get_device_name(0)} ({gpu_mem:.1f}GB)")
+            else:
+                self._log("No GPU detected - using CPU (will be slow)")
+            
+            # Load components with trust_remote_code
+            self._log("Loading processor...")
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            
+            self._log("Loading tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+            
+            self._log("Loading model weights...")
+            
+            # Load model with appropriate settings
+            if torch.cuda.is_available():
+                gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
                 
-                # Download model files
-                self._log("   Downloading model files...")
+                # Determine if we need 8-bit quantization
+                need_8bit = False
+                if model_size == "3" and gpu_mem < 80:
+                    need_8bit = True
+                elif model_size == "2" and gpu_mem < 16:
+                    need_8bit = True
                 
-                # List files in the repository
-                from huggingface_hub import list_repo_files
-                files = list_repo_files(model_id)
-                self._log(f"   Available files: {files[:5]}...")  # Show first 5 files
-                
-                # Check what type of model this is
-                if any('pytorch_model' in f for f in files) or any('model.safetensors' in f for f in files):
-                    # Standard transformers model
-                    self._log("   Detected transformers model format")
-                    
-                    # Try loading as VisionEncoderDecoder model (similar to manga-ocr)
+                if need_8bit:
+                    self._log("Using 8-bit quantization to fit in memory")
                     try:
-                        self._log("   Loading as VisionEncoderDecoder model...")
-                        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-                        self.processor = AutoImageProcessor.from_pretrained(model_id)
-                        self.model = VisionEncoderDecoderModel.from_pretrained(model_id)
-                    except Exception as e:
-                        self._log(f"   Failed as VisionEncoderDecoder: {e}", "warning")
-                        
-                        # Try TrOCR format
-                        self._log("   Trying TrOCR format...")
-                        self.processor = TrOCRProcessor.from_pretrained(model_id)
-                        self.model = VisionEncoderDecoderModel.from_pretrained(model_id)
-                        self.tokenizer = self.processor.tokenizer
-                        
-                elif any('.pt' in f or '.pth' in f for f in files):
-                    # PyTorch checkpoint format
-                    self._log("   Detected PyTorch checkpoint format")
-                    
-                    # Download the model file
-                    model_file = [f for f in files if '.pt' in f or '.pth' in f][0]
-                    local_path = hf_hub_download(repo_id=model_id, filename=model_file)
-                    self._log(f"   Downloaded model to: {local_path}")
-                    
-                    # Load as a generic torch model
-                    # Note: This requires knowing the architecture
-                    # For now, we'll try to load it as a VisionEncoderDecoder
-                    from transformers import VisionEncoderDecoderConfig
-                    
-                    # Try to load config
-                    try:
-                        config = VisionEncoderDecoderConfig.from_pretrained(model_id)
-                        self.model = VisionEncoderDecoderModel(config)
-                        state_dict = torch.load(local_path, map_location='cpu')
-                        self.model.load_state_dict(state_dict)
+                        # Try 8-bit first
+                        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                            model_id,
+                            load_in_8bit=True,
+                            device_map="auto",
+                            trust_remote_code=True
+                        )
                     except:
-                        # Fallback: use a default Korean OCR model
-                        self._log("   Using fallback Korean OCR model...", "warning")
-                        fallback_model = "microsoft/trocr-base-handwritten"
-                        self.processor = TrOCRProcessor.from_pretrained(fallback_model)
-                        self.model = VisionEncoderDecoderModel.from_pretrained(fallback_model)
-                        self.tokenizer = self.processor.tokenizer
+                        # Fallback to fp16
+                        self._log("8-bit failed, trying fp16")
+                        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                            model_id,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            trust_remote_code=True
+                        )
                 else:
-                    raise ValueError(f"Unknown model format in {model_id}")
+                    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                        model_id,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True
+                    )
+                self._log("✅ Model loaded on GPU")
                 
-                # Set model to eval mode
-                self.model.eval()
-                
-                # Move to GPU if available
-                if torch.cuda.is_available():
-                    self.model = self.model.cuda()
-                    self._log("   ✅ Model loaded on GPU")
-                else:
-                    self._log("   ✅ Model loaded on CPU")
-                
-                self.is_loaded = True
-                self._log("✅ Pororo OCR model loaded successfully")
-                return True
-                
-            except Exception as e:
-                self._log(f"⚠️ Failed to load from HuggingFace: {e}", "warning")
-                self._log("   Falling back to default Korean OCR model...", "warning")
-                
-                # Fallback to a working Korean OCR model
-                fallback_model = "microsoft/trocr-base-handwritten"
-                self.processor = TrOCRProcessor.from_pretrained(fallback_model)
-                self.model = VisionEncoderDecoderModel.from_pretrained(fallback_model)
-                self.tokenizer = self.processor.tokenizer
-                
-                self.model.eval()
-                if torch.cuda.is_available():
-                    self.model = self.model.cuda()
-                
-                self.is_loaded = True
-                self._log("✅ Loaded fallback OCR model")
-                return True
-                
+            else:
+                # CPU loading
+                self._log("Loading on CPU...")
+                self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    model_id,
+                    torch_dtype=torch.float32,
+                    trust_remote_code=True
+                )
+                self._log("✅ Model loaded on CPU")
+            
+            # Set to eval mode
+            self.model.eval()
+            self.is_loaded = True
+            
+            self._log(f"✅ Qwen2-VL {model_name} ready for Korean OCR!")
+            return True
+            
+        except ImportError as e:
+            self._log(f"❌ Import error: {str(e)}", "error")
+            self._log("Try installing: pip install transformers torch torchvision accelerate", "error")
+            return False
+            
         except Exception as e:
-            self._log(f"❌ Failed to load Pororo model: {str(e)}", "error")
+            self._log(f"❌ Failed to load: {str(e)}", "error")
             import traceback
-            self._log(traceback.format_exc(), "error")
+            self._log(traceback.format_exc(), "debug")
+            
+            # Reset state on failure
+            self.model = None
+            self.processor = None
+            self.tokenizer = None
+            self.is_loaded = False
             return False
         
-    def _run_ocr(self, pil_image):
-        """Run OCR on a PIL image using the loaded model"""
-        import torch
-        
-        try:
-            if hasattr(self, 'processor') and self.processor:
-                # Use processor if available (TrOCR style)
-                pixel_values = self.processor(pil_image, return_tensors="pt").pixel_values
-            else:
-                # Manual preprocessing
-                from torchvision import transforms
-                transform = transforms.Compose([
-                    transforms.Resize((384, 384)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-                ])
-                pixel_values = transform(pil_image).unsqueeze(0)
-            
-            # Move to same device as model
-            if next(self.model.parameters()).is_cuda:
-                pixel_values = pixel_values.cuda()
-            
-            # Generate text
-            with torch.no_grad():
-                generated_ids = self.model.generate(pixel_values, max_length=512)
-            
-            # Decode
-            if self.tokenizer:
-                generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            elif hasattr(self.processor, 'batch_decode'):
-                generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            else:
-                # Fallback to basic decoding
-                generated_text = ""
-                self._log("⚠️ No tokenizer available for decoding", "warning")
-            
-            # IMPORTANT: Clean and normalize the text to prevent encoding issues
-            if generated_text:
-                # Remove any control characters and normalize unicode
-                import unicodedata
-                import re
-                
-                # Normalize unicode (NFC form for Korean)
-                generated_text = unicodedata.normalize('NFC', generated_text)
-                
-                # Remove control characters except normal whitespace
-                generated_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', generated_text)
-                
-                # Clean up excessive whitespace
-                generated_text = ' '.join(generated_text.split())
-                
-                # Ensure it's properly encoded as UTF-8
-                generated_text = generated_text.encode('utf-8', errors='ignore').decode('utf-8')
-            
-            return generated_text
-            
-        except Exception as e:
-            self._log(f"❌ OCR inference failed: {str(e)}", "error")
-            return ""
-    
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
-        """
-        Process the image region with proper encoding handling.
-        """
+        """Process image with Qwen2-VL for Korean text extraction"""
         results = []
         
         try:
@@ -448,53 +402,94 @@ class PororoOCRProvider(OCRProvider):
             
             import cv2
             from PIL import Image
+            import torch
             
-            # Get confidence from kwargs
-            confidence = kwargs.get('confidence', 0.7)
-            
-            # Convert numpy array to PIL
+            # Convert to PIL
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(image_rgb)
             h, w = image.shape[:2]
             
-            self._log("🔍 Processing region with Pororo OCR...")
+            self._log(f"🔍 Processing with Qwen2-VL ({w}x{h} pixels)...")
             
-            # Run OCR on the image
-            try:
-                text = self._run_ocr(pil_image)
+            # Create conversation for OCR task
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": pil_image,
+                        },
+                        {
+                            "type": "text", 
+                            "text": "Extract and transcribe all Korean text from this image. Output only the text, nothing else."
+                        }
+                    ]
+                }
+            ]
+            
+            # Process with Qwen2-VL
+            text = self.processor.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
+            
+            inputs = self.processor(
+                text=[text],
+                images=[pil_image],
+                padding=True,
+                return_tensors="pt"
+            )
+            
+            # Move to GPU if available
+            if torch.cuda.is_available() and next(self.model.parameters()).is_cuda:
+                inputs = inputs.to("cuda")
+            
+            # Generate text
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=256,
+                    do_sample=False,
+                    temperature=0.01,  # Very low temperature for accurate OCR
+                )
+            
+            # Decode the output
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_text = self.processor.batch_decode(
+                generated_ids_trimmed, 
+                skip_special_tokens=True, 
+                clean_up_tokenization_spaces=False
+            )[0]
+            
+            if output_text and output_text.strip():
+                text = output_text.strip()
                 
-                if text and text.strip():
-                    # Ensure text is clean before returning
-                    clean_text = text.strip()
-                    
-                    # Additional validation for Korean text
-                    if clean_text:
-                        # Check if text contains valid Korean characters
-                        has_korean = any('\uAC00' <= c <= '\uD7AF' for c in clean_text)
-                        if has_korean:
-                            self._log(f"✅ Detected Korean text: {clean_text[:30]}...")
-                        
-                        results.append(OCRResult(
-                            text=clean_text,
-                            bbox=(0, 0, w, h),
-                            confidence=confidence,
-                            vertices=[(0, 0), (w, 0), (w, h), (0, h)]
-                        ))
+                # Check language
+                has_korean = any('\uAC00' <= c <= '\uD7AF' for c in text)
+                if has_korean:
+                    self._log(f"✅ Korean detected: {text[:50]}...")
                 else:
-                    self._log("⚠️ No text detected in region", "warning")
-                    
-            except Exception as e:
-                self._log(f"❌ OCR failed: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "error")
+                    self._log(f"✅ Text: {text[:50]}...")
+                
+                results.append(OCRResult(
+                    text=text,
+                    bbox=(0, 0, w, h),
+                    confidence=0.9,  # Qwen2-VL is quite accurate
+                    vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                ))
+            else:
+                self._log("⚠️ No text detected", "warning")
             
         except Exception as e:
-            self._log(f"❌ Error in Pororo OCR: {str(e)}", "error")
+            self._log(f"❌ Error: {str(e)}", "error")
             import traceback
-            self._log(traceback.format_exc(), "error")
+            self._log(traceback.format_exc(), "debug")
         
         return results
-
 
 class EasyOCRProvider(OCRProvider):
     """EasyOCR provider for multiple languages"""
@@ -953,10 +948,10 @@ class OCRManager:
         self.log_callback = log_callback
         self.providers = {
             'manga-ocr': MangaOCRProvider(log_callback),
-            'pororo': PororoOCRProvider(log_callback),
             'easyocr': EasyOCRProvider(log_callback),
             'paddleocr': PaddleOCRProvider(log_callback),
-            'doctr': DocTROCRProvider(log_callback)
+            'doctr': DocTROCRProvider(log_callback),
+            'Qwen2-VL ': Qwen2VL(log_callback)
         }
         self.current_provider = None
         
