@@ -504,7 +504,7 @@ class MangaTranslationTab:
                         add_log(f"Using GPU: {torch.cuda.get_device_name(0)}")
                         model = AutoModelForVision2Seq.from_pretrained(
                             model_id,
-                            torch_dtype=torch.float16,
+                            dtype=torch.float16,
                             device_map="auto",
                             trust_remote_code=True
                         )
@@ -512,7 +512,7 @@ class MangaTranslationTab:
                         add_log("No GPU detected, will load on CPU")
                         model = AutoModelForVision2Seq.from_pretrained(
                             model_id,
-                            torch_dtype=torch.float32,
+                            dtype=torch.float32,
                             trust_remote_code=True
                         )
                     
