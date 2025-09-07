@@ -58,6 +58,7 @@ class MangaTranslationTab:
         self.total_files = 0
         self.completed_files = 0
         self.failed_files = 0
+        self.qwen2vl_model_size = self.main_gui.config.get('qwen2vl_model_size', '1')
         
         # Queue for thread-safe GUI updates
         self.update_queue = Queue()
@@ -775,19 +776,23 @@ class MangaTranslationTab:
                 
                 # Special handling for Qwen2-VL - pass model_size
                 if provider == 'Qwen2-VL':
-                    provider_obj = self.ocr_manager.get_provider('Qwen2-VL')
-                    if provider_obj:
-                        # Pass model_size to load_model
-                        success = provider_obj.load_model(model_size=model_size)
-                        if success and model_size:
-                            # Store which model was loaded
-                            provider_obj.loaded_model_size = {
-                                "1": "2B",
-                                "2": "7B", 
-                                "3": "72B"
-                            }.get(model_size, model_size)
+                    # Use the OCRManager's load_provider which accepts kwargs
+                    if model_size:
+                        success = self.ocr_manager.load_provider(provider, model_size=model_size)
+                        
+                        # Store which model was loaded
+                        if success:
+                            provider_obj = self.ocr_manager.get_provider('Qwen2-VL')
+                            if provider_obj:
+                                provider_obj.loaded_model_size = {
+                                    "1": "2B",
+                                    "2": "7B", 
+                                    "3": "72B"
+                                }.get(model_size, model_size)
                     else:
-                        success = False
+                        # This shouldn't happen but default to 2B
+                        self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
+                        success = self.ocr_manager.load_provider(provider, model_size="1")
                 else:
                     # Regular loading for other providers
                     success = self.ocr_manager.load_provider(provider)
