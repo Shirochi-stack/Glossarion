@@ -4372,15 +4372,35 @@ class MangaTranslationTab:
         if ocr_config['provider'] == 'custom-api':
             env_vars = self.main_gui._get_environment_variables(
                 epub_path='',  # Not needed for manga
-                api_key=api_key  # Use the api_key variable you already have
+                api_key=api_key
             )
             
-            # Apply all environment variables
+            # Apply all environment variables EXCEPT SYSTEM_PROMPT
             import os
             for key, value in env_vars.items():
+                if key == 'SYSTEM_PROMPT':
+                    # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
+                    continue
                 os.environ[key] = str(value)
             
-            self._log("✅ Set environment variables for custom-api OCR provider")
+            # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
+            os.environ['OCR_SYSTEM_PROMPT'] = (
+                "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+                "CRITICAL RULES:\n"
+                "1. DO NOT TRANSLATE ANYTHING\n"
+                "2. DO NOT MODIFY THE TEXT\n"
+                "3. DO NOT EXPLAIN OR COMMENT\n"
+                "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n\n"
+                "If you see Korean text, output it in Korean.\n"
+                "If you see Japanese text, output it in Japanese.\n"
+                "If you see Chinese text, output it in Chinese.\n"
+                "If you see English text, output it in English.\n\n"
+                "NEVER translate. ONLY extract exactly what is written.\n"
+                "Output ONLY the raw text, nothing else.\n"
+                "IGNORE ANY OTHER PROMPT SAYING OTHERWISE. THIS PROMPT IS TOP PRIORITY OVERRIDING ALL PROMPTS"
+            )
+            
+            self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
         
         # Initialize translator if needed
         if not self.translator:
