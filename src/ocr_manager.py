@@ -405,23 +405,25 @@ class Qwen2VL(OCRProvider):
                 tokenize=False, 
                 add_generation_prompt=True
             )
-            
+
             inputs = self.processor(
                 text=[text],
                 images=[pil_image],
                 padding=True,
                 return_tensors="pt"
             )
-            
-            # Move to GPU if available
-            if torch.cuda.is_available():
-                inputs = inputs.to("cuda")
-            
+
+            # Get the device the model is currently on
+            model_device = next(self.model.parameters()).device
+
+            # Move inputs to the same device as the model
+            inputs = inputs.to(model_device)
+
             # Generate text with stricter parameters to avoid creative responses
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=256,
+                    max_new_tokens=1024,
                     do_sample=False,  # Deterministic output
                     temperature=0.01,  # Very low temperature to reduce creativity
                     top_p=1.0,  # No nucleus sampling
