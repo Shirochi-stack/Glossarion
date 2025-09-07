@@ -77,7 +77,7 @@ class MangaTranslator:
         self.main_gui = main_gui
         self.config = main_gui.config
         self.manga_settings = self.config.get('manga_settings', {})
-        
+
         # Initialize attributes
         self.current_image = None
         self.current_mask = None
@@ -978,26 +978,34 @@ class MangaTranslator:
                 
                 # Create OCR manager if not exists
                 if not hasattr(self, 'ocr_manager'):
-                    self.ocr_manager = OCRManager(log_callback=self._log)
+                    self.ocr_manager = gui.ocr_manager
                 
                 # Check provider status and load if needed
                 provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
-                
+
                 if not provider_status['installed']:
                     self._log(f"❌ {self.ocr_provider} is not installed", "error")
                     self._log(f"   Please install it from the GUI settings", "error")
                     raise Exception(f"{self.ocr_provider} OCR provider is not installed")
-                
+
                 if not provider_status['loaded']:
-                    self._log(f"🔥 Loading {self.ocr_provider} model...")
-                    
-                    # Check for model_size in config for Qwen2-VL
-                    if self.ocr_provider == 'Qwen2-VL' and hasattr(self, 'ocr_config') and 'model_size' in self.ocr_config:
-                        model_size = self.ocr_config['model_size']
-                        self._log(f"Loading Qwen2-VL with model_size={model_size}")
-                        success = self.ocr_manager.load_provider(self.ocr_provider, model_size=model_size)
+                    # Check if Qwen2-VL - if it's supposedly not loaded but actually is, skip
+                    if self.ocr_provider == 'Qwen2-VL':
+                        provider = self.ocr_manager.get_provider('Qwen2-VL')
+                        if provider and hasattr(provider, 'model') and provider.model is not None:
+                            self._log("✅ Qwen2-VL model actually already loaded, skipping reload")
+                        else:
+                            # Only actually load if truly not loaded
+                            model_size = self.ocr_config.get('model_size', '2') if hasattr(self, 'ocr_config') else '2'
+                            self._log(f"Loading Qwen2-VL with model_size={model_size}")
+                            success = self.ocr_manager.load_provider(self.ocr_provider, model_size=model_size)
+                            if not success:
+                                raise Exception(f"Failed to load {self.ocr_provider} model")
                     else:
+                        # Other providers
                         success = self.ocr_manager.load_provider(self.ocr_provider)
+                        if not success:
+                            raise Exception(f"Failed to load {self.ocr_provider} model")
                     
                     if not success:
                         raise Exception(f"Failed to load {self.ocr_provider} model")
