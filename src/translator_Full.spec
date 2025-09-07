@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Full v4.1.0 - PyInstaller Specification File
+Glossarion Full v4.2.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion Full v4.1.0'  # CHANGED: Updated version
+APP_NAME = 'Glossarion Full v4.2.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -103,6 +103,8 @@ app_files = [
 	('bubble_detector.py', '.'),
 
 	('local_inpainter.py', '.'),	
+	
+	('ocr_manager.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -138,6 +140,7 @@ app_modules = [
 	'multi_api_key_manager.py',
 	'bubble_detector', 
 	'local_inpainter',  	
+	'ocr_manager',
 	
 ]
 
