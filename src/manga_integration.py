@@ -1366,6 +1366,15 @@ class MangaTranslationTab:
             font=('Arial', 9),
             fg='gray'
         ).pack(side=tk.LEFT)
+
+        # Force Caps Lock Checkbox
+        force_caps_check = ttk.Checkbutton(
+            render_frame,
+            text="Force CAPS LOCK (All text in uppercase)",
+            variable=self.force_caps_lock_var,
+            command=self._apply_rendering_settings
+        )
+        force_caps_check.pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         # Background opacity slider
         opacity_frame = tk.Frame(render_frame)
@@ -2387,6 +2396,9 @@ class MangaTranslationTab:
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
         self.font_size_multiplier_var.trace('w', lambda *args: self._save_rendering_settings())
         
+        self.force_caps_lock_var = tk.BooleanVar(value=config.get('manga_force_caps_lock', False))
+        self.force_caps_lock_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
         self.constrain_to_bubble_var.trace('w', lambda *args: self._save_rendering_settings())
         
@@ -2552,6 +2564,8 @@ class MangaTranslationTab:
                 self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
             if hasattr(self, 'strict_text_wrapping_var'):
                 self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_var.get()
+            if hasattr(self, 'force_caps_lock_var'):
+                self.main_gui.config['manga_force_caps_lock'] = self.force_caps_lock_var.get()
             
             # Save font color as list
             if hasattr(self, 'text_color_r') and hasattr(self, 'text_color_g') and hasattr(self, 'text_color_b'):
@@ -2825,49 +2839,442 @@ class MangaTranslationTab:
         # Reset font mapping
         self.font_mapping = {}
         
-        # Windows system fonts with paths
-        windows_fonts = [
-            # Basic fonts
-            ("Arial", "C:/Windows/Fonts/arial.ttf"),
-            ("Calibri", "C:/Windows/Fonts/calibri.ttf"),
-            ("Comic Sans MS", "C:/Windows/Fonts/comic.ttf"),
-            ("Tahoma", "C:/Windows/Fonts/tahoma.ttf"),
-            ("Times New Roman", "C:/Windows/Fonts/times.ttf"),
-            ("Verdana", "C:/Windows/Fonts/verdana.ttf"),
-            ("Georgia", "C:/Windows/Fonts/georgia.ttf"),
-            ("Impact", "C:/Windows/Fonts/impact.ttf"),
-            ("Trebuchet MS", "C:/Windows/Fonts/trebuc.ttf"),
-            ("Courier New", "C:/Windows/Fonts/cour.ttf"),
+        # Comprehensive map of Windows font filenames to proper display names
+        font_name_map = {
+            # === BASIC LATIN FONTS ===
+            # Arial family
+            'arial': 'Arial',
+            'ariali': 'Arial Italic',
+            'arialbd': 'Arial Bold',
+            'arialbi': 'Arial Bold Italic',
+            'ariblk': 'Arial Black',
             
-            # Japanese fonts
-            ("MS Gothic", "C:/Windows/Fonts/msgothic.ttc"),
-            ("MS Mincho", "C:/Windows/Fonts/msmincho.ttc"),
-            ("Meiryo", "C:/Windows/Fonts/meiryo.ttc"),
-            ("Yu Gothic", "C:/Windows/Fonts/yugothic.ttc"),
-            ("Yu Mincho", "C:/Windows/Fonts/yumin.ttc"),
+            # Times New Roman
+            'times': 'Times New Roman',
+            'timesbd': 'Times New Roman Bold',
+            'timesi': 'Times New Roman Italic',
+            'timesbi': 'Times New Roman Bold Italic',
             
-            # Korean fonts
-            ("Malgun Gothic", "C:/Windows/Fonts/malgun.ttf"),
-            ("Gulim", "C:/Windows/Fonts/gulim.ttc"),
-            ("Dotum", "C:/Windows/Fonts/dotum.ttc"),
-            ("Batang", "C:/Windows/Fonts/batang.ttc"),
+            # Calibri family
+            'calibri': 'Calibri',
+            'calibrib': 'Calibri Bold',
+            'calibrii': 'Calibri Italic',
+            'calibriz': 'Calibri Bold Italic',
+            'calibril': 'Calibri Light',
+            'calibrili': 'Calibri Light Italic',
             
-            # Chinese fonts
-            ("SimSun", "C:/Windows/Fonts/simsun.ttc"),
-            ("SimHei", "C:/Windows/Fonts/simhei.ttf"),
-            ("Microsoft YaHei", "C:/Windows/Fonts/msyh.ttc"),
-            ("Microsoft JhengHei", "C:/Windows/Fonts/msjh.ttc"),
-            ("KaiTi", "C:/Windows/Fonts/simkai.ttf"),
-            ("FangSong", "C:/Windows/Fonts/simfang.ttf"),
-        ]
+            # Comic Sans family
+            'comic': 'Comic Sans MS',
+            'comici': 'Comic Sans MS Italic',
+            'comicbd': 'Comic Sans MS Bold',
+            'comicz': 'Comic Sans MS Bold Italic',
+            
+            # Segoe UI family
+            'segoeui': 'Segoe UI',
+            'segoeuib': 'Segoe UI Bold',
+            'segoeuii': 'Segoe UI Italic',
+            'segoeuiz': 'Segoe UI Bold Italic',
+            'segoeuil': 'Segoe UI Light',
+            'segoeuisl': 'Segoe UI Semilight',
+            'seguisb': 'Segoe UI Semibold',
+            'seguisbi': 'Segoe UI Semibold Italic',
+            'seguisli': 'Segoe UI Semilight Italic',
+            'seguili': 'Segoe UI Light Italic',
+            'seguibl': 'Segoe UI Black',
+            'seguibli': 'Segoe UI Black Italic',
+            'seguihis': 'Segoe UI Historic',
+            'seguiemj': 'Segoe UI Emoji',
+            'seguisym': 'Segoe UI Symbol',
+            
+            # Courier
+            'cour': 'Courier New',
+            'courbd': 'Courier New Bold',
+            'couri': 'Courier New Italic',
+            'courbi': 'Courier New Bold Italic',
+            
+            # Verdana
+            'verdana': 'Verdana',
+            'verdanab': 'Verdana Bold',
+            'verdanai': 'Verdana Italic',
+            'verdanaz': 'Verdana Bold Italic',
+            
+            # Georgia
+            'georgia': 'Georgia',
+            'georgiab': 'Georgia Bold',
+            'georgiai': 'Georgia Italic',
+            'georgiaz': 'Georgia Bold Italic',
+            
+            # Tahoma
+            'tahoma': 'Tahoma',
+            'tahomabd': 'Tahoma Bold',
+            
+            # Trebuchet
+            'trebuc': 'Trebuchet MS',
+            'trebucbd': 'Trebuchet MS Bold',
+            'trebucit': 'Trebuchet MS Italic',
+            'trebucbi': 'Trebuchet MS Bold Italic',
+            
+            # Impact
+            'impact': 'Impact',
+            
+            # Consolas
+            'consola': 'Consolas',
+            'consolab': 'Consolas Bold',
+            'consolai': 'Consolas Italic',
+            'consolaz': 'Consolas Bold Italic',
+            
+            # Sitka family (from your screenshot)
+            'sitka': 'Sitka Small',
+            'sitkab': 'Sitka Small Bold',
+            'sitkai': 'Sitka Small Italic',
+            'sitkaz': 'Sitka Small Bold Italic',
+            'sitkavf': 'Sitka Text',
+            'sitkavfb': 'Sitka Text Bold',
+            'sitkavfi': 'Sitka Text Italic',
+            'sitkavfz': 'Sitka Text Bold Italic',
+            'sitkasubheading': 'Sitka Subheading',
+            'sitkasubheadingb': 'Sitka Subheading Bold',
+            'sitkasubheadingi': 'Sitka Subheading Italic',
+            'sitkasubheadingz': 'Sitka Subheading Bold Italic',
+            'sitkaheading': 'Sitka Heading',
+            'sitkaheadingb': 'Sitka Heading Bold',
+            'sitkaheadingi': 'Sitka Heading Italic',
+            'sitkaheadingz': 'Sitka Heading Bold Italic',
+            'sitkadisplay': 'Sitka Display',
+            'sitkadisplayb': 'Sitka Display Bold',
+            'sitkadisplayi': 'Sitka Display Italic',
+            'sitkadisplayz': 'Sitka Display Bold Italic',
+            'sitkabanner': 'Sitka Banner',
+            'sitkabannerb': 'Sitka Banner Bold',
+            'sitkabanneri': 'Sitka Banner Italic',
+            'sitkabannerz': 'Sitka Banner Bold Italic',
+            
+            # Ink Free (from your screenshot)
+            'inkfree': 'Ink Free',
+            
+            # Lucida family
+            'l_10646': 'Lucida Sans Unicode',
+            'lucon': 'Lucida Console',
+            'ltype': 'Lucida Sans Typewriter',
+            'ltypeb': 'Lucida Sans Typewriter Bold',
+            'ltypei': 'Lucida Sans Typewriter Italic',
+            'ltypebi': 'Lucida Sans Typewriter Bold Italic',
+
+            # Palatino Linotype
+            'pala': 'Palatino Linotype',
+            'palab': 'Palatino Linotype Bold',
+            'palabi': 'Palatino Linotype Bold Italic',
+            'palai': 'Palatino Linotype Italic',
+
+            # Noto fonts
+            'notosansjp': 'Noto Sans JP',
+            'notoserifjp': 'Noto Serif JP',
+
+            # UD Digi Kyokasho (Japanese educational font)
+            'uddigikyokashon-b': 'UD Digi Kyokasho NK-B',
+            'uddigikyokashon-r': 'UD Digi Kyokasho NK-R',
+            'uddigikyokashonk-b': 'UD Digi Kyokasho NK-B',
+            'uddigikyokashonk-r': 'UD Digi Kyokasho NK-R',
+
+            # Urdu Typesetting
+            'urdtype': 'Urdu Typesetting',
+            'urdtypeb': 'Urdu Typesetting Bold',
+
+            # Segoe variants
+            'segmdl2': 'Segoe MDL2 Assets',
+            'segoeicons': 'Segoe Fluent Icons',
+            'segoepr': 'Segoe Print',
+            'segoeprb': 'Segoe Print Bold',
+            'segoesc': 'Segoe Script',
+            'segoescb': 'Segoe Script Bold',
+            'seguivar': 'Segoe UI Variable',
+
+            # Sans Serif Collection
+            'sansserifcollection': 'Sans Serif Collection',
+
+            # Additional common Windows 10/11 fonts
+            'holomdl2': 'HoloLens MDL2 Assets',
+            'gadugi': 'Gadugi',
+            'gadugib': 'Gadugi Bold',
+
+            # Cascadia Code (developer font)
+            'cascadiacode': 'Cascadia Code',
+            'cascadiacodepl': 'Cascadia Code PL',
+            'cascadiamono': 'Cascadia Mono',
+            'cascadiamonopl': 'Cascadia Mono PL',
+
+            # More Segoe UI variants
+            'seguibli': 'Segoe UI Black Italic',
+            'segoeuiblack': 'Segoe UI Black',
+
+            # Other fonts
+            'aldhabi': 'Aldhabi',
+            'andiso': 'Andalus',  # This is likely Andalus font
+            'arabtype': 'Arabic Typesetting',
+            'mstmc': 'Myanmar Text',  # Alternate file name
+            'monbaiti': 'Mongolian Baiti',  # Shorter filename variant
+            'leeluisl': 'Leelawadee UI Semilight',  # Missing variant
+            'simsunextg': 'SimSun-ExtG',  # Extended SimSun variant
+            'ebrima': 'Ebrima',
+            'ebrimabd': 'Ebrima Bold',
+            'gabriola': 'Gabriola',
+
+            # Bahnschrift variants
+            'bahnschrift': 'Bahnschrift',
+            'bahnschriftlight': 'Bahnschrift Light',
+            'bahnschriftsemibold': 'Bahnschrift SemiBold',
+            'bahnschriftbold': 'Bahnschrift Bold',
+
+            # Majalla (African language font)
+            'majalla': 'Sakkal Majalla',
+            'majallab': 'Sakkal Majalla Bold',
+
+            # Additional fonts that might be missing
+            'amiri': 'Amiri',
+            'amiri-bold': 'Amiri Bold',
+            'amiri-slanted': 'Amiri Slanted',
+            'amiri-boldslanted': 'Amiri Bold Slanted',
+            'aparaj': 'Aparajita',
+            'aparajb': 'Aparajita Bold',
+            'aparaji': 'Aparajita Italic',
+            'aparajbi': 'Aparajita Bold Italic',
+            'kokila': 'Kokila',
+            'kokilab': 'Kokila Bold',
+            'kokilai': 'Kokila Italic',
+            'kokilabi': 'Kokila Bold Italic',
+            'utsaah': 'Utsaah',
+            'utsaahb': 'Utsaah Bold',
+            'utsaahi': 'Utsaah Italic',
+            'utsaahbi': 'Utsaah Bold Italic',
+            'vani': 'Vani',
+            'vanib': 'Vani Bold',
+            
+            # === JAPANESE FONTS ===
+            'msgothic': 'MS Gothic',
+            'mspgothic': 'MS PGothic',
+            'msmincho': 'MS Mincho',
+            'mspmincho': 'MS PMincho',
+            'meiryo': 'Meiryo',
+            'meiryob': 'Meiryo Bold',
+            'yugothic': 'Yu Gothic',
+            'yugothb': 'Yu Gothic Bold',
+            'yugothl': 'Yu Gothic Light',
+            'yugothm': 'Yu Gothic Medium',
+            'yugothr': 'Yu Gothic Regular',
+            'yumin': 'Yu Mincho',
+            'yumindb': 'Yu Mincho Demibold',
+            'yuminl': 'Yu Mincho Light',
+            
+            # === KOREAN FONTS ===
+            'malgun': 'Malgun Gothic',
+            'malgunbd': 'Malgun Gothic Bold',
+            'malgunsl': 'Malgun Gothic Semilight',
+            'gulim': 'Gulim',
+            'gulimche': 'GulimChe',
+            'dotum': 'Dotum',
+            'dotumche': 'DotumChe',
+            'batang': 'Batang',
+            'batangche': 'BatangChe',
+            'gungsuh': 'Gungsuh',
+            'gungsuhche': 'GungsuhChe',
+            
+            # === CHINESE FONTS ===
+            # Simplified Chinese
+            'simsun': 'SimSun',
+            'simsunb': 'SimSun Bold',
+            'simsunextb': 'SimSun ExtB',
+            'nsimsun': 'NSimSun',
+            'simhei': 'SimHei',
+            'simkai': 'KaiTi',
+            'simfang': 'FangSong',
+            'simli': 'LiSu',
+            'simyou': 'YouYuan',
+            'stcaiyun': 'STCaiyun',
+            'stfangsong': 'STFangsong',
+            'sthupo': 'STHupo',
+            'stkaiti': 'STKaiti',
+            'stliti': 'STLiti',
+            'stsong': 'STSong',
+            'stxihei': 'STXihei',
+            'stxingkai': 'STXingkai',
+            'stxinwei': 'STXinwei',
+            'stzhongsong': 'STZhongsong',
+            
+            # Traditional Chinese  
+            'msjh': 'Microsoft JhengHei',
+            'msjhbd': 'Microsoft JhengHei Bold',
+            'msjhl': 'Microsoft JhengHei Light',
+            'mingliu': 'MingLiU',
+            'pmingliu': 'PMingLiU',
+            'mingliub': 'MingLiU Bold',
+            'mingliuhk': 'MingLiU_HKSCS',
+            'mingliuextb': 'MingLiU ExtB',
+            'pmingliuextb': 'PMingLiU ExtB',
+            'mingliuhkextb': 'MingLiU_HKSCS ExtB',
+            'kaiu': 'DFKai-SB',
+            
+            # Microsoft YaHei
+            'msyh': 'Microsoft YaHei',
+            'msyhbd': 'Microsoft YaHei Bold',
+            'msyhl': 'Microsoft YaHei Light',
+            
+            # === THAI FONTS ===
+            'leelawui': 'Leelawadee UI',
+            'leelauib': 'Leelawadee UI Bold',
+            'leelauisl': 'Leelawadee UI Semilight',
+            'leelawad': 'Leelawadee',
+            'leelawdb': 'Leelawadee Bold',
+            
+            # === INDIC FONTS ===
+            'mangal': 'Mangal',
+            'vrinda': 'Vrinda',
+            'raavi': 'Raavi',
+            'shruti': 'Shruti',
+            'tunga': 'Tunga',
+            'gautami': 'Gautami',
+            'kartika': 'Kartika',
+            'latha': 'Latha',
+            'kalinga': 'Kalinga',
+            'vijaya': 'Vijaya',
+            'nirmala': 'Nirmala UI',
+            'nirmalab': 'Nirmala UI Bold',
+            'nirmalas': 'Nirmala UI Semilight',
+            
+            # === ARABIC FONTS ===
+            'arial': 'Arial',
+            'trado': 'Traditional Arabic',
+            'tradbdo': 'Traditional Arabic Bold',
+            'simpo': 'Simplified Arabic',
+            'simpbdo': 'Simplified Arabic Bold',
+            'simpfxo': 'Simplified Arabic Fixed',
+            
+            # === OTHER ASIAN FONTS ===
+            'javatext': 'Javanese Text',
+            'himalaya': 'Microsoft Himalaya',
+            'mongolianbaiti': 'Mongolian Baiti',
+            'msuighur': 'Microsoft Uighur',
+            'msuighub': 'Microsoft Uighur Bold',
+            'msyi': 'Microsoft Yi Baiti',
+            'taileb': 'Microsoft Tai Le Bold',
+            'taile': 'Microsoft Tai Le',
+            'ntailu': 'Microsoft New Tai Lue',
+            'ntailub': 'Microsoft New Tai Lue Bold',
+            'phagspa': 'Microsoft PhagsPa',
+            'phagspab': 'Microsoft PhagsPa Bold',
+            'mmrtext': 'Myanmar Text',
+            'mmrtextb': 'Myanmar Text Bold',
+            
+            # === SYMBOL FONTS ===
+            'symbol': 'Symbol',
+            'webdings': 'Webdings',
+            'wingding': 'Wingdings',
+            'wingdng2': 'Wingdings 2',
+            'wingdng3': 'Wingdings 3',
+            'mtextra': 'MT Extra',
+            'marlett': 'Marlett',
+            
+            # === OTHER FONTS ===
+            'mvboli': 'MV Boli',
+            'sylfaen': 'Sylfaen',
+            'estrangelo': 'Estrangelo Edessa',
+            'euphemia': 'Euphemia',
+            'plantagenet': 'Plantagenet Cherokee',
+            'micross': 'Microsoft Sans Serif',
+            
+            # Franklin Gothic
+            'framd': 'Franklin Gothic Medium',
+            'framdit': 'Franklin Gothic Medium Italic',
+            'fradm': 'Franklin Gothic Demi',
+            'fradmcn': 'Franklin Gothic Demi Cond',
+            'fradmit': 'Franklin Gothic Demi Italic',
+            'frahv': 'Franklin Gothic Heavy',
+            'frahvit': 'Franklin Gothic Heavy Italic',
+            'frabook': 'Franklin Gothic Book',
+            'frabookit': 'Franklin Gothic Book Italic',
+            
+            # Cambria
+            'cambria': 'Cambria',
+            'cambriab': 'Cambria Bold',
+            'cambriai': 'Cambria Italic',
+            'cambriaz': 'Cambria Bold Italic',
+            'cambria&cambria math': 'Cambria Math',
+            
+            # Candara
+            'candara': 'Candara',
+            'candarab': 'Candara Bold',
+            'candarai': 'Candara Italic',
+            'candaraz': 'Candara Bold Italic',
+            'candaral': 'Candara Light',
+            'candarali': 'Candara Light Italic',
+            
+            # Constantia
+            'constan': 'Constantia',
+            'constanb': 'Constantia Bold',
+            'constani': 'Constantia Italic',
+            'constanz': 'Constantia Bold Italic',
+            
+            # Corbel
+            'corbel': 'Corbel',
+            'corbelb': 'Corbel Bold',
+            'corbeli': 'Corbel Italic',
+            'corbelz': 'Corbel Bold Italic',
+            'corbell': 'Corbel Light',
+            'corbelli': 'Corbel Light Italic',
+            
+            # Bahnschrift
+            'bahnschrift': 'Bahnschrift',
+            
+            # Garamond
+            'gara': 'Garamond',
+            'garabd': 'Garamond Bold',
+            'garait': 'Garamond Italic',
+            
+            # Century Gothic
+            'gothic': 'Century Gothic',
+            'gothicb': 'Century Gothic Bold',
+            'gothici': 'Century Gothic Italic',
+            'gothicz': 'Century Gothic Bold Italic',
+            
+            # Bookman Old Style
+            'bookos': 'Bookman Old Style',
+            'bookosb': 'Bookman Old Style Bold',
+            'bookosi': 'Bookman Old Style Italic',
+            'bookosbi': 'Bookman Old Style Bold Italic',
+        }
         
-        # Check which fonts exist and add to mapping
+        # Dynamically discover all Windows fonts
+        windows_fonts = []
+        windows_font_dir = "C:/Windows/Fonts"
+        
+        if os.path.exists(windows_font_dir):
+            for font_file in os.listdir(windows_font_dir):
+                font_path = os.path.join(windows_font_dir, font_file)
+                
+                # Check if it's a font file
+                if os.path.isfile(font_path) and font_file.lower().endswith(('.ttf', '.ttc', '.otf')):
+                    # Get base name without extension
+                    base_name = os.path.splitext(font_file)[0]
+                    base_name_lower = base_name.lower()
+                    
+                    # Check if we have a proper name mapping
+                    if base_name_lower in font_name_map:
+                        display_name = font_name_map[base_name_lower]
+                    else:
+                        # Generic cleanup for unmapped fonts
+                        display_name = base_name.replace('_', ' ').replace('-', ' ')
+                        display_name = ' '.join(word.capitalize() for word in display_name.split())
+                    
+                    windows_fonts.append((display_name, font_path))
+        
+        # Sort alphabetically
+        windows_fonts.sort(key=lambda x: x[0])
+        
+        # Add all discovered fonts to the list
         for font_name, font_path in windows_fonts:
-            if os.path.exists(font_path):
-                fonts.append(font_name)
-                self.font_mapping[font_name] = font_path
+            fonts.append(font_name)
+            self.font_mapping[font_name] = font_path
         
-        # Check for custom fonts directory
+        # Check for custom fonts directory (keep your existing code)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         fonts_dir = os.path.join(script_dir, "fonts")
         
@@ -2884,7 +3291,7 @@ class MangaTranslationTab:
                         fonts.append(font_name)
                         self.font_mapping[font_name] = font_path
         
-        # Load previously saved custom fonts
+        # Load previously saved custom fonts (keep your existing code)
         if 'custom_fonts' in self.main_gui.config:
             for custom_font in self.main_gui.config['custom_fonts']:
                 if os.path.exists(custom_font['path']):
@@ -3963,7 +4370,8 @@ class MangaTranslationTab:
                 shadow_color=shadow_color,
                 shadow_offset_x=self.shadow_offset_x_var.get(),
                 shadow_offset_y=self.shadow_offset_y_var.get(),
-                shadow_blur=self.shadow_blur_var.get()
+                shadow_blur=self.shadow_blur_var.get(),
+                force_caps_lock=self.force_caps_lock_var.get()
             )
             
             # Update font mode and multiplier explicitly
@@ -3973,6 +4381,7 @@ class MangaTranslationTab:
             self.translator.min_readable_size = self.min_readable_size_var.get()
             self.translator.max_font_size_limit = self.max_font_size_var.get()
             self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
+            self.translator.force_caps_lock = self.force_caps_lock_var.get()
             
             # Update constrain to bubble setting
             if hasattr(self, 'constrain_to_bubble_var'):
