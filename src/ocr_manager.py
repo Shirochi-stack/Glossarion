@@ -267,11 +267,39 @@ class Qwen2VL(OCRProvider):
             model_options = {
                 "1": "Qwen/Qwen2-VL-2B-Instruct",
                 "2": "Qwen/Qwen2-VL-7B-Instruct",
-                "3": "Qwen/Qwen2-VL-72B-Instruct"
+                "3": "Qwen/Qwen2-VL-72B-Instruct",
+                "4": "custom"
             }
             
-            # Use provided size or default to 2B
-            model_id = model_options.get(str(model_size), model_options["1"])
+            # Determine which model to load
+            if model_size and str(model_size).startswith("custom:"):
+                # Custom model passed with ID
+                model_id = str(model_size).replace("custom:", "")
+                self.loaded_model_size = "Custom"
+                self._log(f"Loading custom model: {model_id}")
+            elif model_size == "4":
+                # Custom option selected but no ID - shouldn't happen
+                self._log("❌ Custom model selected but no ID provided", "error")
+                return False
+            elif model_size and str(model_size) in model_options:
+                # Standard model option
+                option = model_options[str(model_size)]
+                if option == "custom":
+                    self._log("❌ Custom model needs an ID", "error")
+                    return False
+                model_id = option
+                # Set loaded_model_size for status display
+                if model_size == "1":
+                    self.loaded_model_size = "2B"
+                elif model_size == "2":
+                    self.loaded_model_size = "7B"
+                elif model_size == "3":
+                    self.loaded_model_size = "72B"
+            else:
+                # Default to 2B if not specified
+                model_id = model_options["1"]
+                self.loaded_model_size = "2B"
+                self._log("No model size specified, defaulting to 2B")
             
             self._log(f"Loading model: {model_id}")
             
