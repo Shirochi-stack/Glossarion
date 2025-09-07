@@ -258,7 +258,7 @@ class Qwen2VL(OCRProvider):
                 self._log("❌ Not installed", "error")
                 return False
             
-            self._log("🔥 Loading Qwen2-VL for Korean OCR...")
+            self._log("🔥 Loading Qwen2-VL for Advanced OCR...")
             
             from transformers import AutoProcessor, AutoTokenizer
             import torch
@@ -270,6 +270,13 @@ class Qwen2VL(OCRProvider):
                 "3": "Qwen/Qwen2-VL-72B-Instruct",
                 "4": "custom"
             }
+            
+            # CHANGE: Default to 7B instead of 2B
+            # Check for saved preference first
+            if model_size is None:
+                # Try to get from environment or config
+                import os
+                model_size = os.environ.get('QWEN2VL_MODEL_SIZE', '2')  # Default to '2' which is 7B
             
             # Determine which model to load
             if model_size and str(model_size).startswith("custom:"):
@@ -296,10 +303,10 @@ class Qwen2VL(OCRProvider):
                 elif model_size == "3":
                     self.loaded_model_size = "72B"
             else:
-                # Default to 2B if not specified
-                model_id = model_options["1"]
-                self.loaded_model_size = "2B"
-                self._log("No model size specified, defaulting to 2B")
+                # CHANGE: Default to 7B (option "2") instead of 2B
+                model_id = model_options["2"]  # Changed from "1" to "2"
+                self.loaded_model_size = "7B"   # Changed from "2B" to "7B"
+                self._log("No model size specified, defaulting to 7B")  # Changed message
             
             self._log(f"Loading model: {model_id}")
             
@@ -331,7 +338,7 @@ class Qwen2VL(OCRProvider):
             
             self.model.eval()
             self.is_loaded = True
-            self._log("✅ Qwen2-VL ready for Korean OCR!")
+            self._log("✅ Qwen2-VL ready for Advanced OCR!")
             return True
             
         except Exception as e:
@@ -934,13 +941,13 @@ class OCRManager:
         
         return provider.install(progress_callback)
     
-    def load_provider(self, name: str) -> bool:
-        """Load a provider's model"""
+    def load_provider(self, name: str, **kwargs) -> bool:
+        """Load a provider's model with optional parameters"""
         provider = self.providers.get(name)
         if not provider:
             return False
         
-        return provider.load_model()
+        return provider.load_model(**kwargs)  # <-- Passes model_size and any other kwargs
     
     def detect_text(self, image: np.ndarray, provider_name: str = None, **kwargs) -> List[OCRResult]:
         """Detect text using specified or current provider"""
