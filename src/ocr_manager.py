@@ -16,7 +16,18 @@ import numpy as np
 from dataclasses import dataclass
 from PIL import Image
 import logging
+# At the top of ocr_manager.py or in the Qwen2VL class
+try:
+    import bitsandbytes
+    HAS_QUANTIZATION = True
+except ImportError:
+    HAS_QUANTIZATION = False
 
+try:
+    import optimum
+    HAS_OPTIMUM = True
+except ImportError:
+    HAS_OPTIMUM = False
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -81,26 +92,7 @@ class MangaOCRProvider(OCRProvider):
     
     def install(self, progress_callback=None) -> bool:
         """Install transformers and torch"""
-        try:
-            self._log("📦 Installing transformers for manga OCR...")
-            if progress_callback:
-                progress_callback("Installing transformers...", 0)
-            
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "transformers", "torch", "pillow", "--upgrade"
-            ])
-            
-            if progress_callback:
-                progress_callback("Transformers installed successfully!", 100)
-            
-            self.is_installed = True
-            self._log("✅ Transformers installed successfully")
-            return True
-            
-        except Exception as e:
-            self._log(f"❌ Failed to install transformers: {str(e)}", "error")
-            return False
+        pass
     
     def load_model(self) -> bool:
         """Load the manga-ocr model from HuggingFace"""
@@ -230,26 +222,7 @@ class Qwen2VL(OCRProvider):
     
     def install(self, progress_callback=None) -> bool:
         """Install requirements for Qwen2-VL"""
-        try:
-            self._log("📦 Installing Qwen2-VL dependencies...")
-            if progress_callback:
-                progress_callback("Installing Qwen2-VL...", 0)
-            
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                "transformers", "torch", "torchvision", "pillow", "--upgrade"
-            ])
-            
-            if progress_callback:
-                progress_callback("Done!", 100)
-            
-            self.is_installed = True
-            self._log("✅ Installed")
-            return True
-            
-        except Exception as e:
-            self._log(f"❌ Failed: {str(e)}", "error")
-            return False
+        pass
     
     def load_model(self, model_size=None) -> bool:
         """Load Qwen2-VL model with size selection"""
@@ -324,7 +297,7 @@ class Qwen2VL(OCRProvider):
                 from transformers import AutoModelForVision2Seq
                 self.model = AutoModelForVision2Seq.from_pretrained(
                     model_id,
-                    torch_dtype=torch.float16,
+                    dtype=torch.float16,
                     device_map="auto",
                     trust_remote_code=True
                 )
@@ -334,7 +307,7 @@ class Qwen2VL(OCRProvider):
                 from transformers import AutoModelForVision2Seq
                 self.model = AutoModelForVision2Seq.from_pretrained(
                     model_id,
-                    torch_dtype=torch.float32,
+                    dtype=torch.float32,
                     trust_remote_code=True
                 )
                 self._log("✅ Model loaded on CPU")
@@ -423,11 +396,16 @@ class Qwen2VL(OCRProvider):
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=128,
-                    do_sample=False,  # Deterministic output
-                    temperature=0.01,  # Very low temperature to reduce creativity
-                    top_p=1.0,  # No nucleus sampling
-                    repetition_penalty=1.0  # No repetition penalty
+                    max_new_tokens=128,      # Reduced from 512 - manga bubbles are typically short
+                    do_sample=False,        # Keep deterministic
+                    temperature=0.01,       # Keep your very low temperature
+                    top_p=1.0,             # Keep no nucleus sampling
+                    repetition_penalty=1.0, # Keep no repetition penalty
+                    num_beams=1,           # Ensure greedy decoding (faster than beam search)
+                    use_cache=True,        # Enable KV cache for speed
+                    early_stopping=True,   # Stop at EOS token
+                    pad_token_id=self.tokenizer.pad_token_id,      # Proper padding
+                    eos_token_id=self.tokenizer.eos_token_id,      # Proper stopping
                 )
             
             # Decode the output
@@ -537,27 +515,7 @@ class EasyOCRProvider(OCRProvider):
     
     def install(self, progress_callback=None) -> bool:
         """Install easyocr"""
-        try:
-            self._log("📦 Installing easyocr...")
-            if progress_callback:
-                progress_callback("Installing easyocr package...", 0)
-            
-            # Install easyocr
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "easyocr", "--upgrade"
-            ])
-            
-            if progress_callback:
-                progress_callback("easyocr installed successfully!", 100)
-            
-            self.is_installed = True
-            self._log("✅ easyocr installed successfully")
-            return True
-            
-        except Exception as e:
-            self._log(f"❌ Failed to install easyocr: {str(e)}", "error")
-            return False
+        pass
     
     def load_model(self) -> bool:
         """Load easyocr model"""
@@ -637,33 +595,7 @@ class PaddleOCRProvider(OCRProvider):
     
     def install(self, progress_callback=None) -> bool:
         """Install paddleocr"""
-        try:
-            self._log("📦 Installing paddlepaddle and paddleocr...")
-            if progress_callback:
-                progress_callback("Installing PaddleOCR...", 0)
-            
-            # Install paddlepaddle first
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "paddlepaddle", "--upgrade"
-            ])
-            
-            # Install paddleocr
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "paddleocr", "--upgrade"
-            ])
-            
-            if progress_callback:
-                progress_callback("PaddleOCR installed successfully!", 100)
-            
-            self.is_installed = True
-            self._log("✅ paddleocr installed successfully")
-            return True
-            
-        except Exception as e:
-            self._log(f"❌ Failed to install paddleocr: {str(e)}", "error")
-            return False
+        pass
     
     def load_model(self) -> bool:
         """Load paddleocr model"""
@@ -838,27 +770,7 @@ class DocTROCRProvider(OCRProvider):
     
     def install(self, progress_callback=None) -> bool:
         """Install doctr"""
-        try:
-            self._log("📦 Installing doctr...")
-            if progress_callback:
-                progress_callback("Installing DocTR...", 0)
-            
-            # Install doctr
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "python-doctr[torch]", "--upgrade"
-            ])
-            
-            if progress_callback:
-                progress_callback("DocTR installed successfully!", 100)
-            
-            self.is_installed = True
-            self._log("✅ doctr installed successfully")
-            return True
-            
-        except Exception as e:
-            self._log(f"❌ Failed to install doctr: {str(e)}", "error")
-            return False
+        pass
     
     def load_model(self) -> bool:
         """Load doctr model"""
