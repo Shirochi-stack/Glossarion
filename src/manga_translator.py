@@ -73,6 +73,7 @@ class MangaTranslator:
                     'azure_endpoint': str (if azure)
                 }
         """
+        self.ocr_config = ocr_config
         self.main_gui = main_gui
         self.config = main_gui.config
         self.manga_settings = self.config.get('manga_settings', {})
@@ -983,7 +984,16 @@ class MangaTranslator:
                 
                 if not provider_status['loaded']:
                     self._log(f"🔥 Loading {self.ocr_provider} model...")
-                    if not self.ocr_manager.load_provider(self.ocr_provider):
+                    
+                    # Check for model_size in config for Qwen2-VL
+                    if self.ocr_provider == 'Qwen2-VL' and hasattr(self, 'ocr_config') and 'model_size' in self.ocr_config:
+                        model_size = self.ocr_config['model_size']
+                        self._log(f"Loading Qwen2-VL with model_size={model_size}")
+                        success = self.ocr_manager.load_provider(self.ocr_provider, model_size=model_size)
+                    else:
+                        success = self.ocr_manager.load_provider(self.ocr_provider)
+                    
+                    if not success:
                         raise Exception(f"Failed to load {self.ocr_provider} model")
                 
                 # Initialize ocr_results here before any provider-specific code
