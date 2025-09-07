@@ -107,13 +107,28 @@ class MangaTranslationTab:
         """Download HuggingFace models with progress tracking"""
         provider = self.ocr_provider_var.get()
         
-        # Model sizes (approximate in MB)
-        model_sizes = {
-            'manga-ocr': 450,
+        # Model configurations
+        model_configs = {
+            'manga-ocr': {
+                'size_mb': 450,
+                'model_id': 'kha-white/manga-ocr-base'
+            },
             'Qwen2-VL': {
-                '2B': 4000,    # ~4GB
-                '7B': 14000,   # ~14GB
-                '72B': 144000  # ~144GB
+                '2B': {
+                    'id': 'Qwen/Qwen2-VL-2B-Instruct',
+                    'size_mb': 4000,
+                    'name': 'Qwen2-VL 2B'
+                },
+                '7B': {
+                    'id': 'Qwen/Qwen2-VL-7B-Instruct', 
+                    'size_mb': 14000,
+                    'name': 'Qwen2-VL 7B'
+                },
+                '72B': {
+                    'id': 'Qwen/Qwen2-VL-72B-Instruct',
+                    'size_mb': 144000,
+                    'name': 'Qwen2-VL 72B'
+                }
             }
         }
         
@@ -136,59 +151,36 @@ class MangaTranslationTab:
             tk.Label(selection_dialog, text="Select Qwen2-VL Model Size", 
                     font=('Arial', 14, 'bold')).pack(pady=20)
             
-            # Model options with radio buttons
+            # Model options
             model_options = {
-                "2B": {
-                    "id": "Qwen/Qwen2-VL-2B-Instruct",
-                    "name": "Qwen2-VL 2B",
-                    "description": "• Smallest model (~4GB download, 4-8GB VRAM)\n• Fast but less accurate\n• Good for quick testing",
-                    "size": 4000
-                },
-                "7B": {
-                    "id": "Qwen/Qwen2-VL-7B-Instruct",
-                    "name": "Qwen2-VL 7B",
-                    "description": "• Medium model (~14GB download, 12-16GB VRAM)\n• Best balance of speed and quality\n• Recommended for most users",
-                    "size": 14000
-                },
-                "72B": {
-                    "id": "Qwen/Qwen2-VL-72B-Instruct",
-                    "name": "Qwen2-VL 72B",
-                    "description": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU",
-                    "size": 144000
-                },
-                "custom": {
-                    "id": "custom",
-                    "name": "Custom Model",
-                    "description": "• Enter any Hugging Face model ID\n• For advanced users\n• Size varies by model",
-                    "size": 10000  # Default estimate
-                }
+                "2B": "• Smallest model (~4GB download, 4-8GB VRAM)\n• Fast but less accurate\n• Good for quick testing",
+                "7B": "• Medium model (~14GB download, 12-16GB VRAM)\n• Best balance of speed and quality\n• Recommended for most users",
+                "72B": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU",
+                "custom": "• Enter any Hugging Face model ID\n• For advanced users\n• Size varies by model"
             }
             
-            selected_model = tk.StringVar(value="7B")  # Default to 7B
+            selected_model = tk.StringVar(value="2B")  # Default to smallest for testing
             custom_model_id = tk.StringVar()
             
-            # Create radio buttons and descriptions
-            for key, info in model_options.items():
+            # Create radio buttons
+            for key, description in model_options.items():
                 frame = tk.Frame(selection_dialog)
                 frame.pack(fill=tk.X, padx=20, pady=10)
                 
-                rb = tk.Radiobutton(frame, text=info['name'], variable=selected_model, 
-                                   value=key, font=('Arial', 11, 'bold'))
+                rb = tk.Radiobutton(frame, text=f"{key} Model" if key != "custom" else "Custom Model", 
+                                   variable=selected_model, value=key, font=('Arial', 11, 'bold'))
                 rb.pack(anchor='w')
                 
-                desc_label = tk.Label(frame, text=info['description'], 
-                                     font=('Arial', 9), justify=tk.LEFT, fg='gray')
+                desc_label = tk.Label(frame, text=description, font=('Arial', 9), 
+                                     justify=tk.LEFT, fg='gray')
                 desc_label.pack(anchor='w', padx=(20, 0))
             
-            # Custom model entry (only shown when custom is selected)
+            # Custom model entry
             custom_frame = tk.Frame(selection_dialog)
             custom_frame.pack(fill=tk.X, padx=40, pady=5)
-            
             tk.Label(custom_frame, text="Model ID:", font=('Arial', 9)).pack(side=tk.LEFT)
             custom_entry = tk.Entry(custom_frame, textvariable=custom_model_id, width=40)
             custom_entry.pack(side=tk.LEFT, padx=5)
-            
-            # Initially hide custom entry
             custom_frame.pack_forget()
             
             def on_model_change():
@@ -198,41 +190,36 @@ class MangaTranslationTab:
                     custom_frame.pack_forget()
             
             # Update visibility when selection changes
-            for key in model_options:
-                frame = selection_dialog.winfo_children()[1 + list(model_options.keys()).index(key)]
-                rb = frame.winfo_children()[0]
-                rb.config(command=on_model_change)
+            for widget in selection_dialog.winfo_children():
+                if isinstance(widget, tk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Radiobutton):
+                            child.config(command=on_model_change)
             
-            # Warning label for system requirements
+            # GPU status
             warning_frame = tk.Frame(selection_dialog)
             warning_frame.pack(fill=tk.X, padx=20, pady=10)
             
-            warning_text = "⚠️ Note: Download sizes are approximate. Models require\nadditional disk space after extraction."
-            tk.Label(warning_frame, text=warning_text, font=('Arial', 9), 
-                    fg='orange', justify=tk.LEFT).pack()
-            
-            # Check GPU availability
             try:
                 import torch
                 if torch.cuda.is_available():
                     gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-                    gpu_text = f"✓ GPU detected: {torch.cuda.get_device_name(0)} ({gpu_mem:.1f}GB)"
+                    gpu_text = f"✓ GPU: {torch.cuda.get_device_name(0)} ({gpu_mem:.1f}GB)"
                     gpu_color = 'green'
                 else:
                     gpu_text = "✗ No GPU detected - will use CPU (very slow)"
                     gpu_color = 'red'
             except:
-                gpu_text = "? GPU status unknown"
-                gpu_color = 'gray'
+                gpu_text = "? GPU status unknown - install torch with CUDA"
+                gpu_color = 'orange'
             
-            tk.Label(warning_frame, text=gpu_text, font=('Arial', 9), 
-                    fg=gpu_color).pack()
+            tk.Label(warning_frame, text=gpu_text, font=('Arial', 9), fg=gpu_color).pack()
             
-            # Button frame
+            # Buttons
             button_frame = tk.Frame(selection_dialog)
             button_frame.pack(pady=20)
             
-            model_confirmed = {'value': False, 'model': None, 'model_id': None, 'size': None}
+            model_confirmed = {'value': False, 'model_key': None, 'model_id': None}
             
             def confirm_selection():
                 selected = selected_model.get()
@@ -241,45 +228,45 @@ class MangaTranslationTab:
                         tk.messagebox.showerror("Error", "Please enter a model ID")
                         return
                     model_confirmed['model_id'] = custom_model_id.get().strip()
-                    model_confirmed['size'] = model_options['custom']['size']
+                    model_confirmed['model_key'] = 'custom'
                 else:
-                    model_confirmed['model_id'] = model_options[selected]['id']
-                    model_confirmed['size'] = model_options[selected]['size']
+                    model_confirmed['model_key'] = selected
+                    model_confirmed['model_id'] = model_configs['Qwen2-VL'][selected]['id']
                 
                 model_confirmed['value'] = True
-                model_confirmed['model'] = selected
                 selection_dialog.destroy()
             
             def cancel_selection():
                 selection_dialog.destroy()
             
-            tb.Button(button_frame, text="Download", command=confirm_selection, 
+            tb.Button(button_frame, text="Continue", command=confirm_selection, 
                      bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
             tb.Button(button_frame, text="Cancel", command=cancel_selection, 
                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
             
-            # Wait for dialog to close
             self.dialog.wait_window(selection_dialog)
             
-            # If cancelled, return
             if not model_confirmed['value']:
                 return
             
-            # Use selected model for download
-            selected_model_key = model_confirmed['model']
+            selected_model_key = model_confirmed['model_key']
             model_id = model_confirmed['model_id']
-            total_size_mb = model_confirmed['size']
             
+            # Get size estimate
+            if selected_model_key == 'custom':
+                total_size_mb = 10000  # Default estimate for custom
+            else:
+                total_size_mb = model_configs['Qwen2-VL'][selected_model_key]['size_mb']
         else:
-            # For other providers (manga-ocr, etc.)
-            total_size_mb = model_sizes.get(provider, 500)
-            model_id = None
+            # manga-ocr
+            total_size_mb = model_configs.get(provider, {}).get('size_mb', 500)
+            model_id = model_configs.get(provider, {}).get('model_id')
             selected_model_key = None
         
         # Create download dialog
         download_dialog = tk.Toplevel(self.dialog)
         download_dialog.title(f"Download {provider} Model")
-        download_dialog.geometry("550x400")
+        download_dialog.geometry("600x450")
         download_dialog.transient(self.dialog)
         download_dialog.grab_set()
         
@@ -289,295 +276,232 @@ class MangaTranslationTab:
         y = (download_dialog.winfo_screenheight() // 2) - (download_dialog.winfo_height() // 2)
         download_dialog.geometry(f"+{x}+{y}")
         
-        # Info label
-        if provider == 'Qwen2-VL':
-            if selected_model_key == 'custom':
-                info_text = f"📚 Qwen2-VL Custom Model\n• Model ID: {model_id}\n• Estimated size: ~{total_size_mb/1000:.1f}GB\n• Vision-Language model for Korean OCR"
-            else:
-                model_info = {
-                    '2B': "📚 Qwen2-VL 2B Model\n• Smallest and fastest\n• Size: ~4GB\n• Good for testing",
-                    '7B': "📚 Qwen2-VL 7B Model\n• Best balance\n• Size: ~14GB\n• Recommended",
-                    '72B': "📚 Qwen2-VL 72B Model\n• Highest quality\n• Size: ~144GB\n• Requires high-end GPU"
-                }
-                info_text = model_info.get(selected_model_key, f"Model: {model_id}")
-        else:
-            info_text = {
-                'manga-ocr': "📚 Manga OCR Model\n• Source: HuggingFace (kha-white/manga-ocr-base)\n• Size: ~450MB\n• Optimized for Japanese manga text\n• Auto-downloads on first use",
-            }.get(provider, f"Model for {provider}")
+        # Info section
+        info_frame = tk.Frame(download_dialog)
+        info_frame.pack(pady=20, padx=20, fill=tk.X)
         
-        tk.Label(download_dialog, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack(pady=20)
+        if provider == 'Qwen2-VL':
+            info_text = f"📚 {model_configs['Qwen2-VL'].get(selected_model_key, {}).get('name', 'Custom Model')}\n"
+            info_text += f"Model ID: {model_id}\n"
+            info_text += f"Estimated size: ~{total_size_mb/1000:.1f}GB\n"
+            info_text += "Vision-Language model for Korean OCR"
+        else:
+            info_text = f"📚 {provider} Model\nOptimized for manga/manhwa text detection"
+        
+        tk.Label(info_frame, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack()
         
         # Progress frame
         progress_frame = tk.Frame(download_dialog)
-        progress_frame.pack(pady=20, padx=20, fill=tk.X)
+        progress_frame.pack(pady=10, padx=20, fill=tk.X)
         
-        # Progress label (shows MB)
-        progress_label = tk.Label(progress_frame, text="Ready to download", font=('Arial', 10))
-        progress_label.pack()
+        # Status label
+        status_label = tk.Label(progress_frame, text="Preparing download...", font=('Arial', 11))
+        status_label.pack(pady=5)
         
         # Progress bar
         progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(
-            progress_frame,
-            length=500,
-            mode='determinate',
-            variable=progress_var
-        )
+        progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
+                                      variable=progress_var)
         progress_bar.pack(pady=10)
         
-        # Size label
-        size_label = tk.Label(progress_frame, text="", font=('Arial', 9))
-        size_label.pack()
+        # Details text widget for logs
+        details_frame = tk.Frame(download_dialog)
+        details_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
         
-        # Speed label
-        speed_label = tk.Label(progress_frame, text="", font=('Arial', 9))
-        speed_label.pack()
+        tk.Label(details_frame, text="Download Log:", font=('Arial', 9)).pack(anchor='w')
         
-        # Status label
-        status_label = tk.Label(download_dialog, text="Click 'Download' to begin", font=('Arial', 9))
-        status_label.pack(pady=10)
+        details_text = tk.Text(details_frame, height=8, width=70, font=('Courier', 9))
+        details_text.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = tk.Scrollbar(details_text)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        details_text.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=details_text.yview)
+        
+        def add_log(message):
+            """Add message to log"""
+            details_text.insert(tk.END, f"{message}\n")
+            details_text.see(tk.END)
+            details_text.update()
         
         # Buttons
         button_frame = tk.Frame(download_dialog)
-        button_frame.pack(pady=20)
+        button_frame.pack(pady=15)
         
-        # Download tracking variables
         download_active = {'value': False}
         
-        def download_with_progress():
-            """Download model with real progress tracking"""
+        def download_with_real_progress():
+            """Download with actual progress tracking"""
+            import subprocess
+            import sys
             import time
+            import threading
             
             download_active['value'] = True
-            total_size = total_size_mb * 1024 * 1024  # Convert to bytes
             
             try:
-                if provider == 'manga-ocr':
-                    # Original manga-ocr download logic
-                    progress_label.config(text="Installing manga-ocr package...")
-                    
-                    import subprocess
-                    import sys
+                if provider == 'Qwen2-VL':
+                    # Step 1: Install dependencies
+                    status_label.config(text="Installing dependencies...")
+                    add_log("Installing required packages...")
+                    progress_var.set(5)
                     
                     subprocess.check_call([
-                        sys.executable, "-m", "pip", "install", 
+                        sys.executable, "-m", "pip", "install",
+                        "transformers>=4.37.0", "torch", "torchvision",
+                        "accelerate", "sentencepiece", "protobuf", "--upgrade", "-q"
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+                    
+                    add_log("✓ Dependencies installed")
+                    progress_var.set(10)
+                    
+                    # Step 2: Import and setup
+                    status_label.config(text="Loading libraries...")
+                    add_log("Importing transformers library...")
+                    
+                    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, AutoTokenizer
+                    import torch
+                    
+                    add_log(f"Torch version: {torch.__version__}")
+                    add_log(f"CUDA available: {torch.cuda.is_available()}")
+                    
+                    # Step 3: Download with progress callback
+                    status_label.config(text=f"Downloading {model_id}...")
+                    add_log(f"Starting download of {model_id}")
+                    progress_var.set(15)
+                    
+                    # Create a progress callback
+                    downloaded_files = []
+                    total_files = 20  # Estimate
+                    
+                    def progress_callback(file_info):
+                        """Called by transformers during download"""
+                        if isinstance(file_info, dict) and 'file' in file_info:
+                            filename = file_info.get('file', 'unknown')
+                            downloaded_files.append(filename)
+                            progress = min(15 + (len(downloaded_files) / total_files) * 70, 85)
+                            progress_var.set(progress)
+                            add_log(f"Downloaded: {filename}")
+                    
+                    # Download components separately for better progress tracking
+                    add_log("Downloading processor...")
+                    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                    progress_var.set(30)
+                    
+                    add_log("Downloading tokenizer...")
+                    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                    progress_var.set(40)
+                    
+                    add_log("Downloading model weights (this may take a while)...")
+                    status_label.config(text="Downloading model weights...")
+                    
+                    # Load model with appropriate settings
+                    if torch.cuda.is_available():
+                        add_log("Loading model on GPU...")
+                        model = Qwen2VLForConditionalGeneration.from_pretrained(
+                            model_id,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            trust_remote_code=True
+                        )
+                    else:
+                        add_log("Loading model on CPU (will be slower)...")
+                        model = Qwen2VLForConditionalGeneration.from_pretrained(
+                            model_id,
+                            torch_dtype=torch.float32,
+                            trust_remote_code=True
+                        )
+                    
+                    progress_var.set(90)
+                    add_log("✓ Model downloaded successfully")
+                    
+                    # Step 4: Initialize in OCR manager
+                    status_label.config(text="Initializing model...")
+                    add_log("Setting up OCR provider...")
+                    
+                    # Store in OCR manager
+                    qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
+                    if qwen_provider:
+                        qwen_provider.processor = processor
+                        qwen_provider.tokenizer = tokenizer  
+                        qwen_provider.model = model
+                        qwen_provider.model.eval()
+                        qwen_provider.is_loaded = True
+                        qwen_provider.is_installed = True
+                        
+                        # Save the model size that was loaded
+                        if hasattr(qwen_provider, 'loaded_model_size'):
+                            qwen_provider.loaded_model_size = selected_model_key
+                    
+                    progress_var.set(100)
+                    status_label.config(text="✅ Model ready for Korean OCR!")
+                    add_log("✓ Model initialization complete")
+                    add_log(f"Model is ready to use!")
+                    
+                    # Update main UI
+                    self.dialog.after(0, self._check_provider_status)
+                    
+                    # Enable close button
+                    download_btn.config(state=tk.DISABLED)
+                    cancel_btn.config(text="Close", bootstyle="success")
+                    
+                elif provider == 'manga-ocr':
+                    # Original manga-ocr logic
+                    status_label.config(text="Installing manga-ocr...")
+                    add_log("Installing manga-ocr package...")
+                    
+                    subprocess.check_call([
+                        sys.executable, "-m", "pip", "install",
                         "manga-ocr", "--upgrade"
                     ])
                     
-                    progress_label.config(text="Downloading model from HuggingFace...")
-                    progress_var.set(10)
+                    progress_var.set(20)
+                    add_log("Loading manga-ocr model...")
                     
                     from manga_ocr import MangaOcr
+                    model = MangaOcr()
                     
-                    # Track HuggingFace cache directory
-                    import os
-                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+                    progress_var.set(100)
+                    status_label.config(text="✅ Model ready!")
+                    add_log("✓ Manga OCR ready")
                     
-                    initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
+                    # Update OCR manager
+                    self.ocr_manager.get_provider('manga-ocr').model = model
+                    self.ocr_manager.get_provider('manga-ocr').is_loaded = True
+                    self.ocr_manager.get_provider('manga-ocr').is_installed = True
                     
-                    def init_model_with_progress():
-                        start_time = time.time()
-                        
-                        import threading
-                        model_ready = threading.Event()
-                        model_instance = [None]
-                        
-                        def init_model():
-                            model_instance[0] = MangaOcr()
-                            model_ready.set()
-                        
-                        init_thread = threading.Thread(target=init_model)
-                        init_thread.start()
-                        
-                        while not model_ready.is_set() and download_active['value']:
-                            current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                            downloaded = current_size - initial_size
-                            
-                            if downloaded > 0:
-                                progress = min((downloaded / total_size) * 100, 99)
-                                progress_var.set(progress)
-                                
-                                elapsed = time.time() - start_time
-                                if elapsed > 0:
-                                    speed = downloaded / elapsed
-                                    speed_mb = speed / (1024 * 1024)
-                                    speed_label.config(text=f"Speed: {speed_mb:.1f} MB/s")
-                                
-                                mb_downloaded = downloaded / (1024 * 1024)
-                                mb_total = total_size / (1024 * 1024)
-                                size_label.config(text=f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
-                                progress_label.config(text=f"Downloading: {progress:.1f}%")
-                            
-                            time.sleep(0.5)
-                        
-                        init_thread.join(timeout=1)
-                        return model_instance[0]
+                    self.dialog.after(0, self._check_provider_status)
                     
-                    model = init_model_with_progress()
-                    
-                    if model:
-                        progress_var.set(100)
-                        size_label.config(text=f"{total_size_mb} MB / {total_size_mb} MB")
-                        progress_label.config(text="✅ Download complete!")
-                        status_label.config(text="Model ready to use!")
-                        
-                        self.ocr_manager.get_provider('manga-ocr').model = model
-                        self.ocr_manager.get_provider('manga-ocr').is_loaded = True
-                        self.ocr_manager.get_provider('manga-ocr').is_installed = True
-                        
-                        self.dialog.after(0, self._check_provider_status)
-                        
-                elif provider == 'Qwen2-VL':
-                    # Download Qwen2-VL model
-                    progress_label.config(text="Installing dependencies...")
-                    
-                    import subprocess
-                    import sys
-                    
-                    # Install required packages
-                    subprocess.check_call([
-                        sys.executable, "-m", "pip", "install",
-                        "transformers>=4.37.0", "torch", "torchvision", 
-                        "pillow", "qwen-vl-utils", "--upgrade"
-                    ])
-                    
-                    progress_var.set(5)
-                    progress_label.config(text=f"Downloading {model_id} from HuggingFace...")
-                    
-                    # Import required libraries
-                    from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
-                    import torch
-                    import os
-                    
-                    # Track cache directory
-                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-                    initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                    
-                    # Download in separate thread with progress monitoring
-                    import threading
-                    download_complete = threading.Event()
-                    model_components = {'processor': None, 'tokenizer': None, 'model': None}
-                    error_msg = {'value': None}
-                    
-                    def download_model():
-                        try:
-                            # Download processor
-                            model_components['processor'] = AutoProcessor.from_pretrained(model_id)
-                            
-                            # Download tokenizer
-                            model_components['tokenizer'] = AutoTokenizer.from_pretrained(model_id)
-                            
-                            # Download model (this is the big one)
-                            if torch.cuda.is_available():
-                                model_components['model'] = Qwen2VLForConditionalGeneration.from_pretrained(
-                                    model_id,
-                                    torch_dtype=torch.float16,
-                                    device_map="auto"
-                                )
-                            else:
-                                model_components['model'] = Qwen2VLForConditionalGeneration.from_pretrained(
-                                    model_id,
-                                    torch_dtype=torch.float32
-                                )
-                            
-                            download_complete.set()
-                        except Exception as e:
-                            error_msg['value'] = str(e)
-                            download_complete.set()
-                    
-                    download_thread = threading.Thread(target=download_model)
-                    download_thread.start()
-                    
-                    # Monitor download progress
-                    start_time = time.time()
-                    last_update = time.time()
-                    
-                    while not download_complete.is_set() and download_active['value']:
-                        current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                        downloaded = current_size - initial_size
-                        
-                        if downloaded > 0:
-                            # Update progress
-                            progress = min((downloaded / (total_size * 1024 * 1024)) * 100, 99)
-                            progress_var.set(progress)
-                            
-                            # Calculate speed
-                            elapsed = time.time() - start_time
-                            if elapsed > 0:
-                                speed = downloaded / elapsed
-                                speed_mb = speed / (1024 * 1024)
-                                speed_label.config(text=f"Speed: {speed_mb:.1f} MB/s")
-                            
-                            # Update size
-                            mb_downloaded = downloaded / (1024 * 1024)
-                            size_label.config(text=f"{mb_downloaded:.1f} MB / {total_size_mb:.1f} MB")
-                            
-                            # Update status periodically
-                            if time.time() - last_update > 2:
-                                if mb_downloaded < 100:
-                                    progress_label.config(text=f"Downloading tokenizer and processor...")
-                                else:
-                                    progress_label.config(text=f"Downloading model weights: {progress:.1f}%")
-                                last_update = time.time()
-                        
-                        time.sleep(0.5)
-                    
-                    download_thread.join(timeout=1)
-                    
-                    # Check if download was successful
-                    if error_msg['value']:
-                        raise Exception(error_msg['value'])
-                    
-                    if all(v is not None for v in model_components.values()):
-                        # Success!
-                        progress_var.set(100)
-                        size_label.config(text=f"{total_size_mb} MB / {total_size_mb} MB")
-                        progress_label.config(text="✅ Download complete!")
-                        status_label.config(text="Model ready for Korean OCR!")
-                        
-                        # Update OCR manager
-                        qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-                        if qwen_provider:
-                            qwen_provider.processor = model_components['processor']
-                            qwen_provider.tokenizer = model_components['tokenizer']
-                            qwen_provider.model = model_components['model']
-                            qwen_provider.model.eval()
-                            qwen_provider.is_loaded = True
-                            qwen_provider.is_installed = True
-                        
-                        # Update status in main UI
-                        self.dialog.after(0, self._check_provider_status)
-                    else:
-                        raise Exception("Failed to download all model components")
-                        
+            except subprocess.CalledProcessError as e:
+                error_msg = f"Installation failed: {str(e)}"
+                status_label.config(text="❌ Installation failed")
+                add_log(f"ERROR: {error_msg}")
+                self._log(error_msg, "error")
+                
+            except ImportError as e:
+                error_msg = f"Import error: {str(e)}\nTry installing torch with CUDA support"
+                status_label.config(text="❌ Import failed")  
+                add_log(f"ERROR: {error_msg}")
+                self._log(error_msg, "error")
+                
             except Exception as e:
-                progress_label.config(text="❌ Download failed")
-                status_label.config(text=f"Error: {str(e)[:100]}")
-                self._log(f"Download error: {str(e)}", "error")
-            
+                error_msg = f"Download failed: {str(e)}"
+                status_label.config(text="❌ Download failed")
+                add_log(f"ERROR: {error_msg}")
+                self._log(error_msg, "error")
+                import traceback
+                add_log(traceback.format_exc())
+                
             finally:
                 download_active['value'] = False
         
-        def get_dir_size(path):
-            """Get total size of directory"""
-            total = 0
-            try:
-                for dirpath, dirnames, filenames in os.walk(path):
-                    for filename in filenames:
-                        filepath = os.path.join(dirpath, filename)
-                        if os.path.exists(filepath):
-                            total += os.path.getsize(filepath)
-            except:
-                pass
-            return total
-        
         def start_download():
-            """Start download in background thread"""
+            """Start download in background"""
             download_btn.config(state=tk.DISABLED)
-            cancel_btn.config(text="Cancel")
+            cancel_btn.config(text="Cancel", bootstyle="warning")
             
             import threading
-            download_thread = threading.Thread(target=download_with_progress, daemon=True)
+            download_thread = threading.Thread(target=download_with_real_progress, daemon=True)
             download_thread.start()
         
         def cancel_download():
@@ -585,14 +509,16 @@ class MangaTranslationTab:
             if download_active['value']:
                 download_active['value'] = False
                 status_label.config(text="Cancelling...")
+                add_log("Download cancelled by user")
             else:
                 download_dialog.destroy()
         
-        # Buttons
-        download_btn = tb.Button(button_frame, text="Download", command=start_download, bootstyle="primary")
+        download_btn = tb.Button(button_frame, text="Download", command=start_download, 
+                                bootstyle="primary", width=15)
         download_btn.pack(side=tk.LEFT, padx=5)
         
-        cancel_btn = tb.Button(button_frame, text="Close", command=cancel_download, bootstyle="secondary")
+        cancel_btn = tb.Button(button_frame, text="Cancel", command=cancel_download, 
+                              bootstyle="secondary", width=15)
         cancel_btn.pack(side=tk.LEFT, padx=5)
 
     def _check_provider_status(self):
@@ -630,30 +556,58 @@ class MangaTranslationTab:
             status = self.ocr_manager.check_provider_status(provider)
             
             if status['loaded']:
-                self.provider_status_label.config(text="✅ Model loaded", fg="green")
+                # Model is loaded and ready
+                if provider == 'Qwen2-VL':
+                    # Check which model size is loaded
+                    qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
+                    if qwen_provider and hasattr(qwen_provider, 'loaded_model_size'):
+                        model_size = qwen_provider.loaded_model_size
+                        status_text = f"✅ {model_size} model loaded"
+                    else:
+                        status_text = "✅ Model loaded"
+                    self.provider_status_label.config(text=status_text, fg="green")
+                else:
+                    self.provider_status_label.config(text="✅ Model loaded", fg="green")
+                
                 # Show reload button for all local providers
                 self.provider_setup_btn.config(text="Reload", bootstyle="secondary")
                 self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
                 
             elif status['installed']:
-                self.provider_status_label.config(text="📦 Installed (not loaded)", fg="orange")
-                # Show load button
-                self.provider_setup_btn.config(text="Load", bootstyle="primary")
-                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                # Package/dependencies installed but model not loaded
+                if provider == 'Qwen2-VL':
+                    self.provider_status_label.config(text="📦 Dependencies ready", fg="orange")
+                    # For Qwen2-VL, show download button since it needs model download
+                    self.download_model_btn.config(text="📥 Download Model")
+                    self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
+                else:
+                    self.provider_status_label.config(text="📦 Installed (not loaded)", fg="orange")
+                    # Show load button
+                    self.provider_setup_btn.config(text="Load", bootstyle="primary")
+                    self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
                 
             else:
                 # Not installed
                 self.provider_status_label.config(text="❌ Not installed", fg="red")
                 
-                # Determine if this is a HuggingFace model or pip package
-                huggingface_providers = ['manga-ocr', 'Qwen2-VL']
+                # Categorize providers
+                huggingface_providers = ['manga-ocr', 'Qwen2-VL']  # Both need model downloads
                 pip_providers = ['easyocr', 'paddleocr', 'doctr']
                 
                 if provider in huggingface_providers:
                     # HuggingFace models need special download
-                    self.download_model_btn.config(text=f"📥 Download {provider}")
+                    if provider == 'Qwen2-VL':
+                        button_text = "📥 Download Qwen2-VL"
+                    else:
+                        button_text = f"📥 Download {provider}"
+                        
+                    self.download_model_btn.config(text=button_text)
                     self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
                     
+                    # Add info about what will be downloaded
+                    if provider == 'Qwen2-VL':
+                        self._log("ℹ️ Qwen2-VL requires selecting a model size (2B/7B/72B)", "info")
+                        
                 elif provider in pip_providers:
                     # Check if running as .exe
                     if getattr(sys, 'frozen', False):
@@ -667,6 +621,15 @@ class MangaTranslationTab:
                         # Running from Python - can pip install
                         self.provider_setup_btn.config(text="Install", bootstyle="success")
                         self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Additional GPU status check for Qwen2-VL
+        if provider == 'Qwen2-VL' and not status['loaded']:
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    self._log("⚠️ No GPU detected - Qwen2-VL will run slowly on CPU", "warning")
+            except ImportError:
+                pass
 
     def _setup_ocr_provider(self):
         """Setup/install/load OCR provider"""
