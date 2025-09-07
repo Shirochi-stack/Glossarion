@@ -1121,6 +1121,68 @@ class MangaTranslator:
                         self._log("📝 Processing full image with Qwen2-VL")
                         ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
 
+                elif self.ocr_provider == 'custom-api':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure Custom API for text extraction
+                    self._log("🔌 Using Custom API for OCR")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for Custom API...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        if self.bubble_detector.load_rtdetr_model():
+                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                                image_path=image_path,
+                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
+                                return_all_bubbles=False
+                            )
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Custom API")
+                            
+                            # Clear detections after extracting regions
+                            rtdetr_detections = None
+                            
+                            # Process each region with Custom API
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(
+                                    cropped, 
+                                    'custom-api', 
+                                    confidence=confidence_threshold
+                                )
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    # Adjust coordinates to full image space
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"🔍 Region {i+1}/{len(all_regions)}: {result[0].text[:50]}...")
+                            
+                            # Clear regions list after processing
+                            all_regions = None
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Custom API")
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            'custom-api',
+                            confidence=confidence_threshold
+                        )
+
                 elif self.ocr_provider == 'easyocr':
                     # Initialize results list
                     ocr_results = []
