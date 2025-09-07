@@ -121,86 +121,121 @@ class MangaTranslationTab:
         
         # For Qwen2-VL, show model selection dialog first
         if provider == 'Qwen2-VL':
-            selection_dialog = tk.Toplevel(self.dialog)
-            selection_dialog.title("Select Qwen2-VL Model Size")
-            selection_dialog.geometry("500x650")
-            selection_dialog.transient(self.dialog)
-            selection_dialog.grab_set()
+            # Use window manager from main_gui
+            selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+                self.dialog,
+                "Select Qwen2-VL Model Size",
+                width=None,
+                height=None,
+                max_width_ratio=0.6,
+                max_height_ratio=0.3
+            )
             
-            selection_dialog.update_idletasks()
-            x = (selection_dialog.winfo_screenwidth() // 2) - (selection_dialog.winfo_width() // 2)
-            y = (selection_dialog.winfo_screenheight() // 2) - (selection_dialog.winfo_height() // 2)
-            selection_dialog.geometry(f"+{x}+{y}")
+            # Title
+            title_frame = tk.Frame(scrollable_frame)
+            title_frame.pack(fill=tk.X, pady=(10, 20))
+            tk.Label(title_frame, text="Select Qwen2-VL Model Size", 
+                    font=('Arial', 14, 'bold')).pack()
             
-            tk.Label(selection_dialog, text="Select Qwen2-VL Model Size", 
-                    font=('Arial', 14, 'bold')).pack(pady=20)
+            # Model selection frame
+            model_frame = tk.LabelFrame(
+                scrollable_frame,
+                text="Model Options",
+                font=('Arial', 11, 'bold'),
+                padx=15,
+                pady=10
+            )
+            model_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
             
             model_options = {
-                "2B": "• Smallest model (~4GB download, 4-8GB VRAM)\n• Fast but less accurate\n• Good for quick testing",
-                "7B": "• Medium model (~14GB download, 12-16GB VRAM)\n• Best balance of speed and quality\n• Recommended for most users",
-                "72B": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU",
-                "custom": "• Enter any Hugging Face model ID\n• For advanced users\n• Size varies by model"
+                "2B": {
+                    "title": "2B Model",
+                    "desc": "• Smallest model (~4GB download, 4-8GB VRAM)\n• Fast but less accurate\n• Good for quick testing"
+                },
+                "7B": {
+                    "title": "7B Model", 
+                    "desc": "• Medium model (~14GB download, 12-16GB VRAM)\n• Best balance of speed and quality\n• Recommended for most users"
+                },
+                "72B": {
+                    "title": "72B Model",
+                    "desc": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU"
+                },
+                "custom": {
+                    "title": "Custom Model",
+                    "desc": "• Enter any Hugging Face model ID\n• For advanced users\n• Size varies by model"
+                }
             }
             
             selected_model = tk.StringVar(value="2B")
             custom_model_id = tk.StringVar()
             
-            for key, description in model_options.items():
-                frame = tk.Frame(selection_dialog)
-                frame.pack(fill=tk.X, padx=20, pady=10)
+            for key, info in model_options.items():
+                option_frame = tk.Frame(model_frame)
+                option_frame.pack(fill=tk.X, pady=5)
                 
-                rb = tk.Radiobutton(frame, text=f"{key.title()} Model" if key != "custom" else "Custom Model", 
-                                   variable=selected_model, value=key, font=('Arial', 11, 'bold'))
+                rb = tk.Radiobutton(option_frame, text=info["title"], 
+                                   variable=selected_model, value=key, 
+                                   font=('Arial', 11, 'bold'))
                 rb.pack(anchor='w')
                 
-                desc_label = tk.Label(frame, text=description, font=('Arial', 9), 
-                                     justify=tk.LEFT, fg='gray')
+                desc_label = tk.Label(option_frame, text=info["desc"], 
+                                     font=('Arial', 9), justify=tk.LEFT, fg='#666666')
                 desc_label.pack(anchor='w', padx=(20, 0))
+                
+                if key != "custom":
+                    ttk.Separator(option_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 0))
             
-            # Custom model ID entry
-            custom_frame = tk.Frame(selection_dialog)
-            custom_frame.pack(fill=tk.X, padx=40, pady=5)
+            # Custom model ID frame
+            custom_frame = tk.LabelFrame(
+                scrollable_frame,
+                text="Custom Model ID",
+                font=('Arial', 11, 'bold'),
+                padx=15,
+                pady=10
+            )
             
-            tk.Label(custom_frame, text="Model ID:", font=('Arial', 9)).pack(side=tk.LEFT)
-            custom_entry = tk.Entry(custom_frame, textvariable=custom_model_id, width=40)
-            custom_entry.pack(side=tk.LEFT, padx=5)
+            entry_frame = tk.Frame(custom_frame)
+            entry_frame.pack(fill=tk.X, pady=5)
+            tk.Label(entry_frame, text="Model ID:", font=('Arial', 10)).pack(side=tk.LEFT, padx=(0, 10))
+            custom_entry = tk.Entry(entry_frame, textvariable=custom_model_id, width=40, font=('Arial', 10))
+            custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
             
-            # Initially hide custom entry
-            custom_frame.pack_forget()
-            
-            def on_model_change():
+            def toggle_custom_frame(*args):
                 if selected_model.get() == "custom":
-                    custom_frame.pack(fill=tk.X, padx=40, pady=5)
+                    custom_frame.pack(fill=tk.X, padx=20, pady=10, after=model_frame)
                 else:
                     custom_frame.pack_forget()
             
-            # Update visibility when selection changes
-            for widget in selection_dialog.winfo_children():
-                if isinstance(widget, tk.Frame):
-                    for child in widget.winfo_children():
-                        if isinstance(child, tk.Radiobutton):
-                            child.config(command=on_model_change)
+            selected_model.trace('w', toggle_custom_frame)
             
-            warning_frame = tk.Frame(selection_dialog)
-            warning_frame.pack(fill=tk.X, padx=20, pady=10)
+            # GPU status frame
+            gpu_frame = tk.LabelFrame(
+                scrollable_frame,
+                text="System Status",
+                font=('Arial', 11, 'bold'),
+                padx=15,
+                pady=10
+            )
+            gpu_frame.pack(fill=tk.X, padx=20, pady=10)
             
             try:
                 import torch
                 if torch.cuda.is_available():
                     gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
                     gpu_text = f"✓ GPU: {torch.cuda.get_device_name(0)} ({gpu_mem:.1f}GB)"
-                    gpu_color = 'green'
+                    gpu_color = '#4CAF50'
                 else:
                     gpu_text = "✗ No GPU detected - will use CPU (very slow)"
-                    gpu_color = 'red'
+                    gpu_color = '#f44336'
             except:
                 gpu_text = "? GPU status unknown - install torch with CUDA"
-                gpu_color = 'orange'
+                gpu_color = '#FF9800'
             
-            tk.Label(warning_frame, text=gpu_text, font=('Arial', 9), fg=gpu_color).pack()
+            tk.Label(gpu_frame, text=gpu_text, font=('Arial', 10), fg=gpu_color).pack(anchor='w')
             
-            button_frame = tk.Frame(selection_dialog)
-            button_frame.pack(pady=20)
+            # Buttons
+            button_frame = tk.Frame(scrollable_frame)
+            button_frame.pack(fill=tk.X, pady=20)
             
             model_confirmed = {'value': False, 'model_key': None, 'model_id': None}
             
@@ -208,7 +243,7 @@ class MangaTranslationTab:
                 selected = selected_model.get()
                 if selected == "custom":
                     if not custom_model_id.get().strip():
-                        tk.messagebox.showerror("Error", "Please enter a model ID")
+                        messagebox.showerror("Error", "Please enter a model ID")
                         return
                     model_confirmed['model_key'] = selected
                     model_confirmed['model_id'] = custom_model_id.get().strip()
@@ -218,14 +253,26 @@ class MangaTranslationTab:
                 model_confirmed['value'] = True
                 selection_dialog.destroy()
             
-            def cancel_selection():
-                selection_dialog.destroy()
+            # Center the buttons by creating an inner frame
+            button_inner_frame = tk.Frame(button_frame)
+            button_inner_frame.pack()
+
+            proceed_btn = tk.Button(
+                button_inner_frame, text="Continue", command=confirm_selection,
+                bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
+                padx=20, pady=8, cursor='hand2'
+            )
+            proceed_btn.pack(side=tk.LEFT, padx=5)
+
+            cancel_btn = tk.Button(
+                button_inner_frame, text="Cancel", command=selection_dialog.destroy,
+                bg='#9E9E9E', fg='white', font=('Arial', 10),
+                padx=20, pady=8, cursor='hand2'
+            )
+            cancel_btn.pack(side=tk.LEFT, padx=5)
             
-            tb.Button(button_frame, text="Continue", command=confirm_selection, 
-                     bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_frame, text="Cancel", command=cancel_selection, 
-                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-            
+            # Auto-resize and wait
+            self.main_gui.wm.auto_resize_dialog(selection_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.6)
             self.dialog.wait_window(selection_dialog)
             
             if not model_confirmed['value']:
@@ -239,21 +286,25 @@ class MangaTranslationTab:
             model_id = None
             selected_model_key = None
         
-        # Create download dialog
-        download_dialog = tk.Toplevel(self.dialog)
-        download_dialog.title(f"Download {provider} Model")
-        download_dialog.geometry("600x450")
-        download_dialog.transient(self.dialog)
-        download_dialog.grab_set()
-        
-        download_dialog.update_idletasks()
-        x = (download_dialog.winfo_screenwidth() // 2) - (download_dialog.winfo_width() // 2)
-        y = (download_dialog.winfo_screenheight() // 2) - (download_dialog.winfo_height() // 2)
-        download_dialog.geometry(f"+{x}+{y}")
+        # Create download dialog with window manager
+        download_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+            self.dialog,
+            f"Download {provider} Model",
+            width=600,
+            height=450,
+            max_width_ratio=0.6,
+            max_height_ratio=0.6
+        )
         
         # Info section
-        info_frame = tk.Frame(download_dialog)
-        info_frame.pack(pady=20, padx=20, fill=tk.X)
+        info_frame = tk.LabelFrame(
+            scrollable_frame,
+            text="Model Information",
+            font=('Arial', 11, 'bold'),
+            padx=15,
+            pady=10
+        )
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
         
         if provider == 'Qwen2-VL':
             info_text = f"📚 Qwen2-VL {selected_model_key} Model\n"
@@ -263,48 +314,54 @@ class MangaTranslationTab:
         else:
             info_text = f"📚 {provider} Model\nOptimized for manga/manhwa text detection"
         
-        tk.Label(info_frame, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack()
+        tk.Label(info_frame, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack(anchor='w')
         
-        # Progress frame
-        progress_frame = tk.Frame(download_dialog)
-        progress_frame.pack(pady=10, padx=20, fill=tk.X)
+        # Progress section
+        progress_frame = tk.LabelFrame(
+            scrollable_frame,
+            text="Download Progress",
+            font=('Arial', 11, 'bold'),
+            padx=15,
+            pady=10
+        )
+        progress_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        # Progress label
         progress_label = tk.Label(progress_frame, text="Ready to download", font=('Arial', 10))
-        progress_label.pack()
+        progress_label.pack(pady=(5, 10))
         
-        # Progress bar
         progress_var = tk.DoubleVar()
         progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
                                       variable=progress_var)
-        progress_bar.pack(pady=10)
+        progress_bar.pack(pady=(0, 5))
         
-        # Size label
-        size_label = tk.Label(progress_frame, text="", font=('Arial', 9))
+        size_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
         size_label.pack()
         
-        # Speed label
-        speed_label = tk.Label(progress_frame, text="", font=('Arial', 9))
+        speed_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
         speed_label.pack()
         
-        # Status label
-        status_label = tk.Label(download_dialog, text="Click 'Download' to begin", font=('Arial', 9))
-        status_label.pack(pady=10)
+        status_label = tk.Label(progress_frame, text="Click 'Download' to begin", 
+                              font=('Arial', 9), fg='#666666')
+        status_label.pack(pady=(5, 0))
         
-        # Details text widget for logs
-        details_frame = tk.Frame(download_dialog)
-        details_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
+        # Log section
+        log_frame = tk.LabelFrame(
+            scrollable_frame,
+            text="Download Log",
+            font=('Arial', 11, 'bold'),
+            padx=15,
+            pady=10
+        )
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
-        tk.Label(details_frame, text="Download Log:", font=('Arial', 9)).pack(anchor='w')
-        
-        details_text = tk.Text(details_frame, height=8, width=70, font=('Courier', 9))
+        details_text = tk.Text(log_frame, height=8, width=70, font=('Courier', 9), bg='#f5f5f5')
         details_text.pack(fill=tk.BOTH, expand=True)
         
-        scrollbar = tk.Scrollbar(details_text)
+        scrollbar = ttk.Scrollbar(details_text)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         details_text.config(yscrollcommand=scrollbar.set)
         scrollbar.config(command=details_text.yview)
-        
+            
         def add_log(message):
             """Add message to log"""
             details_text.insert(tk.END, f"{message}\n")
@@ -508,7 +565,10 @@ class MangaTranslationTab:
         
         cancel_btn = tb.Button(button_frame, text="Close", command=cancel_download, bootstyle="secondary")
         cancel_btn.pack(side=tk.LEFT, padx=5)
-
+    
+        # Auto-resize
+        self.main_gui.wm.auto_resize_dialog(download_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.6)
+    
     def _check_provider_status(self):
         """Check and display OCR provider status"""
         provider = self.ocr_provider_var.get()
@@ -627,23 +687,33 @@ class MangaTranslationTab:
         # For Qwen2-VL, check if we need to select model size first
         model_size = None
         if provider == 'Qwen2-VL' and status['installed'] and not status['loaded']:
-            # Show model selection dialog for Qwen2-VL
-            selection_dialog = tk.Toplevel(self.dialog)
-            selection_dialog.title("Select Qwen2-VL Model Size")
-            selection_dialog.geometry("500x400")
-            selection_dialog.transient(self.dialog)
-            selection_dialog.grab_set()
+            # Use window manager for dialog
+            selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+                self.dialog,
+                "Select Qwen2-VL Model Size",
+                width=None,
+                height=None,
+                max_width_ratio=0.5,
+                max_height_ratio=0.3
+            )
             
-            # Center dialog
-            selection_dialog.update_idletasks()
-            x = (selection_dialog.winfo_screenwidth() // 2) - (selection_dialog.winfo_width() // 2)
-            y = (selection_dialog.winfo_screenheight() // 2) - (selection_dialog.winfo_height() // 2)
-            selection_dialog.geometry(f"+{x}+{y}")
+            # Title
+            title_frame = tk.Frame(scrollable_frame)
+            title_frame.pack(fill=tk.X, pady=(10, 20))
+            tk.Label(title_frame, text="Select Model Size to Load", 
+                    font=('Arial', 12, 'bold')).pack()
             
-            tk.Label(selection_dialog, text="Select Model Size to Load", 
-                    font=('Arial', 12, 'bold')).pack(pady=20)
+            # Model selection frame
+            model_frame = tk.LabelFrame(
+                scrollable_frame,
+                text="Available Models",
+                font=('Arial', 11, 'bold'),
+                padx=15,
+                pady=10
+            )
+            model_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
             
-            # Model options including custom
+            # Model options
             model_options = {
                 "1": {"name": "Qwen2-VL 2B", "desc": "Smallest (4-8GB VRAM)"},
                 "2": {"name": "Qwen2-VL 7B", "desc": "Medium (12-16GB VRAM)"},
@@ -655,37 +725,51 @@ class MangaTranslationTab:
             custom_model_id = tk.StringVar()
             
             for key, info in model_options.items():
-                frame = tk.Frame(selection_dialog)
-                frame.pack(fill=tk.X, padx=30, pady=10)
+                option_frame = tk.Frame(model_frame)
+                option_frame.pack(fill=tk.X, pady=5)
                 
-                rb = tk.Radiobutton(frame, text=f"{info['name']} - {info['desc']}", 
-                                   variable=selected_model, value=key, 
-                                   font=('Arial', 10))
+                rb = tk.Radiobutton(
+                    option_frame, 
+                    text=f"{info['name']} - {info['desc']}", 
+                    variable=selected_model, 
+                    value=key,
+                    font=('Arial', 10),
+                    anchor='w'
+                )
                 rb.pack(anchor='w')
+                
+                if key != "4":
+                    ttk.Separator(option_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 0))
             
-            # Custom model ID entry
-            custom_frame = tk.Frame(selection_dialog)
-            custom_frame.pack(fill=tk.X, padx=40, pady=5)
+            # Custom model ID frame
+            custom_frame = tk.LabelFrame(
+                scrollable_frame,
+                text="Custom Model Configuration",
+                font=('Arial', 11, 'bold'),
+                padx=15,
+                pady=10
+            )
             
-            tk.Label(custom_frame, text="Model ID:", font=('Arial', 9)).pack(side=tk.LEFT)
-            custom_entry = tk.Entry(custom_frame, textvariable=custom_model_id, width=35)
-            custom_entry.pack(side=tk.LEFT, padx=5)
+            entry_frame = tk.Frame(custom_frame)
+            entry_frame.pack(fill=tk.X, pady=5)
+            tk.Label(entry_frame, text="Model ID:", font=('Arial', 10)).pack(side=tk.LEFT, padx=(0, 10))
+            custom_entry = tk.Entry(entry_frame, textvariable=custom_model_id, width=35, font=('Arial', 10))
+            custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
             
-            # Initially hide custom entry
-            custom_frame.pack_forget()
-            
-            def on_model_change():
+            def toggle_custom_frame(*args):
                 if selected_model.get() == "4":
-                    custom_frame.pack(fill=tk.X, padx=40, pady=5)
+                    custom_frame.pack(fill=tk.X, padx=20, pady=10, after=model_frame)
                 else:
                     custom_frame.pack_forget()
             
-            # Update visibility when selection changes
-            for widget in selection_dialog.winfo_children():
-                if isinstance(widget, tk.Frame):
-                    for child in widget.winfo_children():
-                        if isinstance(child, tk.Radiobutton):
-                            child.config(command=on_model_change)
+            selected_model.trace('w', toggle_custom_frame)
+            
+            # Buttons with centering
+            button_frame = tk.Frame(scrollable_frame)
+            button_frame.pack(fill=tk.X, pady=20)
+            
+            button_inner_frame = tk.Frame(button_frame)
+            button_inner_frame.pack()
             
             model_confirmed = {'value': False, 'size': None}
             
@@ -693,9 +777,8 @@ class MangaTranslationTab:
                 selected = selected_model.get()
                 self._log(f"DEBUG: Radio button selection = {selected}")
                 if selected == "4":
-                    # Custom model
                     if not custom_model_id.get().strip():
-                        tk.messagebox.showerror("Error", "Please enter a model ID")
+                        messagebox.showerror("Error", "Please enter a model ID")
                         return
                     model_confirmed['size'] = f"custom:{custom_model_id.get().strip()}"
                 else:
@@ -703,17 +786,22 @@ class MangaTranslationTab:
                 model_confirmed['value'] = True
                 selection_dialog.destroy()
             
-            def cancel_selection():
-                selection_dialog.destroy()
+            load_btn = tk.Button(
+                button_inner_frame, text="Load", command=confirm_selection,
+                bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
+                padx=20, pady=8, cursor='hand2', width=12
+            )
+            load_btn.pack(side=tk.LEFT, padx=5)
             
-            button_frame = tk.Frame(selection_dialog)
-            button_frame.pack(pady=20)
+            cancel_btn = tk.Button(
+                button_inner_frame, text="Cancel", command=selection_dialog.destroy,
+                bg='#9E9E9E', fg='white', font=('Arial', 10),
+                padx=20, pady=8, cursor='hand2', width=12
+            )
+            cancel_btn.pack(side=tk.LEFT, padx=5)
             
-            tb.Button(button_frame, text="Load", command=confirm_selection, 
-                     bootstyle="primary", width=12).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_frame, text="Cancel", command=cancel_selection, 
-                     bootstyle="secondary", width=12).pack(side=tk.LEFT, padx=5)
-            
+            # Auto-resize and wait
+            self.main_gui.wm.auto_resize_dialog(selection_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.35)
             self.dialog.wait_window(selection_dialog)
             
             if not model_confirmed['value']:
@@ -722,34 +810,39 @@ class MangaTranslationTab:
             model_size = model_confirmed['size']
             self._log(f"DEBUG: Dialog closed, model_size set to: {model_size}")
         
-        # Create progress dialog
-        progress_dialog = tk.Toplevel(self.dialog)
-        progress_dialog.title(f"Setting up {provider}")
-        progress_dialog.geometry("400x150")
-        progress_dialog.transient(self.dialog)
-        progress_dialog.grab_set()
+        # Create progress dialog with window manager
+        progress_dialog, progress_frame, canvas = self.main_gui.wm.setup_scrollable(
+            self.dialog,
+            f"Setting up {provider}",
+            width=400,
+            height=200,
+            max_width_ratio=0.4,
+            max_height_ratio=0.3
+        )
         
-        # Center dialog
-        progress_dialog.update_idletasks()
-        x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
-        y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
-        progress_dialog.geometry(f"+{x}+{y}")
+        # Progress section
+        progress_section = tk.LabelFrame(
+            progress_frame,
+            text="Setup Progress",
+            font=('Arial', 11, 'bold'),
+            padx=15,
+            pady=10
+        )
+        progress_section.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        # Progress widgets
-        progress_label = tk.Label(progress_dialog, text="", font=('Arial', 10))
-        progress_label.pack(pady=20)
+        progress_label = tk.Label(progress_section, text="Initializing...", font=('Arial', 10))
+        progress_label.pack(pady=(10, 15))
         
         progress_bar = ttk.Progressbar(
-            progress_dialog,
+            progress_section,
             length=350,
             mode='indeterminate'
         )
-        progress_bar.pack(pady=10)
+        progress_bar.pack(pady=(0, 10))
         progress_bar.start(10)
         
-        # Status label
-        status_label = tk.Label(progress_dialog, text="", font=('Arial', 9))
-        status_label.pack()
+        status_label = tk.Label(progress_section, text="", font=('Arial', 9), fg='#666666')
+        status_label.pack(pady=(0, 10))
         
         def update_progress(message, percent=None):
             """Update progress display"""
@@ -779,12 +872,10 @@ class MangaTranslationTab:
                 
                 # Special handling for Qwen2-VL - pass model_size
                 if provider == 'Qwen2-VL':
-                    self._log(f"DEBUG: In thread, about to load with model_size={model_size}")  # ADD THIS
-                    # Use the OCRManager's load_provider which accepts kwargs
+                    self._log(f"DEBUG: In thread, about to load with model_size={model_size}")
                     if model_size:
                         success = self.ocr_manager.load_provider(provider, model_size=model_size)
                         
-                        # Store which model was loaded
                         if success:
                             provider_obj = self.ocr_manager.get_provider('Qwen2-VL')
                             if provider_obj:
@@ -794,18 +885,14 @@ class MangaTranslationTab:
                                     "3": "72B"
                                 }.get(model_size, model_size)
                     else:
-                        # This shouldn't happen but default to 2B
                         self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
                         success = self.ocr_manager.load_provider(provider, model_size="1")
                 else:
-                    # Regular loading for other providers
                     success = self.ocr_manager.load_provider(provider)
                 
                 if success:
                     update_progress(f"✅ {provider} ready!", 100)
                     self._log(f"✅ {provider} is ready to use", "success")
-                    
-                    # Update UI in main thread
                     self.dialog.after(0, self._check_provider_status)
                 else:
                     update_progress("❌ Failed to load model!", 0)
@@ -818,8 +905,10 @@ class MangaTranslationTab:
                 self._log(traceback.format_exc(), "debug")
             
             finally:
-                # Close dialog after delay
                 self.dialog.after(2000, progress_dialog.destroy)
+        
+        # Auto-resize
+        self.main_gui.wm.auto_resize_dialog(progress_dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.3)
         
         # Start setup in background
         import threading
