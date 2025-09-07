@@ -604,6 +604,21 @@ class MangaTranslationTab:
                 self.provider_status_label.config(text="✅ Ready", fg="green")
             else:
                 self.provider_status_label.config(text="❌ Key needed", fg="red")
+
+        elif provider == 'custom=api':
+            # Custom API - check for configuration
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            custom_config = manga_settings.get('ocr', {}).get('custom_api', {})
+            
+            # Check if URL is configured (minimum requirement)
+            if custom_config.get('url'):
+                self.provider_status_label.config(text="✅ Configured", fg="green")
+            else:
+                self.provider_status_label.config(text="⚙️ Configure API", fg="orange")
+            
+            # Show Configure button
+            self.provider_setup_btn.config(text="Configure", bootstyle="info")
+            self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
             
         else:
             # Local OCR providers
@@ -691,6 +706,31 @@ class MangaTranslationTab:
         
         if provider in ['google', 'azure']:
             return  # Cloud providers don't need setup
+
+        # your own api key
+        if provider == 'custom-api':
+            # Open configuration dialog for custom API
+            try:
+                from custom_api_config_dialog import CustomAPIConfigDialog
+                dialog = CustomAPIConfigDialog(
+                    self.manga_window,
+                    self.main_gui.config,
+                    self.main_gui.save_config
+                )
+                # After dialog closes, refresh status
+                self.dialog.after(100, self._check_provider_status)
+            except ImportError:
+                # If dialog not available, show message
+                messagebox.showinfo(
+                    "Custom API Configuration",
+                    "Please configure custom API settings in config.json:\n\n"
+                    "manga_settings > ocr > custom_api:\n"
+                    "- url: Your API endpoint\n"
+                    "- api_key: Your API key\n"
+                    "- model: Model name\n"
+                    "- format: 'openai' or 'anthropic'"
+                )
+            return
         
         status = self.ocr_manager.check_provider_status(provider)
         
@@ -937,6 +977,7 @@ class MangaTranslationTab:
         
         # Update the API label based on provider
         api_label_text = {
+            'custom-api': "OCR: Custom API | Translation: API Key",
             'google': "OCR: Google Cloud Vision | Translation: API Key",
             'azure': "OCR: Azure Computer Vision | Translation: API Key",
             'manga-ocr': "OCR: Manga OCR (Japanese) | Translation: API Key",
@@ -973,6 +1014,7 @@ class MangaTranslationTab:
         
         # Log the change
         provider_descriptions = {
+            'custom-api': "Custom API - use your own vision model",
             'google': "Google Cloud Vision (requires credentials)",
             'azure': "Azure Computer Vision (requires API key)",
             'manga-ocr': "Manga OCR - optimized for Japanese manga",
@@ -1140,6 +1182,7 @@ class MangaTranslationTab:
 
         # Expanded provider list with descriptions
         ocr_providers = [
+            ('custom-api', 'Your Own key'),
             ('google', 'Google Cloud Vision'),
             ('azure', 'Azure Computer Vision'),
             ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
