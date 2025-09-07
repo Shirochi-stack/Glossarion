@@ -892,7 +892,8 @@ class MangaTranslationTab:
                                 provider_obj.loaded_model_size = {
                                     "1": "2B",
                                     "2": "7B", 
-                                    "3": "72B"
+                                    "3": "72B",
+                                    "4": "custom"
                                 }.get(model_size, model_size)
                     else:
                         self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
@@ -4246,14 +4247,15 @@ class MangaTranslationTab:
         ocr_config = {'provider': self.ocr_provider_var.get()}
 
         if ocr_config['provider'] == 'Qwen2-VL':
-            # Check if model is already loaded and get its size
             qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
             if qwen_provider and hasattr(qwen_provider, 'loaded_model_size'):
-                # Map display name back to option number
-                size_map = {'2B': '1', '7B': '2', '72B': '3'}
-                model_size = size_map.get(qwen_provider.loaded_model_size, '2')
-                ocr_config['model_size'] = model_size
-                self._log(f"Passing Qwen2-VL model size: {qwen_provider.loaded_model_size} (option {model_size})", "info")
+                if qwen_provider.loaded_model_size == "Custom":
+                    ocr_config['model_size'] = f"custom:{qwen_provider.model_id}"
+                else:
+                    size_map = {'2B': '1', '7B': '2', '72B': '3'}
+                    ocr_config['model_size'] = size_map.get(qwen_provider.loaded_model_size, '2')
+                self._log(f"Setting ocr_config['model_size'] = {ocr_config['model_size']}", "info")
+
         
         if ocr_config['provider'] == 'google':
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
@@ -4332,6 +4334,7 @@ class MangaTranslationTab:
                     self.main_gui,
                     log_callback=self._log
                 )
+                self.translator.ocr_manager = self.ocr_manager
                 # Set cloud inpainting if configured
                 saved_api_key = self.main_gui.config.get('replicate_api_key', '')
                 if saved_api_key:
