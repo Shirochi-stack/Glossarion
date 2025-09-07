@@ -16,12 +16,13 @@ import numpy as np
 from dataclasses import dataclass
 from PIL import Image
 import logging
+
 try:
-    import auto_gptq
+    import gptqmodel
     HAS_GPTQ = True
 except ImportError:
     try:
-        import gptqmodel
+        import auto_gptq
         HAS_GPTQ = True
     except ImportError:
         HAS_GPTQ = False
@@ -31,6 +32,13 @@ try:
     HAS_OPTIMUM = True
 except ImportError:
     HAS_OPTIMUM = False
+
+try:
+    import accelerate
+    HAS_ACCELERATE = True
+except ImportError:
+    HAS_ACCELERATE = False
+
 logger = logging.getLogger(__name__)
 
 @dataclass
