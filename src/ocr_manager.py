@@ -237,7 +237,8 @@ class Qwen2VL(OCRProvider):
     
     def load_model(self, model_size=None) -> bool:
         """Load Qwen2-VL model with size selection"""
-        self._log(f"DEBUG: load_model called with model_size={model_size}")  # Add this
+        self._log(f"DEBUG: load_model called with model_size={model_size}")
+
         try:
             if not self.is_installed and not self.check_installation():
                 self._log("❌ Not installed", "error")
@@ -257,19 +258,19 @@ class Qwen2VL(OCRProvider):
                 "3": "Qwen/Qwen2-VL-72B-Instruct",
                 "4": "custom"
             }
-            
             # CHANGE: Default to 7B instead of 2B
             # Check for saved preference first
             if model_size is None:
                 # Try to get from environment or config
                 import os
-                model_size = os.environ.get('QWEN2VL_MODEL_SIZE', '1')  # Default to '2' which is 7B
+                model_size = os.environ.get('QWEN2VL_MODEL_SIZE', '1')
             
             # Determine which model to load
             if model_size and str(model_size).startswith("custom:"):
                 # Custom model passed with ID
                 model_id = str(model_size).replace("custom:", "")
                 self.loaded_model_size = "Custom"
+                self.model_id = model_id
                 self._log(f"Loading custom model: {model_id}")
             elif model_size == "4":
                 # Custom option selected but no ID - shouldn't happen
@@ -337,7 +338,8 @@ class Qwen2VL(OCRProvider):
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """Process image with Qwen2-VL for Korean text extraction"""
         results = []
-        
+        if hasattr(self, 'model_id'):
+            self._log(f"DEBUG: Using model: {self.model_id}", "debug")
         try:
             if not self.is_loaded:
                 if not self.load_model():
@@ -904,10 +906,12 @@ class OCRManager:
         if not provider:
             return {'installed': False, 'loaded': False}
         
-        return {
+        result = {
             'installed': provider.check_installation(),
             'loaded': provider.is_loaded
         }
+        self.log_callback(f"DEBUG: check_provider_status({name}) returning loaded={result['loaded']}", "debug")
+        return result
     
     def install_provider(self, name: str, progress_callback=None) -> bool:
         """Install a provider"""
