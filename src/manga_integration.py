@@ -4367,6 +4367,20 @@ class MangaTranslationTab:
         # Reset the translator's history manager for new batch
         if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
             self.translator.reset_history_manager()
+
+        # Set environment variables for custom-api provider
+        if ocr_config['provider'] == 'custom-api':
+            env_vars = self.main_gui._get_environment_variables(
+                epub_path='',  # Not needed for manga
+                api_key=api_key  # Use the api_key variable you already have
+            )
+            
+            # Apply all environment variables
+            import os
+            for key, value in env_vars.items():
+                os.environ[key] = str(value)
+            
+            self._log("✅ Set environment variables for custom-api OCR provider")
         
         # Initialize translator if needed
         if not self.translator:
