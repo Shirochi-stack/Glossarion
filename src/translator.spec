@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v4.1.0 - PyInstaller Specification File
+Glossarion v4.2.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v4.1.0'  # CHANGED: Updated version
+APP_NAME = 'Glossarion v4.2.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -103,6 +103,8 @@ app_files = [
 	('bubble_detector.py', '.'),
 
 	('local_inpainter.py', '.'),	
+	
+	('ocr_manager.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -138,6 +140,7 @@ app_modules = [
 	'multi_api_key_manager.py',
 	'bubble_detector', 
 	'local_inpainter',  	
+	'ocr_manager',
 	
 ]
 
@@ -347,35 +350,6 @@ api_modules = [
     'isodate',  # Required by msrest
     'oauthlib',  # May be required for Azure auth
     'requests_oauthlib',  # May be required for Azure auth
-
-    # YOLO Bubble Detection Support (ADD THIS SECTION)
-    'onnxruntime',
-    'onnxruntime.capi',
-    'onnxruntime.capi.onnxruntime_pybind11_state',
-    'onnxruntime.capi._pybind_state',
-    'onnxruntime.tools',
-    'onnxruntime.transformers',
-    'onnxruntime.backend',
-    'onnxruntime.backend.backend',
-    'onnxruntime.datasets',
-    'onnxruntime.quantization',
-    'onnxruntime.training',
-    
-    # Ultralytics (optional - for PT to ONNX conversion)
-    'ultralytics',
-    'ultralytics.yolo',
-    'ultralytics.engine',
-    'ultralytics.engine.model',
-    'ultralytics.engine.exporter',
-    'ultralytics.engine.predictor',
-    'ultralytics.engine.results',
-    'ultralytics.nn',
-    'ultralytics.nn.modules',
-    'ultralytics.utils',
-    'ultralytics.utils.ops',
-    'ultralytics.utils.torch_utils',
-    'ultralytics.data',
-    'ultralytics.cfg',
     
     # Google Cloud Vision (for manga OCR)
     'google.cloud',
@@ -881,87 +855,114 @@ hiddenimports = list(set(hiddenimports))
 # ============================================================================
 
 excludes = [
-    # Large scientific packages (unless needed)
-	'ultralytics',
-	'onnxruntime',
-    'matplotlib',
-    'pandas',
-    #'scipy',  # Required by datasketch - do not exclude
-    # 'numpy',  # Required by datasketch and OpenCV - do not exclude
-    'sklearn',
-    'skimage',
-    'torch',
-    'torchvision',
-    'torchaudio',
-    'tensorflow',
-    'tensorflow_hub',
-    'tensorboard',
-    'keras',
-    'jax',
-    'flax',
-    'transformers',  # Hugging Face
-    'accelerate',
-    'xformers',
-    'triton',  # PyTorch dependency
-    'nvidia',  # CUDA libraries
-    'cuda',
-    'cudnn',
-    'cublas',
-    'cufft',
-    'curand',
-    'cusolver',
-    'cusparse',
-    'nccl',
-    'nvtx',
+    # ============================================================================
+    # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)
+    # ============================================================================
     
-    # Testing frameworks
-    'pytest',
-    'nose',
-    'unittest',
-    'doctest',
-    'test',
-    'tests',
+    # PyTorch ecosystem (~800MB)
+    'torch', 'torch.*',
+    'torchvision', 'torchvision.*', 
+    'torchaudio', 'torchaudio.*',
+    'torch.nn', 'torch.nn.*',
+    'torch.cuda', 'torch.cuda.*',
+    'torch.jit', 'torch.onnx', 'torch.autograd',
+    'torch.optim', 'torch.utils', 'torch.distributed',
+    'torch.multiprocessing', 'torch.serialization',
+    'torch.nn.modules.*',
     
-    # Development tools
-    'IPython',
-    'jupyter',
-    'notebook',
-    'ipykernel',
-    'ipywidgets',
-    'pylint',
-    'black',
-    'flake8',
-    'mypy',
-    'coverage',
+    # HuggingFace ecosystem (~400MB)
+    'transformers', 'transformers.*',
+    'tokenizers', 'tokenizers.*',
+    'huggingface_hub', 'huggingface_hub.*',
+    'safetensors', 'safetensors.*',
+    'accelerate', 'accelerate.*',
     
-    # Documentation
-    'sphinx',
-    'docutils',
+    # Computer Vision & YOLO (~200MB)
+    'ultralytics', 'ultralytics.*',
+    'ultralytics-thop',
     
-    # Other unnecessary packages
-    'PyQt5',
-    'PyQt6',
-    'PySide2',
-    'PySide6',
-    'wx',
-    'kivy',
-    'pygame',
-    'tornado',
-    'flask',
-    'django',
-    'fastapi',
-    'uvicorn',
+    # ONNX Runtime (~300MB)
+    'onnx', 'onnx.*',
+    'onnxruntime', 'onnxruntime.*',
+    'onnxruntime-gpu',
+    'onnxruntime.capi', 'onnxruntime.capi.*',
+    'onnxruntime.tools', 'onnxruntime.transformers',
+    'onnxruntime.backend', 'onnxruntime.backend.*',
+    
+    # OCR Libraries (~300MB) - MAJOR ADDITION
+    'easyocr', 'easyocr.*',
+    'manga-ocr', 'manga_ocr.*',
+    'paddleocr', 'paddleocr.*',
+    'paddlepaddle', 'paddlepaddle.*',
+    'paddlex', 'paddlex.*',
+    'python-doctr', 'python_doctr.*',
+    
+    # Multiple OpenCV versions (~150MB) - MAJOR ADDITION
+    'opencv-contrib-python',
+    'opencv-python',  # Keep opencv-python-headless only
+    'cv2.contrib',
+    
+    # Scientific Computing (Optional)
+    'matplotlib', 'matplotlib.*',
+    'pandas', 'pandas.*',
+    'scikit-image', 'skimage', 'skimage.*',
+    'sklearn', 'sklearn.*',
+    # 'scipy',  # Keep - required by datasketch
+    # 'numpy',  # Keep - required by datasketch and OpenCV
+    
+    # ============================================================================
+    # CUDA & GPU LIBRARIES
+    # ============================================================================
+    'nvidia', 'nvidia.*',
+    'cuda', 'cudart', 'cublas', 'curand', 'cusparse', 'cufft',
+    'cutlass', 'nccl', 'nvtx', 'cudnn',
+    
+    # ============================================================================
+    # OTHER ML FRAMEWORKS
+    # ============================================================================
+    'tensorflow', 'tensorflow.*',
+    'tensorflow_hub', 'tensorboard',
+    'keras', 'keras.*',
+    'jax', 'jax.*', 'flax', 'flax.*',
+    'xformers', 'triton',
+    
+    # ============================================================================
+    # DEVELOPMENT & TESTING TOOLS
+    # ============================================================================
+    'pytest', 'nose', 'unittest', 'doctest', 'test', 'tests',
+    'IPython', 'jupyter', 'notebook', 'ipykernel', 'ipywidgets',
+    'pylint', 'black', 'flake8', 'mypy', 'coverage',
+    'sphinx', 'docutils',
+    
+    # ============================================================================
+    # ALTERNATIVE GUI FRAMEWORKS
+    # ============================================================================
+    'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
+    'wx', 'kivy', 'pygame',
+    
+    # ============================================================================
+    # WEB FRAMEWORKS
+    # ============================================================================
+    'tornado', 'flask', 'django', 'fastapi', 'uvicorn',
+    
+    # ============================================================================
+    # OPTIONAL/RARELY USED PACKAGES
+    # ============================================================================
+    'dask', 'dask.*',
+    'cupy', 'sparse',
     'colorama',  # Unless you need colored console output
-    'win32com',  # Unless you need Windows COM
-    'pythoncom', # Unless you need Windows COM
+    'win32com', 'pythoncom',  # Unless you need Windows COM
     
-    # Optional scipy backends (these cause warnings but are safe to exclude)
-    'dask',
-    'dask.array',
-    'torch',
-    'cupy',
-    'jax',
-    'sparse',
+    # ============================================================================
+    # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
+    # ============================================================================
+    'modelscope', 'modelscope.*',
+    'aistudio-sdk',
+    'bce-python-sdk',
+    'briefcase',
+    'cookiecutter',
+    'fugashi', 'unidic-lite', 'jaconv',  # Japanese text processing
+    'python-bidi',  # BiDi text
 ]
 
 # ============================================================================
