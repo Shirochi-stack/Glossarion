@@ -113,7 +113,8 @@ class MangaTranslationTab:
             'Qwen2-VL': {
                 '2B': 4000,
                 '7B': 14000,
-                '72B': 144000
+                '72B': 144000,
+                'custom': 10000  # Default estimate for custom models
             }
         }
         
@@ -136,22 +137,48 @@ class MangaTranslationTab:
             model_options = {
                 "2B": "• Smallest model (~4GB download, 4-8GB VRAM)\n• Fast but less accurate\n• Good for quick testing",
                 "7B": "• Medium model (~14GB download, 12-16GB VRAM)\n• Best balance of speed and quality\n• Recommended for most users",
-                "72B": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU"
+                "72B": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU",
+                "custom": "• Enter any Hugging Face model ID\n• For advanced users\n• Size varies by model"
             }
             
             selected_model = tk.StringVar(value="2B")
+            custom_model_id = tk.StringVar()
             
             for key, description in model_options.items():
                 frame = tk.Frame(selection_dialog)
                 frame.pack(fill=tk.X, padx=20, pady=10)
                 
-                rb = tk.Radiobutton(frame, text=f"{key} Model", variable=selected_model, 
-                                   value=key, font=('Arial', 11, 'bold'))
+                rb = tk.Radiobutton(frame, text=f"{key.title()} Model" if key != "custom" else "Custom Model", 
+                                   variable=selected_model, value=key, font=('Arial', 11, 'bold'))
                 rb.pack(anchor='w')
                 
                 desc_label = tk.Label(frame, text=description, font=('Arial', 9), 
                                      justify=tk.LEFT, fg='gray')
                 desc_label.pack(anchor='w', padx=(20, 0))
+            
+            # Custom model ID entry
+            custom_frame = tk.Frame(selection_dialog)
+            custom_frame.pack(fill=tk.X, padx=40, pady=5)
+            
+            tk.Label(custom_frame, text="Model ID:", font=('Arial', 9)).pack(side=tk.LEFT)
+            custom_entry = tk.Entry(custom_frame, textvariable=custom_model_id, width=40)
+            custom_entry.pack(side=tk.LEFT, padx=5)
+            
+            # Initially hide custom entry
+            custom_frame.pack_forget()
+            
+            def on_model_change():
+                if selected_model.get() == "custom":
+                    custom_frame.pack(fill=tk.X, padx=40, pady=5)
+                else:
+                    custom_frame.pack_forget()
+            
+            # Update visibility when selection changes
+            for widget in selection_dialog.winfo_children():
+                if isinstance(widget, tk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Radiobutton):
+                            child.config(command=on_model_change)
             
             warning_frame = tk.Frame(selection_dialog)
             warning_frame.pack(fill=tk.X, padx=20, pady=10)
@@ -178,8 +205,15 @@ class MangaTranslationTab:
             
             def confirm_selection():
                 selected = selected_model.get()
-                model_confirmed['model_key'] = selected
-                model_confirmed['model_id'] = f"Qwen/Qwen2-VL-{selected}-Instruct"
+                if selected == "custom":
+                    if not custom_model_id.get().strip():
+                        tk.messagebox.showerror("Error", "Please enter a model ID")
+                        return
+                    model_confirmed['model_key'] = selected
+                    model_confirmed['model_id'] = custom_model_id.get().strip()
+                else:
+                    model_confirmed['model_key'] = selected
+                    model_confirmed['model_id'] = f"Qwen/Qwen2-VL-{selected}-Instruct"
                 model_confirmed['value'] = True
                 selection_dialog.destroy()
             
@@ -595,7 +629,7 @@ class MangaTranslationTab:
             # Show model selection dialog for Qwen2-VL
             selection_dialog = tk.Toplevel(self.dialog)
             selection_dialog.title("Select Qwen2-VL Model Size")
-            selection_dialog.geometry("450x300")
+            selection_dialog.geometry("500x400")
             selection_dialog.transient(self.dialog)
             selection_dialog.grab_set()
             
@@ -608,14 +642,16 @@ class MangaTranslationTab:
             tk.Label(selection_dialog, text="Select Model Size to Load", 
                     font=('Arial', 12, 'bold')).pack(pady=20)
             
-            # Model options
+            # Model options including custom
             model_options = {
                 "1": {"name": "Qwen2-VL 2B", "desc": "Smallest (4-8GB VRAM)"},
                 "2": {"name": "Qwen2-VL 7B", "desc": "Medium (12-16GB VRAM)"},
                 "3": {"name": "Qwen2-VL 72B", "desc": "Largest (80GB+ VRAM)"},
+                "4": {"name": "Custom Model", "desc": "Enter any HF model ID"},
             }
             
             selected_model = tk.StringVar(value="1")
+            custom_model_id = tk.StringVar()
             
             for key, info in model_options.items():
                 frame = tk.Frame(selection_dialog)
@@ -626,10 +662,42 @@ class MangaTranslationTab:
                                    font=('Arial', 10))
                 rb.pack(anchor='w')
             
+            # Custom model ID entry
+            custom_frame = tk.Frame(selection_dialog)
+            custom_frame.pack(fill=tk.X, padx=40, pady=5)
+            
+            tk.Label(custom_frame, text="Model ID:", font=('Arial', 9)).pack(side=tk.LEFT)
+            custom_entry = tk.Entry(custom_frame, textvariable=custom_model_id, width=35)
+            custom_entry.pack(side=tk.LEFT, padx=5)
+            
+            # Initially hide custom entry
+            custom_frame.pack_forget()
+            
+            def on_model_change():
+                if selected_model.get() == "4":
+                    custom_frame.pack(fill=tk.X, padx=40, pady=5)
+                else:
+                    custom_frame.pack_forget()
+            
+            # Update visibility when selection changes
+            for widget in selection_dialog.winfo_children():
+                if isinstance(widget, tk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Radiobutton):
+                            child.config(command=on_model_change)
+            
             model_confirmed = {'value': False, 'size': None}
             
             def confirm_selection():
-                model_confirmed['size'] = selected_model.get()
+                selected = selected_model.get()
+                if selected == "4":
+                    # Custom model
+                    if not custom_model_id.get().strip():
+                        tk.messagebox.showerror("Error", "Please enter a model ID")
+                        return
+                    model_confirmed['size'] = f"custom:{custom_model_id.get().strip()}"
+                else:
+                    model_confirmed['size'] = selected
                 model_confirmed['value'] = True
                 selection_dialog.destroy()
             
