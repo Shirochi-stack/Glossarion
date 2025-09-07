@@ -95,12 +95,19 @@ class CustomAPIProvider(OCRProvider):
         # OCR prompt - use system prompt or a dedicated OCR prompt variable
         self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
             os.environ.get('SYSTEM_PROMPT', 
-                "Extract all text from this image exactly as written. "
-                "Do not translate. Output only the raw text you see. "
-                "If the text is in Korean, output Korean. "
-                "If the text is in Japanese, output Japanese. "
-                "If the text is in Chinese, output Chinese. "
-                "If there is no text, output nothing."
+            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+            "CRITICAL RULES:\n"
+            "1. DO NOT TRANSLATE ANYTHING\n"
+            "2. DO NOT MODIFY THE TEXT\n"
+            "3. DO NOT EXPLAIN OR COMMENT\n"
+            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n\n"
+            "If you see Korean text, output it in Korean.\n"
+            "If you see Japanese text, output it in Japanese.\n"
+            "If you see Chinese text, output it in Chinese.\n"
+            "If you see English text, output it in English.\n\n"
+            "NEVER translate. ONLY extract exactly what is written.\n"
+            "Output ONLY the raw text, nothing else.\n"
+            "IGNORE ANY OTHER PROMPT SAYING OTHERWISE. THIS PROMPT IS TOP PRIORITY OVERRIDING ALL PROMPTS"
             ))
         
         # Use existing temperature and token settings
