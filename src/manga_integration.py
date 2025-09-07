@@ -110,7 +110,7 @@ class MangaTranslationTab:
         # Model sizes (approximate)
         model_sizes = {
             'manga-ocr': 450,  # MB
-            'pororo': 500,     # MB
+            'Qwen2-VL': 2000,     # MB
         }
         
         # Create download dialog
@@ -129,7 +129,6 @@ class MangaTranslationTab:
         # Info label
         info_text = {
             'manga-ocr': "📚 Manga OCR Model\n• Source: HuggingFace (kha-white/manga-ocr-base)\n• Size: ~450MB\n• Optimized for Japanese manga text\n• Auto-downloads on first use",
-            'pororo': "🇰🇷 Pororo OCR Model\n• Source: Kakao Brain\n• Size: ~500MB\n• Optimized for Korean manhwa\n• Includes text detection + recognition",
         }.get(provider, f"Model for {provider}")
         
         tk.Label(download_dialog, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack(pady=20)
@@ -268,39 +267,6 @@ class MangaTranslationTab:
                         
                         # Update main UI
                         self.dialog.after(0, self._check_provider_status)
-                        
-                elif provider == 'pororo':
-                    # Similar process for Pororo
-                    progress_label.config(text="Installing Pororo package...")
-                    
-                    import subprocess
-                    import sys
-                    
-                    subprocess.check_call([
-                        sys.executable, "-m", "pip", "install", 
-                        "pororo", "--upgrade"
-                    ])
-                    
-                    progress_label.config(text="Downloading Pororo models...")
-                    progress_var.set(10)
-                    
-                    # Import and initialize Pororo
-                    from pororo import Pororo
-                    
-                    # Initialize with progress tracking
-                    # Pororo downloads models automatically
-                    model = Pororo(task="ocr", lang="ko")
-                    
-                    progress_var.set(100)
-                    progress_label.config(text="✅ Download complete!")
-                    status_label.config(text="Model ready to use!")
-                    
-                    # Update OCR manager
-                    self.ocr_manager.get_provider('pororo').model = model
-                    self.ocr_manager.get_provider('pororo').is_loaded = True
-                    self.ocr_manager.get_provider('pororo').is_installed = True
-                    
-                    self.dialog.after(0, self._check_provider_status)
                     
             except Exception as e:
                 progress_label.config(text="❌ Download failed")
@@ -398,7 +364,7 @@ class MangaTranslationTab:
                 self.provider_status_label.config(text="❌ Not installed", fg="red")
                 
                 # Determine if this is a HuggingFace model or pip package
-                huggingface_providers = ['manga-ocr', 'pororo']
+                huggingface_providers = ['manga-ocr', 'Qwen2-VL']
                 pip_providers = ['easyocr', 'paddleocr', 'doctr']
                 
                 if provider in huggingface_providers:
@@ -520,7 +486,7 @@ class MangaTranslationTab:
             'google': "OCR: Google Cloud Vision | Translation: API Key",
             'azure': "OCR: Azure Computer Vision | Translation: API Key",
             'manga-ocr': "OCR: Manga OCR (Japanese) | Translation: API Key",
-            'pororo': "OCR: Pororo (Korean) | Translation: API Key",
+            'Qwen2-VL': "OCR: Qwen2-VL (Korean) | Translation: API Key",
             'easyocr': "OCR: EasyOCR (Multi-lang) | Translation: API Key",
             'paddleocr': "OCR: PaddleOCR | Translation: API Key",
             'doctr': "OCR: DocTR | Translation: API Key"
@@ -545,7 +511,7 @@ class MangaTranslationTab:
             # Show Azure settings frame  
             self.azure_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
             
-        # For all other providers (manga-ocr, pororo, easyocr, paddleocr, doctr)
+        # For all other providers (manga-ocr, Qwen2-VL, easyocr, paddleocr, doctr)
         # Don't show any cloud credential frames - they use local models
         
         # Check provider status to show appropriate buttons
@@ -556,7 +522,7 @@ class MangaTranslationTab:
             'google': "Google Cloud Vision (requires credentials)",
             'azure': "Azure Computer Vision (requires API key)",
             'manga-ocr': "Manga OCR - optimized for Japanese manga",
-            'pororo': "Pororo - optimized for Korean manhwa", 
+            'Qwen2-VL': "Pororo - optimized for Korean manhwa", 
             'easyocr': "EasyOCR - multi-language support",
             'paddleocr': "PaddleOCR - CJK language support",
             'doctr': "DocTR - document text recognition"
@@ -723,10 +689,10 @@ class MangaTranslationTab:
             ('google', 'Google Cloud Vision'),
             ('azure', 'Azure Computer Vision'),
             ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
-            ('pororo', '🇰🇷 Pororo (Korean)'),
+            ('Qwen2-VL', '🇰🇷 Qwen2-VL (Korean)'),
             ('easyocr', '🌏 EasyOCR (Multi-lang)'),
             ('paddleocr', '🐼 PaddleOCR'),
-            ('doctr', '📄 DocTR')
+            ('doctr', '📄 DocTR'),
         ]
 
         # Just the values for the combobox
