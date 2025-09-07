@@ -353,14 +353,24 @@ class MangaTranslationTab:
             pady=10
         )
         log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        
-        details_text = tk.Text(log_frame, height=8, width=70, font=('Courier', 9), bg='#f5f5f5')
-        details_text.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(details_text)
+
+        # Create a frame to hold the text widget and scrollbar
+        text_frame = tk.Frame(log_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+
+        details_text = tk.Text(
+            text_frame, 
+            height=12, 
+            width=70, 
+            font=('Courier', 9), 
+            bg='#f5f5f5'
+        )
+        details_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Attach scrollbar to the frame, not the text widget
+        scrollbar = ttk.Scrollbar(text_frame, command=details_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         details_text.config(yscrollcommand=scrollbar.set)
-        scrollbar.config(command=details_text.yview)
             
         def add_log(message):
             """Add message to log"""
@@ -1178,7 +1188,7 @@ class MangaTranslationTab:
             text="📥 Download",
             command=self._download_hf_model,
             bootstyle="success",
-            width=10
+            width=22
         )
         # Don't pack yet
 
