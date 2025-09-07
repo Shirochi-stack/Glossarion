@@ -229,6 +229,7 @@ class MangaTranslator:
         self.shadow_offset_x = config.get('manga_shadow_offset_x', 2)
         self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
+        self.force_caps_lock = config.get('manga_force_caps_lock', False)
         self.skip_inpainting = config.get('manga_skip_inpainting', True)
 
         # Font size multiplier mode - Load from config
@@ -503,7 +504,8 @@ class MangaTranslator:
                                      shadow_color: tuple = None,
                                      shadow_offset_x: int = None,
                                      shadow_offset_y: int = None,
-                                     shadow_blur: int = None):
+                                     shadow_blur: int = None,
+                                     force_caps_lock: bool = None):  # ADD THIS PARAMETER
         """Update text rendering settings"""
         self._log("📐 Updating text rendering settings:", "info")
         
@@ -532,6 +534,7 @@ class MangaTranslator:
                 self.font_size_mode = 'fixed'
                 self.custom_font_size = font_size if font_size > 0 else None
                 self._log(f"  Font size mode: Fixed ({font_size if font_size > 0 else 'Auto'})", "info")
+        if text_color is not None:
             self.text_color = text_color
             self._log(f"  Text color: RGB{text_color}", "info")
         if shadow_enabled is not None:
@@ -546,6 +549,9 @@ class MangaTranslator:
             self.shadow_offset_y = shadow_offset_y
         if shadow_blur is not None:
             self.shadow_blur = max(0, shadow_blur)
+        if force_caps_lock is not None:  # ADD THIS BLOCK
+            self.force_caps_lock = force_caps_lock
+            self._log(f"  Force Caps Lock: {'Enabled' if force_caps_lock else 'Disabled'}", "info")
             
         self._log("✅ Rendering settings updated", "info")
     
@@ -3416,6 +3422,8 @@ class MangaTranslator:
         self._log(f"  Text color: RGB{self.text_color}", "info")
         self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
         self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
+        if self.force_caps_lock:  
+            self._log(f"  Force Caps Lock: ENABLED", "info")
         
         # Convert to PIL for text rendering
         import cv2
@@ -3462,6 +3470,10 @@ class MangaTranslator:
             for region in adjusted_regions:
                 if not region.translated_text:
                     continue
+                
+                # APPLY CAPS LOCK TRANSFORMATION HERE (First location)
+                if self.force_caps_lock:
+                    region.translated_text = region.translated_text.upper()
                 
                 region_count += 1
                 self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
@@ -3547,6 +3559,10 @@ class MangaTranslator:
             for region in adjusted_regions:
                 if not region.translated_text:
                     continue
+                
+                # APPLY CAPS LOCK TRANSFORMATION HERE
+                if self.force_caps_lock:
+                    region.translated_text = region.translated_text.upper()
                 
                 region_count += 1
                 self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
@@ -4569,6 +4585,7 @@ class MangaTranslator:
     def _find_font(self) -> str:
         """Find a suitable font for text rendering"""
         font_candidates = [
+            "C:/Windows/Fonts/comicbd.ttf",  # Comic Sans MS Bold as first choice
             "C:/Windows/Fonts/arial.ttf",
             "C:/Windows/Fonts/calibri.ttf", 
             "C:/Windows/Fonts/tahoma.ttf",
