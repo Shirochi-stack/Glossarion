@@ -81,6 +81,317 @@ class OCRProvider:
         """Detect text in image"""
         raise NotImplementedError
 
+class CustomAPIProvider(OCRProvider):
+    """Custom API OCR provider that uses existing GUI variables"""
+    
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        
+        # Use EXISTING environment variables from TranslatorGUI
+        self.api_url = os.environ.get('OPENAI_CUSTOM_BASE_URL', '')
+        self.api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+        self.model_name = os.environ.get('MODEL', 'gpt-4o-mini')
+        
+        # OCR prompt - use system prompt or a dedicated OCR prompt variable
+        self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
+            os.environ.get('SYSTEM_PROMPT', 
+                "Extract all text from this image exactly as written. "
+                "Do not translate. Output only the raw text you see. "
+                "If the text is in Korean, output Korean. "
+                "If the text is in Japanese, output Japanese. "
+                "If the text is in Chinese, output Chinese. "
+                "If there is no text, output nothing."
+            ))
+        
+        # Use existing temperature and token settings
+        self.temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.01'))
+        self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '500'))
+        
+        # Image settings from existing compression variables
+        self.image_format = 'jpeg' if os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') != 'png' else 'png'
+        self.image_quality = int(os.environ.get('JPEG_QUALITY', '85'))
+        
+        # Simple defaults
+        self.api_format = 'openai'  # Most custom endpoints are OpenAI-compatible
+        self.timeout = int(os.environ.get('CHUNK_TIMEOUT', '30'))
+        
+    def check_installation(self) -> bool:
+        """Always installed - uses UnifiedClient"""
+        self.is_installed = True
+        return True
+    
+    def install(self, progress_callback=None) -> bool:
+        """No installation needed for API-based provider"""
+        return self.check_installation()
+    
+    def load_model(self) -> bool:
+        """Initialize UnifiedClient with current settings"""
+        try:
+            from unified_api_client import UnifiedClient
+            
+            model = os.environ.get('MODEL', 'gpt-4o-mini')
+            api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+            
+            if not api_key:
+                self._log("❌ No API key configured", "error")
+                return False
+            
+            # Create UnifiedClient just like translations do
+            self.client = UnifiedClient(model=model, api_key=api_key)
+            
+            self._log(f"✅ Using {model} for OCR via UnifiedClient")
+            self.is_loaded = True
+            return True
+            
+        except Exception as e:
+            self._log(f"❌ Failed to initialize UnifiedClient: {str(e)}", "error")
+            return False
+    
+    def _test_connection(self) -> bool:
+        """Test API connection with a simple request"""
+        try:
+            # Create a small test image
+            test_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
+            cv2.putText(test_image, "TEST", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+            
+            # Encode image
+            image_base64 = self._encode_image(test_image)
+            
+            # Prepare test request based on API format
+            if self.api_format == 'openai':
+                test_payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "What text do you see?"},
+                                {"type": "image_url", "image_url": {"url": f"data:image/{self.image_format};base64,{image_base64}"}}
+                            ]
+                        }
+                    ],
+                    "max_tokens": 50
+                }
+            else:
+                # For other formats, just try a basic health check
+                return True
+            
+            headers = self._prepare_headers()
+            response = requests.post(
+                self.api_url,
+                headers=headers,
+                json=test_payload,
+                timeout=10
+            )
+            
+            return response.status_code == 200
+            
+        except Exception:
+            return False
+    
+    def _encode_image(self, image: np.ndarray) -> str:
+        """Encode numpy array to base64 string"""
+        # Convert BGR to RGB if needed
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            image_rgb = image
+        
+        # Convert to PIL Image
+        pil_image = Image.fromarray(image_rgb)
+        
+        # Save to bytes buffer
+        buffer = io.BytesIO()
+        if self.image_format.lower() == 'png':
+            pil_image.save(buffer, format='PNG')
+        else:
+            pil_image.save(buffer, format='JPEG', quality=self.image_quality)
+        
+        # Encode to base64
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+        
+        return image_base64
+    
+    def _prepare_headers(self) -> dict:
+        """Prepare request headers"""
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # Add API key if configured
+        if self.api_key:
+            if self.api_format == 'anthropic':
+                headers["x-api-key"] = self.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        # Add any custom headers
+        headers.update(self.api_headers)
+        
+        return headers
+    
+    def _prepare_request_payload(self, image_base64: str) -> dict:
+        """Prepare request payload based on API format"""
+        if self.api_format == 'openai':
+            return {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self.ocr_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/{self.image_format};base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature
+            }
+        
+        elif self.api_format == 'anthropic':
+            return {
+                "model": self.model_name,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": self.ocr_prompt
+                            },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": f"image/{self.image_format}",
+                                    "data": image_base64
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        
+        else:
+            # Custom format - use environment variable for template
+            template = os.environ.get('CUSTOM_OCR_REQUEST_TEMPLATE', '{}')
+            payload = json.loads(template)
+            
+            # Replace placeholders
+            payload_str = json.dumps(payload)
+            payload_str = payload_str.replace('{{IMAGE_BASE64}}', image_base64)
+            payload_str = payload_str.replace('{{PROMPT}}', self.ocr_prompt)
+            payload_str = payload_str.replace('{{MODEL}}', self.model_name)
+            payload_str = payload_str.replace('{{MAX_TOKENS}}', str(self.max_tokens))
+            payload_str = payload_str.replace('{{TEMPERATURE}}', str(self.temperature))
+            
+            return json.loads(payload_str)
+    
+    def _extract_text_from_response(self, response_data: dict) -> str:
+        """Extract text from API response based on format"""
+        try:
+            if self.api_format == 'openai':
+                # OpenAI format: response.choices[0].message.content
+                return response_data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            elif self.api_format == 'anthropic':
+                # Anthropic format: response.content[0].text
+                content = response_data.get('content', [])
+                if content and isinstance(content, list):
+                    return content[0].get('text', '')
+                return ''
+            
+            else:
+                # Custom format - use environment variable for path
+                response_path = os.environ.get('CUSTOM_OCR_RESPONSE_PATH', 'text')
+                
+                # Navigate through the response using the path
+                result = response_data
+                for key in response_path.split('.'):
+                    if isinstance(result, dict):
+                        result = result.get(key, '')
+                    elif isinstance(result, list) and key.isdigit():
+                        idx = int(key)
+                        result = result[idx] if idx < len(result) else ''
+                    else:
+                        result = ''
+                        break
+                
+                return str(result)
+                
+        except Exception as e:
+            self._log(f"Failed to extract text from response: {e}", "error")
+            return ''
+    
+    def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
+        """Process image using UnifiedClient.send_image()"""
+        results = []
+        
+        try:
+            if not self.is_loaded:
+                if not self.load_model():
+                    return results
+            
+            import cv2
+            from PIL import Image
+            import base64
+            import io
+            
+            # Convert numpy array to PIL Image
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            h, w = image.shape[:2]
+            
+            # Convert PIL Image to base64 string (what send_image expects)
+            buffer = io.BytesIO()
+            
+            # Use the image format from settings
+            if self.image_format.lower() == 'png':
+                pil_image.save(buffer, format='PNG')
+            else:
+                pil_image.save(buffer, format='JPEG', quality=self.image_quality)
+            
+            buffer.seek(0)
+            image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+            
+            # Use UnifiedClient's send_image method with base64 data
+            content, finish_reason = self.client.send_image(
+                messages=[{"role": "user", "content": self.ocr_prompt}],
+                image_data=image_base64  # Now passing base64 string
+            )
+            
+            # Check the content directly
+            if content and content.strip():
+                # Filter out error messages
+                if "[" in content and "FAILED]" in content:
+                    self._log(f"⚠️ API returned error: {content}", "warning")
+                    return results
+                    
+                text = content.strip()
+                results.append(OCRResult(
+                    text=text,
+                    bbox=(0, 0, w, h),
+                    confidence=kwargs.get('confidence', 0.85),
+                    vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                ))
+                self._log(f"✅ Detected: {text[:50]}...")
+            else:
+                self._log(f"⚠️ No text detected (finish_reason: {finish_reason})")
+        
+        except Exception as e:
+            self._log(f"❌ Error: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+        
+        return results
 
 class MangaOCRProvider(OCRProvider):
     """Manga OCR provider using HuggingFace model directly"""
@@ -881,6 +1192,7 @@ class OCRManager:
     def __init__(self, log_callback=None):
         self.log_callback = log_callback
         self.providers = {
+            'custom-api': CustomAPIProvider(log_callback) ,
             'manga-ocr': MangaOCRProvider(log_callback),
             'easyocr': EasyOCRProvider(log_callback),
             'paddleocr': PaddleOCRProvider(log_callback),
