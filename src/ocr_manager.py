@@ -423,9 +423,9 @@ class Qwen2VL(OCRProvider):
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=1024,
+                    max_new_tokens=512,
                     do_sample=False,  # Deterministic output
-                    temperature=0.01,  # Very low temperature to reduce creativity
+                    temperature=0.1,  # Very low temperature to reduce creativity
                     top_p=1.0,  # No nucleus sampling
                     repetition_penalty=1.0  # No repetition penalty
                 )
