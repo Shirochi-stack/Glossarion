@@ -217,15 +217,12 @@ class Qwen2VL(OCRProvider):
         self.processor = None
         self.model = None
         self.tokenizer = None
-        self.loaded_model_size = None  # Track which model size is loaded
-        self.loaded_model_id = None    # Track which model ID is loaded
         
     def check_installation(self) -> bool:
         """Check if required packages are installed"""
         try:
             import transformers
             import torch
-            from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
             self.is_installed = True
             return True
         except ImportError:
@@ -240,8 +237,7 @@ class Qwen2VL(OCRProvider):
             
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install",
-                "transformers>=4.37.0", "torch", "torchvision", 
-                "pillow", "accelerate", "sentencepiece", "protobuf", "--upgrade"
+                "transformers", "torch", "torchvision", "pillow", "--upgrade"
             ])
             
             if progress_callback:
@@ -262,133 +258,58 @@ class Qwen2VL(OCRProvider):
                 self._log("❌ Not installed", "error")
                 return False
             
-            # If model already loaded with same size, just return success
-            if self.is_loaded and self.model is not None:
-                if model_size is None or str(model_size) == str(self.loaded_model_size):
-                    self._log("✅ Model already loaded")
-                    return True
-                else:
-                    # Different size requested, need to reload
-                    self._log(f"Unloading current model to load size {model_size}")
-                    self.model = None
-                    self.processor = None
-                    self.tokenizer = None
-                    self.is_loaded = False
-            
             self._log("🔥 Loading Qwen2-VL for Korean OCR...")
             
-            from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+            from transformers import AutoProcessor, AutoTokenizer
             import torch
             
             # Model options
             model_options = {
-                "1": {"id": "Qwen/Qwen2-VL-2B-Instruct", "name": "2B"},
-                "2": {"id": "Qwen/Qwen2-VL-7B-Instruct", "name": "7B"},
-                "3": {"id": "Qwen/Qwen2-VL-72B-Instruct", "name": "72B"},
+                "1": "Qwen/Qwen2-VL-2B-Instruct",
+                "2": "Qwen/Qwen2-VL-7B-Instruct",
+                "3": "Qwen/Qwen2-VL-72B-Instruct"
             }
             
-            # Determine model to load
-            if model_size and str(model_size) in model_options:
-                model_id = model_options[str(model_size)]["id"]
-                model_name = model_options[str(model_size)]["name"]
-                self.loaded_model_size = model_name
-            else:
-                # Default to 2B if not specified
-                model_id = model_options["1"]["id"]
-                model_name = "2B"
-                self.loaded_model_size = model_name
-                model_size = "1"
+            # Use provided size or default to 2B
+            model_id = model_options.get(str(model_size), model_options["1"])
             
-            self.loaded_model_id = model_id
-            self._log(f"Loading {model_name} model: {model_id}")
+            self._log(f"Loading model: {model_id}")
             
-            # Check GPU availability
-            if torch.cuda.is_available():
-                gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-                self._log(f"GPU available: {torch.cuda.get_device_name(0)} ({gpu_mem:.1f}GB)")
-            else:
-                self._log("No GPU detected - using CPU (will be slow)")
-            
-            # Load components with trust_remote_code
-            self._log("Loading processor...")
+            # Load processor and tokenizer
             self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-            
-            self._log("Loading tokenizer...")
             self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
             
-            self._log("Loading model weights...")
-            
-            # Load model with appropriate settings
+            # Load the model - let it figure out the class dynamically
             if torch.cuda.is_available():
-                gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-                
-                # Determine if we need 8-bit quantization
-                need_8bit = False
-                if model_size == "3" and gpu_mem < 80:
-                    need_8bit = True
-                elif model_size == "2" and gpu_mem < 16:
-                    need_8bit = True
-                
-                if need_8bit:
-                    self._log("Using 8-bit quantization to fit in memory")
-                    try:
-                        # Try 8-bit first
-                        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                            model_id,
-                            load_in_8bit=True,
-                            device_map="auto",
-                            trust_remote_code=True
-                        )
-                    except:
-                        # Fallback to fp16
-                        self._log("8-bit failed, trying fp16")
-                        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                            model_id,
-                            torch_dtype=torch.float16,
-                            device_map="auto",
-                            trust_remote_code=True
-                        )
-                else:
-                    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                        model_id,
-                        torch_dtype=torch.float16,
-                        device_map="auto",
-                        trust_remote_code=True
-                    )
+                self._log(f"GPU: {torch.cuda.get_device_name(0)}")
+                # Use auto model class
+                from transformers import AutoModelForVision2Seq
+                self.model = AutoModelForVision2Seq.from_pretrained(
+                    model_id,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
                 self._log("✅ Model loaded on GPU")
-                
             else:
-                # CPU loading
                 self._log("Loading on CPU...")
-                self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                from transformers import AutoModelForVision2Seq
+                self.model = AutoModelForVision2Seq.from_pretrained(
                     model_id,
                     torch_dtype=torch.float32,
                     trust_remote_code=True
                 )
                 self._log("✅ Model loaded on CPU")
             
-            # Set to eval mode
             self.model.eval()
             self.is_loaded = True
-            
-            self._log(f"✅ Qwen2-VL {model_name} ready for Korean OCR!")
+            self._log("✅ Qwen2-VL ready for Korean OCR!")
             return True
-            
-        except ImportError as e:
-            self._log(f"❌ Import error: {str(e)}", "error")
-            self._log("Try installing: pip install transformers torch torchvision accelerate", "error")
-            return False
             
         except Exception as e:
             self._log(f"❌ Failed to load: {str(e)}", "error")
             import traceback
             self._log(traceback.format_exc(), "debug")
-            
-            # Reset state on failure
-            self.model = None
-            self.processor = None
-            self.tokenizer = None
-            self.is_loaded = False
             return False
         
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
@@ -443,7 +364,7 @@ class Qwen2VL(OCRProvider):
             )
             
             # Move to GPU if available
-            if torch.cuda.is_available() and next(self.model.parameters()).is_cuda:
+            if torch.cuda.is_available():
                 inputs = inputs.to("cuda")
             
             # Generate text
@@ -452,7 +373,7 @@ class Qwen2VL(OCRProvider):
                     **inputs,
                     max_new_tokens=256,
                     do_sample=False,
-                    temperature=0.01,  # Very low temperature for accurate OCR
+                    temperature=0.01
                 )
             
             # Decode the output
@@ -478,7 +399,7 @@ class Qwen2VL(OCRProvider):
                 results.append(OCRResult(
                     text=text,
                     bbox=(0, 0, w, h),
-                    confidence=0.9,  # Qwen2-VL is quite accurate
+                    confidence=0.9,
                     vertices=[(0, 0), (w, 0), (w, h), (0, h)]
                 ))
             else:
@@ -951,7 +872,7 @@ class OCRManager:
             'easyocr': EasyOCRProvider(log_callback),
             'paddleocr': PaddleOCRProvider(log_callback),
             'doctr': DocTROCRProvider(log_callback),
-            'Qwen2-VL ': Qwen2VL(log_callback)
+            'Qwen2-VL': Qwen2VL(log_callback)
         }
         self.current_provider = None
         
