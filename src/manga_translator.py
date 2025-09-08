@@ -2987,101 +2987,132 @@ class MangaTranslator:
             return {}
 
     def _fix_json_response(self, response_text: str) -> str:
-        """Fix JSON response with unescaped newlines and other control characters"""
+        """Parse JSON-like response with maximum leniency - quotes optional everywhere"""
         import re
         import json
         
-        # First, try to parse as-is
+        # First, try standard JSON parsing
         try:
             json.loads(response_text)
-            return response_text  # Already valid
+            return response_text  # Already valid JSON
         except json.JSONDecodeError:
             pass
         
-        # Method 1: Fix newlines within JSON string values
-        # This regex finds content between quotes and escapes newlines
-        def escape_newlines_in_strings(match):
-            content = match.group(1)
-            # Escape actual newlines (not already escaped ones)
-            content = re.sub(r'(?<!\\)\n', r'\\n', content)
-            content = re.sub(r'(?<!\\)\r', r'\\r', content) 
-            content = re.sub(r'(?<!\\)\t', r'\\t', content)
-            return f'"{content}"'
+        # Extract key-value pairs with maximum flexibility
+        translations = {}
         
-        # Pattern to match JSON string values (handles escaped quotes)
-        pattern = r'"((?:[^"\\]|\\.|\\n)*?)"'
+        # Remove outer braces and clean up
+        text = response_text.strip()
+        if text.startswith('{'):
+            text = text[1:]
+        if text.endswith('}'):
+            text = text[:-1]
         
-        # Apply the fix
-        fixed = re.sub(pattern, escape_newlines_in_strings, response_text)
+        # Current parsing state
+        current_key = None
+        current_value = []
+        in_value = False
         
-        # Try parsing the fixed version
-        try:
-            json.loads(fixed)
-            self._log("✅ Fixed JSON by escaping control characters", "info")
-            return fixed
-        except json.JSONDecodeError as e:
-            self._log(f"⚠️ Still invalid after escaping: {str(e)}", "debug")
-        
-        # Method 2: More aggressive cleaning
-        # Replace actual newlines that appear between quotes
-        lines = response_text.split('\n')
-        cleaned_lines = []
-        in_string = False
+        lines = text.split('\n')
         
         for line in lines:
-            # Count unescaped quotes to track if we're in a string
-            quote_count = len(re.findall(r'(?<!\\)"', line))
+            line = line.strip()
+            if not line:
+                continue
             
-            if quote_count % 2 == 1:  # Odd number of quotes
-                in_string = not in_string
+            # Remove trailing comma if present
+            has_comma = line.endswith(',')
+            if has_comma:
+                line = line[:-1].strip()
             
-            if in_string and cleaned_lines:
-                # We're continuing a string from the previous line
-                # Add as continuation with escaped newline
-                cleaned_lines[-1] = cleaned_lines[-1].rstrip() + '\\n' + line.lstrip()
-            else:
-                cleaned_lines.append(line)
+            # Check if this line contains a key:value separator
+            if ':' in line and not in_value:
+                # Save previous key-value if exists
+                if current_key is not None and current_value:
+                    value = '\n'.join(current_value)
+                    # Strip quotes if present
+                    if value.startswith('"') and value.endswith('"'):
+                        value = value[1:-1]
+                    translations[current_key] = value
+                    current_value = []
+                
+                # Split at the FIRST colon (the key might contain colons too)
+                colon_idx = line.index(':')
+                key_part = line[:colon_idx].strip()
+                value_part = line[colon_idx + 1:].strip()
+                
+                # Clean the key - remove quotes if present
+                if key_part.startswith('"') and key_part.endswith('"'):
+                    key_part = key_part[1:-1]
+                elif key_part.startswith("'") and key_part.endswith("'"):
+                    key_part = key_part[1:-1]
+                
+                # Unescape the key
+                key_part = key_part.replace('\\n', '\n')
+                current_key = key_part
+                
+                # Check if value exists on same line
+                if value_part:
+                    # Check if value is complete (has closing quote if it started with one)
+                    if value_part.startswith('"'):
+                        if value_part.endswith('"') or has_comma:
+                            # Complete value
+                            if value_part.endswith('"'):
+                                value_part = value_part[1:-1]
+                            else:
+                                value_part = value_part[1:]  # Remove opening quote
+                            translations[current_key] = value_part
+                            current_key = None
+                        else:
+                            # Multi-line value starts
+                            current_value = [value_part[1:]]  # Remove opening quote
+                            in_value = True
+                    else:
+                        # Unquoted value - take it as is
+                        translations[current_key] = value_part
+                        current_key = None
+            elif in_value:
+                # Continuation of multi-line value
+                if line.endswith('"') or has_comma:
+                    # End of value
+                    if line.endswith('"'):
+                        line = line[:-1]
+                    current_value.append(line)
+                    value = '\n'.join(current_value)
+                    translations[current_key] = value
+                    current_key = None
+                    current_value = []
+                    in_value = False
+                else:
+                    # Still in value
+                    current_value.append(line)
+            elif current_key is not None:
+                # This is a value line for the current key (unquoted multi-line)
+                if has_comma or not lines[lines.index(line) + 1:]:  # Last line or has comma
+                    current_value.append(line)
+                    value = '\n'.join(current_value) if current_value else line
+                    translations[current_key] = value
+                    current_key = None
+                    current_value = []
+                else:
+                    current_value.append(line)
         
-        fixed = '\n'.join(cleaned_lines)
+        # Handle any remaining key-value
+        if current_key is not None:
+            value = '\n'.join(current_value) if current_value else ""
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            translations[current_key] = value
         
-        # Try parsing again
-        try:
-            json.loads(fixed)
-            self._log("✅ Fixed JSON with line joining method", "info")
-            return fixed
-        except json.JSONDecodeError:
-            pass
+        # Convert back to valid JSON
+        if translations:
+            result = json.dumps(translations, ensure_ascii=False)
+            self._log(f"✅ Parsed {len(translations)} translations from flexible format", "debug")
+            return result
         
-        # Method 3: Extract and rebuild
-        # Extract all key-value pairs and rebuild valid JSON
-        extracted = {}
-        
-        # Pattern to extract "key": "value" pairs
-        pair_pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\"[^"]*)*)"'
-        
-        matches = re.finditer(pair_pattern, response_text, re.MULTILINE | re.DOTALL)
-        
-        for match in matches:
-            key = match.group(1)
-            value = match.group(2)
-            
-            # Clean up the key (remove newlines)
-            key = key.replace('\n', ' ').replace('\r', ' ')
-            
-            # Properly escape value
-            value = value.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-            
-            extracted[key] = value
-        
-        if extracted:
-            # Rebuild as valid JSON
-            rebuilt = json.dumps(extracted, ensure_ascii=False)
-            self._log("✅ Rebuilt JSON from extracted pairs", "info")
-            return rebuilt
-        
-        # If all else fails, return original
+        # Return original if nothing could be parsed
         return response_text
-
+    
     def _fix_encoding_issues(self, text: str) -> str:
         """Fix common encoding issues in text, especially for Korean"""
         if not text:
@@ -4113,141 +4144,118 @@ class MangaTranslator:
         return safe_x, safe_y, safe_width, safe_height
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
-        """Find optimal font size with smart strategy selection based on context"""
-        
-        # MINIMUM READABLE SIZE (Option 3)
-        MIN_READABLE_SIZE = self.min_readable_size
-        
-        # Check if this region might overlap with others (Option 1 trigger)
-        has_potential_overlap = self._check_potential_overlap(region) if region else False
+        """Find optimal font size with better algorithm"""
         
         # Get usable area
         if region and hasattr(region, 'vertices') and region.vertices:
             safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
             usable_width = safe_width
             usable_height = safe_height
-            self._log(f"  Using vertex-based safe area: {safe_width}x{safe_height}", "info")
         else:
-            # LESS CONSERVATIVE for better readability (Option 2)
-            margin = 0.75 if has_potential_overlap else 0.85  # Use more space when no overlap
+            # Use 85% of bubble area
+            margin = 0.85
             usable_width = int(max_width * margin)
             usable_height = int(max_height * margin)
-            self._log(f"  Using {int(margin*100)}% margins (overlap: {has_potential_overlap})", "info")
         
-        # Font size range with maximum limit applied
-        min_font_size = max(self.min_font_size, MIN_READABLE_SIZE)  # Enforce minimum
-        max_font_size = min(self.max_font_size, self.max_font_size_limit)  # Apply user-configured maximum
+        # Font size limits
+        MIN_FONT = max(10, self.min_readable_size)
+        MAX_FONT = min(40, self.max_font_size_limit)  # Cap at reasonable max
         
-        # Calculate text metrics
+        # Quick estimate based on bubble size
+        # Smaller bubbles need smaller fonts
+        bubble_area = usable_width * usable_height
+        if bubble_area < 5000:  # Very small bubble
+            MAX_FONT = min(MAX_FONT, 18)
+        elif bubble_area < 10000:  # Small bubble
+            MAX_FONT = min(MAX_FONT, 22)
+        elif bubble_area < 20000:  # Medium bubble
+            MAX_FONT = min(MAX_FONT, 28)
+        
+        # Start with a reasonable guess based on text length
         text_length = len(text.strip())
-        area = usable_width * usable_height
+        chars_per_line = max(1, usable_width // 20)  # Estimate ~20 pixels per character
+        estimated_lines = max(1, text_length // chars_per_line)
         
-        # OPTION 1: Simple top-down approach for overlapping regions
-        if has_potential_overlap:
-            self._log("  Using conservative sizing due to potential overlap", "info")
-            return self._fit_text_simple_topdown(text, usable_width, usable_height, draw, min_font_size, max_font_size)
-        
-        # OPTION 2: Less conservative approach for non-overlapping regions
-        # Start with HIGHER estimates
-        if text_length > 0:
-            pixels_per_char = area / text_length
-            
-            # MORE AGGRESSIVE sizing
-            if pixels_per_char > 800:
-                initial_estimate = int(max_font_size * 0.9)  # Was 0.7
-            elif pixels_per_char > 400:
-                initial_estimate = int(max_font_size * 0.7)  # Was 0.5
-            elif pixels_per_char > 200:
-                initial_estimate = int(max_font_size * 0.5)  # Was 0.35
-            elif pixels_per_char > 100:
-                initial_estimate = int(max_font_size * 0.4)  # Was 0.25
-            else:
-                initial_estimate = int(max_font_size * 0.3)  # Was 0.2
+        # Initial size estimate based on height available per line
+        if estimated_lines > 0:
+            initial_size = int(usable_height / (estimated_lines * 1.5))  # 1.5 for line spacing
+            initial_size = max(MIN_FONT, min(initial_size, MAX_FONT))
         else:
-            initial_estimate = int(max_font_size * 0.6)  # Was 0.4
+            initial_size = (MIN_FONT + MAX_FONT) // 2
         
-        # Ensure we start high enough
-        initial_estimate = max(initial_estimate, min_font_size + 10)
-        initial_estimate = min(initial_estimate, max_font_size)
-        
-        self._log(f"  Text length: {text_length}, Initial estimate: {initial_estimate}", "info")
-        
-        # Handle multiplier modes
-        if self.font_size_mode == 'multiplier' and not self.constrain_to_bubble:
-            # Unconstrained multiplier
-            base_size = initial_estimate
-            target_size = int(base_size * self.font_size_multiplier)
-            target_size = max(min_font_size, min(target_size, self.max_font_size_limit * 3))  # Apply limit even in unconstrained mode
-            
-            font = self._get_font(target_size)
-            lines = self._wrap_text(text, font, usable_width, draw)
-            
-            return target_size, lines
-        
-        # Binary search with preference for LARGER sizes
-        low = min_font_size
-        high = initial_estimate
-        best_size = initial_estimate  # Start with the estimate
+        # Binary search for optimal size
+        low = MIN_FONT
+        high = min(initial_size + 10, MAX_FONT)  # Start searching from initial estimate
+        best_size = MIN_FONT
         best_lines = []
-
-        # First try the initial estimate
-        font = self._get_font(initial_estimate)
-        lines = self._wrap_text(text, font, usable_width, draw)
-        best_size = initial_estimate
-        best_lines = lines
-
-        # Only shrink if constrain_to_bubble is enabled
-        if self.constrain_to_bubble:
-            # Original binary search for fitting
-            while low <= high:
-                mid = (low + high) // 2
-                font = self._get_font(mid)
-                lines = self._wrap_text(text, font, usable_width, draw)
-                
-                line_height = mid * 1.25
-                total_height = len(lines) * line_height
-                
-                if total_height <= usable_height:
-                    best_size = mid
-                    best_lines = lines
-                    low = mid + 1  # Try even larger
-                else:
-                    high = mid - 1
-        else:
-            # Don't constrain - use the initial size even if it overflows
-            self._log(f"  Overflow allowed - using size {best_size} regardless of fit", "info")
         
-        # Apply multiplier if needed
-        if self.font_size_mode == 'multiplier' and self.constrain_to_bubble:
-            multiplied_size = int(best_size * self.font_size_multiplier)
-            multiplied_size = max(min_font_size, min(multiplied_size, self.max_font_size_limit))  # Apply maximum limit
+        # Track attempts to avoid infinite loops
+        attempts = 0
+        max_attempts = 15
+        
+        while low <= high and attempts < max_attempts:
+            attempts += 1
+            mid = (low + high) // 2
             
-            font = self._get_font(multiplied_size)
+            font = self._get_font(mid)
             lines = self._wrap_text(text, font, usable_width, draw)
-            line_height = multiplied_size * 1.25
+            
+            if not lines:  # Safety check
+                low = mid + 1
+                continue
+            
+            # Calculate actual height needed
+            line_height = mid * 1.3  # Standard line spacing
             total_height = len(lines) * line_height
             
+            # Check if it fits
             if total_height <= usable_height:
-                best_size = multiplied_size
+                # It fits, try larger
+                best_size = mid
                 best_lines = lines
+                
+                # But don't go too large - check readability
+                if len(lines) == 1 and mid >= MAX_FONT * 0.8:
+                    # Single line at large size, good enough
+                    break
+                elif len(lines) <= 3 and mid >= MAX_FONT * 0.7:
+                    # Few lines at good size, good enough
+                    break
+                
+                low = mid + 1
+            else:
+                # Doesn't fit, go smaller
+                high = mid - 1
         
-        # OPTION 3: Enforce minimum readable size
-        if best_size < MIN_READABLE_SIZE:
-            self._log(f"  Size {best_size} below minimum, using {MIN_READABLE_SIZE}", "warning")
-            best_size = MIN_READABLE_SIZE
-            font = self._get_font(best_size)
+        # Fallback if no good size found
+        if not best_lines:
+            font = self._get_font(MIN_FONT)
             best_lines = self._wrap_text(text, font, usable_width, draw)
-            
-            # If it doesn't fit at minimum size, we still use it (readability > fit)
-            line_height = best_size * 1.25
-            max_lines = int(usable_height / line_height)
-            if len(best_lines) > max_lines > 0:
-                # Only truncate if really necessary
-                best_lines = best_lines[:max_lines]
-                if len(best_lines) < len(self._wrap_text(text, font, usable_width, draw)):
-                    best_lines[-1] = best_lines[-1][:-3] + "..."
+            best_size = MIN_FONT
         
-        self._log(f"  Final size: {best_size}, Lines: {len(best_lines)}", "info")
+        # Apply multiplier if in multiplier mode
+        if self.font_size_mode == 'multiplier':
+            target_size = int(best_size * self.font_size_multiplier)
+            
+            # Check if multiplied size still fits (if constrained)
+            if self.constrain_to_bubble:
+                font = self._get_font(target_size)
+                test_lines = self._wrap_text(text, font, usable_width, draw)
+                test_height = len(test_lines) * target_size * 1.3
+                
+                if test_height <= usable_height:
+                    best_size = target_size
+                    best_lines = test_lines
+                else:
+                    # Multiplied size doesn't fit, use original
+                    self._log(f"  Multiplier {self.font_size_multiplier}x would exceed bubble", "debug")
+            else:
+                # Not constrained, use multiplied size
+                best_size = target_size
+                font = self._get_font(best_size)
+                best_lines = self._wrap_text(text, font, usable_width, draw)
+        
+        self._log(f"  Font sizing: text_len={text_length}, size={best_size}, lines={len(best_lines)}", "debug")
         
         return best_size, best_lines
 
