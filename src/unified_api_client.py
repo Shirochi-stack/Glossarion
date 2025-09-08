@@ -292,6 +292,8 @@ class UnifiedClient:
         'o4': 'openai',
         'gemini': 'gemini',
         'claude': 'anthropic',
+        'chute': 'chute',
+        'chute/': 'chute',
         'sonnet': 'anthropic',
         'opus': 'anthropic',
         'haiku': 'anthropic',
@@ -2321,6 +2323,27 @@ class UnifiedClient:
                 logger.info("ElectronHub will use OpenAI SDK for API calls")
             else:
                 logger.info("ElectronHub will use HTTP API for API calls")
+
+        elif self.client_type == 'chute':
+            # Chute uses OpenAI-compatible endpoint
+            if openai is not None:
+                chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1/chat/completions")
+                
+                # MICROSECOND LOCK for Chute client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=chute_base_url
+                        )
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=chute_base_url
+                    )
+                logger.info(f"Chute client configured with endpoint: {chute_base_url}")
+            else:
+                logger.info("Chute will use HTTP API")
         
         elif self.client_type == 'mistral':
             if MistralClient is None:
@@ -2550,7 +2573,7 @@ class UnifiedClient:
                                   'sensenova', 'internlm', 'tii', 'microsoft', 
                                   'azure', 'google', 'alephalpha', 'databricks', 
                                   'huggingface', 'salesforce', 'bigscience', 'meta',
-                                  'electronhub', 'poe', 'openrouter']:
+                                  'electronhub', 'poe', 'openrouter', 'chute']:
             # These providers will use HTTP API or OpenAI-compatible endpoints
             # No client initialization needed here
             logger.info(f"{self.client_type} will use HTTP API or compatible endpoint")
@@ -4265,7 +4288,11 @@ class UnifiedClient:
                                                      max_tokens or max_completion_tokens, response_name)
                 elif self.client_type == 'vertex_model_garden':
                     response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
-                                                                   max_tokens or max_completion_tokens, response_name)
+                                                                   max_tokens or max_completion_tokens, response_name)               
+                elif self.client_type == 'chute':
+                    response = self._send_chute_image(messages, image_base64, temperature, 
+                                                      max_tokens or max_completion_tokens, response_name)
+               
                 else:
                     # Try OpenAI-compatible endpoint as fallback
                     print(f"⚠️ No specific image handler for {self.client_type}, trying OpenAI-compatible endpoint")
@@ -6321,6 +6348,58 @@ class UnifiedClient:
             else:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
+
+    def _send_chute(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Chute AI API"""
+        
+        # Get Chute API endpoint from environment or use default
+        chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1")
+        
+        # Log the request
+        logger.info(f"Sending request to Chute AI: {self.model}")
+        
+        # Chute uses OpenAI-compatible endpoint
+        return self._send_openai_compatible(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            base_url=chute_base_url,
+            response_name=response_name,
+            provider="chute"
+        )
+
+    def _send_chute_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request to Chute AI"""
+        
+        # Get Chute API endpoint
+        chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1")
+        
+        logger.info(f"Sending image request to Chute AI: {self.model}")
+        
+        # Format messages with image
+        formatted_messages = []
+        for msg in messages:
+            if msg['role'] == 'user':
+                # Add image to user message
+                formatted_messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": msg['content']},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                    ]
+                })
+            else:
+                formatted_messages.append(msg)
+        
+        # Use OpenAI-compatible endpoint for images
+        return self._send_openai_compatible(
+            messages=formatted_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            base_url=chute_base_url,
+            response_name=response_name,
+            provider="chute"
+        )
  
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
@@ -6353,6 +6432,7 @@ class UnifiedClient:
             'anthropic': self._send_anthropic,
             'mistral': self._send_mistral,
             'cohere': self._send_cohere,
+            'chute': self._send_chute,
             'ai21': self._send_ai21,
             'together': self._send_together,
             'perplexity': self._send_perplexity,
@@ -8739,7 +8819,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai']
+                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chute']
         
         if openai and provider in sdk_compatible:
             # Use OpenAI SDK with custom base URL
