@@ -1033,7 +1033,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.2.0"
+        __version__ = "4.2.4"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1920,7 +1920,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.2.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.2.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -2169,6 +2169,28 @@ Recent translations to summarize:
             "vertex/gemini-2.5-pro",
             "vertex/gemini-2.5-flash",
             "vertex/gemini-2.5-flash-lite",
+
+            # Chute AI
+            "chute/gpt-5",
+            "chute/gpt-5-mini",
+            "chute/gpt-5-nano",
+            "chute/gpt-4o",
+            "chute/gpt-4o-mini",
+            "chute/gpt-4-turbo",
+            "chute/gpt-4",
+            "chute/gpt-4.1-mini",
+            "chute/gpt-4.1-nano",
+            "chute/gpt-3.5-turbo",
+            "chute/claude-opus-4-1-20250805",
+            "chute/claude-opus-4-20250514",
+            "chute/claude-sonnet-4-20250514",
+            "chute/claude-3-7-sonnet-20250219",
+            "chute/claude-3-5-sonnet-20241022",
+            "chute/claude-3-5-haiku-20241022",
+            "chute/gemini-2.5-pro",
+            "chute/gemini-2.5-flash",
+            "chute/gemini-2.5-flash-lite",
+            "chute/gemini-2.0-flash",
             
             # DeepSeek Models
             "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
@@ -15040,7 +15062,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v4.2.0...")
+    print("🚀 Starting Glossarion v4.2.4...")
     
     # Initialize splash screen
     splash_manager = None
