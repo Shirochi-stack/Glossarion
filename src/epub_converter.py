@@ -467,11 +467,35 @@ class XHTMLConverter:
         """Ensure HTML content is XHTML-compliant while PRESERVING story tags"""
         try:
             import html
+            import re
             
             # Add debug at the very start
             log(f"[DEBUG] Processing chapter: {title}")
             log(f"[DEBUG] Input HTML length: {len(html_content)}")
             
+            # Unescape any HTML entities first if present
+            if '&lt;' in html_content or '&gt;' in html_content or '&quot;' in html_content:
+                log(f"[DEBUG] Unescaping HTML entities")
+                html_content = html.unescape(html_content)
+            
+            # Strip out ANY existing DOCTYPE, XML declaration, or html wrapper
+            # We only want the body content
+            log(f"[DEBUG] Extracting body content")
+            
+            # Try to extract just body content
+            body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
+            if body_match:
+                html_content = body_match.group(1)
+                log(f"[DEBUG] Extracted body content")
+            else:
+                # No body tags, strip any DOCTYPE/html tags if present
+                html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content)
+                html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
+                html_content = re.sub(r'</?html[^>]*>', '', html_content)
+                html_content = re.sub(r'<head[^>]*>.*?</head>', '', html_content, flags=re.DOTALL)
+                log(f"[DEBUG] Stripped wrapper tags")
+            
+            # Now process the content normally
             # Fix broken attributes with ="" pattern
             def fix_broken_attributes_only(match):
                 tag_content = match.group(0)
@@ -490,52 +514,41 @@ class XHTMLConverter:
             
             html_content = re.sub(r'<[^>]*?=""[^>]*?>', fix_broken_attributes_only, html_content)
             
+            # Convert story tags to Chinese brackets
             def escape_story_tags(match):
                 tag = match.group(0)
-                return html.escape(tag) 
+                return tag.replace('<', '《').replace('>', '》')
             
             html_content = re.sub(r'<[^/>][^>]*?:[^>]*?>', escape_story_tags, html_content)
             
             # Parse with lxml
-            from lxml import html, etree
+            from lxml import html as lxml_html, etree
             
-            parser = html.HTMLParser(recover=True)
-            doc = html.document_fromstring(html_content, parser=parser)
+            parser = lxml_html.HTMLParser(recover=True)
+            doc = lxml_html.document_fromstring(f"<div>{html_content}</div>", parser=parser)
             
-            # Extract body
-            body = doc.find('.//body')
-            if body is not None:
-                body_xhtml = etree.tostring(body, method='xml', encoding='unicode')
-                body_xhtml = re.sub(r'^<body[^>]*>|</body>$', '', body_xhtml)
-            else:
-                body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
+            # Get the content back
+            body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
+            # Remove the wrapper div we added
+            body_xhtml = re.sub(r'^<div[^>]*>|</div>$', '', body_xhtml)
             
-            # ============= ADD THIS SECTION RIGHT HERE =============
-            # Special handling for story notification entities that got split across paragraphs
-            # Special handling for story notification entities that got split across paragraphs
-            if '&lt;' in body_xhtml and ':' in body_xhtml:
-                if re.search(r'&lt;[A-Z][^&<>]*?:', body_xhtml):
-                    # First, remove any escaped HTML tags that shouldn't be there
-                    body_xhtml = re.sub(r'&lt;/p&gt;', '', body_xhtml)  # Remove escaped </p> tags
-                    body_xhtml = re.sub(r'&lt;p&gt;', '', body_xhtml)   # Remove escaped <p> tags
-                    
-                    # Then convert story notification brackets to square brackets
-                    body_xhtml = body_xhtml.replace('&lt;', '《')
-                    body_xhtml = body_xhtml.replace('&gt;', '》')
-        # ============================================================
+            # Convert any remaining entities to Chinese brackets
+            if '&lt;' in body_xhtml or '&gt;' in body_xhtml:
+                body_xhtml = body_xhtml.replace('&lt;', '《')
+                body_xhtml = body_xhtml.replace('&gt;', '》')
             
+            # Build our own clean XHTML document
             return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
             
         except Exception as e:
             log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
-            # ADD MORE DEBUG INFO HERE
             import traceback
             log(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
             log(f"[DEBUG] Failed chapter title: {title}")
             log(f"[DEBUG] First 500 chars of input: {html_content[:500] if html_content else 'EMPTY'}")
             
             return XHTMLConverter._build_fallback_xhtml(title)
- 
+        
     @staticmethod
     def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
         """Build XHTML document"""
@@ -1287,10 +1300,20 @@ class EPUBCompiler:
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
                          css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                          spine: List, toc: List, metadata: dict) -> int:
-        """Process chapters using parallel processing"""
+        """Process chapters using parallel processing with AGGRESSIVE DEBUGGING"""
         chapters_added = 0
-        self.log(f"\n📚 Processing {len(html_files)} chapters...")
+        self.log(f"\n{'='*80}")
+        self.log(f"📚 STARTING CHAPTER PROCESSING")
+        self.log(f"📚 Total files to process: {len(html_files)}")
         self.log(f"🔧 Using {self.max_workers} parallel workers")
+        self.log(f"📂 Output directory: {self.output_dir}")
+        self.log(f"{'='*80}")
+        
+        # Debug chapter titles info
+        self.log(f"\n[DEBUG] Chapter titles info has {len(chapter_titles_info)} entries")
+        for num in list(chapter_titles_info.keys())[:5]:
+            title, conf, method = chapter_titles_info[num]
+            self.log(f"  Chapter {num}: {title[:50]}... (conf: {conf}, method: {method})")
         
         # Prepare chapter data
         chapter_data = []
@@ -1299,37 +1322,119 @@ class EPUBCompiler:
             if chapter_num not in chapter_titles_info and (chapter_num + 1) in chapter_titles_info:
                 chapter_num = idx + 1
             chapter_data.append((chapter_num, filename))
+            
+            # Debug specific problem chapters
+            if 49 <= chapter_num <= 56:
+                self.log(f"[DEBUG] Problem chapter found: {chapter_num} -> {filename}")
         
         def process_chapter_content(data):
-            """Worker function to process chapter content"""
+            """Worker function to process chapter content with FULL DEBUGGING"""
             chapter_num, filename = data
             path = os.path.join(self.output_dir, filename)
             
+            # Debug tracking for problem chapters
+            is_problem_chapter = 49 <= chapter_num <= 56
+            
             try:
-                # Heavy operations: reading, decoding, XHTML conversion
+                if is_problem_chapter:
+                    self.log(f"\n[DEBUG] {'*'*60}")
+                    self.log(f"[DEBUG] PROCESSING PROBLEM CHAPTER {chapter_num}: {filename}")
+                    self.log(f"[DEBUG] Full path: {path}")
+                
+                # Check file exists
+                if not os.path.exists(path):
+                    error_msg = f"File does not exist: {path}"
+                    self.log(f"[ERROR] {error_msg}")
+                    raise FileNotFoundError(error_msg)
+                
+                # Get file size
+                file_size = os.path.getsize(path)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] File size: {file_size} bytes")
+                
+                # Read and decode
                 raw_content = self._read_and_decode_html_file(path)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Raw content length after reading: {len(raw_content) if raw_content else 'NULL'}")
+                    if raw_content:
+                        self.log(f"[DEBUG] First 200 chars: {raw_content[:200]}")
+                
+                # Fix encoding
                 raw_content = self._fix_encoding_issues(raw_content)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Content length after encoding fix: {len(raw_content) if raw_content else 'NULL'}")
                 
-                if not raw_content.strip():
-                    return None
+                if not raw_content or not raw_content.strip():
+                    error_msg = f"Empty content after reading/decoding: {filename}"
+                    if is_problem_chapter:
+                        self.log(f"[ERROR] {error_msg}")
+                    raise ValueError(error_msg)
                 
+                # Extract main content
                 if not filename.startswith('response_'):
+                    before_len = len(raw_content)
                     raw_content = self._extract_main_content(raw_content, filename)
+                    if is_problem_chapter:
+                        self.log(f"[DEBUG] Content extraction: {before_len} -> {len(raw_content)} chars")
                 
+                # Get title
                 title = self._get_chapter_title(chapter_num, filename, raw_content, chapter_titles_info)
-                css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Chapter title: {title}")
                 
-                # XHTML conversion (CPU intensive)
+                # Prepare CSS links
+                css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] CSS links: {css_links}")
+                
+                # XHTML conversion - THE CRITICAL PART
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Starting XHTML conversion...")
+                
                 xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] XHTML content length: {len(xhtml_content) if xhtml_content else 'NULL'}")
+                    if xhtml_content:
+                        self.log(f"[DEBUG] XHTML first 300 chars: {xhtml_content[:300]}")
+                
+                # Process images
                 xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
+                
+                # Validate
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Starting validation...")
+                
                 final_content = XHTMLConverter.validate(xhtml_content)
                 
-                # Validate XML
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Final content length: {len(final_content)}")
+                
+                # Final XML validation
                 try:
                     ET.fromstring(final_content.encode('utf-8'))
+                    if is_problem_chapter:
+                        self.log(f"[DEBUG] XML validation PASSED")
                 except ET.ParseError as e:
-                    # Create fallback content
+                    if is_problem_chapter:
+                        self.log(f"[ERROR] XML validation FAILED: {e}")
+                        # Show the exact error location
+                        lines = final_content.split('\n')
+                        import re
+                        match = re.search(r'line (\d+), column (\d+)', str(e))
+                        if match:
+                            line_num = int(match.group(1))
+                            if line_num <= len(lines):
+                                self.log(f"[ERROR] Problem line {line_num}: {lines[line_num-1][:100]}")
+                    
+                    # Create fallback
                     final_content = XHTMLConverter._build_fallback_xhtml(title)
+                    if is_problem_chapter:
+                        self.log(f"[DEBUG] Using fallback XHTML")
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Chapter processing SUCCESSFUL")
+                    self.log(f"[DEBUG] {'*'*60}\n")
                 
                 return {
                     'num': chapter_num,
@@ -1341,18 +1446,30 @@ class EPUBCompiler:
                 
             except Exception as e:
                 import traceback
+                tb = traceback.format_exc()
+                
+                if is_problem_chapter:
+                    self.log(f"[ERROR] {'!'*60}")
+                    self.log(f"[ERROR] CHAPTER {chapter_num} PROCESSING FAILED")
+                    self.log(f"[ERROR] Exception type: {type(e).__name__}")
+                    self.log(f"[ERROR] Exception: {e}")
+                    self.log(f"[ERROR] Full traceback:\n{tb}")
+                    self.log(f"[ERROR] {'!'*60}\n")
+                
                 return {
                     'num': chapter_num,
                     'filename': filename,
                     'title': chapter_titles_info.get(chapter_num, (f"Chapter {chapter_num}", 0, ""))[0],
                     'error': str(e),
-                    'traceback': traceback.format_exc(),
+                    'traceback': tb,
                     'success': False
                 }
         
         # Process in parallel
         processed_chapters = []
         completed = 0
+        
+        self.log(f"\n[DEBUG] Starting parallel processing...")
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
@@ -1367,22 +1484,44 @@ class EPUBCompiler:
                         processed_chapters.append(result)
                         completed += 1
                         
-                        if result['success']:
-                            self.log(f"  [{completed}/{len(chapter_data)}] ✅ Processed: {result['title']}")
+                        # Extra logging for problem chapters
+                        if 49 <= result['num'] <= 56:
+                            if result['success']:
+                                self.log(f"  [{completed}/{len(chapter_data)}] ✅ PROBLEM CHAPTER PROCESSED: {result['num']} - {result['title']}")
+                            else:
+                                self.log(f"  [{completed}/{len(chapter_data)}] ❌ PROBLEM CHAPTER FAILED: {result['num']} - {result['filename']}")
+                                self.log(f"     Error: {result['error']}")
                         else:
-                            self.log(f"  [{completed}/{len(chapter_data)}] ❌ Failed: {result['filename']} - {result['error']}")
+                            if result['success']:
+                                self.log(f"  [{completed}/{len(chapter_data)}] ✅ Processed: {result['title']}")
+                            else:
+                                self.log(f"  [{completed}/{len(chapter_data)}] ❌ Failed: {result['filename']} - {result['error']}")
                             
                 except Exception as e:
                     completed += 1
                     chapter_num = futures[future]
                     self.log(f"  [{completed}/{len(chapter_data)}] ❌ Exception processing chapter {chapter_num}: {e}")
+                    import traceback
+                    self.log(f"[ERROR] Traceback:\n{traceback.format_exc()}")
         
         # Sort by chapter number to maintain order
         processed_chapters.sort(key=lambda x: x['num'])
         
+        # Debug what we have
+        self.log(f"\n[DEBUG] Processed {len(processed_chapters)} chapters")
+        failed_chapters = [c for c in processed_chapters if not c['success']]
+        if failed_chapters:
+            self.log(f"[WARNING] {len(failed_chapters)} chapters failed:")
+            for fc in failed_chapters:
+                self.log(f"  - Chapter {fc['num']}: {fc['filename']} - {fc.get('error', 'Unknown error')}")
+        
         # Add chapters to book in order (this must be sequential)
         self.log("\n📦 Adding chapters to EPUB structure...")
         for chapter_data in processed_chapters:
+            # Debug for problem chapters
+            if 49 <= chapter_data['num'] <= 56:
+                self.log(f"[DEBUG] Adding problem chapter {chapter_data['num']} to EPUB...")
+            
             if chapter_data['success']:
                 try:
                     # Create EPUB chapter
@@ -1398,25 +1537,35 @@ class EPUBCompiler:
                         for css_item in css_items:
                             chapter.add_item(css_item)
                     
-                    # Add to book (must be sequential)
+                    # Add to book
                     book.add_item(chapter)
                     spine.append(chapter)
                     toc.append(chapter)
                     chapters_added += 1
                     
-                    self.log(f"  ✅ Added chapter {chapter_data['num']}: '{chapter_data['title']}'")
+                    if 49 <= chapter_data['num'] <= 56:
+                        self.log(f"  ✅ ADDED PROBLEM CHAPTER {chapter_data['num']}: '{chapter_data['title']}'")
+                    else:
+                        self.log(f"  ✅ Added chapter {chapter_data['num']}: '{chapter_data['title']}'")
                     
                 except Exception as e:
                     self.log(f"  ❌ Failed to add chapter {chapter_data['num']} to book: {e}")
+                    import traceback
+                    self.log(f"[ERROR] Traceback:\n{traceback.format_exc()}")
                     # Add error placeholder
                     self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
                     chapters_added += 1
             else:
+                self.log(f"  ⚠️ Adding error placeholder for chapter {chapter_data['num']}")
                 # Add error placeholder
                 self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
                 chapters_added += 1
         
-        self.log(f"\n✅ Added {chapters_added} chapters to EPUB")
+        self.log(f"\n{'='*80}")
+        self.log(f"✅ CHAPTER PROCESSING COMPLETE")
+        self.log(f"✅ Added {chapters_added} chapters to EPUB")
+        self.log(f"{'='*80}\n")
+        
         return chapters_added
     
     def _add_error_chapter_from_data(self, book, chapter_data, spine, toc, metadata):
@@ -1712,128 +1861,225 @@ class EPUBCompiler:
                                chapter_titles_info: Dict[int, Tuple[str, float, str]],
                                css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                                spine: List, toc: List, metadata: dict) -> bool:
-        """Process a single chapter with debugging"""
+        """Process a single chapter with COMPREHENSIVE debugging"""
         path = os.path.join(self.output_dir, filename)
         
+        # Flag for extra debugging on problem chapters
+        is_problem_chapter = 49 <= num <= 56
+        is_response_file = filename.startswith('response_')
+        
         try:
+            if is_problem_chapter:
+                self.log(f"\n{'='*70}")
+                self.log(f"[DEBUG] PROCESSING PROBLEM CHAPTER {num}")
+                self.log(f"[DEBUG] Filename: {filename}")
+                self.log(f"[DEBUG] Is response file: {is_response_file}")
+                self.log(f"[DEBUG] Full path: {path}")
+            
+            # Check file exists and size
+            if not os.path.exists(path):
+                self.log(f"[ERROR] File does not exist: {path}")
+                return False
+            
+            file_size = os.path.getsize(path)
+            if is_problem_chapter:
+                self.log(f"[DEBUG] File size: {file_size} bytes")
+            
+            if file_size == 0:
+                self.log(f"[ERROR] File is empty (0 bytes): {filename}")
+                return False
+            
             # Read and decode
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Reading and decoding file...")
+            
             raw_content = self._read_and_decode_html_file(path)
             
-            # Fix encoding issues
-            raw_content = self._fix_encoding_issues(raw_content)
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Raw content length: {len(raw_content) if raw_content else 'NULL'}")
+                if raw_content:
+                    # Show first and last parts
+                    self.log(f"[DEBUG] First 300 chars of raw content:")
+                    self.log(f"  {raw_content[:300]!r}")
+                    self.log(f"[DEBUG] Last 300 chars of raw content:")
+                    self.log(f"  {raw_content[-300:]!r}")
+                    
+                    # Check for common issues
+                    if '&lt;' in raw_content[:500]:
+                        self.log(f"[DEBUG] Found &lt; entities in content")
+                    if '&gt;' in raw_content[:500]:
+                        self.log(f"[DEBUG] Found &gt; entities in content")
+                    if '<Official' in raw_content[:500] or '<System' in raw_content[:500]:
+                        self.log(f"[DEBUG] Found story tags in content")
             
-            if not raw_content.strip():
-                self.log(f"[WARNING] Chapter {num} is empty")
+            # Fix encoding issues
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Fixing encoding issues...")
+            
+            before_fix = len(raw_content) if raw_content else 0
+            raw_content = self._fix_encoding_issues(raw_content)
+            after_fix = len(raw_content) if raw_content else 0
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Encoding fix: {before_fix} -> {after_fix} chars")
+                if before_fix != after_fix:
+                    self.log(f"[DEBUG] Content changed during encoding fix")
+            
+            if not raw_content or not raw_content.strip():
+                self.log(f"[WARNING] Chapter {num} is empty after decoding/encoding fix")
+                if is_problem_chapter:
+                    self.log(f"[ERROR] Problem chapter {num} has no content!")
                 return False
             
             # Extract main content if needed
             if not filename.startswith('response_'):
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Extracting main content (not a response file)...")
+                
+                before_extract = len(raw_content)
                 raw_content = self._extract_main_content(raw_content, filename)
+                after_extract = len(raw_content)
+                
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Content extraction: {before_extract} -> {after_extract} chars")
+                    if after_extract < before_extract / 2:
+                        self.log(f"[WARNING] Lost more than 50% of content during extraction!")
+                        self.log(f"[DEBUG] Content after extraction (first 300 chars):")
+                        self.log(f"  {raw_content[:300]!r}")
+            else:
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Skipping content extraction for response file")
+                    self.log(f"[DEBUG] Response file content structure:")
+                    # Check what's in a response file
+                    if '<body>' in raw_content:
+                        self.log(f"  Has <body> tag")
+                    if '<html>' in raw_content:
+                        self.log(f"  Has <html> tag")
+                    if '<!DOCTYPE' in raw_content:
+                        self.log(f"  Has DOCTYPE declaration")
+                    # Check for any obvious issues
+                    if raw_content.strip().startswith('Error'):
+                        self.log(f"[ERROR] Response file starts with 'Error'")
+                    if 'failed' in raw_content.lower()[:500]:
+                        self.log(f"[WARNING] Response file contains 'failed' in first 500 chars")
             
-            # Get title
+            # Get chapter title
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Getting chapter title...")
+            
             title = self._get_chapter_title(num, filename, raw_content, chapter_titles_info)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Chapter title: {title!r}")
+                if title == f"Chapter {num}" or title.startswith("Chapter"):
+                    self.log(f"[WARNING] Using generic title, couldn't extract proper title")
             
             # Prepare CSS links
             css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+            if is_problem_chapter:
+                self.log(f"[DEBUG] CSS links: {css_links}")
             
-            # Convert to XHTML
-            try:
-                xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
-                    
-            except Exception as e:
-                self.log(f"[WARNING] XHTML conversion failed for chapter {num}: {e}")
-                xhtml_content = XHTMLConverter._build_xhtml(
-                    title,
-                    f'<h1>{ContentProcessor.safe_escape(title)}</h1><p>Chapter content could not be processed.</p>',
-                    css_links
-                )
+            # XHTML conversion - CRITICAL PART
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Starting XHTML conversion...")
+                self.log(f"[DEBUG] Content length before XHTML: {len(raw_content)}")
             
-            # Process images
+            xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+            
+            if is_problem_chapter:
+                self.log(f"[DEBUG] XHTML conversion complete")
+                self.log(f"[DEBUG] XHTML content length: {len(xhtml_content) if xhtml_content else 'NULL'}")
+                if xhtml_content:
+                    # Check if it's the fallback
+                    if 'Error processing content' in xhtml_content:
+                        self.log(f"[ERROR] Got fallback XHTML - conversion failed!")
+                    else:
+                        self.log(f"[DEBUG] XHTML first 400 chars:")
+                        self.log(f"  {xhtml_content[:400]!r}")
+            
+            # Process chapter images
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Processing chapter images...")
+            
             xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
             
-            # Validate
+            # Validate final content
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Validating final XHTML...")
+            
             final_content = XHTMLConverter.validate(xhtml_content)
             
-            # Final validation check
-            try:
-                ET.fromstring(final_content.encode('utf-8'))
-            except ET.ParseError as e:
-                self.log(f"[DEBUG] XML Parse error: {e}")
-                # Fallback content...
-                final_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
-                    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
-                    '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
-                    '<html xmlns="http://www.w3.org/1999/xhtml">\n' + \
-                    '<head>\n' + \
-                    '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n' + \
-                    f'<title>{ContentProcessor.safe_escape(title)}</title>\n' + \
-                    '</head>\n' + \
-                    '<body>\n' + \
-                    f'<h1>{ContentProcessor.safe_escape(title)}</h1>\n' + \
-                    '<p>Chapter content could not be processed properly.</p>\n' + \
-                    '</body>\n' + \
-                    '</html>'
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Validation complete")
+                self.log(f"[DEBUG] Final content length: {len(final_content)}")
+                # Check for fallback again
+                if 'Error processing content' in final_content:
+                    self.log(f"[ERROR] Final content is fallback error page!")
             
-            # Create chapter
-            safe_fn = os.path.basename(filename)
-            
+            # Create chapter object
             import html
-            decoded_title = html.unescape(title)
             chapter = epub.EpubHtml(
-                title=decoded_title,
-                file_name=safe_fn,
+                title=html.unescape(title),
+                file_name=os.path.basename(filename),
                 lang=metadata.get("language", "en")
             )
             
             chapter.content = FileUtils.ensure_bytes(final_content)
             
-            # Add CSS if enabled
+            if is_problem_chapter:
+                self.log(f"[DEBUG] Chapter object created")
+                self.log(f"[DEBUG] Chapter content size: {len(chapter.content)} bytes")
+            
+            # Attach CSS if configured
             if self.attach_css_to_chapters:
                 for css_item in css_items:
                     chapter.add_item(css_item)
+                if is_problem_chapter:
+                    self.log(f"[DEBUG] Attached {len(css_items)} CSS files")
             
             # Add to book
             book.add_item(chapter)
             spine.append(chapter)
             toc.append(chapter)
             
-            self.log(f"✅ Added chapter {num}: '{title}' as {safe_fn}")
+            if is_problem_chapter:
+                self.log(f"[SUCCESS] Problem chapter {num} successfully added to EPUB!")
+                self.log(f"{'='*70}\n")
+            else:
+                self.log(f"  ✓ Chapter {num}: {title}")
+            
             return True
             
         except Exception as e:
             import traceback
-            print(f"FULL ERROR TRACEBACK: {traceback.format_exc()}")
-            self.log(f"[ERROR] Failed to process chapter {num}: {e}")
-
-            try:
-                # Try to get the title from chapter_titles_info
-                title = f"Chapter {num}"
-                if num in chapter_titles_info:
-                    title = chapter_titles_info[num][0]
+            tb = traceback.format_exc()
+            
+            self.log(f"\n{'!'*70}")
+            self.log(f"[ERROR] Failed to process chapter {num}: {filename}")
+            self.log(f"[ERROR] Exception type: {type(e).__name__}")
+            self.log(f"[ERROR] Exception message: {e}")
+            
+            if is_problem_chapter:
+                self.log(f"[ERROR] PROBLEM CHAPTER {num} FAILED!")
+                self.log(f"[ERROR] Full traceback:")
+                self.log(tb)
                 
-                safe_fn = os.path.basename(filename)
-                
-                chapter = epub.EpubHtml(
-                    title=title,
-                    file_name=safe_fn,
-                    lang=metadata.get("language", "en")
-                )
-                chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
-    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml">
-    <head><title>{ContentProcessor.safe_escape(title)}</title></head>
-    <body>
-    <h1>{ContentProcessor.safe_escape(title)}</h1>
-    <p>Error loading: {filename}</p>
-    </body>
-    </html>""".encode('utf-8')
-                
-                book.add_item(chapter)
-                spine.append(chapter)
-                toc.append(chapter)
-                return True
-            except:
-                return False
+                # Try to identify the exact failure point
+                if 'ensure_compliance' in tb:
+                    self.log(f"[ERROR] Failed during XHTML compliance")
+                elif 'validate' in tb:
+                    self.log(f"[ERROR] Failed during validation")
+                elif '_extract_main_content' in tb:
+                    self.log(f"[ERROR] Failed during content extraction")
+                elif '_read_and_decode' in tb:
+                    self.log(f"[ERROR] Failed during file reading/decoding")
+            
+            self.log(f"{'!'*70}\n")
+            
+            # Add error chapter as fallback
+            self._add_error_chapter(book, num, title if 'title' in locals() else f"Chapter {num}", 
+                                    spine, toc, metadata, str(e))
+            return False
 
     def _get_chapter_title(self, num: int, filename: str, content: str,
                           chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
