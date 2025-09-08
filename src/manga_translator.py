@@ -73,8 +73,22 @@ class MangaTranslator:
                     'azure_endpoint': str (if azure)
                 }
         """
+        # Set up logging first
+        self.log_callback = log_callback
+        self.main_gui = main_gui
+        
+        # Set up stdout capture to redirect prints to GUI
+        self._setup_stdout_capture()
+        
+        # Pass log callback to unified client
+        self.client = unified_client
+        if hasattr(self.client, 'log_callback'):
+            self.client.log_callback = log_callback
+        elif hasattr(self.client, 'set_log_callback'):
+            self.client.set_log_callback(log_callback)
         self.ocr_config = ocr_config
         self.main_gui = main_gui
+        self.log_callback = log_callback
         self.config = main_gui.config
         self.manga_settings = self.config.get('manga_settings', {})
 
@@ -85,7 +99,7 @@ class MangaTranslator:
         self.translated_regions = []
         self.final_image = None
         
-        # Initialize inpainter attributes (ADD THESE)
+        # Initialize inpainter attributes
         self.local_inpainter = None
         self.hybrid_inpainter = None
         self.inpainter = None
@@ -96,6 +110,26 @@ class MangaTranslator:
         # Processing flags
         self.is_processing = False
         self.cancel_requested = False
+
+        # Initialize batch mode attributes
+        self.batch_mode = main_gui.batch_translation_var.get() if hasattr(main_gui, 'batch_translation_var') else False
+        self.batch_size = int(main_gui.batch_size_var.get()) if hasattr(main_gui, 'batch_size_var') else 1
+        self.batch_current = 1 
+        
+        if self.batch_mode:
+            self._log(f"📦 BATCH MODE: Processing {self.batch_size} images")
+            self._log(f"⏱️ Keeping API delay for rate limit protection")
+            
+            # Pre-load models for batch processing
+            if self.bubble_detector is None:
+                from bubble_detector import BubbleDetector
+                self.bubble_detector = BubbleDetector()
+            
+            # Pre-load RT-DETR if using it
+            ocr_settings = self.manga_settings.get('ocr', {})
+            if ocr_settings.get('detector_type', 'yolo') == 'rtdetr':
+                self._log("📥 Pre-loading RT-DETR for batch processing...")
+                self.bubble_detector.load_rtdetr_model()
         
         # Cache for processed images
         self.cache = {}
@@ -277,6 +311,77 @@ class MangaTranslator:
             return True
         return False
 
+    def _setup_stdout_capture(self):
+        """Set up stdout capture to redirect print statements to GUI"""
+        import sys
+        import builtins
+        
+        # Store original print function
+        self._original_print = builtins.print
+        
+        # Create custom print function
+        def gui_print(*args, **kwargs):
+            """Custom print that redirects to GUI"""
+            # Convert args to string
+            message = ' '.join(str(arg) for arg in args)
+            
+            # Check if this is one of the specific messages we want to capture
+            if any(marker in message for marker in ['🔍', '✅', '⏳', 'INFO:', 'ERROR:', 'WARNING:']):
+                if self.log_callback:
+                    # Clean up the message
+                    message = message.strip()
+                    
+                    # Determine level
+                    level = 'info'
+                    if 'ERROR:' in message or '❌' in message:
+                        level = 'error'
+                    elif 'WARNING:' in message or '⚠️' in message:
+                        level = 'warning'
+                    
+                    # Remove prefixes like "INFO:" if present
+                    for prefix in ['INFO:', 'ERROR:', 'WARNING:', 'DEBUG:']:
+                        message = message.replace(prefix, '').strip()
+                    
+                    # Send to GUI
+                    self.log_callback(message, level)
+                    return  # Don't print to console
+            
+            # For other messages, use original print
+            self._original_print(*args, **kwargs)
+        
+        # Replace the built-in print
+        builtins.print = gui_print
+    
+    def __del__(self):
+        """Restore original print when MangaTranslator is destroyed"""
+        if hasattr(self, '_original_print'):
+            import builtins
+            builtins.print = self._original_print
+
+    def set_batch_mode(self, enabled: bool, batch_size: int = 1):
+        """Enable or disable batch mode optimizations"""
+        self.batch_mode = enabled
+        self.batch_size = batch_size
+        
+        if enabled:
+            # Pre-load models to avoid repeated loading
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                if not self.bubble_detector.rtdetr_loaded:
+                    self._log("📦 BATCH MODE: Pre-loading RT-DETR model...")
+                    self.bubble_detector.load_rtdetr_model()
+            
+            # Pre-load other models if needed
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
+                if not provider_status['loaded']:
+                    self._log(f"📦 BATCH MODE: Pre-loading {self.ocr_provider}...")
+                    self.ocr_manager.load_provider(self.ocr_provider)
+            
+            self._log(f"📦 BATCH MODE ENABLED: Processing {batch_size} images")
+            self._log(f"⏱️ API delay: {self.api_delay}s (preserved for rate limiting)")
+        else:
+            self._log("📝 BATCH MODE DISABLED")
+
     def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
         """Merge text regions by bubble and filter based on RT-DETR class settings"""
         try:
@@ -295,30 +400,36 @@ class MangaTranslator:
                 self.bubble_detector = BubbleDetector()
             
             bubbles = None
-            rtdetr_detections = None  # Store full RT-DETR results for filtering
+            rtdetr_detections = None
             
             if detector_type == 'rtdetr':
-                # Use RT-DETR
-                self._log("🤖 Using RT-DETR for bubble detection", "info")
+                # BATCH OPTIMIZATION: Less verbose logging
+                if not self.batch_mode:
+                    self._log("🤖 Using RT-DETR for bubble detection", "info")
                 
-                # Load RT-DETR if needed
-                if not self.bubble_detector.rtdetr_loaded:
+                # BATCH OPTIMIZATION: Don't reload if already loaded
+                if self.batch_mode and self.bubble_detector.rtdetr_loaded:
+                    # Model already loaded, skip the loading step entirely
+                    pass
+                elif not self.bubble_detector.rtdetr_loaded:
                     self._log("📥 Loading RT-DETR model...", "info")
                     if not self.bubble_detector.load_rtdetr_model():
                         self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                 
-                # Get RT-DETR settings including class filters
+                # Get settings
                 rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
                 detect_empty = ocr_settings.get('detect_empty_bubbles', True)
                 detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
                 detect_free_text = ocr_settings.get('detect_free_text', True)
                 
-                self._log(f"📋 RT-DETR class filters:", "info")
-                self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
-                self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
-                self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
-                self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
+                # BATCH OPTIMIZATION: Reduce logging
+                if not self.batch_mode:
+                    self._log(f"📋 RT-DETR class filters:", "info")
+                    self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                    self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                    self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                    self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
 
                 # Get FULL RT-DETR detections (not just bubbles)
                 rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
@@ -557,6 +668,18 @@ class MangaTranslator:
     
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI or console"""
+        # In batch mode, only log important messages
+        if self.batch_mode:
+            # Skip verbose/debug messages in batch mode
+            if level == "debug" or "DEBUG:" in message:
+                return
+            # Skip repetitive messages
+            if any(skip in message for skip in [
+                "Using vertex-based", "Using", "Applying", "Font size", 
+                "Region", "Found text", "Style:"
+            ]):
+                return
+        
         if self.log_callback:
             self.log_callback(message, level)
         else:
@@ -612,10 +735,27 @@ class MangaTranslator:
             
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
         """Detect text regions using configured OCR provider"""
-        self._log(f"🔍 Detecting text regions in: {os.path.basename(image_path)}")
-        self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
+        # Reduce logging in batch mode
+        if not self.batch_mode:
+            self._log(f"🔍 Detecting text regions in: {os.path.basename(image_path)}")
+            self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
+        else:
+            # Only show batch progress if batch_current is set properly
+            if hasattr(self, 'batch_current') and hasattr(self, 'batch_size'):
+                self._log(f"🔍 [{self.batch_current}/{self.batch_size}] {os.path.basename(image_path)}")
+            else:
+                self._log(f"🔍 Detecting text: {os.path.basename(image_path)}")
         
         try:
+            # BATCH OPTIMIZATION: Skip clearing cache in batch mode
+            if not self.batch_mode:
+                # Clear any cached state from previous image
+                if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                    if hasattr(self.ocr_manager, 'last_results'):
+                        self.ocr_manager.last_results = None
+                    if hasattr(self.ocr_manager, 'cache'):
+                        self.ocr_manager.cache = {}
+                        
             # CLEAR ANY CACHED STATE FROM PREVIOUS IMAGE
             if hasattr(self, 'ocr_manager') and self.ocr_manager:
                 # Clear any cached results in OCR manager
@@ -1677,6 +1817,10 @@ class MangaTranslator:
 
     def _save_debug_image(self, image_path: str, regions: List[TextRegion]):
         """Save debug image with detected regions highlighted"""
+        # Skip debug images in batch mode unless explicitly requested
+        if self.batch_mode and not self.manga_settings.get('advanced', {}).get('force_debug_batch', False):
+            return
+        
         # Check if debug mode is enabled
         if not self.manga_settings.get('advanced', {}).get('debug_mode', False):
             return
@@ -4868,14 +5012,25 @@ class MangaTranslator:
             return None
 
 
-    def process_image(self, image_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
+    def process_image(self, image_path: str, output_path: Optional[str] = None, 
+                     batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
         """Process a single manga image through the full pipeline"""
         
-        self._log(f"\n{'='*60}")
-        self._log(f"🖼️ STARTING MANGA TRANSLATION PIPELINE")
-        self._log(f"📁 Input: {image_path}")
-        self._log(f"📁 Output: {output_path or 'Auto-generated'}")
-        self._log(f"{'='*60}\n")
+        # Set batch tracking if provided
+        if batch_index is not None and batch_total is not None:
+            self.batch_current = batch_index
+            self.batch_size = batch_total
+            self.batch_mode = True
+        
+        # Simplified header for batch mode
+        if not self.batch_mode:
+            self._log(f"\n{'='*60}")
+            self._log(f"🖼️ STARTING MANGA TRANSLATION PIPELINE")
+            self._log(f"📁 Input: {image_path}")
+            self._log(f"📁 Output: {output_path or 'Auto-generated'}")
+            self._log(f"{'='*60}\n")
+        else:
+            self._log(f"\n[{batch_index}/{batch_total}] Processing: {os.path.basename(image_path)}")
         
         result = {
             'success': False,
