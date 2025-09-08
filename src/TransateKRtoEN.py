@@ -1231,8 +1231,7 @@ class ContentProcessor:
                 return text_length > 50  # Much lower threshold for plain text
             
             # Original HTML parsing logic
-            protected_html = self.protect_angle_brackets_with_korean(html_content)
-            soup = BeautifulSoup(protected_html, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser')
             
             soup_copy = BeautifulSoup(str(soup), 'html.parser')
             
