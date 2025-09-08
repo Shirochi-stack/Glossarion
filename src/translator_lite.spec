@@ -14,7 +14,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 
 APP_NAME = 'L_Glossarion_Lite v4.2.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
-ENABLE_CONSOLE = True  # Console disabled for production
+ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True         # Single executable vs folder distribution
 
@@ -1168,3 +1168,4 @@ For auto-update:
 - Downloads updates directly from GitHub
 - Configurable auto-check on startup
 """
+
