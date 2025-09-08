@@ -3168,26 +3168,38 @@ class MangaTranslator:
         return response_text
 
     def _clean_translation_text(self, text: str) -> str:
-        """Remove unnecessary quotation marks from translated text"""
+        """Remove unnecessary quotation marks and dots from translated text"""
         if not text:
             return text
         
-        # Remove leading and trailing quotes if they wrap the entire text
+        # Log what we're cleaning
+        original = text
+        
+        # Remove leading and trailing whitespace
         text = text.strip()
         
-        # Check if the entire text is wrapped in quotes
-        if len(text) >= 2:
-            # Remove matching quotes at start and end
-            if (text[0] == '"' and text[-1] == '"') or (text[0] == "'" and text[-1] == "'"):
-                text = text[1:-1].strip()
+        # Remove ALL types of quotes and dots from start/end
+        # Keep removing until no more quotes/dots at edges
+        while len(text) > 0:
+            old_len = len(text)
             
-            # Also handle smart quotes
-            if (text[0] == '"' and text[-1] == '"') or (text[0] == ''' and text[-1] == '''):
-                text = text[1:-1].strip()
+            # Remove from start
+            text = text.lstrip('"\'`''""「」『』【】《》〈〉.·•°')
             
-            # Handle Japanese quotes 「」
-            if text[0] == '「' and text[-1] == '」':
-                text = text[1:-1].strip()
+            # Remove from end (but preserve ... and !!)
+            if not text.endswith('...') and not text.endswith('!!'):
+                text = text.rstrip('"\'`''""「」『』【】《》〈〉.·•°')
+            
+            # If nothing changed, we're done
+            if len(text) == old_len:
+                break
+        
+        # Final strip
+        text = text.strip()
+        
+        # Log if we made changes
+        if text != original:
+            self._log(f"🧹 Cleaned quotes/dots: '{original}' → '{text}'", "debug")
         
         return text
     
