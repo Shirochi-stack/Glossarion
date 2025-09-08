@@ -106,7 +106,7 @@ class MangaSettingsDialog:
         self.show_dialog()
             
     def _disable_spinbox_scroll(self, widget):
-        """Disable mouse wheel scrolling on a spinbox"""
+        """Disable mouse wheel scrolling on a spinbox or combobox"""
         def dummy_scroll(event):
             # Return "break" to prevent the default scroll behavior
             return "break"
@@ -117,10 +117,13 @@ class MangaSettingsDialog:
         widget.bind("<Button-5>", dummy_scroll)    # Linux scroll down
 
     def _disable_all_spinbox_scrolling(self, parent):
-        """Recursively find and disable scrolling on all spinboxes"""
+        """Recursively find and disable scrolling on all spinboxes and comboboxes"""
         for widget in parent.winfo_children():
             # Check if it's a Spinbox (both ttk and tk versions)
-            if isinstance(widget, (tb.Spinbox, tk.Spinbox, tb.Spinbox)):
+            if isinstance(widget, (tb.Spinbox, tk.Spinbox, ttk.Spinbox)):
+                self._disable_spinbox_scroll(widget)
+            # Check if it's a Combobox (ttk and ttkbootstrap versions)
+            elif isinstance(widget, (ttk.Combobox, tb.Combobox)):
                 self._disable_spinbox_scroll(widget)
             # Recursively check frames and other containers
             elif hasattr(widget, 'winfo_children'):
