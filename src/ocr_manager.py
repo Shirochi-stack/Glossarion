@@ -117,7 +117,7 @@ class CustomAPIProvider(OCRProvider):
         
         # Use existing temperature and token settings
         self.temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.01'))
-        self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '500'))
+        self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
         
         # Image settings from existing compression variables
         self.image_format = 'jpeg' if os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') != 'png' else 'png'
