@@ -848,7 +848,7 @@ excludes = [
     # ============================================================================
     
     # PyTorch ecosystem (~800MB)
-    'torch', 'torch.*',
+    'torch', 'torch.*','torch-*',
     'torchvision', 'torchvision.*', 
     'torchaudio', 'torchaudio.*',
     'torch.nn', 'torch.nn.*',
@@ -1021,7 +1021,23 @@ a.binaries = [b for b in a.binaries if not any([
     'hdf5.dll' in b[0],  # Remove HDF5 (3MB)
     'libsndfile' in b[0],  # Remove soundfile (2MB)
     'geos-' in b[0],  # Remove Shapely (2MB)
+	
 ])]
+
+a.datas = [d for d in a.datas if not any([
+    'torch' in d[0].lower(),
+    'torch-' in d[0],  # Catches torch-2.5.1+cu121.dist-info
+    '.dist-info' in d[0] and 'torch' in d[0].lower(),
+])]
+
+print(f"Removed {original_datas - len(a.datas)} torch-related data files")
+
+# Also clean up any torch entries from pure Python modules
+a.pure = [p for p in a.pure if not any([
+    p[0].startswith('torch'),
+    p[0].startswith('torch.'),
+])]
+
 print(f"Removed {original_size - len(a.binaries)} duplicate binaries")
 
 # ============================================================================
