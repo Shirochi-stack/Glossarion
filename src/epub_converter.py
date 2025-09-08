@@ -506,16 +506,26 @@ class XHTMLConverter:
             else:
                 body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
             
-            # Delete orphaned &lt; and &gt; that are split across paragraphs
-            body_xhtml = body_xhtml.replace('<p>&lt;', '<p>')  # Remove &lt; at start of paragraph
-            body_xhtml = body_xhtml.replace('&gt;</p>', '</p>')  # Remove &gt; at end of paragraph
+            # ============= ADD THIS SECTION RIGHT HERE =============
+            # Special handling for story notification entities that got split across paragraphs
+            # Special handling for story notification entities that got split across paragraphs
+            if '&lt;' in body_xhtml and ':' in body_xhtml:
+                if re.search(r'&lt;[A-Z][^&<>]*?:', body_xhtml):
+                    # First, remove any escaped HTML tags that shouldn't be there
+                    body_xhtml = re.sub(r'&lt;/p&gt;', '', body_xhtml)  # Remove escaped </p> tags
+                    body_xhtml = re.sub(r'&lt;p&gt;', '', body_xhtml)   # Remove escaped <p> tags
+                    
+                    # Then convert story notification brackets to square brackets
+                    body_xhtml = body_xhtml.replace('&lt;', '《')
+                    body_xhtml = body_xhtml.replace('&gt;', '》')
+        # ============================================================
             
             return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
             
         except Exception as e:
             log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
             return XHTMLConverter._build_fallback_xhtml(title)
-    
+ 
     @staticmethod
     def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
         """Build XHTML document"""
