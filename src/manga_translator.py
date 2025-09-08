@@ -2798,10 +2798,6 @@ class MangaTranslator:
             response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
             response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
             response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
-
-
-            # Final cleanup to remove any remaining wrapper quotes
-            translated = self._clean_translation_text(translated)
             
             # Try to parse as JSON
             translations = {}
