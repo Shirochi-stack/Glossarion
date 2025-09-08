@@ -5686,9 +5686,6 @@ class MangaTranslator:
         
         return unique_regions
 
-        
-
-
     def _save_intermediate_image(self, original_path: str, image, stage: str):
         """Save intermediate processing stages"""
         debug_dir = os.path.join(os.path.dirname(original_path), 'debug')
