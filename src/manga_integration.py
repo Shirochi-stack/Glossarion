@@ -2918,8 +2918,8 @@ class MangaTranslationTab:
                 "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
                 "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
                 '{\n'
-                '  "こんにちは": "Hello",\n'
-                '  "ありがとう": "Thank you"\n'
+                '  こんにちは: Hello,\n'
+                '  ありがとう: Thank you\n'
                 '}\n\n'
                 'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
             )
