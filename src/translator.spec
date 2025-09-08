@@ -1037,7 +1037,7 @@ a.datas = [d for d in a.datas if not any([
     '.dist-info' in d[0] and 'torch' in d[0].lower(),
 ])]
 
-print(f"Removed {original_datas - len(a.datas)} torch-related data files")
+print(f"Removed {original_size - len(a.datas)} torch-related data files")
 
 # Also clean up any torch entries from pure Python modules
 a.pure = [p for p in a.pure if not any([
