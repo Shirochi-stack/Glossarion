@@ -1188,7 +1188,8 @@ class ContentProcessor:
     def get_content_hash(html_content):
         """Create a stable hash of content"""
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+            protected_html = self.protect_angle_brackets_with_korean(html_content)
+            soup = BeautifulSoup(protected_html, 'html.parser')
             
             for tag in soup(['script', 'style', 'meta', 'link']):
                 tag.decompose()
@@ -1231,7 +1232,8 @@ class ContentProcessor:
                 return text_length > 50  # Much lower threshold for plain text
             
             # Original HTML parsing logic
-            soup = BeautifulSoup(html_content, 'html.parser')
+            protected_html = self.protect_angle_brackets_with_korean(html_content)
+            soup = BeautifulSoup(protected_html, 'html.parser')
             
             soup_copy = BeautifulSoup(str(soup), 'html.parser')
             
@@ -1269,6 +1271,22 @@ class ChapterExtractor:
         self.pattern_manager = PatternManager()
         self.progress_callback = progress_callback  # Add progress callback
 
+
+    def protect_angle_brackets_with_korean(self, text: str) -> str:
+        """Protect Korean text in angle brackets from HTML parsing"""
+        if text is None:
+            return ""
+        
+        import re
+        korean_pattern = r'[가-힣ㄱ-ㅎㅏ-ㅣ]'
+        bracket_pattern = rf'<([^<>]*{korean_pattern}[^<>]*)>'
+        
+        def replace_brackets(match):
+            content = match.group(1)
+            return f'&#60;{content}&#62;'
+        
+        return re.sub(bracket_pattern, replace_brackets, text)
+    
     def ensure_all_opf_chapters_extracted(zf, chapters, out):
         """Ensure ALL chapters from OPF spine are extracted, not just what ChapterExtractor found"""
         
@@ -1932,7 +1950,8 @@ class ChapterExtractor:
                         print(f"❌ Skipping {file_path} - enhanced extraction required but not available")
                         return None
                     # Parse the (possibly merged) content
-                    soup = BeautifulSoup(html_content, 'html.parser')
+                    protected_html = self.protect_angle_brackets_with_korean(html_content)
+                    soup = BeautifulSoup(protected_html, 'html.parser')
                     
                     # Get effective mode for filtering
                     effective_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
@@ -1998,7 +2017,8 @@ class ChapterExtractor:
                         detection_method = f"{extraction_mode}_sequential_no_merge" if extraction_mode == "enhanced" else "sequential_no_merge"
                     else:
                         # When merging is enabled, try to extract chapter info
-                        soup = BeautifulSoup(html_content, 'html.parser')
+                        protected_html = self.protect_angle_brackets_with_korean(html_content)
+                        soup = BeautifulSoup(protected_html, 'html.parser')
                         
                         # Count headers (thread-safe)
                         h1_tags = soup.find_all('h1')
@@ -2026,7 +2046,8 @@ class ChapterExtractor:
                             print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
                 
                 # Process images and metadata (same for all modes)
-                soup = BeautifulSoup(html_content, 'html.parser')
+                protected_html = self.protect_angle_brackets_with_korean(html_content)
+                soup = BeautifulSoup(protected_html, 'html.parser')
                 images = soup.find_all('img')
                 has_images = len(images) > 0
                 is_image_only_chapter = has_images and len(content_text.strip()) < 500
