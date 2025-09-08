@@ -907,7 +907,6 @@ excludes = [
     'pandas', 'pandas.*',
     'scikit-image', 'skimage', 'skimage.*',
     'sklearn', 'sklearn.*',
-    'numpy.libs',
     'PIL._avif',
     'pillow.libs',
     'pypdfium2', 'pypdfium2.*',
@@ -1020,7 +1019,6 @@ original_size = len(a.binaries)
 a.binaries = [b for b in a.binaries if not any([
     b[0].endswith('opencv_videoio_ffmpeg490_64.dll'),  # Old FFmpeg
     'scipy.libs' in b[0],  # Scipy's OpenBLAS
-	'numpy.libs' in b[0],
     'libscipy_openblas' in b[0],
     '_avif' in b[0],
     'pypdfium' in b[0],
