@@ -2171,26 +2171,8 @@ Recent translations to summarize:
             "vertex/gemini-2.5-flash-lite",
 
             # Chute AI
-            "chute/gpt-5",
-            "chute/gpt-5-mini",
-            "chute/gpt-5-nano",
-            "chute/gpt-4o",
-            "chute/gpt-4o-mini",
-            "chute/gpt-4-turbo",
-            "chute/gpt-4",
-            "chute/gpt-4.1-mini",
-            "chute/gpt-4.1-nano",
-            "chute/gpt-3.5-turbo",
-            "chute/claude-opus-4-1-20250805",
-            "chute/claude-opus-4-20250514",
-            "chute/claude-sonnet-4-20250514",
-            "chute/claude-3-7-sonnet-20250219",
-            "chute/claude-3-5-sonnet-20241022",
-            "chute/claude-3-5-haiku-20241022",
-            "chute/gemini-2.5-pro",
-            "chute/gemini-2.5-flash",
-            "chute/gemini-2.5-flash-lite",
-            "chute/gemini-2.0-flash",
+            "chutes/openai/gpt-oss-120b"
+            "chutes/deepseek-ai/DeepSeek-V3.1",
             
             # DeepSeek Models
             "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
