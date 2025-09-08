@@ -2290,6 +2290,22 @@ class MangaTranslator:
             else:
                 # If response is a string or other format
                 translated = str(response).strip()
+
+            # Check if response looks like JSON (contains both { and } and : characters)
+            if '{' in translated and '}' in translated and ':' in translated:
+                try:
+                    # It might be JSON, try to fix and parse it
+                    fixed_json = self._fix_json_response(translated)
+                    import json
+                    parsed = json.loads(fixed_json)
+                    
+                    # If it's a dict with a single translation, extract it
+                    if isinstance(parsed, dict) and len(parsed) == 1:
+                        translated = list(parsed.values())[0]
+                        self._log("📦 Extracted translation from JSON response", "debug")
+                except:
+                    # Not JSON or failed to parse, use as-is
+                    pass
             
             self._log(f"🔍 Raw response type: {type(response)}")
             self._log(f"🔍 Raw response content: '{translated[:100]}...'")
@@ -2370,9 +2386,9 @@ class MangaTranslator:
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
-            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
-            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
-            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            translated = re.sub(r"['''\"`]$", "", translated.strip())   # Remove trailing
+            translated = re.sub(r"^['''\"`]", "", translated.strip())   # Remove leading
+            translated = re.sub(r"\s+['''\"`]\s+", " ", translated)     # Remove isolated
             self._log(f"🎯 Final translation result: '{translated[:50]}...'")
             
             # Apply glossary if available
@@ -2771,12 +2787,16 @@ class MangaTranslator:
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
-            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
-            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
-            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            translated = re.sub(r"['''\"`]$", "", translated.strip())  # Remove trailing
+            translated = re.sub(r"^['''\"`]", "", translated.strip())   # Remove leading
+            translated = re.sub(r"\s+['''\"`]\s+", " ", translated)     # Remove isolated
+            
             # Try to parse as JSON
             translations = {}
             try:
+                # Fix any JSON formatting issues first
+                response_text = self._fix_json_response(response_text)
+                
                 # Clean up response if needed
                 if "```json" in response_text:
                     import re
@@ -2965,6 +2985,102 @@ class MangaTranslator:
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
             return {}
+
+    def _fix_json_response(self, response_text: str) -> str:
+        """Fix JSON response with unescaped newlines and other control characters"""
+        import re
+        import json
+        
+        # First, try to parse as-is
+        try:
+            json.loads(response_text)
+            return response_text  # Already valid
+        except json.JSONDecodeError:
+            pass
+        
+        # Method 1: Fix newlines within JSON string values
+        # This regex finds content between quotes and escapes newlines
+        def escape_newlines_in_strings(match):
+            content = match.group(1)
+            # Escape actual newlines (not already escaped ones)
+            content = re.sub(r'(?<!\\)\n', r'\\n', content)
+            content = re.sub(r'(?<!\\)\r', r'\\r', content) 
+            content = re.sub(r'(?<!\\)\t', r'\\t', content)
+            return f'"{content}"'
+        
+        # Pattern to match JSON string values (handles escaped quotes)
+        pattern = r'"((?:[^"\\]|\\.|\\n)*?)"'
+        
+        # Apply the fix
+        fixed = re.sub(pattern, escape_newlines_in_strings, response_text)
+        
+        # Try parsing the fixed version
+        try:
+            json.loads(fixed)
+            self._log("✅ Fixed JSON by escaping control characters", "info")
+            return fixed
+        except json.JSONDecodeError as e:
+            self._log(f"⚠️ Still invalid after escaping: {str(e)}", "debug")
+        
+        # Method 2: More aggressive cleaning
+        # Replace actual newlines that appear between quotes
+        lines = response_text.split('\n')
+        cleaned_lines = []
+        in_string = False
+        
+        for line in lines:
+            # Count unescaped quotes to track if we're in a string
+            quote_count = len(re.findall(r'(?<!\\)"', line))
+            
+            if quote_count % 2 == 1:  # Odd number of quotes
+                in_string = not in_string
+            
+            if in_string and cleaned_lines:
+                # We're continuing a string from the previous line
+                # Add as continuation with escaped newline
+                cleaned_lines[-1] = cleaned_lines[-1].rstrip() + '\\n' + line.lstrip()
+            else:
+                cleaned_lines.append(line)
+        
+        fixed = '\n'.join(cleaned_lines)
+        
+        # Try parsing again
+        try:
+            json.loads(fixed)
+            self._log("✅ Fixed JSON with line joining method", "info")
+            return fixed
+        except json.JSONDecodeError:
+            pass
+        
+        # Method 3: Extract and rebuild
+        # Extract all key-value pairs and rebuild valid JSON
+        extracted = {}
+        
+        # Pattern to extract "key": "value" pairs
+        pair_pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\"[^"]*)*)"'
+        
+        matches = re.finditer(pair_pattern, response_text, re.MULTILINE | re.DOTALL)
+        
+        for match in matches:
+            key = match.group(1)
+            value = match.group(2)
+            
+            # Clean up the key (remove newlines)
+            key = key.replace('\n', ' ').replace('\r', ' ')
+            
+            # Properly escape value
+            value = value.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+            
+            extracted[key] = value
+        
+        if extracted:
+            # Rebuild as valid JSON
+            rebuilt = json.dumps(extracted, ensure_ascii=False)
+            self._log("✅ Rebuilt JSON from extracted pairs", "info")
+            return rebuilt
+        
+        # If all else fails, return original
+        return response_text
 
     def _fix_encoding_issues(self, text: str) -> str:
         """Fix common encoding issues in text, especially for Korean"""
@@ -4880,8 +4996,12 @@ class MangaTranslator:
             return regions
 
     #  parallel processing:
-    def _translate_regions_parallel(self, regions: List[TextRegion], image_path: str, max_workers: int) -> List[TextRegion]:
+    def _translate_regions_parallel(self, regions: List[TextRegion], image_path: str, max_workers: int = None) -> List[TextRegion]:
         """Translate regions using parallel processing"""
+        # Get max_workers from settings if not provided
+        if max_workers is None:
+            max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
         # Thread-safe storage for results
         results_lock = threading.Lock()
         translated_regions = {}
@@ -5315,29 +5435,208 @@ class MangaTranslator:
     
     def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
         """Process webtoon in chunks for better OCR"""
-        # Implementation for processing tall images in chunks
+        import cv2
+        import numpy as np
+        from PIL import Image as PILImage
         
-    def _translate_regions_parallel(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
-        """Translate regions using parallel processing"""
-        max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit translation tasks
-            future_to_region = {
-                executor.submit(self._translate_single_region, region, i): (i, region) 
-                for i, region in enumerate(regions)
-            }
+        try:
+            self._log("📱 Processing webtoon in chunks for better OCR", "info")
             
-            # Collect results
-            for future in as_completed(future_to_region):
-                i, region = future_to_region[future]
+            # Load the image
+            image = cv2.imread(image_path)
+            if image is None:
+                pil_image = PILImage.open(image_path)
+                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            
+            height, width = image.shape[:2]
+            
+            # Get chunk settings from config
+            chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)
+            chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)
+            
+            self._log(f"   Image dimensions: {width}x{height}", "info")
+            self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")
+            
+            # Calculate number of chunks needed
+            effective_chunk_height = chunk_height - chunk_overlap
+            num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)
+            
+            self._log(f"   Will process in {num_chunks} chunks", "info")
+            
+            # Process each chunk
+            all_regions = []
+            chunk_offsets = []
+            
+            for i in range(num_chunks):
+                # Calculate chunk boundaries
+                start_y = i * effective_chunk_height
+                end_y = min(start_y + chunk_height, height)
+                
+                # Make sure we don't miss the bottom part
+                if i == num_chunks - 1:
+                    end_y = height
+                
+                self._log(f"\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")
+                
+                # Extract chunk
+                chunk = image[start_y:end_y, 0:width]
+                
+                # Save chunk temporarily for OCR
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    chunk_path = tmp.name
+                    cv2.imwrite(chunk_path, chunk)
+                
                 try:
-                    translated_text = future.result()
-                    regions[i].translated_text = translated_text
-                except Exception as e:
-                    self._log(f"Translation failed for region {i}: {e}", "error")
+                    # Detect text in this chunk
+                    chunk_regions = self.detect_text_regions(chunk_path)
+                    
+                    # Adjust region coordinates to full image space
+                    for region in chunk_regions:
+                        # Adjust bounding box
+                        x, y, w, h = region.bounding_box
+                        region.bounding_box = (x, y + start_y, w, h)
+                        
+                        # Adjust vertices if present
+                        if hasattr(region, 'vertices') and region.vertices:
+                            adjusted_vertices = []
+                            for vx, vy in region.vertices:
+                                adjusted_vertices.append((vx, vy + start_y))
+                            region.vertices = adjusted_vertices
+                        
+                        # Mark which chunk this came from (for deduplication)
+                        region.chunk_index = i
+                        region.chunk_y_range = (start_y, end_y)
+                    
+                    all_regions.extend(chunk_regions)
+                    chunk_offsets.append(start_y)
+                    
+                    self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")
+                    
+                finally:
+                    # Clean up temp file
+                    import os
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+            
+            # Remove duplicate regions from overlapping areas
+            self._log(f"\n   🔍 Deduplicating regions from overlaps...", "info")
+            unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)
+            
+            self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")
+            
+            if not unique_regions:
+                self._log("⚠️ No text regions detected in webtoon", "warning")
+                result['errors'].append("No text regions detected")
+                return result
+            
+            # Now process the regions as normal
+            self._log(f"\n📍 Translating {len(unique_regions)} unique regions", "info")
+            
+            # Translate regions
+            if self.full_page_context_enabled:
+                translations = self.translate_full_page_context(unique_regions, image_path)
+                for region in unique_regions:
+                    if region.text in translations:
+                        region.translated_text = translations[region.text]
+            else:
+                unique_regions = self.translate_regions(unique_regions, image_path)
+            
+            # Create mask and inpaint
+            self._log(f"\n🎨 Creating mask and inpainting...", "info")
+            mask = self.create_text_mask(image, unique_regions)
+            
+            if self.skip_inpainting:
+                inpainted = image.copy()
+            else:
+                inpainted = self.inpaint_regions(image, mask)
+            
+            # Render translated text
+            self._log(f"✍️ Rendering translated text...", "info")
+            final_image = self.render_translated_text(inpainted, unique_regions)
+            
+            # Save output
+            if not output_path:
+                base, ext = os.path.splitext(image_path)
+                output_path = f"{base}_translated{ext}"
+            
+            cv2.imwrite(output_path, final_image)
+            
+            result['output_path'] = output_path
+            result['regions'] = [r.to_dict() for r in unique_regions]
+            result['success'] = True
+            result['format_info']['chunks_processed'] = num_chunks
+            
+            self._log(f"\n✅ Webtoon processing complete: {output_path}", "success")
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error processing webtoon chunks: {str(e)}"
+            self._log(f"❌ {error_msg}", "error")
+            result['errors'].append(error_msg)
+            return result
+
+    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:
+        """Remove duplicate regions from overlapping chunk areas"""
+        if not regions:
+            return regions
         
-        return regions
+        # Sort regions by y position
+        regions.sort(key=lambda r: r.bounding_box[1])
+        
+        unique_regions = []
+        used_indices = set()
+        
+        for i, region1 in enumerate(regions):
+            if i in used_indices:
+                continue
+            
+            # Check if this region is in an overlap zone
+            x1, y1, w1, h1 = region1.bounding_box
+            chunk_idx = region1.chunk_index if hasattr(region1, 'chunk_index') else 0
+            chunk_y_start, chunk_y_end = region1.chunk_y_range if hasattr(region1, 'chunk_y_range') else (0, float('inf'))
+            
+            # Check if region is near chunk boundary (in overlap zone)
+            in_overlap_zone = (y1 < chunk_y_start + overlap_height) and chunk_idx > 0
+            
+            if in_overlap_zone:
+                # Look for duplicate in previous chunk's regions
+                found_duplicate = False
+                
+                for j, region2 in enumerate(regions):
+                    if j >= i or j in used_indices:
+                        continue
+                    
+                    if hasattr(region2, 'chunk_index') and region2.chunk_index == chunk_idx - 1:
+                        x2, y2, w2, h2 = region2.bounding_box
+                        
+                        # Check if regions are the same (similar position and size)
+                        if (abs(x1 - x2) < 20 and 
+                            abs(y1 - y2) < 20 and 
+                            abs(w1 - w2) < 20 and 
+                            abs(h1 - h2) < 20):
+                            
+                            # Check text similarity
+                            if region1.text == region2.text:
+                                # This is a duplicate
+                                found_duplicate = True
+                                used_indices.add(i)
+                                self._log(f"   Removed duplicate: '{region1.text[:30]}...'", "debug")
+                                break
+                
+                if not found_duplicate:
+                    unique_regions.append(region1)
+                    used_indices.add(i)
+            else:
+                # Not in overlap zone, keep it
+                unique_regions.append(region1)
+                used_indices.add(i)
+        
+        return unique_regions
+
+        
+
 
     def _save_intermediate_image(self, original_path: str, image, stage: str):
         """Save intermediate processing stages"""
