@@ -3526,103 +3526,110 @@ class UnifiedClient:
         Create a temporary client with the main key and retry the request.
         This is used for prohibited content errors in multi-key mode.
         """
+        # CHECK 1: Verify multi-key mode is actually enabled
+        if not self._multi_key_mode:
+            print(f"[MAIN KEY RETRY] Not in multi-key mode, skipping retry")
+            return None
+        
+        # CHECK 2: Verify the multi-key toggle is enabled
+        multi_key_enabled = os.getenv("USE_MULTI_KEYS", "0") == "1"
+        if not multi_key_enabled:
+            print(f"[MAIN KEY RETRY] Multi-key toggle is disabled, skipping retry")
+            return None
+        
+        # CHECK 3: Check if fallback keys are enabled
+        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        if not use_fallback_keys:
+            print(f"[MAIN KEY RETRY] Fallback keys toggle is disabled, skipping retry")
+            return None
+        
+        # CHECK 4: Verify we have the necessary attributes for main GUI key
+        if not (hasattr(self, 'original_api_key') and 
+                hasattr(self, 'original_model') and
+                self.original_api_key and 
+                self.original_model):
+            print(f"[MAIN KEY RETRY] Missing original key/model attributes, skipping retry")
+            return None
+        
         fallback_keys = []
         
-        # FIRST: Always add the MAIN GUI KEY as the first fallback
-        # This is the key from the main GUI, NOT from multi-key rotation
+        # Add the MAIN GUI KEY as the first fallback
         fallback_keys.append({
-            'api_key': self.original_api_key,  # The key from main GUI
-            'model': self.original_model,      # The model from main GUI
+            'api_key': self.original_api_key,
+            'model': self.original_model,
             'label': 'MAIN GUI KEY'
         })
         print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
         
-        # DEBUG: Check what's in environment
-        print(f"[DEBUG] USE_FALLBACK_KEYS env: {os.getenv('USE_FALLBACK_KEYS')}")
-        print(f"[DEBUG] FALLBACK_KEYS env: {os.getenv('FALLBACK_KEYS', 'NOT SET')[:100]}")
-        
-        # Try loading directly from environment if translator_config doesn't exist
-        use_fallback_env = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        # Try loading additional configured fallback keys
         fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
         
-        if use_fallback_env and fallback_keys_json != '[]':
+        if fallback_keys_json != '[]':
             try:
                 configured_fallbacks = json.loads(fallback_keys_json)
-                print(f"[DEBUG] Loaded {len(configured_fallbacks)} fallback keys from environment")
+                print(f"[MAIN KEY RETRY] Loaded {len(configured_fallbacks)} additional fallback keys")
                 for fb in configured_fallbacks:
-                    fallback_keys.append({
-                        'api_key': fb.get('api_key'),
-                        'model': fb.get('model'),
-                        'label': 'FALLBACK KEY'
-                    })
+                    if fb.get('api_key') and fb.get('model'):  # Validate entries
+                        fallback_keys.append({
+                            'api_key': fb.get('api_key'),
+                            'model': fb.get('model'),
+                            'label': 'FALLBACK KEY'
+                        })
             except Exception as e:
-                print(f"[DEBUG] Failed to parse FALLBACK_KEYS: {e}")
+                print(f"[MAIN KEY RETRY] Failed to parse FALLBACK_KEYS: {e}")
         
         print(f"[MAIN KEY RETRY] Total keys to try: {len(fallback_keys)}")
         
-        # Try each fallback key in the list
-        for idx, fallback_data in enumerate(fallback_keys):
+        # LIMIT: Maximum attempts to prevent infinite loops
+        max_fallback_attempts = min(len(fallback_keys), 3)  # Try at most 3 fallback keys
+        
+        # Try each fallback key with attempt limit
+        for idx, fallback_data in enumerate(fallback_keys[:max_fallback_attempts]):
             label = fallback_data.get('label', 'Fallback')
             fallback_key = fallback_data.get('api_key')
             fallback_model = fallback_data.get('model')
             
-            print(f"[{label} {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
-            print(f"[{label} {idx+1}] Failed multi-key model was: {self.model}")
+            if not fallback_key or not fallback_model:
+                print(f"[{label} {idx+1}] Skipping invalid entry")
+                continue
+            
+            print(f"[{label} {idx+1}/{max_fallback_attempts}] Trying {fallback_model}")
             
             try:
-                # Create a new temporary UnifiedClient instance with the fallback key
+                # Create a new temporary UnifiedClient instance
                 temp_client = UnifiedClient(
                     api_key=fallback_key,  
                     model=fallback_model,   
                     output_dir=self.output_dir
                 )
-
+                
+                # Copy necessary attributes
                 if hasattr(self, 'base_url') and self.base_url:
                     temp_client.base_url = self.base_url
                     temp_client.openai_base_url = self.base_url
-                    
                 if hasattr(self, 'api_version'):
                     temp_client.api_version = self.api_version
-                    
                 if hasattr(self, 'is_azure') and self.is_azure:
                     temp_client.is_azure = self.is_azure
-                    
-                # Force the client to reinitialize with Azure settings
-                temp_client._setup_client()
                 
-                # FORCE single-key mode after initialization
+                # Force setup and single-key mode
+                temp_client._setup_client()
                 temp_client._multi_key_mode = False
                 temp_client.use_multi_keys = False
                 temp_client.key_identifier = f"{label} ({fallback_model})"
-
-                # FLAG to indicate this is a retry client
                 temp_client._is_retry_client = True
                 
-                # The client should already be set up from __init__, but verify
-                if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
-                    # Force setup if needed - USE FALLBACK VALUES
-                    temp_client.api_key = fallback_key
-                    temp_client.model = fallback_model
-                    temp_client._setup_client()
-                
-                # Copy relevant state BUT NOT THE CANCELLATION FLAG
+                # Copy state but reset cancellation flags
                 temp_client.context = context
-                temp_client._cancelled = False  # ALWAYS start fresh for retry
-                temp_client._in_cleanup = False  # Reset cleanup state too
+                temp_client._cancelled = False
+                temp_client._in_cleanup = False
                 temp_client.current_session_context = self.current_session_context
                 temp_client.conversation_message_count = self.conversation_message_count
                 temp_client.request_timeout = self.request_timeout
                 
-                print(f"[{label} {idx+1}] Created temp client with model: {temp_client.model}")
-                print(f"[{label} {idx+1}] Multi-key mode: {temp_client._multi_key_mode}")
-                
-                # Get file names for response tracking
-                payload_name, response_name = self._get_file_names(messages, context=context)
-                
-                # Try to send the request using _send_internal
                 print(f"[{label} {idx+1}] Sending request...")
                 
-                # Use _send_internal directly to avoid nested retry loops
+                # Call _send_internal with retry reason
                 result = temp_client._send_internal(
                     messages=messages,
                     temperature=temperature,
@@ -3633,48 +3640,30 @@ class UnifiedClient:
                     request_id=request_id
                 )
                 
-                # Check the result
+                # Validate result
                 if result and isinstance(result, tuple):
                     content, finish_reason = result
                     
-                    # Check if content is an error message
-                    if content and "[AI RESPONSE UNAVAILABLE]" in content:
-                        print(f"[{label} {idx+1}] ❌ Got error message: {content}")
-                        continue  # Try next fallback key
-                    
-                    # Check if content is valid
-                    if content and len(content) > 50:  # Require more than 50 chars
-                        print(f"[{label} {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
-                        self._save_response(content, response_name)
+                    # Check for error markers
+                    if content and "[AI RESPONSE UNAVAILABLE]" not in content and len(content) > 50:
+                        print(f"[{label} {idx+1}] ✅ SUCCESS! Got {len(content)} chars")
                         return content, finish_reason
                     else:
-                        print(f"[{label} {idx+1}] ❌ Content too short or empty: {len(content) if content else 0} chars")
+                        print(f"[{label} {idx+1}] ❌ Invalid or short content: {len(content) if content else 0} chars")
                         continue
-                else:
-                    print(f"[{label} {idx+1}] ❌ Unexpected result type: {type(result)}")
-                    continue
-                    
+                        
             except UnifiedClientError as e:
-                # Check if it's a cancellation
                 if e.error_type == "cancelled":
-                    print(f"[{label} {idx+1}] Operation was cancelled during retry")
+                    print(f"[{label} {idx+1}] Operation cancelled")
                     return None
-                
-                # Check if it's Azure content filter - CONTINUE TO NEXT KEY
-                error_str = str(e).lower()
-                if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
-                    print(f"[{label} {idx+1}] ❌ Content filter error: {str(e)[:100]}")
-                    continue  # TRY NEXT FALLBACK KEY
-                
-                print(f"[{label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
-                continue  # TRY NEXT KEY REGARDLESS
+                print(f"[{label} {idx+1}] ❌ Error: {str(e)[:100]}")
+                continue
                 
             except Exception as e:
-                print(f"[{label} {idx+1}] ❌ Exception: {str(e)[:200]}")
-                continue  # TRY NEXT KEY
+                print(f"[{label} {idx+1}] ❌ Exception: {str(e)[:100]}")
+                continue
         
-        # If we get here, all fallback keys failed
-        print(f"[MAIN KEY RETRY] ❌ All {len(fallback_keys)} fallback keys failed")
+        print(f"[MAIN KEY RETRY] ❌ All {max_fallback_attempts} attempts failed")
         return None
     
     # Image handling methods
@@ -4700,71 +4689,82 @@ class UnifiedClient:
         Create a temporary client with the main key and retry the image request.
         This is used for prohibited content errors in multi-key mode.
         """
+        # CHECK 1: Verify multi-key mode is actually enabled
+        if not self._multi_key_mode:
+            print(f"[IMAGE MAIN KEY RETRY] Not in multi-key mode, skipping retry")
+            return None
+        
+        # CHECK 2: Verify the multi-key toggle is enabled
+        multi_key_enabled = os.getenv("USE_MULTI_KEYS", "0") == "1"
+        if not multi_key_enabled:
+            print(f"[IMAGE MAIN KEY RETRY] Multi-key toggle is disabled, skipping retry")
+            return None
+        
+        # CHECK 3: Check if fallback keys are enabled
+        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        if not use_fallback_keys:
+            print(f"[IMAGE MAIN KEY RETRY] Fallback keys toggle is disabled, skipping retry")
+            return None
+        
+        # CHECK 4: Verify we have the necessary attributes
+        if not (hasattr(self, 'original_api_key') and 
+                hasattr(self, 'original_model') and
+                self.original_api_key and 
+                self.original_model):
+            print(f"[IMAGE MAIN KEY RETRY] Missing original key/model attributes, skipping retry")
+            return None
+        
         fallback_keys = []
         
-        # FIRST: Always add the MAIN GUI KEY as the first fallback
-        # This is the key from the main GUI, NOT from multi-key rotation
+        # Add the MAIN GUI KEY
         fallback_keys.append({
-            'api_key': self.original_api_key,  # The key from main GUI
-            'model': self.original_model,      # The model from main GUI
+            'api_key': self.original_api_key,
+            'model': self.original_model,
             'label': 'MAIN GUI KEY'
         })
         print(f"[IMAGE MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
         
-        # Try each fallback key in the list
-        for idx, fallback_data in enumerate(fallback_keys):
+        # LIMIT: Maximum attempts to prevent infinite loops (only 1 for images)
+        max_fallback_attempts = 1
+        
+        for idx, fallback_data in enumerate(fallback_keys[:max_fallback_attempts]):
             label = fallback_data.get('label', 'Fallback')
             fallback_key = fallback_data.get('api_key')
             fallback_model = fallback_data.get('model')
             
-            print(f"[IMAGE {label} {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
-            print(f"[IMAGE {label} {idx+1}] Failed multi-key model was: {self.model}")
+            if not fallback_key or not fallback_model:
+                print(f"[IMAGE {label} {idx+1}] Skipping invalid entry")
+                continue
+            
+            print(f"[IMAGE {label} {idx+1}/{max_fallback_attempts}] Trying {fallback_model}")
             
             try:
-                # Create a new temporary UnifiedClient instance with the fallback key
+                # Create temporary client
                 temp_client = UnifiedClient(
                     api_key=fallback_key,  
                     model=fallback_model,   
                     output_dir=self.output_dir
                 )
                 
-                # FORCE single-key mode after initialization
+                # Force single-key mode
                 temp_client._multi_key_mode = False
                 temp_client.use_multi_keys = False
                 temp_client.key_identifier = f"{label} ({fallback_model})"
- 
-                # FLAG to indicate this is a retry client
                 temp_client._is_retry_client = True
- 
-                # The client should already be set up from __init__, but verify
-                if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
-                    # Force setup if needed - USE FALLBACK VALUES
-                    temp_client.api_key = fallback_key
-                    temp_client.model = fallback_model
-                    temp_client._setup_client()
                 
-                # Copy relevant state BUT NOT THE CANCELLATION FLAG
+                # Copy state
                 temp_client.context = context or 'image_translation'
-                temp_client._cancelled = False  # ALWAYS start fresh for retry
+                temp_client._cancelled = False
                 temp_client._in_cleanup = False
                 temp_client.current_session_context = self.current_session_context
                 temp_client.conversation_message_count = self.conversation_message_count
-                
-                # Copy image-specific settings if they exist
                 temp_client.default_temperature = getattr(self, 'default_temperature', 0.3)
                 temp_client.default_max_tokens = getattr(self, 'default_max_tokens', 8192)
                 temp_client.request_timeout = self.request_timeout
                 
-                print(f"[IMAGE {label} {idx+1}] Created temp client with model: {temp_client.model}")
-                print(f"[IMAGE {label} {idx+1}] Multi-key mode: {temp_client._multi_key_mode}")
-                
-                # Get file names for response tracking
-                payload_name, response_name = self._get_file_names(messages, context=context)
-                
-                # Try to send the image request
                 print(f"[IMAGE {label} {idx+1}] Sending image request...")
                 
-                # Use _send_image_internal directly to avoid nested retry loops
+                # Call _send_image_internal
                 result = temp_client._send_image_internal(
                     messages=messages,
                     image_data=image_data,
@@ -4776,45 +4776,20 @@ class UnifiedClient:
                     request_id=request_id
                 )
                 
-                # Check the result
+                # Validate result
                 if result and isinstance(result, tuple):
                     content, finish_reason = result
                     
-                    # Check if content is an error message
-                    if content and "[AI RESPONSE UNAVAILABLE]" in content:
-                        print(f"[IMAGE {label} {idx+1}] ❌ Got error message: {content}")
-                        continue  # Try next fallback key
-                    
-                    # Check if content is valid
-                    if content and len(content) > 50:  # Require more than 50 chars
-                        print(f"[IMAGE {label} {idx+1}] ✅ SUCCESS! Got image response of length: {len(content)}")
-                        self._save_response(content, response_name)
+                    if content and "[AI RESPONSE UNAVAILABLE]" not in content and len(content) > 50:
+                        print(f"[IMAGE {label} {idx+1}] ✅ SUCCESS! Got {len(content)} chars")
                         return content, finish_reason
                     else:
-                        print(f"[IMAGE {label} {idx+1}] ❌ Image content too short or empty: {len(content) if content else 0} chars")
-                        continue
-                                    
-            except UnifiedClientError as e:
-                # Check if it's a cancellation
-                if e.error_type == "cancelled":
-                    print(f"[IMAGE {label} {idx+1}] Operation was cancelled during retry")
-                    return None
-                
-                # Check if it's Azure content filter - CONTINUE TO NEXT KEY
-                error_str = str(e).lower()
-                if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
-                    print(f"[IMAGE {label} {idx+1}] ❌ Content filter error: {str(e)[:100]}")
-                    continue  # TRY NEXT FALLBACK KEY
-                
-                print(f"[IMAGE {label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
-                continue  # TRY NEXT KEY REGARDLESS
-                
+                        print(f"[IMAGE {label} {idx+1}] ❌ Invalid content")
+                        
             except Exception as e:
-                print(f"[IMAGE {label} {idx+1}] ❌ Exception: {str(e)[:200]}")
-                continue  # TRY NEXT KEY
+                print(f"[IMAGE {label} {idx+1}] ❌ Error: {str(e)[:100]}")
         
-        # If we get here, all fallback keys failed
-        print(f"[IMAGE MAIN KEY RETRY] ❌ All {len(fallback_keys)} fallback keys failed")
+        print(f"[IMAGE MAIN KEY RETRY] ❌ Failed")
         return None
  
     def reset_conversation_for_new_context(self, new_context):
