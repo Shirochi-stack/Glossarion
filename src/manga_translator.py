@@ -2302,6 +2302,7 @@ class MangaTranslator:
                     # If it's a dict with a single translation, extract it
                     if isinstance(parsed, dict) and len(parsed) == 1:
                         translated = list(parsed.values())[0]
+                        translated = self._clean_translation_text(translated)
                         self._log("📦 Extracted translation from JSON response", "debug")
                 except:
                     # Not JSON or failed to parse, use as-is
@@ -2386,9 +2387,12 @@ class MangaTranslator:
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
+            response_text = translated
             response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
             response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
             response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            translated = response_text
+            translated = self._clean_translation_text(translated)
             self._log(f"🎯 Final translation result: '{translated[:50]}...'")
             
             # Apply glossary if available
@@ -2405,6 +2409,8 @@ class MangaTranslator:
                 
                 if replacements > 0:
                     self._log(f"   ✏️ Made {replacements} glossary replacements")
+            
+            translated = self._clean_translation_text(translated)
             
             # Store in history if HistoryManager is available
             if self.history_manager and self.contextual_enabled:
@@ -2787,9 +2793,15 @@ class MangaTranslator:
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
+            
+            # Define response_text to match translated (since it was being used incorrectly)
             response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
             response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
             response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+
+
+            # Final cleanup to remove any remaining wrapper quotes
+            translated = self._clean_translation_text(translated)
             
             # Try to parse as JSON
             translations = {}
@@ -2878,6 +2890,9 @@ class MangaTranslator:
             
             # Extract translation values in order
             translation_values = list(translations.values()) if translations else []
+
+            # Clean all translation values to remove quotes
+            translation_values = [self._clean_translation_text(t) for t in translation_values]
             
             # Use position-based mapping if counts match
             if len(translation_values) >= len(regions) - 1:  # Allow 1 missing
@@ -2919,9 +2934,9 @@ class MangaTranslator:
                     key = f"[{i}] {region.text}"
                     
                     if key in translations:
-                        translated = translations[key]
+                        translated = self._clean_translation_text(translations[key])  # Clean here
                     elif region.text in translations:
-                        translated = translations[region.text]
+                        translated = self._clean_translation_text(translations[region.text])  # Clean here
                     else:
                         translated = region.text
                     
@@ -3155,6 +3170,30 @@ class MangaTranslator:
         # If all else fails, return original
         self._log("⚠️ Could not fix JSON, returning original", "warning")
         return response_text
+
+    def _clean_translation_text(self, text: str) -> str:
+        """Remove unnecessary quotation marks from translated text"""
+        if not text:
+            return text
+        
+        # Remove leading and trailing quotes if they wrap the entire text
+        text = text.strip()
+        
+        # Check if the entire text is wrapped in quotes
+        if len(text) >= 2:
+            # Remove matching quotes at start and end
+            if (text[0] == '"' and text[-1] == '"') or (text[0] == "'" and text[-1] == "'"):
+                text = text[1:-1].strip()
+            
+            # Also handle smart quotes
+            if (text[0] == '"' and text[-1] == '"') or (text[0] == ''' and text[-1] == '''):
+                text = text[1:-1].strip()
+            
+            # Handle Japanese quotes 「」
+            if text[0] == '「' and text[-1] == '」':
+                text = text[1:-1].strip()
+        
+        return text
     
     def _fix_encoding_issues(self, text: str) -> str:
         """Fix common encoding issues in text, especially for Korean"""
