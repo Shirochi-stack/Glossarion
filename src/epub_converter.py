@@ -459,7 +459,7 @@ class TitleExtractor:
 
 
 class XHTMLConverter:
-    """Handles XHTML conversion and compliance - UPDATED WITH UNICODE PRESERVATION"""
+    """Handles XHTML conversion and compliance"""
     
     @staticmethod
     def ensure_compliance(html_content: str, title: str = "Chapter", 
@@ -488,9 +488,7 @@ class XHTMLConverter:
             
             def escape_story_tags(match):
                 tag = match.group(0)
-                if '=' not in tag and '"' not in tag:
-                    return html.escape(tag)
-                return tag
+                return html.escape(tag)
             
             html_content = re.sub(r'<[^/>][^>]*?:[^>]*?>', escape_story_tags, html_content)
             
@@ -508,21 +506,9 @@ class XHTMLConverter:
             else:
                 body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
             
-            # Fix orphaned story brackets - handle multiline patterns
-            # Pattern: &lt;Something: text that might span lines...&gt;
-            body_xhtml = re.sub(
-                r'&lt;([^&]*?:[^&]*?)&gt;',
-                r'<\1>',
-                body_xhtml,
-                flags=re.DOTALL  # Allow . to match newlines
-            )
-            
-            # Also handle case where closing &gt; is orphaned on next line
-            body_xhtml = re.sub(
-                r'&lt;([^&]*?:[^&]*?)\n([^&]*?)&gt;',
-                r'<\1\n\2>',
-                body_xhtml
-            )
+            # Delete orphaned &lt; and &gt; that are split across paragraphs
+            body_xhtml = re.sub(r'&lt;[^&<>]*?</p>', '</p>', body_xhtml)
+            body_xhtml = re.sub(r'<p>[^&<>]*?&gt;', '<p>', body_xhtml)
             
             return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
             
@@ -531,36 +517,14 @@ class XHTMLConverter:
             return XHTMLConverter._build_fallback_xhtml(title)
     
     @staticmethod
-    def _extract_body_content(soup) -> str:
-        """Extract body content - DON'T USE BeautifulSoup for this!"""
-        # Convert soup back to string first
-        html_str = str(soup)
-        
-        # Use regex to extract body content
-        import re
-        body_match = re.search(r'<body[^>]*>(.*?)</body>', html_str, re.DOTALL | re.IGNORECASE)
-        
-        if body_match:
-            body_html = body_match.group(1)
-        else:
-            # No body tag, get everything
-            body_html = html_str
-        
-        return body_html
-    
-    @staticmethod
     def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
-        """Build XHTML document - PRESERVES UNICODE"""
+        """Build XHTML document"""
         if not body_content.strip():
             body_content = '<p>Empty chapter</p>'
         
-        # Ensure title is XML-safe (but preserves Unicode)
         title = ContentProcessor.safe_escape(title)
-        
-        # Ensure body content is XML-safe - PRESERVES UNICODE
         body_content = XHTMLConverter._ensure_xml_safe_readable(body_content)
         
-        # Ensure we use standard ASCII quotes and no hidden characters
         xml_declaration = '<?xml version="1.0" encoding="utf-8"?>'
         doctype = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'
         
@@ -573,7 +537,6 @@ class XHTMLConverter:
             f'<title>{title}</title>'
         ]
         
-        # Add CSS links
         if css_links:
             for css_link in css_links:
                 if css_link.startswith('<link'):
@@ -596,46 +559,16 @@ class XHTMLConverter:
     
     @staticmethod
     def _ensure_xml_safe_readable(content: str) -> str:
-        """Ensure content is XML-safe - minimal processing only"""
-        # Only fix truly unescaped ampersands (not those in valid entities or tags)
-        # This pattern is very careful to only match standalone ampersands
+        """Ensure content is XML-safe"""
         content = re.sub(
             r'&(?!(?:'
-            r'[a-zA-Z][a-zA-Z0-9]{0,30};|'  # Named entities like &nbsp;
-            r'#[0-9]{1,7};|'                # Decimal entities like &#65;
-            r'#x[0-9a-fA-F]{1,6};'          # Hex entities like &#x41;
+            r'[a-zA-Z][a-zA-Z0-9]{0,30};|'
+            r'#[0-9]{1,7};|'
+            r'#x[0-9a-fA-F]{1,6};'
             r'))',
             '&amp;',
             content
         )
-        
-        return content
-    
-    @staticmethod
-    def _basic_xml_escape(content: str) -> str:
-        """Basic XML escaping as fallback - PRESERVES UNICODE"""
-        # Protect existing entities
-        entities = []
-        placeholder = "###ENTITY###"
-        
-        def protect_entity(match):
-            entities.append(match.group(0))
-            return f"{placeholder}{len(entities)-1}###"
-        
-        # Protect valid entities
-        content = re.sub(
-            r'&(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+|#x[0-9a-fA-F]+);',
-            protect_entity,
-            content
-        )
-        
-        # Escape unescaped special characters
-        content = content.replace('&', '&amp;')
-        
-        # Restore entities
-        for i, entity in enumerate(entities):
-            content = content.replace(f"{placeholder}{i}###", entity)
-        
         return content
     
     @staticmethod
@@ -645,20 +578,18 @@ class XHTMLConverter:
         if not safe_title:
             safe_title = "Chapter"
         
-        parts = []
-        parts.append('<?xml version="1.0" encoding="utf-8"?>')
-        parts.append('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">')
-        parts.append('<html xmlns="http://www.w3.org/1999/xhtml">')
-        parts.append('<head>')
-        parts.append('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />')
-        parts.append(f'<title>{ContentProcessor.safe_escape(safe_title)}</title>')
-        parts.append('</head>')
-        parts.append('<body>')
-        parts.append('<p>Error processing content. Please check the source file.</p>')
-        parts.append('</body>')
-        parts.append('</html>')
-        
-        return '\n'.join(parts)
+        return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>{ContentProcessor.safe_escape(safe_title)}</title>
+</head>
+<body>
+<p>Error processing content. Please check the source file.</p>
+</body>
+</html>'''
+    
     
     @staticmethod
     def validate(content: str) -> str:
