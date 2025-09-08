@@ -1038,6 +1038,18 @@ a.pure = [p for p in a.pure if not any([
     p[0].startswith('torch.'),
 ])]
 
+a.pure = [p for p in a.pure if not any([
+    'torch' in p[0].lower(),
+    'pytorch' in p[0].lower(),
+    '_torchcodec' in p[0],
+])]
+
+# Remove from PYZ entries
+a.scripts = [s for s in a.scripts if not any([
+    'torch' in s[0].lower(),
+    'pytorch' in s[0].lower(),
+])]
+
 print(f"Removed {original_size - len(a.binaries)} duplicate binaries")
 
 # ============================================================================
