@@ -4409,15 +4409,30 @@ class MangaTranslationTab:
 
         if ocr_config['provider'] == 'Qwen2-VL':
             qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-            if qwen_provider and hasattr(qwen_provider, 'loaded_model_size'):
-                if qwen_provider.loaded_model_size == "Custom":
-                    ocr_config['model_size'] = f"custom:{qwen_provider.model_id}"
-                else:
-                    size_map = {'2B': '1', '7B': '2', '72B': '3'}
-                    ocr_config['model_size'] = size_map.get(qwen_provider.loaded_model_size, '2')
-                self._log(f"Setting ocr_config['model_size'] = {ocr_config['model_size']}", "info")
-
-        
+            if qwen_provider:
+                # Set model size configuration
+                if hasattr(qwen_provider, 'loaded_model_size'):
+                    if qwen_provider.loaded_model_size == "Custom":
+                        ocr_config['model_size'] = f"custom:{qwen_provider.model_id}"
+                    else:
+                        size_map = {'2B': '1', '7B': '2', '72B': '3'}
+                        ocr_config['model_size'] = size_map.get(qwen_provider.loaded_model_size, '2')
+                    self._log(f"Setting ocr_config['model_size'] = {ocr_config['model_size']}", "info")
+                
+                # Set OCR prompt if available
+                if hasattr(self, 'ocr_prompt'):
+                    # Set it via environment variable (Qwen2VL will read this)
+                    os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
+                    
+                    # Also set it directly on the provider if it has the method
+                    if hasattr(qwen_provider, 'set_ocr_prompt'):
+                        qwen_provider.set_ocr_prompt(self.ocr_prompt)
+                    else:
+                        # If no setter method, set it directly
+                        qwen_provider.ocr_prompt = self.ocr_prompt
+                    
+                    self._log("✅ Set custom OCR prompt for Qwen2-VL", "info")
+       
         if ocr_config['provider'] == 'google':
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
             if not google_creds or not os.path.exists(google_creds):
