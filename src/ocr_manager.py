@@ -100,14 +100,19 @@ class CustomAPIProvider(OCRProvider):
             "1. DO NOT TRANSLATE ANYTHING\n"
             "2. DO NOT MODIFY THE TEXT\n"
             "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n\n"
+            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
             "If you see Korean text, output it in Korean.\n"
             "If you see Japanese text, output it in Japanese.\n"
             "If you see Chinese text, output it in Chinese.\n"
             "If you see English text, output it in English.\n\n"
+            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+            "between every word/character.\n\n"
+            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+            "there are clear visual breaks.\n\n"
             "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else.\n"
-            "IGNORE ANY OTHER PROMPT SAYING OTHERWISE. THIS PROMPT IS TOP PRIORITY OVERRIDING ALL PROMPTS"
+            "Output ONLY the raw text, nothing else."
             ))
         
         # Use existing temperature and token settings
@@ -581,6 +586,32 @@ class Qwen2VL(OCRProvider):
         self.model = None
         self.tokenizer = None
         
+        # Get OCR prompt from environment or use default
+        self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
+            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+            "CRITICAL RULES:\n"
+            "1. DO NOT TRANSLATE ANYTHING\n"
+            "2. DO NOT MODIFY THE TEXT\n"
+            "3. DO NOT EXPLAIN OR COMMENT\n"
+            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+            "If you see Korean text, output it in Korean.\n"
+            "If you see Japanese text, output it in Japanese.\n"
+            "If you see Chinese text, output it in Chinese.\n"
+            "If you see English text, output it in English.\n\n"
+            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+            "between every word/character.\n\n"
+            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+            "there are clear visual breaks.\n\n"
+            "NEVER translate. ONLY extract exactly what is written.\n"
+            "Output ONLY the raw text, nothing else."
+        )
+    
+    def set_ocr_prompt(self, prompt: str):
+        """Allow setting the OCR prompt dynamically"""
+        self.ocr_prompt = prompt
+        
     def check_installation(self) -> bool:
         """Check if required packages are installed"""
         try:
@@ -700,6 +731,11 @@ class Qwen2VL(OCRProvider):
         results = []
         if hasattr(self, 'model_id'):
             self._log(f"DEBUG: Using model: {self.model_id}", "debug")
+            
+        # Check if OCR prompt was passed in kwargs (for dynamic updates)
+        if 'ocr_prompt' in kwargs:
+            self.ocr_prompt = kwargs['ocr_prompt']
+        
         try:
             if not self.is_loaded:
                 if not self.load_model():
@@ -716,8 +752,7 @@ class Qwen2VL(OCRProvider):
             
             self._log(f"🔍 Processing with Qwen2-VL ({w}x{h} pixels)...")
             
-            # FIXED: Clear, unambiguous prompt that only asks for text extraction
-            # Don't ask for transcription, translation, or explanation
+            # Use the configurable OCR prompt
             messages = [
                 {
                     "role": "user",
@@ -728,15 +763,7 @@ class Qwen2VL(OCRProvider):
                         },
                         {
                             "type": "text", 
-                            # CHANGED: More explicit prompt to prevent translation
-                            "text": (
-                                "Output ONLY the exact raw text you see in this image. "
-                                "Do not translate. Do not explain. Do not add any commentary. "
-                                "If you see Korean text, output the Korean text exactly as written. "
-                                "If you see Japanese text, output the Japanese text exactly as written. "
-                                "If you see Chinese text, output the Chinese text exactly as written. "
-                                "If there is no text, output nothing."
-                            )
+                            "text": self.ocr_prompt  # Use the configurable prompt
                         }
                     ]
                 }
