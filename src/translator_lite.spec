@@ -256,7 +256,6 @@ image_modules = [
     'PIL.FtexImagePlugin',
     
     'olefile',
-    'cv2',  # OpenCV for manga processing
     'numpy',  # Required for OpenCV and image processing
 ]
 
@@ -889,6 +888,7 @@ excludes = [
     # Multiple OpenCV versions (~150MB) - MAJOR ADDITION
     'opencv-contrib-python',
     'opencv-python',  # Keep opencv-python-headless only
+	'cv2',
     'cv2.contrib',
     
     # Scientific Computing (Optional)
@@ -896,8 +896,7 @@ excludes = [
     'pandas', 'pandas.*',
     'scikit-image', 'skimage', 'skimage.*',
     'sklearn', 'sklearn.*',
-    # 'scipy',  # Keep - required by datasketch
-    # 'numpy',  # Keep - required by datasketch and OpenCV
+    'numpy.libs',  # Keep - required by datasketch and OpenCV
     
     # ============================================================================
     # CUDA & GPU LIBRARIES
