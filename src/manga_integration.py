@@ -1217,7 +1217,7 @@ class MangaTranslationTab:
         provider_values = [p[0] for p in ocr_providers]
         provider_display = [f"{p[0]} - {p[1]}" for p in ocr_providers]
 
-        self.ocr_provider_var = tk.StringVar(value=self.main_gui.config.get('manga_ocr_provider', 'google'))
+        self.ocr_provider_var = tk.StringVar(value=self.main_gui.config.get('manga_ocr_provider', 'custom-api'))
         provider_combo = ttk.Combobox(
             self.ocr_provider_frame,
             textvariable=self.ocr_provider_var,
