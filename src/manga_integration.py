@@ -4433,6 +4433,7 @@ class MangaTranslationTab:
                     self._log("✅ Set custom OCR prompt for Qwen2-VL", "info")
        
         if ocr_config['provider'] == 'google':
+            import os
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
             if not google_creds or not os.path.exists(google_creds):
                 messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
