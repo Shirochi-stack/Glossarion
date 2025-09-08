@@ -143,6 +143,10 @@ class HTMLEntityDecoder:
     @classmethod
     def decode(cls, text: str) -> str:
         """Comprehensive HTML entity decoding - PRESERVES UNICODE"""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
         if not text:
             return text
         
@@ -150,21 +154,12 @@ class HTMLEntityDecoder:
         for bad, good in cls.ENCODING_FIXES.items():
             text = text.replace(bad, good)
         
-        # Direct replacement of HTML entities we ALWAYS want decoded
-        text = text.replace('&lt;', '<')
-        text = text.replace('&gt;', '>')
-        text = text.replace('&amp;', '&')
-        text = text.replace('&quot;', '"')
-        text = text.replace('&apos;', "'")
-        text = text.replace('&#39;', "'")
-        text = text.replace('&nbsp;', ' ')
-        
         # Multiple passes to handle nested/double-encoded entities
         max_passes = 3
         for _ in range(max_passes):
             prev_text = text
             
-            # Use html module for any remaining standard decoding
+            # Use html module for standard decoding (this handles &lt;, &gt;, etc.)
             text = html_module.unescape(text)
             
             if text == prev_text:
@@ -231,18 +226,7 @@ class ContentProcessor:
     @staticmethod
     def safe_escape(text: str) -> str:
         """Escape XML special characters"""
-        if not text:
-            return ''
-        
-        # Only escape the 5 XML special characters
-        text = str(text)
-        text = text.replace('&', '&amp;')
-        text = text.replace('<', '&lt;')
-        text = text.replace('>', '&gt;')
-        text = text.replace('"', '&quot;')
-        text = text.replace("'", '&apos;')
-        
-        return text
+        pass
 
 
 class TitleExtractor:
@@ -480,90 +464,70 @@ class XHTMLConverter:
     @staticmethod
     def ensure_compliance(html_content: str, title: str = "Chapter", 
                          css_links: Optional[List[str]] = None) -> str:
-        """Ensure HTML content is XHTML-compliant"""
+        """Ensure HTML content is XHTML-compliant while PRESERVING story tags"""
         try:
-            # AGGRESSIVE FIX: Remove ALL malformed tags with word:="" patterns
-            # These are clearly broken and need to be fixed before parsing
+            import html
             
-            # Pattern 1: Fix tags like <eliminated: kim="" eunha="" hours="" minutes=""/>
-            # Convert to: <eliminated>kim eunha hours minutes</eliminated>
-            def fix_colon_attributes(match):
+            # Fix broken attributes with ="" pattern
+            def fix_broken_attributes_only(match):
                 tag_content = match.group(0)
                 
-                # Extract the tag name (part before the colon)
-                tag_match = re.match(r'<([^:\s]+):', tag_content)
-                if tag_match:
-                    tag_name = tag_match.group(1)
-                    
-                    # Extract all the "words" that became attributes
-                    words = re.findall(r'(\w+)=""', tag_content)
-                    
-                    if words:
-                        content = ' '.join(words)
-                        # Check for self-closing
-                        if '/>' in tag_content:
-                            return f'<{tag_name}>{content}</{tag_name}>'
-                        else:
-                            return f'<{tag_name}>{content}'
-                    else:
-                        # No words found, just remove the broken tag
-                        return ''
-                
-                return ''  # Remove if we can't fix it
-            
-            # Apply fixes for colon patterns
-            html_content = re.sub(r'<[^>]*?:\s*[^>]*?>', fix_colon_attributes, html_content)
-            
-            # Pattern 2: Fix any remaining tags with ="" patterns (without colons)
-            def fix_empty_attributes(match):
-                full_tag = match.group(0)
-                
-                # Count empty attributes
-                empty_count = full_tag.count('=""')
-                
-                if empty_count > 2:  # Likely broken if many empty attributes
-                    # Extract tag name
-                    tag_match = re.match(r'<(\w+)', full_tag)
+                if '=""' in tag_content and tag_content.count('=""') > 2:
+                    tag_match = re.match(r'<(\w+)', tag_content)
                     if tag_match:
                         tag_name = tag_match.group(1)
-                        
-                        # Extract words
-                        words = re.findall(r'(\w+)=""', full_tag)
+                        words = re.findall(r'(\w+)=""', tag_content)
                         if words:
                             content = ' '.join(words)
-                            if '/>' in full_tag:
-                                return f'<{tag_name}>{content}</{tag_name}>'
-                            else:
-                                return f'<{tag_name}>{content}'
+                            return f'<{tag_name}>{content}</{tag_name}>'
+                    return ''
                 
-                return full_tag
+                return html.escape(tag_content)
             
-            html_content = re.sub(r'<\w+(?:\s+\w+="")+[^>]*?>', fix_empty_attributes, html_content)
+            html_content = re.sub(r'<[^>]*?=""[^>]*?>', fix_broken_attributes_only, html_content)
             
-            # Now use lxml to convert to proper XHTML
+            def escape_story_tags(match):
+                tag = match.group(0)
+                if '=' not in tag and '"' not in tag:
+                    return html.escape(tag)
+                return tag
+            
+            html_content = re.sub(r'<[^/>][^>]*?:[^>]*?>', escape_story_tags, html_content)
+            
+            # Parse with lxml
             from lxml import html, etree
             
-            # Parse with recovery mode
-            parser = html.HTMLParser(recover=True, remove_blank_text=True, remove_comments=True)
+            parser = html.HTMLParser(recover=True)
             doc = html.document_fromstring(html_content, parser=parser)
             
             # Extract body
             body = doc.find('.//body')
             if body is not None:
-                # Convert to XHTML
-                body_xhtml = etree.tostring(body, method='xml', encoding='unicode', pretty_print=True)
-                # Remove body wrapper
-                body_xhtml = re.sub(r'^<body[^>]*>|</body>$', '', body_xhtml, flags=re.IGNORECASE)
+                body_xhtml = etree.tostring(body, method='xml', encoding='unicode')
+                body_xhtml = re.sub(r'^<body[^>]*>|</body>$', '', body_xhtml)
             else:
-                # No body, convert whole document
-                body_xhtml = etree.tostring(doc, method='xml', encoding='unicode', pretty_print=True)
+                body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
             
-            # Build final XHTML
+            # Fix orphaned story brackets - handle multiline patterns
+            # Pattern: &lt;Something: text that might span lines...&gt;
+            body_xhtml = re.sub(
+                r'&lt;([^&]*?:[^&]*?)&gt;',
+                r'<\1>',
+                body_xhtml,
+                flags=re.DOTALL  # Allow . to match newlines
+            )
+            
+            # Also handle case where closing &gt; is orphaned on next line
+            body_xhtml = re.sub(
+                r'&lt;([^&]*?:[^&]*?)\n([^&]*?)&gt;',
+                r'<\1\n\2>',
+                body_xhtml
+            )
+            
             return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
             
         except Exception as e:
             log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
-            # Return a minimal valid XHTML
             return XHTMLConverter._build_fallback_xhtml(title)
     
     @staticmethod
@@ -1772,27 +1736,21 @@ class EPUBCompiler:
         return html_files
 
     def _read_and_decode_html_file(self, file_path: str) -> str:
-        """Read HTML file and PROPERLY decode ALL entities"""
+        """Read HTML file and decode entities"""
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # AGGRESSIVE DECODING - Keep doing it until nothing changes
-        max_iterations = 10
+        if not content:
+            return content
+        
+        # Multiple passes to handle nested/double-encoded entities
+        import html
+        max_iterations = 5
         for i in range(max_iterations):
             prev_content = content
             
-            # Method 1: Python's html.unescape
-            import html
+            # html.unescape handles all standard HTML entities
             content = html.unescape(content)
-            
-            # Method 2: Direct replacements for common entities
-            content = content.replace('&lt;', '<')
-            content = content.replace('&gt;', '>')
-            content = content.replace('&amp;', '&')
-            content = content.replace('&quot;', '"')
-            content = content.replace('&apos;', "'")
-            content = content.replace('&#39;', "'")
-            content = content.replace('&nbsp;', ' ')
             
             # If nothing changed, we're done
             if content == prev_content:
@@ -1876,10 +1834,6 @@ class EPUBCompiler:
                 file_name=safe_fn,
                 lang=metadata.get("language", "en")
             )
-            
-            # DEBUG POINT 7: Final check before setting content
-            if '&lt;' in final_content:
-                self.log(f"[DEBUG 7] FINAL PROBLEM: Setting chapter content with &lt; entities!")
             
             chapter.content = FileUtils.ensure_bytes(final_content)
             
