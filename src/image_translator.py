@@ -17,12 +17,37 @@ import logging
 import time
 import queue
 import threading
-import cv2
+# OpenCV availability check
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    print("⚠️ OpenCV not available - advanced image processing disabled")
 import numpy as np
 from unified_api_client import UnifiedClientError
 
 logger = logging.getLogger(__name__)
 
+def requires_cv2(func):
+    """Decorator to skip methods that require OpenCV"""
+    def wrapper(self, *args, **kwargs):
+        if not CV2_AVAILABLE:
+            # Return sensible defaults based on the function
+            if func.__name__ == '_detect_watermark_pattern':
+                return False, None
+            elif func.__name__ in ['_remove_periodic_watermark', 
+                                  '_adaptive_histogram_equalization',
+                                  '_bilateral_filter',
+                                  '_enhance_text_regions']:
+                # Return the image array unchanged
+                return args[0] if args else None
+            else:
+                return None
+        return func(self, *args, **kwargs)
+    return wrapper
+    
 def send_image_with_interrupt(client, messages, image_data, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='image_translation'):
     """Send image API request with interrupt capability and timeout retry"""
     import queue
@@ -1209,37 +1234,35 @@ class ImageTranslator:
             if img.mode not in ('RGB', 'RGBA'):
                 img = img.convert('RGB')
             
-            # Check if advanced watermark removal is enabled
+            # Check if advanced watermark removal is enabled AND cv2 is available
             if os.getenv("ADVANCED_WATERMARK_REMOVAL", "0") == "1":
-                print(f"   🔬 Using advanced watermark removal...")
-                
-                # Convert to numpy array for advanced processing
-                img_array = np.array(img)
-                
-                # Step 1: Detect if image has repeating patterns
-                has_pattern, pattern_mask = self._detect_watermark_pattern(img_array)
-                if has_pattern:
-                    print(f"   🔍 Detected watermark pattern in image")
-                    img_array = self._remove_periodic_watermark(img_array, pattern_mask)
-                
-                # Step 2: Apply adaptive histogram equalization
-                img_array = self._adaptive_histogram_equalization(img_array)
-                
-                # Step 3: Edge-preserving denoising
-                img_array = self._bilateral_filter(img_array)
-                
-                # Step 4: Text-specific enhancement
-                img_array = self._enhance_text_regions(img_array)
-                
-                # Convert back to PIL Image
-                img = Image.fromarray(img_array)
+                if CV2_AVAILABLE:
+                    print(f"   🔬 Using advanced watermark removal...")
+                    
+                    # Convert to numpy array for advanced processing
+                    img_array = np.array(img)
+                    
+                    # These will safely return defaults if cv2 is not available
+                    has_pattern, pattern_mask = self._detect_watermark_pattern(img_array)
+                    if has_pattern:
+                        print(f"   🔍 Detected watermark pattern in image")
+                        img_array = self._remove_periodic_watermark(img_array, pattern_mask)
+                    
+                    img_array = self._adaptive_histogram_equalization(img_array)
+                    img_array = self._bilateral_filter(img_array)
+                    img_array = self._enhance_text_regions(img_array)
+                    
+                    # Convert back to PIL Image
+                    img = Image.fromarray(img_array)
+                else:
+                    print(f"   ⚠️ Advanced watermark removal requested but OpenCV not available")
             
-            # Apply basic PIL enhancements (always)
+            # Apply basic PIL enhancements (always works)
             enhancer = ImageEnhance.Contrast(img)
-            img = enhancer.enhance(1.5)  # Increase contrast
+            img = enhancer.enhance(1.5)
             
             enhancer = ImageEnhance.Brightness(img)
-            img = enhancer.enhance(1.1)  # Slight brightness increase
+            img = enhancer.enhance(1.1)
             
             img = img.filter(ImageFilter.SHARPEN)
             
@@ -1271,7 +1294,8 @@ class ImageTranslator:
         except Exception as e:
             logger.warning(f"Could not preprocess image: {e}")
             return image_path  # Return original on error
-    
+            
+    @requires_cv2
     def _detect_watermark_pattern(self, img_array: np.ndarray) -> Tuple[bool, Optional[np.ndarray]]:
         """Detect repeating watermark patterns using FFT"""
         try:
@@ -1310,7 +1334,8 @@ class ImageTranslator:
         except Exception as e:
             logger.warning(f"Pattern detection failed: {e}")
             return False, None
-    
+            
+    @requires_cv2
     def _remove_periodic_watermark(self, img_array: np.ndarray, pattern_mask: np.ndarray) -> np.ndarray:
         """Remove periodic watermark using frequency domain filtering"""
         try:
@@ -1348,7 +1373,8 @@ class ImageTranslator:
         except Exception as e:
             logger.warning(f"Watermark removal failed: {e}")
             return img_array
-    
+            
+    @requires_cv2
     def _adaptive_histogram_equalization(self, img_array: np.ndarray) -> np.ndarray:
         """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)"""
         try:
@@ -1375,6 +1401,7 @@ class ImageTranslator:
             logger.warning(f"Adaptive histogram equalization failed: {e}")
             return img_array
     
+    @requires_cv2
     def _bilateral_filter(self, img_array: np.ndarray) -> np.ndarray:
         """Apply bilateral filter for edge-preserving denoising"""
         try:
@@ -1391,6 +1418,7 @@ class ImageTranslator:
             logger.warning(f"Bilateral filtering failed: {e}")
             return img_array
     
+    @requires_cv2
     def _enhance_text_regions(self, img_array: np.ndarray) -> np.ndarray:
         """Specifically enhance regions likely to contain text"""
         try:
