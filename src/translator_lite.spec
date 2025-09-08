@@ -257,6 +257,16 @@ image_modules = [
     
     'olefile',
     'numpy',  # Required for OpenCV and image processing
+	'numpy.core',
+	'numpy.core._multiarray_umath',
+	'numpy.core._dtype',
+	'numpy.core._methods',
+	'numpy.core._exceptions',
+	'numpy.random',
+	'numpy.random._common',
+	'numpy.fft',
+	'numpy.linalg',
+	'numpy.polynomial',
 ]
 
 # AI/API Clients (Including Google Cloud Vision)
@@ -918,6 +928,17 @@ excludes = [
     '_soundfile_data',
     'librosa', 'librosa.*',
 	
+	# numpy src
+	'numpy.distutils',
+    'numpy.distutils.*',
+    'numpy.testing',
+    'numpy.testing.*',
+    'numpy.tests',
+    'numpy.tests.*',
+    'numpy.setup',
+    'numpy.conftest',
+    'numpy.version',
+	
     # ============================================================================
     # CUDA & GPU LIBRARIES
     # ============================================================================
@@ -1006,49 +1027,69 @@ a = Analysis(
     noarchive=False,
 )
 
+# Remove duplicate binaries and fix numpy
+print("Removing duplicate libraries and fixing numpy...")
+original_binaries = len(a.binaries)
+original_datas = len(a.datas)
+original_pure = len(a.pure)
+
 # Remove duplicate binaries
-print("Removing duplicate libraries...")
-original_size = len(a.binaries)
 a.binaries = [b for b in a.binaries if not any([
     b[0].endswith('opencv_videoio_ffmpeg490_64.dll'),  # Old FFmpeg
     'scipy.libs' in b[0],  # Scipy's OpenBLAS
     'libscipy_openblas' in b[0],
     '_avif' in b[0],
     'pypdfium' in b[0],
-	'metrics_cpp_avx2' in b[0],  # Remove AVX2 variant (1.5MB)
+    'metrics_cpp_avx2' in b[0],  # Remove AVX2 variant (1.5MB)
     'hdf5.dll' in b[0],  # Remove HDF5 (3MB)
     'libsndfile' in b[0],  # Remove soundfile (2MB)
     'geos-' in b[0],  # Remove Shapely (2MB)
-	
+    'numpy.libs' in b[0] and 'openblas' in b[0],  # Remove numpy's OpenBLAS only
 ])]
 
+# Clean numpy source directory issues
 a.datas = [d for d in a.datas if not any([
+    # Remove torch completely
     'torch' in d[0].lower(),
     'torch-' in d[0],  # Catches torch-2.5.1+cu121.dist-info
     '.dist-info' in d[0] and 'torch' in d[0].lower(),
+    # Remove numpy source files that cause import errors
+    'numpy/setup.py' in d[0],
+    'numpy/conftest.py' in d[0],
+    'numpy/__config__.py' in d[0],
+    'numpy/version.py' in d[0],
+    'numpy/distutils' in d[0],
+    'numpy/testing' in d[0],
+    'numpy/tests' in d[0],
 ])]
 
-print(f"Removed {original_size - len(a.datas)} torch-related data files")
-
-# Also clean up any torch entries from pure Python modules
+# More aggressive torch cleanup in pure Python modules
 a.pure = [p for p in a.pure if not any([
-    p[0].startswith('torch'),
-    p[0].startswith('torch.'),
+    'torch' in str(p).lower(),
+    'pytorch' in str(p).lower(),
+    '_torchcodec' in str(p),
+    # Also remove numpy test/source modules
+    'numpy.distutils' in p[0],
+    'numpy.testing' in p[0],
+    'numpy.tests' in p[0],
 ])]
 
-a.pure = [p for p in a.pure if not any([
-    'torch' in p[0].lower(),
-    'pytorch' in p[0].lower(),
-    '_torchcodec' in p[0],
-])]
+# Clean zipped_data too
+if hasattr(a, 'zipped_data'):
+    a.zipped_data = [z for z in a.zipped_data if not any([
+        'torch' in str(z).lower(),
+        'pytorch' in str(z).lower(),
+    ])]
 
-# Remove from PYZ entries
+# Remove from scripts
 a.scripts = [s for s in a.scripts if not any([
-    'torch' in s[0].lower(),
-    'pytorch' in s[0].lower(),
+    'torch' in str(s).lower(),
+    'pytorch' in str(s).lower(),
 ])]
 
-print(f"Removed {original_size - len(a.binaries)} duplicate binaries")
+print(f"Removed {original_binaries - len(a.binaries)} binaries")
+print(f"Removed {original_datas - len(a.datas)} data files")
+print(f"Removed {original_pure - len(a.pure)} pure Python modules")
 
 # ============================================================================
 # PYZ (Python Zip archive)
