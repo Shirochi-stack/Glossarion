@@ -2386,9 +2386,9 @@ class MangaTranslator:
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
-            translated = re.sub(r"['''\"`]$", "", translated.strip())   # Remove trailing
-            translated = re.sub(r"^['''\"`]", "", translated.strip())   # Remove leading
-            translated = re.sub(r"\s+['''\"`]\s+", " ", translated)     # Remove isolated
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
             self._log(f"🎯 Final translation result: '{translated[:50]}...'")
             
             # Apply glossary if available
@@ -2787,9 +2787,9 @@ class MangaTranslator:
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
-            translated = re.sub(r"['''\"`]$", "", translated.strip())  # Remove trailing
-            translated = re.sub(r"^['''\"`]", "", translated.strip())   # Remove leading
-            translated = re.sub(r"\s+['''\"`]\s+", " ", translated)     # Remove isolated
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
             
             # Try to parse as JSON
             translations = {}
