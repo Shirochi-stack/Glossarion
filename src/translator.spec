@@ -1047,6 +1047,18 @@ a.pure = [p for p in a.pure if not any([
 
 print(f"Removed {original_size - len(a.binaries)} duplicate binaries")
 
+a.pure = [p for p in a.pure if not any([
+    'torch' in p[0].lower(),
+    'pytorch' in p[0].lower(),
+    '_torchcodec' in p[0],
+])]
+
+# Remove from PYZ entries
+a.scripts = [s for s in a.scripts if not any([
+    'torch' in s[0].lower(),
+    'pytorch' in s[0].lower(),
+])]
+
 # ============================================================================
 # PYZ (Python Zip archive)
 # ============================================================================
