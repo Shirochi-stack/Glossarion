@@ -14,7 +14,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 
 APP_NAME = 'Glossarion v4.2.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
-ENABLE_CONSOLE = False  # Console disabled for production
+ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True         # Single executable vs folder distribution
 
@@ -963,6 +963,19 @@ excludes = [
     'cookiecutter',
     'fugashi', 'unidic-lite', 'jaconv',  # Japanese text processing
     'python-bidi',  # BiDi text
+	
+		
+	# MORE AGGRESSIVE EXCLUDES
+	'bitsandbytes', 'bitsandbytes.*',
+	'polars', 'polars.*',
+	'pyarrow', 'pyarrow.*',
+    'scipy', 'scipy.*',
+    'scipy.libs'
+	
+	# Force exclude ALL torch variants
+	'*torch*',
+	'torch*',
+	'_torch*',
 ]
 
 # ============================================================================
@@ -984,6 +997,15 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# Remove duplicate binaries
+print("Removing duplicate libraries...")
+original_size = len(a.binaries)
+a.binaries = [b for b in a.binaries if not any([
+    b[0].endswith('opencv_videoio_ffmpeg490_64.dll'),  # Old FFmpeg
+    'scipy.libs' in b[0],  # Scipy's OpenBLAS
+])]
+print(f"Removed {original_size - len(a.binaries)} duplicate binaries")
 
 # ============================================================================
 # PYZ (Python Zip archive)
