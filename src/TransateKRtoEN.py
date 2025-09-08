@@ -1188,8 +1188,7 @@ class ContentProcessor:
     def get_content_hash(html_content):
         """Create a stable hash of content"""
         try:
-            protected_html = self.protect_angle_brackets_with_korean(html_content)
-            soup = BeautifulSoup(protected_html, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser')
             
             for tag in soup(['script', 'style', 'meta', 'link']):
                 tag.decompose()
