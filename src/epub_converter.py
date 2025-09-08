@@ -507,8 +507,8 @@ class XHTMLConverter:
                 body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
             
             # Delete orphaned &lt; and &gt; that are split across paragraphs
-            body_xhtml = re.sub(r'&lt;[^&<>]*?</p>', '</p>', body_xhtml)
-            body_xhtml = re.sub(r'<p>[^&<>]*?&gt;', '<p>', body_xhtml)
+            body_xhtml = body_xhtml.replace('<p>&lt;', '<p>')  # Remove &lt; at start of paragraph
+            body_xhtml = body_xhtml.replace('&gt;</p>', '</p>')  # Remove &gt; at end of paragraph
             
             return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
             
@@ -614,8 +614,7 @@ class XHTMLConverter:
             content
         )
         
-        
-        # Fix unquoted attributes
+
         # Fix unquoted attributes
         try:
             content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
