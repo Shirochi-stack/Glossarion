@@ -907,8 +907,7 @@ excludes = [
     'pandas', 'pandas.*',
     'scikit-image', 'skimage', 'skimage.*',
     'sklearn', 'sklearn.*',
-    # 'scipy',  # Keep - required by datasketch
-    # 'numpy',  # Keep - required by datasketch and OpenCV
+    'numpy.libs',
     
     # ============================================================================
     # CUDA & GPU LIBRARIES
