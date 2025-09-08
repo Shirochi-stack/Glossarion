@@ -19,6 +19,7 @@ from typing import Dict, List, Tuple, Optional, Callable
 from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from metadata_batch_translator import enhance_epub_compiler
+from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     from unified_api_client import UnifiedClient
 except ImportError:
@@ -149,37 +150,29 @@ class HTMLEntityDecoder:
         for bad, good in cls.ENCODING_FIXES.items():
             text = text.replace(bad, good)
         
+        # Direct replacement of HTML entities we ALWAYS want decoded
+        text = text.replace('&lt;', '<')
+        text = text.replace('&gt;', '>')
+        text = text.replace('&amp;', '&')
+        text = text.replace('&quot;', '"')
+        text = text.replace('&apos;', "'")
+        text = text.replace('&#39;', "'")
+        text = text.replace('&nbsp;', ' ')
+        
         # Multiple passes to handle nested/double-encoded entities
         max_passes = 3
         for _ in range(max_passes):
             prev_text = text
             
-            # Use html module for standard decoding
+            # Use html module for any remaining standard decoding
             text = html_module.unescape(text)
-            
-            # Handle entities without semicolons
-            text = re.sub(r'&(nbsp|quot|amp|lt|gt|apos)(?!;)', r'&\1;', text)
-            text = re.sub(r'&#(\d{1,7})(?!;)', r'&#\1;', text)
-            text = re.sub(r'&#x([0-9a-fA-F]{1,6})(?!;)', r'&#x\1;', text)
-            
-            # Second pass
-            text = html_module.unescape(text)
-            
-            # Handle numeric entities manually
-            text = re.sub(r'&#(\d+);?', cls._decode_decimal, text)
-            text = re.sub(r'&#[xX]([0-9a-fA-F]+);?', cls._decode_hex, text)
             
             if text == prev_text:
                 break
         
-        # Apply entity replacements
+        # Apply any remaining entity replacements
         for entity, char in cls.ENTITY_MAP.items():
             text = text.replace(entity, char)
-            text = text.replace(entity.lower(), char)
-            text = text.replace(entity.upper(), char)
-        
-        # Final cleanup
-        text = re.sub(r'&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+|#x[0-9a-fA-F]+);)', '&amp;', text)
         
         return text
     
@@ -250,471 +243,6 @@ class ContentProcessor:
         text = text.replace("'", '&apos;')
         
         return text
-    
-    @staticmethod
-    def fix_malformed_tags(html_content: str) -> str:
-        """Fix various types of malformed tags - CONVERTS all non-standard tags to preserve content
-        
-        This method is genre-agnostic and converts ANY non-standard HTML tags to bracketed format.
-        This ensures we preserve all content regardless of the novel type or custom markup used.
-        
-        Examples:
-        - <skill>Fireball</skill> → [skill: Fireball]
-        - <cultivation>Golden Core</cultivation> → [cultivation: Golden Core]  
-        - <magic>Teleport</magic> → [magic: Teleport]
-        - <anythingcustom>Content</anythingcustom> → [anythingcustom: Content]
-        """
-        
-            # Pattern: <tagname, anything> ... </tagname,>
-        def fix_comma_tag(match):
-            tag_name = match.group(1)  # e.g., "reply"
-            attributes = match.group(2) or ''  # e.g., ' rachel=""'
-            content = match.group(3) or ''  # content between tags
-            
-            # Try to extract meaningful info from the attributes part
-            attr_text = attributes.strip()
-            if attr_text:
-                # Remove quotes and equals signs to get cleaner text
-                attr_text = re.sub(r'[="\']+', ' ', attr_text).strip()
-            
-            # Build replacement
-            if content and attr_text:
-                return f'[{tag_name}: {attr_text} - {content}]'
-            elif content:
-                return f'[{tag_name}: {content}]'
-            elif attr_text:
-                return f'[{tag_name}: {attr_text}]'
-            else:
-                return ''  # Empty tag, remove it
-        
-        # Fix opening and closing tags with commas
-        html_content = re.sub(
-            r'<([a-zA-Z][\w\-]*),([^>]*)>(.*?)</\1,\s*>',
-            fix_comma_tag,
-            html_content,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-
-        def fix_apostrophe_tag(match):
-            tag_name = match.group(1)  # e.g., "maiden's breath"
-            content = match.group(2) or ''  # content between tags
-            
-            content = content.strip()
-            if content:
-                return f'[{tag_name}: {content}]'
-            else:
-                return f'[{tag_name}]'
-
-        # Fix apostrophe tags like <maiden's breath="">content</maiden's>
-        html_content = re.sub(
-            r'<([^<>]*\'[^<>]*?)(?:\s+[^<>]*?)?=""[^<>]*?>(.*?)</[^<>]*\'[^<>]*?>',
-            fix_apostrophe_tag,
-            html_content,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-        
-        def fix_punctuation_tag(match):
-            tag_name = match.group(1)  # e.g., "you......!!"
-            try:
-                content = match.group(2) or ''  # content between tags
-            except IndexError:
-                content = match.group(1) if match.lastindex >= 1 else ''
-            
-            content = content.strip()
-            if content:
-                return f'[{tag_name}: {content}]'
-            else:
-                return f'[{tag_name}]'
-
-        # Fix tags with dots/exclamation marks: <you......!!></you......!!>
-        html_content = re.sub(
-            r'<([^<>]*[\.!]+[^<>]*)></\1>',
-            fix_punctuation_tag,
-            html_content,
-            flags=re.IGNORECASE
-        )
-
-        # Fix tags with dots/exclamation marks that have content: <you......!!>content</you......!!>
-        html_content = re.sub(
-            r'<([^<>]*[\.!]+[^<>]*)>(.*?)</\1>',
-            fix_punctuation_tag,
-            html_content,
-            flags=re.IGNORECASE | re.DOTALL
-        )        
-
-        def fix_invalid_char_tag(match):
-            tag_name = match.group(1)  # e.g., "hmm?", "don't die."
-            content = match.group(2) or ''  # content between tags
-            
-            content = content.strip()
-            if content:
-                return f'[{tag_name}: {content}]'
-            else:
-                return f'[{tag_name}]'
-
-        # ONLY target the specific problematic patterns - much less aggressive
-
-        # Fix apostrophe tags: <maiden's breath="">content</maiden's>
-        html_content = re.sub(
-            r'<([^<>]*\'[^<>]*?)=""[^<>]*?>(.*?)</[^<>]*\'[^<>]*?>',
-            lambda m: f'[{m.group(1)}: {m.group(2).strip()}]' if m.group(2).strip() else f'[{m.group(1)}]',
-            html_content,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-
-        # Fix question mark tags: <hmm?></hmm?>
-        html_content = re.sub(
-            r'<([a-zA-Z]+\?)></\1>',
-            lambda m: f'[{m.group(1)}]',
-            html_content,
-            flags=re.IGNORECASE
-        )
-
-        # Fix period tags: <don't die.=""></don't>
-        html_content = re.sub(
-            r'<([^<>]*\.)=""[^<>]*?></[^<>]*>',
-            lambda m: f'[{m.group(1)}]',
-            html_content,
-            flags=re.IGNORECASE
-        )
-
-        # Remove any leftover fragments
-        html_content = re.sub(r'</[^<>]*[\'?\.][^<>]*>', '', html_content)
-        
-        # Fix common entity issues first
-        html_content = html_content.replace('&&', '&amp;&amp;')
-        html_content = html_content.replace('& ', '&amp; ')
-        html_content = html_content.replace(' & ', ' &amp; ')
-        
-        # Fix unescaped ampersands more thoroughly
-        html_content = re.sub(
-            r'&(?!(?:'
-            r'amp|lt|gt|quot|apos|'
-            r'[a-zA-Z][a-zA-Z0-9]{0,30}|'
-            r'#[0-9]{1,7}|'
-            r'#x[0-9a-fA-F]{1,6}'
-            r');)',
-            '&amp;',
-            html_content
-        )
-        
-        # Remove completely broken tags with ="" patterns
-        html_content = re.sub(r'<[^>]*?=\s*""\s*[^>]*?=\s*""[^>]*?>', '', html_content)
-        html_content = re.sub(r'<[^>]*?="""[^>]*?>', '', html_content)
-        html_content = re.sub(r'<[^>]*?="{3,}[^>]*?>', '', html_content)
-        
-        # Fix tags with extra < characters
-        html_content = re.sub(r'<([a-zA-Z][\w\-]*)<+', r'<\1', html_content)  # <p< becomes <p
-        html_content = re.sub(r'</([a-zA-Z][\w\-]*)<+>', r'</\1>', html_content)  # </p<> becomes </p>
-        html_content = re.sub(r'<([a-zA-Z][\w\-]*)<\s+', r'<\1 ', html_content)  # <p< body= becomes <p body=
-        
-        # Define valid EPUB 3.3 XHTML tags
-        # Based on:
-        # - EPUB 3.3 spec: https://www.w3.org/TR/epub-33/
-        # - EPUB Content Documents 3.3: https://www.w3.org/TR/epub-33/#sec-xhtml
-        # - HTML5 elements allowed in XHTML syntax
-        # 
-        # EPUB 3.3 uses XHTML5 (XML serialization of HTML5).
-        # This list includes ALL tags that are technically valid in EPUB 3.3,
-        # regardless of reader support. If it's valid XHTML5, we keep it!
-        valid_html_tags = {
-            # Document structure
-            'html', 'head', 'body', 'title', 'meta', 'link', 'base',
-            
-            # Content sectioning
-            'section', 'nav', 'article', 'aside', 'header', 'footer', 
-            'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'address',
-            'hgroup',  # Removed from HTML5 Living Standard but still valid XHTML5
-            'main',  # Main content area
-            
-            # Text content blocks
-            'p', 'hr', 'pre', 'blockquote', 'ol', 'ul', 'li', 
-            'dl', 'dt', 'dd', 'figure', 'figcaption', 'div',
-            
-            # Inline text semantics
-            'a', 'em', 'strong', 'small', 's', 'cite', 'q', 'dfn', 'abbr',
-            'data', 'time', 'code', 'var', 'samp', 'kbd', 'sub', 'sup',
-            'i', 'b', 'u', 'mark', 'bdi', 'bdo',
-            'span', 'br', 'wbr',
-            
-            # Ruby annotations (important for Asian languages)
-            'ruby', 'rt', 'rp',  # Standard HTML5 ruby
-            'rb', 'rtc',  # Extended ruby support
-            
-            # Edits
-            'ins', 'del',
-            
-            # Embedded content - ALL valid in EPUB 3.3
-            'img', 'iframe', 'embed', 'object', 'param',
-            'video', 'audio', 'source', 'track',
-            'picture',  # Responsive images
-            'svg',  # SVG support
-            'math',  # MathML support
-            'canvas',  # Valid even if scripting is disabled
-            'map', 'area',  # Image maps
-            
-            # Tabular data
-            'table', 'caption', 'colgroup', 'col', 'tbody', 'thead', 'tfoot',
-            'tr', 'td', 'th',
-            
-            # Forms - ALL technically valid in EPUB 3.3
-            'form', 'label', 'input', 'button', 'select', 'datalist', 'optgroup',
-            'option', 'textarea', 'output', 'progress', 'meter', 'fieldset', 
-            'legend', 'keygen',  # Deprecated but still valid XHTML
-            
-            # Interactive elements - valid in EPUB 3.3
-            'details', 'summary', 'dialog',
-            'menu',  # Valid in XHTML5 even if removed from HTML Living Standard
-            
-            # Scripting - valid in EPUB 3.3 (reader support varies)
-            'script', 'noscript', 'template',
-            
-            # Document metadata
-            'style',  # For embedded CSS
-            
-            # Obsolete but still valid in XHTML5/EPUB for compatibility
-            'acronym',  # Use 'abbr' in new content but valid if present
-            'center',  # Use CSS instead but valid
-            'font',    # Use CSS instead but valid
-            'big',     # Use CSS instead but valid
-            'strike', 's',  # Use <del> or CSS but valid
-            'tt',      # Use <code> or CSS but valid
-            'basefont',  # Obsolete but won't break EPUB
-            'dir',  # Obsolete but valid XHTML
-            
-            # These are NOT valid in any modern HTML/XHTML:
-            # 'applet' - use <object> instead
-            # 'bgsound' - IE only, never standard
-            # 'blink' - Never standard
-            # 'frame', 'frameset', 'noframes' - Not allowed in EPUB
-            # 'isindex' - Obsolete
-            # 'listing', 'plaintext', 'xmp' - Obsolete
-            # 'marquee' - Never standard
-            # 'multicol' - Never standard
-            # 'nextid' - Obsolete
-            # 'nobr' - Never standard
-            # 'noembed' - Never standard
-            # 'spacer' - Never standard
-            # 'menuitem' - Removed from spec
-            # 'slot' - Web Components, not in EPUB
-        }
-        
-        # Convert ALL non-standard tags to bracketed format
-        # This regex finds any tag that looks like <something>content</something>
-        def convert_custom_tag(match):
-            tag_name = match.group(1)
-            attributes = match.group(2) or ''
-            content = match.group(3) or ''
-            
-            # If it's a valid HTML tag, leave it alone
-            if tag_name in valid_html_tags:
-                return match.group(0)
-            
-            # For custom tags, convert to bracketed format
-            content = content.strip()
-            
-            # Try to extract meaningful attributes like name, value, type, etc.
-            attr_text = ''
-            if attributes:
-                # Look for common meaningful attributes
-                name_match = re.search(r'(?:name|value|type|id)\s*=\s*["\']([^"\']+)["\']', attributes, re.IGNORECASE)
-                if name_match:
-                    attr_text = name_match.group(1).strip()
-            
-            # Build the bracketed version
-            if attr_text and not content:
-                # Attribute but no content: [tag: attribute_value]
-                return f'[{tag_name}: {attr_text}]'
-            elif content and not attr_text:
-                # Content but no meaningful attribute: [tag: content]
-                return f'[{tag_name}: {content}]'
-            elif attr_text and content:
-                # Both attribute and content: [tag: attribute_value - content]
-                return f'[{tag_name}: {attr_text} - {content}]'
-            else:
-                # Empty tag, remove it
-                return ''
-        
-        # Pattern to match ANY tag with content
-        pattern = r'<([a-zA-Z][\w\-]*)((?:\s+[^>]*)?)>(.*?)</\1>'
-        html_content = re.sub(pattern, convert_custom_tag, html_content, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Handle self-closing custom tags
-        def convert_self_closing(match):
-            tag_name = match.group(1)
-            attributes = match.group(2) or ''
-            
-            # If it's a valid HTML tag, leave it alone
-            if tag_name in valid_html_tags:
-                return match.group(0)
-            
-            # Extract meaningful content from attributes
-            content_parts = []
-            
-            # Look for various attribute patterns that might contain content
-            patterns = [
-                r'(?:name|value|content|text|title|label)\s*=\s*["\']([^"\']+)["\']',
-                r'(?:type|class|id)\s*=\s*["\']([^"\']+)["\']',
-                # Also handle bare attributes like <skill="Fireball">
-                r'^=\s*["\']([^"\']+)["\']'
-            ]
-            
-            for attr_pattern in patterns:
-                attr_matches = re.findall(attr_pattern, attributes, re.IGNORECASE)
-                content_parts.extend(attr_matches)
-            
-            if content_parts:
-                # Join all found content
-                content = ' - '.join(content_parts)
-                return f'[{tag_name}: {content}]'
-            else:
-                # No meaningful content found, remove the tag
-                return ''
-        
-        # Pattern for self-closing tags or tags without closing tag
-        self_closing_pattern = r'<([a-zA-Z][\w\-]*)((?:\s+[^>]*)?)\s*/?>'
-        
-        # First pass: find and mark tags that have closing tags
-        tags_with_closing = set()
-        for match in re.finditer(r'</([a-zA-Z][\w\-]*)>', html_content, re.IGNORECASE):
-            tags_with_closing.add(match.group(1))
-        
-        # Second pass: convert self-closing and standalone tags
-        def convert_if_no_closing(match):
-            tag_name = match.group(1)
-            # Only convert if this tag doesn't have a closing tag elsewhere
-            # or if it's explicitly self-closing (ends with />)
-            if tag_name not in tags_with_closing or match.group(0).rstrip('>').endswith('/'):
-                return convert_self_closing(match)
-            return match.group(0)
-        
-        html_content = re.sub(self_closing_pattern, convert_if_no_closing, html_content, flags=re.IGNORECASE)
-        
-        # Clean up any remaining unmatched closing tags for custom elements
-        def remove_unmatched_closing(match):
-            tag_name = match.group(1)
-            if tag_name not in valid_html_tags:
-                return ''  # Remove unmatched custom closing tags
-            return match.group(0)
-        
-        html_content = re.sub(r'</([a-zA-Z][\w\-]*)>', remove_unmatched_closing, html_content, flags=re.IGNORECASE)
-        
-        # Fix attributes without quotes (for remaining valid HTML tags)
-        html_content = re.sub(r'<(\w+)\s+(\w+)=([^\s"\'>]+)(\s|>)', r'<\1 \2="\3"\4', html_content)
-        
-        # Fix unclosed tags at end
-        if html_content.rstrip().endswith('<'):
-            html_content = html_content.rstrip()[:-1]
-        
-        # Final cleanup with BeautifulSoup
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
-            
-            # Fix nested paragraphs (not allowed in XHTML)
-            for p in soup.find_all('p'):
-                nested_ps = p.find_all('p')
-                for nested_p in nested_ps:
-                    nested_p.unwrap()
-            
-            # Remove empty tags that might cause issues (but only standard HTML tags)
-            for tag in soup.find_all():
-                if (not tag.get_text(strip=True) and 
-                    not tag.find_all() and 
-                    tag.name in valid_html_tags and
-                    tag.name not in ['br', 'hr', 'img', 'meta', 'link', 'input', 'area', 'col']):
-                    tag.decompose()
-            
-            html_content = str(soup)
-        except:
-            pass
-        
-        return html_content
-    
-    @staticmethod
-    def fix_self_closing_tags(content: str) -> str:
-        """Fix self-closing tags for XHTML compliance"""
-        void_elements = ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-                        'link', 'meta', 'param', 'source', 'track', 'wbr']
-        
-        for tag in void_elements:
-            # Fix simple tags
-            content = re.sub(f'<{tag}>', f'<{tag} />', content)
-            
-            # Fix tags with attributes - IMPROVED REGEX
-            content = re.sub(f'<{tag}(\\s+[^/>]*?)(?<!/)>', f'<{tag}\\1 />', content)
-            
-            # Remove any closing tags for void elements
-            content = re.sub(f'</{tag}>', '', content)
-        
-        return content
-    
-    @staticmethod
-    def clean_chapter_content(html_content: str) -> str:
-        """Clean and prepare chapter content for XHTML conversion - PRESERVES UNICODE"""
-        
-        # FIX COMMA TAGS IMMEDIATELY - BEFORE BeautifulSoup converts to lowercase
-        # This must happen FIRST before any other processing
-        
-        # Handle tags like <Reply, Rachel=""> -> [Reply: Rachel]
-        def fix_comma_tag_early(match):
-            tag_part = match.group(1)  # 'Reply'
-            attr_part = match.group(2)  # ' Rachel=""'
-            
-            # Extract the attribute name (before the =)
-            attr_match = re.match(r'\s*(\w+)', attr_part)
-            if attr_match:
-                attr_name = attr_match.group(1)  # 'Rachel'
-                return f'[{tag_part}: {attr_name}]'
-            
-            return f'[{tag_part}]'
-        
-        # Fix opening tags with commas - PRESERVES ORIGINAL CASE
-        html_content = re.sub(r'<([^,>/]+),([^>]*)>', fix_comma_tag_early, html_content)
-        
-        # Remove closing tags with commas
-        html_content = re.sub(r'</([^,>]+),\s*>', '', html_content)
-        
-        # Fix any smart quotes that might be in the content
-        # Using Unicode escape sequences to avoid parsing issues
-        html_content = re.sub(r'[\u201c\u201d\u2018\u2019\u201a\u201e]', '"', html_content)
-        html_content = re.sub(r'[\u2018\u2019\u0027]', "'", html_content)
-        
-        # Decode entities first - NOW PRESERVES UNICODE
-        html_content = HTMLEntityDecoder.decode(html_content)
-        
-        # Remove XML declarations and DOCTYPE (we'll add clean ones later)
-        html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content, flags=re.IGNORECASE)
-        html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content, flags=re.IGNORECASE)
-        html_content = re.sub(r'<html[^>]*>', '<html>', html_content, flags=re.IGNORECASE)
-        
-        # Remove control characters
-        html_content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', html_content)
-        
-        # Remove Unicode control characters
-        control_chars = ''.join(
-            chr(i) for i in range(0x00, 0x20) if i not in [0x09, 0x0A, 0x0D]
-        ) + ''.join(chr(i) for i in range(0x7F, 0xA0))
-        
-        translator = str.maketrans('', '', control_chars)
-        html_content = html_content.translate(translator)
-        
-        # Fix malformed tags
-        html_content = ContentProcessor.fix_malformed_tags(html_content)
-        
-        # Remove BOM
-        if html_content.startswith('\ufeff'):
-            html_content = html_content[1:]
-        
-        # Clean for XML - PRESERVES VALID UNICODE
-        html_content = XMLValidator.clean_for_xml(html_content)
-        
-        # Normalize line endings
-        html_content = html_content.replace('\r\n', '\n').replace('\r', '\n')
-        
-        # DO NOT convert Unicode to XML character references
-        # Keep characters like "同期 (dōki)" as-is
-        
-        return html_content
 
 
 class TitleExtractor:
@@ -728,7 +256,7 @@ class TitleExtractor:
             # Decode entities first - PRESERVES UNICODE
             html_content = HTMLEntityDecoder.decode(html_content)
             
-            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
+            soup = BeautifulSoup(html_content, 'lxml', from_encoding='utf-8')
             candidates = []
             
             # Strategy 1: <title> tag (highest confidence)
@@ -954,36 +482,84 @@ class XHTMLConverter:
                          css_links: Optional[List[str]] = None) -> str:
         """Ensure HTML content is XHTML-compliant"""
         try:
-            # Clean content first - with error handling
-            try:
-                html_content = ContentProcessor.clean_chapter_content(html_content)
-            except Exception as e:
-                log(f"[WARNING] Content cleaning failed: {e}, skipping cleanup")
+            # AGGRESSIVE FIX: Remove ALL malformed tags with word:="" patterns
+            # These are clearly broken and need to be fixed before parsing
             
-            # Parse with BeautifulSoup
-            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
+            # Pattern 1: Fix tags like <eliminated: kim="" eunha="" hours="" minutes=""/>
+            # Convert to: <eliminated>kim eunha hours minutes</eliminated>
+            def fix_colon_attributes(match):
+                tag_content = match.group(0)
+                
+                # Extract the tag name (part before the colon)
+                tag_match = re.match(r'<([^:\s]+):', tag_content)
+                if tag_match:
+                    tag_name = tag_match.group(1)
+                    
+                    # Extract all the "words" that became attributes
+                    words = re.findall(r'(\w+)=""', tag_content)
+                    
+                    if words:
+                        content = ' '.join(words)
+                        # Check for self-closing
+                        if '/>' in tag_content:
+                            return f'<{tag_name}>{content}</{tag_name}>'
+                        else:
+                            return f'<{tag_name}>{content}'
+                    else:
+                        # No words found, just remove the broken tag
+                        return ''
+                
+                return ''  # Remove if we can't fix it
             
-            # Extract title if available
-            if soup.title and soup.title.string:
-                title = str(soup.title.string).strip()
-            elif soup.h1:
-                title = soup.h1.get_text(strip=True)
-            elif soup.h2:
-                title = soup.h2.get_text(strip=True)
+            # Apply fixes for colon patterns
+            html_content = re.sub(r'<[^>]*?:\s*[^>]*?>', fix_colon_attributes, html_content)
             
-            # Extract CSS links if needed
-            if css_links is None and soup.head:
-                css_links = []
-                for link in soup.head.find_all('link', rel='stylesheet'):
-                    href = link.get('href', '')
-                    if href:
-                        css_links.append(href)
+            # Pattern 2: Fix any remaining tags with ="" patterns (without colons)
+            def fix_empty_attributes(match):
+                full_tag = match.group(0)
+                
+                # Count empty attributes
+                empty_count = full_tag.count('=""')
+                
+                if empty_count > 2:  # Likely broken if many empty attributes
+                    # Extract tag name
+                    tag_match = re.match(r'<(\w+)', full_tag)
+                    if tag_match:
+                        tag_name = tag_match.group(1)
+                        
+                        # Extract words
+                        words = re.findall(r'(\w+)=""', full_tag)
+                        if words:
+                            content = ' '.join(words)
+                            if '/>' in full_tag:
+                                return f'<{tag_name}>{content}</{tag_name}>'
+                            else:
+                                return f'<{tag_name}>{content}'
+                
+                return full_tag
             
-            # Extract body content
-            body_content = XHTMLConverter._extract_body_content(soup)
+            html_content = re.sub(r'<\w+(?:\s+\w+="")+[^>]*?>', fix_empty_attributes, html_content)
             
-            # Build proper XHTML
-            return XHTMLConverter._build_xhtml(title, body_content, css_links)
+            # Now use lxml to convert to proper XHTML
+            from lxml import html, etree
+            
+            # Parse with recovery mode
+            parser = html.HTMLParser(recover=True, remove_blank_text=True, remove_comments=True)
+            doc = html.document_fromstring(html_content, parser=parser)
+            
+            # Extract body
+            body = doc.find('.//body')
+            if body is not None:
+                # Convert to XHTML
+                body_xhtml = etree.tostring(body, method='xml', encoding='unicode', pretty_print=True)
+                # Remove body wrapper
+                body_xhtml = re.sub(r'^<body[^>]*>|</body>$', '', body_xhtml, flags=re.IGNORECASE)
+            else:
+                # No body, convert whole document
+                body_xhtml = etree.tostring(doc, method='xml', encoding='unicode', pretty_print=True)
+            
+            # Build final XHTML
+            return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
             
         except Exception as e:
             log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
@@ -992,117 +568,21 @@ class XHTMLConverter:
     
     @staticmethod
     def _extract_body_content(soup) -> str:
-        """Extract body content from BeautifulSoup object while preserving element order
+        """Extract body content - DON'T USE BeautifulSoup for this!"""
+        # Convert soup back to string first
+        html_str = str(soup)
         
-        IMPORTANT: This method preserves ALL bracketed content like [Skill: Fireball] 
-        as these are often part of the story in light novels, not HTML artifacts.
-        """
-        try:
-            if soup.body:
-                # Fix img tags to ensure XHTML compliance (do this before extracting content)
-                for img in soup.body.find_all('img'):
-                    # Ensure alt attribute exists (required for XHTML)
-                    if not img.get('alt'):
-                        img['alt'] = ''
-                    # Remove images with no source
-                    if not img.get('src'):
-                        img.decompose()
-                        continue
-                    # Fix relative image paths if needed
-                    src = img.get('src', '')
-                    if src and not src.startswith(('http://', 'https://', '/', 'images/')):
-                        # If it's just a filename, prepend images/
-                        if '/' not in src:
-                            img['src'] = f'images/{src}'
-                
-                # Fix other self-closing tags that might cause issues
-                for br_tag in soup.body.find_all('br'):
-                    if br_tag.string:
-                        # Some broken HTML has content in br tags - preserve it
-                        new_text = soup.new_string(str(br_tag.string))
-                        br_tag.replace_with(new_text)
-                
-                # CRITICAL: Use decode_contents() to preserve exact element order
-                # This method returns the inner HTML without the wrapping body tag
-                if hasattr(soup.body, 'decode_contents'):
-                    body_html = soup.body.decode_contents()
-                else:
-                    # Fallback for older BeautifulSoup versions
-                    # Get children as a list first to preserve order
-                    children = list(soup.body.children)
-                    body_parts = []
-                    for child in children:
-                        if hasattr(child, 'prettify'):
-                            # It's a tag - convert to string without prettifying (which can reorder attributes)
-                            child_str = str(child)
-                        else:
-                            # It's a text node or comment
-                            child_str = str(child)
-                        body_parts.append(child_str)
-                    body_html = ''.join(body_parts)
-                
-                # Post-process the extracted HTML
-                # Fix self-closing tags for XHTML compliance
-                body_html = ContentProcessor.fix_self_closing_tags(body_html)
-                
-                # NOTE: We do NOT remove bracketed content like [Skill: xxx] or [Status: xxx]
-                # These are intentionally converted from game tags and are part of the story!
-                # The fix_malformed_tags() method converts <skill>Fireball</skill> to [Skill: Fireball]
-                # to preserve story content while ensuring XHTML compliance.
-                
-                # Final cleanup: ensure no double-escaping of entities
-                # Sometimes BeautifulSoup double-escapes things like &amp;amp;
-                try:
-                    body_html = re.sub(r'&amp;(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);', r'&\1;', body_html)
-                except re.error:
-                    pass  # Skip if regex fails
-                
-                return body_html
-                
-            else:
-                # No body tag found - extract all content
-                # Remove script and style tags first
-                for tag in soup(['script', 'style']):
-                    tag.decompose()
-                
-                # Fix img tags
-                for img in soup.find_all('img'):
-                    if not img.get('alt'):
-                        img['alt'] = ''
-                    if not img.get('src'):
-                        img.decompose()
-                        continue
-                    src = img.get('src', '')
-                    if src and not src.startswith(('http://', 'https://', '/', 'images/')):
-                        if '/' not in src:
-                            img['src'] = f'images/{src}'
-                
-                # Get all content
-                if hasattr(soup, 'decode_contents'):
-                    content = soup.decode_contents()
-                else:
-                    # Convert to string without prettifying
-                    content = str(soup)
-                
-                # Fix self-closing tags
-                content = ContentProcessor.fix_self_closing_tags(content)
-                
-                # Fix double-escaped entities
-                content = re.sub(r'&amp;(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);', r'&\1;', content)
-                
-                return content
-                
-        except Exception as e:
-            # Log the error but don't crash
-            log(f"[WARNING] Error extracting body content: {e}")
-            
-            # Last resort: just convert to string and clean up
-            try:
-                content = str(soup)
-                content = ContentProcessor.fix_self_closing_tags(content)
-                return content
-            except:
-                return "<p>Error extracting content</p>"
+        # Use regex to extract body content
+        import re
+        body_match = re.search(r'<body[^>]*>(.*?)</body>', html_str, re.DOTALL | re.IGNORECASE)
+        
+        if body_match:
+            body_html = body_match.group(1)
+        else:
+            # No body tag, get everything
+            body_html = html_str
+        
+        return body_html
     
     @staticmethod
     def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
@@ -1152,21 +632,20 @@ class XHTMLConverter:
     
     @staticmethod
     def _ensure_xml_safe_readable(content: str) -> str:
-        """Ensure content is XML-safe while keeping full readability"""
-        try:
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # BeautifulSoup automatically handles XML escaping in text nodes
-            # while preserving Unicode characters
-            result = str(soup)
-            
-            # Ensure self-closing tags are properly formatted
-            result = ContentProcessor.fix_self_closing_tags(result)
-            
-            return result
-        except:
-            # Fallback: basic XML escaping
-            return XHTMLConverter._basic_xml_escape(content)
+        """Ensure content is XML-safe - minimal processing only"""
+        # Only fix truly unescaped ampersands (not those in valid entities or tags)
+        # This pattern is very careful to only match standalone ampersands
+        content = re.sub(
+            r'&(?!(?:'
+            r'[a-zA-Z][a-zA-Z0-9]{0,30};|'  # Named entities like &nbsp;
+            r'#[0-9]{1,7};|'                # Decimal entities like &#65;
+            r'#x[0-9a-fA-F]{1,6};'          # Hex entities like &#x41;
+            r'))',
+            '&amp;',
+            content
+        )
+        
+        return content
     
     @staticmethod
     def _basic_xml_escape(content: str) -> str:
@@ -1228,9 +707,6 @@ class XHTMLConverter:
         # Remove control characters
         content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', content)
         
-        # Fix malformed tags
-        content = ContentProcessor.fix_malformed_tags(content)
-        
         # Fix unescaped ampersands
         content = re.sub(
             r'&(?!(?:'
@@ -1243,8 +719,6 @@ class XHTMLConverter:
             content
         )
         
-        # Fix self-closing tags
-        content = ContentProcessor.fix_self_closing_tags(content)
         
         # Fix unquoted attributes
         # Fix unquoted attributes
@@ -1309,11 +783,11 @@ class XHTMLConverter:
         """Attempt to recover from XML parse errors - ENHANCED"""
         try:
             # Use BeautifulSoup to fix structure
-            soup = BeautifulSoup(content, 'html.parser')
+            soup = BeautifulSoup(content, 'lxml')
             
             # Ensure we have proper XHTML structure
             if not soup.find('html'):
-                new_soup = BeautifulSoup('<html xmlns="http://www.w3.org/1999/xhtml"></html>', 'html.parser')
+                new_soup = BeautifulSoup('<html xmlns="http://www.w3.org/1999/xhtml"></html>', 'lxml')
                 html_tag = new_soup.html
                 for child in list(soup.children):
                     html_tag.append(child)
@@ -1436,7 +910,8 @@ class EPUBCompiler:
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
         self.metadata_path = os.path.join(self.output_dir, "metadata.json")
         self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
-
+        self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
+        self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
         
         # Set global log callback
         set_global_log_callback(log_callback)
@@ -1820,12 +1295,10 @@ class EPUBCompiler:
             self.log("⚠️  No resource directories found (CSS/images/fonts)")
 
     def _analyze_chapters(self) -> Dict[int, Tuple[str, float, str]]:
-        """Analyze chapter files and extract titles using OPF order when available"""
+        """Analyze chapter files and extract titles using parallel processing"""
         self.log("\n📖 Extracting translated titles from chapter files...")
         
         chapter_info = {}
-        
-        # Get files in the correct order (OPF-based or pattern-based)
         sorted_files = self._find_html_files()
         
         if not sorted_files:
@@ -1833,39 +1306,234 @@ class EPUBCompiler:
             return chapter_info
         
         self.log(f"📖 Analyzing {len(sorted_files)} translated chapter files for titles...")
+        self.log(f"🔧 Using {self.max_workers} parallel workers")
         
-        # Process files in order - chapter number is ALWAYS based on position
-        for idx, filename in enumerate(sorted_files):
+        def analyze_single_file(idx_filename):
+            """Worker function to analyze a single file"""
+            idx, filename = idx_filename
             file_path = os.path.join(self.output_dir, filename)
             
             try:
-                # Chapter number is simply the position in our sorted list
-                chapter_num = idx  # 0-based, always
-                
-                # Read content and extract title...
+                # Read and process file
                 with open(file_path, 'r', encoding='utf-8') as f:
                     raw_html_content = f.read()
                 
-                # [Rest of the extraction logic remains the same...]
-                html_content = self._fix_encoding_issues(raw_html_content)
+                # Decode HTML entities
+                import html
+                html_content = html.unescape(raw_html_content)
+                html_content = self._fix_encoding_issues(html_content)
                 html_content = HTMLEntityDecoder.decode(html_content)
                 
+                # Extract title
                 title, confidence = TitleExtractor.extract_from_html(
-                    html_content, chapter_num, filename
+                    html_content, idx, filename
                 )
                 
-                # Store with 0-based index
-                chapter_info[chapter_num] = (title, confidence, filename)
-                
-                # Log the result
-                indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
-                self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f})")
+                return idx, (title, confidence, filename)
                 
             except Exception as e:
-                self.log(f"❌ Error processing {filename}: {e}")
-                chapter_info[idx] = (f"Chapter {idx}", 0.0, filename)
+                return idx, (f"Chapter {idx}", 0.0, filename), str(e)
+        
+        # Process files in parallel using environment variable worker count
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(analyze_single_file, (idx, filename)): idx 
+                for idx, filename in enumerate(sorted_files)
+            }
+            
+            # Collect results as they complete
+            completed = 0
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    completed += 1
+                    
+                    if len(result) == 2:  # Success
+                        idx, info = result
+                        chapter_info[idx] = info
+                        
+                        # Log progress
+                        title, confidence, filename = info
+                        indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
+                        self.log(f"  [{completed}/{len(sorted_files)}] {indicator} Chapter {idx}: '{title}' (confidence: {confidence:.2f})")
+                    else:  # Error
+                        idx, info, error = result
+                        chapter_info[idx] = info
+                        self.log(f"❌ [{completed}/{len(sorted_files)}] Error processing chapter {idx}: {error}")
+                        
+                except Exception as e:
+                    idx = futures[future]
+                    self.log(f"❌ Failed to process chapter {idx}: {e}")
+                    chapter_info[idx] = (f"Chapter {idx}", 0.0, sorted_files[idx])
         
         return chapter_info
+    
+    def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
+                         chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                         css_items: List[epub.EpubItem], processed_images: Dict[str, str],
+                         spine: List, toc: List, metadata: dict) -> int:
+        """Process chapters using parallel processing"""
+        chapters_added = 0
+        self.log(f"\n📚 Processing {len(html_files)} chapters...")
+        self.log(f"🔧 Using {self.max_workers} parallel workers")
+        
+        # Prepare chapter data
+        chapter_data = []
+        for idx, filename in enumerate(html_files):
+            chapter_num = idx
+            if chapter_num not in chapter_titles_info and (chapter_num + 1) in chapter_titles_info:
+                chapter_num = idx + 1
+            chapter_data.append((chapter_num, filename))
+        
+        def process_chapter_content(data):
+            """Worker function to process chapter content"""
+            chapter_num, filename = data
+            path = os.path.join(self.output_dir, filename)
+            
+            try:
+                # Heavy operations: reading, decoding, XHTML conversion
+                raw_content = self._read_and_decode_html_file(path)
+                raw_content = self._fix_encoding_issues(raw_content)
+                
+                if not raw_content.strip():
+                    return None
+                
+                if not filename.startswith('response_'):
+                    raw_content = self._extract_main_content(raw_content, filename)
+                
+                title = self._get_chapter_title(chapter_num, filename, raw_content, chapter_titles_info)
+                css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+                
+                # XHTML conversion (CPU intensive)
+                xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+                xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
+                final_content = XHTMLConverter.validate(xhtml_content)
+                
+                # Validate XML
+                try:
+                    ET.fromstring(final_content.encode('utf-8'))
+                except ET.ParseError as e:
+                    # Create fallback content
+                    final_content = XHTMLConverter._build_fallback_xhtml(title)
+                
+                return {
+                    'num': chapter_num,
+                    'filename': filename,
+                    'title': title,
+                    'content': final_content,
+                    'success': True
+                }
+                
+            except Exception as e:
+                import traceback
+                return {
+                    'num': chapter_num,
+                    'filename': filename,
+                    'title': chapter_titles_info.get(chapter_num, (f"Chapter {chapter_num}", 0, ""))[0],
+                    'error': str(e),
+                    'traceback': traceback.format_exc(),
+                    'success': False
+                }
+        
+        # Process in parallel
+        processed_chapters = []
+        completed = 0
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(process_chapter_content, data): data[0] 
+                for data in chapter_data
+            }
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        processed_chapters.append(result)
+                        completed += 1
+                        
+                        if result['success']:
+                            self.log(f"  [{completed}/{len(chapter_data)}] ✅ Processed: {result['title']}")
+                        else:
+                            self.log(f"  [{completed}/{len(chapter_data)}] ❌ Failed: {result['filename']} - {result['error']}")
+                            
+                except Exception as e:
+                    completed += 1
+                    chapter_num = futures[future]
+                    self.log(f"  [{completed}/{len(chapter_data)}] ❌ Exception processing chapter {chapter_num}: {e}")
+        
+        # Sort by chapter number to maintain order
+        processed_chapters.sort(key=lambda x: x['num'])
+        
+        # Add chapters to book in order (this must be sequential)
+        self.log("\n📦 Adding chapters to EPUB structure...")
+        for chapter_data in processed_chapters:
+            if chapter_data['success']:
+                try:
+                    # Create EPUB chapter
+                    import html
+                    chapter = epub.EpubHtml(
+                        title=html.unescape(chapter_data['title']),
+                        file_name=os.path.basename(chapter_data['filename']),
+                        lang=metadata.get("language", "en")
+                    )
+                    chapter.content = FileUtils.ensure_bytes(chapter_data['content'])
+                    
+                    if self.attach_css_to_chapters:
+                        for css_item in css_items:
+                            chapter.add_item(css_item)
+                    
+                    # Add to book (must be sequential)
+                    book.add_item(chapter)
+                    spine.append(chapter)
+                    toc.append(chapter)
+                    chapters_added += 1
+                    
+                    self.log(f"  ✅ Added chapter {chapter_data['num']}: '{chapter_data['title']}'")
+                    
+                except Exception as e:
+                    self.log(f"  ❌ Failed to add chapter {chapter_data['num']} to book: {e}")
+                    # Add error placeholder
+                    self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
+                    chapters_added += 1
+            else:
+                # Add error placeholder
+                self._add_error_chapter_from_data(book, chapter_data, spine, toc, metadata)
+                chapters_added += 1
+        
+        self.log(f"\n✅ Added {chapters_added} chapters to EPUB")
+        return chapters_added
+    
+    def _add_error_chapter_from_data(self, book, chapter_data, spine, toc, metadata):
+        """Helper to add an error placeholder chapter"""
+        try:
+            title = chapter_data.get('title', f"Chapter {chapter_data['num']}")
+            chapter = epub.EpubHtml(
+                title=title,
+                file_name=f"chapter_{chapter_data['num']:03d}.xhtml",
+                lang=metadata.get("language", "en")
+            )
+            
+            error_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>{ContentProcessor.safe_escape(title)}</title></head>
+<body>
+<h1>{ContentProcessor.safe_escape(title)}</h1>
+<p>Error loading chapter content.</p>
+<p>File: {chapter_data.get('filename', 'unknown')}</p>
+<p>Error: {chapter_data.get('error', 'unknown error')}</p>
+</body>
+</html>"""
+            
+            chapter.content = error_content.encode('utf-8')
+            book.add_item(chapter)
+            spine.append(chapter)
+            toc.append(chapter)
+            
+        except Exception as e:
+            self.log(f"  ❌ Failed to add error placeholder: {e}")
 
 
     def _get_chapter_order_from_opf(self) -> Dict[str, int]:
@@ -2103,93 +1771,56 @@ class EPUBCompiler:
         
         return html_files
 
-    def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
-                         chapter_titles_info: Dict[int, Tuple[str, float, str]],
-                         css_items: List[epub.EpubItem], processed_images: Dict[str, str],
-                         spine: List, toc: List, metadata: dict) -> int:
-        """Process chapters - uses position-based numbering to match _analyze_chapters"""
-        chapters_added = 0
+    def _read_and_decode_html_file(self, file_path: str) -> str:
+        """Read HTML file and PROPERLY decode ALL entities"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
         
-        self.log(f"\n📚 Processing {len(html_files)} chapters...")
-        
-        # Just use the index as chapter number - don't try to be clever
-        # The files are ALREADY in the correct order from _find_html_files
-        for idx, filename in enumerate(html_files):
-            # Chapter number is just the position in the list
-            chapter_num = idx
+        # AGGRESSIVE DECODING - Keep doing it until nothing changes
+        max_iterations = 10
+        for i in range(max_iterations):
+            prev_content = content
             
-            # Try position first, then position+1 for backwards compatibility
-            if chapter_num not in chapter_titles_info and (chapter_num + 1) in chapter_titles_info:
-                chapter_num = idx + 1
+            # Method 1: Python's html.unescape
+            import html
+            content = html.unescape(content)
             
-            try:
-                if self._process_single_chapter(
-                    book, chapter_num, filename, chapter_titles_info, css_items, 
-                    processed_images, spine, toc, metadata
-                ):
-                    chapters_added += 1
-            except Exception as e:
-                self.log(f"[ERROR] Chapter {chapter_num} ({filename}) failed: {e}")
-                
-                # Add placeholder with consistent numbering
-                try:
-                    title = f"Chapter {chapter_num}"
-                    if chapter_num in chapter_titles_info:
-                        title = chapter_titles_info[chapter_num][0]
-                    
-                    chapter = epub.EpubHtml(
-                        title=title,
-                        file_name=f"chapter_{chapter_num:03d}.xhtml",
-                        lang=metadata.get("language", "en")
-                    )
-                    chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
-    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml">
-    <head><title>{ContentProcessor.safe_escape(title)}</title></head>
-    <body>
-    <h1>{ContentProcessor.safe_escape(title)}</h1>
-    <p>Error loading: {filename}</p>
-    </body>
-    </html>""".encode('utf-8')
-                    
-                    book.add_item(chapter)
-                    spine.append(chapter)
-                    toc.append(chapter)
-                    chapters_added += 1
-                except:
-                    pass
+            # Method 2: Direct replacements for common entities
+            content = content.replace('&lt;', '<')
+            content = content.replace('&gt;', '>')
+            content = content.replace('&amp;', '&')
+            content = content.replace('&quot;', '"')
+            content = content.replace('&apos;', "'")
+            content = content.replace('&#39;', "'")
+            content = content.replace('&nbsp;', ' ')
+            
+            # If nothing changed, we're done
+            if content == prev_content:
+                break
         
-        self.log(f"Added {chapters_added} chapters")
-        return chapters_added
+        return content
 
     def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
                                chapter_titles_info: Dict[int, Tuple[str, float, str]],
                                css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                                spine: List, toc: List, metadata: dict) -> bool:
-        """Process a single chapter"""
+        """Process a single chapter with debugging"""
         path = os.path.join(self.output_dir, filename)
         
         try:
-            # Read content
-            with open(path, 'r', encoding='utf-8') as f:
-                raw_content = f.read()
+            # Read and decode
+            raw_content = self._read_and_decode_html_file(path)
             
-            # Force fix the encoding issues FIRST
+            # Fix encoding issues
             raw_content = self._fix_encoding_issues(raw_content)
-
-            # Then do the normal decode (for other entities)
-            raw_content = HTMLEntityDecoder.decode(raw_content)
             
             if not raw_content.strip():
                 self.log(f"[WARNING] Chapter {num} is empty")
                 return False
             
-            # Clean content - with progressive handling for web-scraped pages
+            # Extract main content if needed
             if not filename.startswith('response_'):
-                # Try to extract main content for non-standard files
                 raw_content = self._extract_main_content(raw_content, filename)
-            
-            raw_content = ContentProcessor.clean_chapter_content(raw_content)
             
             # Get title
             title = self._get_chapter_title(num, filename, raw_content, chapter_titles_info)
@@ -2200,16 +1831,16 @@ class EPUBCompiler:
             # Convert to XHTML
             try:
                 xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+                    
             except Exception as e:
                 self.log(f"[WARNING] XHTML conversion failed for chapter {num}: {e}")
-                # Create minimal valid XHTML
                 xhtml_content = XHTMLConverter._build_xhtml(
                     title,
                     f'<h1>{ContentProcessor.safe_escape(title)}</h1><p>Chapter content could not be processed.</p>',
                     css_links
                 )
             
-            # Process images in content
+            # Process images
             xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
             
             # Validate
@@ -2218,8 +1849,9 @@ class EPUBCompiler:
             # Final validation check
             try:
                 ET.fromstring(final_content.encode('utf-8'))
-            except ET.ParseError:
-                # Use a simple fallback that we know is valid
+            except ET.ParseError as e:
+                self.log(f"[DEBUG] XML Parse error: {e}")
+                # Fallback content...
                 final_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
                     '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
                     '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
@@ -2234,24 +1866,28 @@ class EPUBCompiler:
                     '</body>\n' + \
                     '</html>'
             
-            # Use the actual filename from the input
+            # Create chapter
             safe_fn = os.path.basename(filename)
             
-            # Pre-decode the title - when ebooklib escapes it for NCX, it'll be correct
             import html
-            decoded_title = html.unescape(title)  # Use Python's built-in html.unescape
+            decoded_title = html.unescape(title)
             chapter = epub.EpubHtml(
                 title=decoded_title,
                 file_name=safe_fn,
                 lang=metadata.get("language", "en")
             )
+            
+            # DEBUG POINT 7: Final check before setting content
+            if '&lt;' in final_content:
+                self.log(f"[DEBUG 7] FINAL PROBLEM: Setting chapter content with &lt; entities!")
+            
             chapter.content = FileUtils.ensure_bytes(final_content)
-
-            # CSS ATTACHMENT FIX - Only if enabled
+            
+            # Add CSS if enabled
             if self.attach_css_to_chapters:
                 for css_item in css_items:
-                    chapter.add_item(css_item)  
-                
+                    chapter.add_item(css_item)
+            
             # Add to book
             book.add_item(chapter)
             spine.append(chapter)
@@ -2264,7 +1900,7 @@ class EPUBCompiler:
             import traceback
             print(f"FULL ERROR TRACEBACK: {traceback.format_exc()}")
             self.log(f"[ERROR] Failed to process chapter {num}: {e}")
-            # Add placeholder with consistent numbering
+
             try:
                 # Try to get the title from chapter_titles_info
                 title = f"Chapter {num}"
@@ -2621,6 +2257,7 @@ class EPUBCompiler:
         """Load metadata from JSON file"""
         if os.path.exists(self.metadata_path):
             try:
+                import html
                 with open(self.metadata_path, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
                 self.log("[DEBUG] Metadata loaded successfully")
@@ -2837,9 +2474,9 @@ img {
         for css_file in css_files:
             css_path = os.path.join(self.css_dir, css_file)
             try:
+                import html
                 with open(css_path, 'r', encoding='utf-8') as f:
                     css_content = f.read()
-                
                 css_item = epub.EpubItem(
                     uid=f"css_{css_file}",
                     file_name=f"css/{css_file}",
@@ -2887,20 +2524,18 @@ img {
                 self.log(f"[WARNING] Failed to add font {font_file}: {e}")
     
     def _process_images(self) -> Tuple[Dict[str, str], Optional[str]]:
-        """Process images and find cover"""
+        """Process images using parallel processing"""
         processed_images = {}
         cover_file = None
         
         try:
-            # Debug: Check multiple possible image locations
-            possible_dirs = [
-                self.images_dir,  # Default: output_dir/images
-                os.path.join(self.base_dir, "images"),  # base_dir/images
-                os.path.join(self.output_dir, "images"),  # output_dir/images
-            ]
-            
-            images_found = False
+            # Find the images directory
             actual_images_dir = None
+            possible_dirs = [
+                self.images_dir,
+                os.path.join(self.base_dir, "images"),
+                os.path.join(self.output_dir, "images"),
+            ]
             
             for test_dir in possible_dirs:
                 self.log(f"[DEBUG] Checking for images in: {test_dir}")
@@ -2909,23 +2544,24 @@ img {
                     if files:
                         self.log(f"[DEBUG] Found {len(files)} files in {test_dir}")
                         actual_images_dir = test_dir
-                        images_found = True
                         break
             
-            if not images_found:
+            if not actual_images_dir:
                 self.log("[WARNING] No images directory found or directory is empty")
-                self.log(f"[DEBUG] Searched in: {possible_dirs}")
                 return processed_images, cover_file
             
-            # Use the directory where images were found
             self.images_dir = actual_images_dir
             self.log(f"[INFO] Using images directory: {self.images_dir}")
             
-            # Process all images
-            for img in sorted(os.listdir(self.images_dir)):
+            # Get list of files to process
+            image_files = sorted(os.listdir(self.images_dir))
+            self.log(f"🖼️ Processing {len(image_files)} potential images with {self.max_workers} workers")
+            
+            def process_single_image(img):
+                """Worker function to process a single image"""
                 path = os.path.join(self.images_dir, img)
                 if not os.path.isfile(path):
-                    continue
+                    return None
                 
                 # Check MIME type
                 ctype, _ = mimetypes.guess_type(path)
@@ -2933,18 +2569,16 @@ img {
                 # If MIME type detection fails, check extension
                 if not ctype:
                     ext = os.path.splitext(img)[1].lower()
-                    if ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']:
-                        # Manually set MIME type based on extension
-                        mime_map = {
-                            '.jpg': 'image/jpeg',
-                            '.jpeg': 'image/jpeg',
-                            '.png': 'image/png',
-                            '.gif': 'image/gif',
-                            '.bmp': 'image/bmp',
-                            '.webp': 'image/webp',
-                            '.svg': 'image/svg+xml'
-                        }
-                        ctype = mime_map.get(ext, 'image/jpeg')
+                    mime_map = {
+                        '.jpg': 'image/jpeg',
+                        '.jpeg': 'image/jpeg',
+                        '.png': 'image/png',
+                        '.gif': 'image/gif',
+                        '.bmp': 'image/bmp',
+                        '.webp': 'image/webp',
+                        '.svg': 'image/svg+xml'
+                    }
+                    ctype = mime_map.get(ext)
                 
                 if ctype and ctype.startswith("image"):
                     safe_name = FileUtils.sanitize_filename(img, allow_unicode=False)
@@ -2959,28 +2593,46 @@ img {
                         elif ctype == 'image/png':
                             safe_name += '.png'
                     
-                    processed_images[img] = safe_name
-                    self.log(f"[DEBUG] Found image: {img} -> {safe_name}")
+                    return (img, safe_name, ctype)
                 else:
-                    self.log(f"[DEBUG] Skipped non-image file: {img} (MIME: {ctype})")
+                    return None
             
-            # Find cover (case-insensitive search)
+            # Process images in parallel
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [executor.submit(process_single_image, img) for img in image_files]
+                
+                completed = 0
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        completed += 1
+                        
+                        if result:
+                            original, safe, ctype = result
+                            processed_images[original] = safe
+                            self.log(f"  [{completed}/{len(image_files)}] ✅ Processed: {original} -> {safe}")
+                        else:
+                            self.log(f"  [{completed}/{len(image_files)}] ⏭️ Skipped non-image file")
+                            
+                    except Exception as e:
+                        completed += 1
+                        self.log(f"  [{completed}/{len(image_files)}] ❌ Failed to process image: {e}")
+            
+            # Find cover (sequential - quick operation)
             if processed_images:
-                # Search for images starting with "cover" or "front" (case-insensitive)
                 cover_prefixes = ['cover', 'front']
                 for original_name, safe_name in processed_images.items():
                     name_lower = original_name.lower()
                     if any(name_lower.startswith(prefix) for prefix in cover_prefixes):
                         cover_file = safe_name
-                        self.log(f"[DEBUG] Found cover image: {original_name} -> {cover_file}")
+                        self.log(f"📔 Found cover image: {original_name} -> {cover_file}")
                         break
                 
-                # If no cover-like image found, use first image
                 if not cover_file:
                     cover_file = next(iter(processed_images.values()))
-                    self.log(f"[DEBUG] Using first image as cover: {cover_file}")
+                    self.log(f"📔 Using first image as cover: {cover_file}")
             
-            self.log(f"[INFO] Processed {len(processed_images)} images")
+            self.log(f"✅ Processed {len(processed_images)} images successfully")
             
         except Exception as e:
             self.log(f"[ERROR] Error processing images: {e}")
@@ -2988,26 +2640,87 @@ img {
             self.log(f"[DEBUG] Traceback: {traceback.format_exc()}")
         
         return processed_images, cover_file
-    
+
     def _add_images_to_book(self, book: epub.EpubBook, processed_images: Dict[str, str], 
                            cover_file: Optional[str]):
-        """Add images to book (except cover)"""
-        for original_name, safe_name in processed_images.items():
-            if safe_name == cover_file:
-                continue
-            
+        """Add images to book using parallel processing for reading files"""
+        
+        # Filter out cover image
+        images_to_add = [(orig, safe) for orig, safe in processed_images.items() 
+                         if safe != cover_file]
+        
+        if not images_to_add:
+            self.log("No images to add (besides cover)")
+            return
+        
+        self.log(f"📚 Adding {len(images_to_add)} images to EPUB with {self.max_workers} workers")
+        
+        def read_image_file(image_data):
+            """Worker function to read image file"""
+            original_name, safe_name = image_data
             img_path = os.path.join(self.images_dir, original_name)
+            
             try:
                 ctype, _ = mimetypes.guess_type(img_path)
+                if not ctype:
+                    ctype = "image/jpeg"  # Default fallback
+                
                 with open(img_path, 'rb') as f:
-                    book.add_item(epub.EpubItem(
-                        uid=safe_name,
-                        file_name=f"images/{safe_name}",
-                        media_type=ctype or "image/jpeg",
-                        content=f.read()
-                    ))
+                    content = f.read()
+                
+                return {
+                    'original': original_name,
+                    'safe': safe_name,
+                    'ctype': ctype,
+                    'content': content,
+                    'success': True
+                }
             except Exception as e:
-                self.log(f"[WARNING] Failed to embed image {original_name}: {e}")
+                return {
+                    'original': original_name,
+                    'safe': safe_name,
+                    'error': str(e),
+                    'success': False
+                }
+        
+        # Read all images in parallel
+        image_data_list = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [executor.submit(read_image_file, img_data) for img_data in images_to_add]
+            
+            completed = 0
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    completed += 1
+                    
+                    if result['success']:
+                        image_data_list.append(result)
+                        self.log(f"  [{completed}/{len(images_to_add)}] ✅ Read: {result['original']}")
+                    else:
+                        self.log(f"  [{completed}/{len(images_to_add)}] ❌ Failed: {result['original']} - {result['error']}")
+                        
+                except Exception as e:
+                    completed += 1
+                    self.log(f"  [{completed}/{len(images_to_add)}] ❌ Exception reading image: {e}")
+        
+        # Add images to book sequentially (required by ebooklib)
+        self.log("\n📦 Adding images to EPUB structure...")
+        added = 0
+        for img_data in image_data_list:
+            try:
+                book.add_item(epub.EpubItem(
+                    uid=img_data['safe'],
+                    file_name=f"images/{img_data['safe']}",
+                    media_type=img_data['ctype'],
+                    content=img_data['content']
+                ))
+                added += 1
+                self.log(f"  ✅ Added: {img_data['original']}")
+            except Exception as e:
+                self.log(f"  ❌ Failed to add {img_data['original']} to EPUB: {e}")
+        
+        self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
     
     def _create_cover_page(self, book: epub.EpubBook, cover_file: str, 
                           processed_images: Dict[str, str], css_items: List[epub.EpubItem],
@@ -3048,19 +2761,25 @@ img {
                 lang=metadata.get("language", "en")
             )
             
-            # Build cover HTML
-            cover_css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
-            cover_body = f'''<div style="text-align: center;">
-<img src="images/{cover_file}" alt="Cover" style="max-width: 100%; height: auto;" />
-</div>'''
+            # Build cover HTML directly without going through ensure_compliance
+            # Since it's simple and controlled, we can build it directly
+            cover_content = f'''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Cover</title>
+    </head>
+    <body>
+    <div style="text-align: center;">
+    <img src="images/{cover_file}" alt="Cover" style="max-width: 100%; height: auto;" />
+    </div>
+    </body>
+    </html>'''
             
-            cover_page.content = FileUtils.ensure_bytes(
-                XHTMLConverter.validate(
-                    XHTMLConverter.ensure_compliance(cover_body, "Cover", cover_css_links)
-                )
-            )
+            cover_page.content = cover_content.encode('utf-8')
             
-            # Associate CSS with cover page
+            # Associate CSS with cover page if needed
             if self.attach_css_to_chapters:
                 for css_item in css_items:
                     cover_page.add_item(css_item)
@@ -3076,7 +2795,7 @@ img {
     def _process_chapter_images(self, xhtml_content: str, processed_images: Dict[str, str]) -> str:
         """Process image paths in chapter content"""
         try:
-            soup = BeautifulSoup(xhtml_content, 'html.parser')
+            soup = BeautifulSoup(xhtml_content, 'lxml')
             changed = False
             
             # Debug: Log what images we're looking for
