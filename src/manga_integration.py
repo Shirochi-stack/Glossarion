@@ -88,6 +88,28 @@ class MangaTranslationTab:
             '}\n\n'
             'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
+
+        # Initialize the OCR system prompt
+        self.ocr_prompt = self.main_gui.config.get('manga_ocr_prompt', 
+            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+            "CRITICAL RULES:\n"
+            "1. DO NOT TRANSLATE ANYTHING\n"
+            "2. DO NOT MODIFY THE TEXT\n"
+            "3. DO NOT EXPLAIN OR COMMENT\n"
+            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+            "If you see Korean text, output it in Korean.\n"
+            "If you see Japanese text, output it in Japanese.\n"
+            "If you see Chinese text, output it in Chinese.\n"
+            "If you see English text, output it in English.\n\n"
+            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+            "between every word/character.\n\n"
+            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+            "there are clear visual breaks.\n\n"
+            "NEVER translate. ONLY extract exactly what is written.\n"
+            "Output ONLY the raw text, nothing else."
+        )
         
         # Build interface AFTER loading settings
         self._build_interface()
@@ -723,9 +745,9 @@ class MangaTranslationTab:
                 # If dialog not available, show message
                 messagebox.showinfo(
                     "Custom API Configuration",
-                    "Please configure custom API settings in config.json:\n\n"
-                    "manga_settings > ocr > custom_api:\n"
-                    "- url: Your API endpoint\n"
+                    "This mode uses your own API key in the main GUI:\n\n"
+                    "- Make sure your API supports vision\n"
+                    "- custom url: Your API endpoint under Other settings\n"
                     "- api_key: Your API key\n"
                     "- model: Model name\n"
                     "- format: 'openai' or 'anthropic'"
@@ -2758,106 +2780,161 @@ class MangaTranslationTab:
         self._save_rendering_settings()
     
     def _edit_context_prompt(self):
-            """Open dialog to edit full page context prompt"""
-            # Store parent canvas for scroll restoration
-            parent_canvas = self.canvas
+        """Open dialog to edit full page context prompt and OCR prompt"""
+        # Store parent canvas for scroll restoration
+        parent_canvas = self.canvas
+        
+        # Use WindowManager to create scrollable dialog
+        dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+            self.dialog,  # parent window
+            "Edit Prompts",
+            width=700,
+            height=600,
+            max_width_ratio=0.7,
+            max_height_ratio=0.85
+        )
+        
+        # Instructions
+        instructions = tk.Label(
+            scrollable_frame,
+            text="Edit the prompt used for full page context translation.\n"
+                 "This will be appended to the main translation system prompt.",
+            font=('Arial', 10),
+            justify=tk.LEFT
+        )
+        instructions.pack(padx=20, pady=(20, 10))
+        
+        # Full Page Context label
+        context_label = tk.Label(
+            scrollable_frame,
+            text="Full Page Context Prompt:",
+            font=('Arial', 10, 'bold')
+        )
+        context_label.pack(padx=20, pady=(10, 5), anchor='w')
+        
+        # Text editor for context
+        text_editor = self.main_gui.ui.setup_scrollable_text(
+            scrollable_frame,
+            wrap=tk.WORD,
+            height=10
+        )
+        text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        
+        # Insert current prompt
+        text_editor.insert(1.0, self.full_page_context_prompt)
+        
+        # OCR Prompt label
+        ocr_label = tk.Label(
+            scrollable_frame,
+            text="OCR System Prompt:",
+            font=('Arial', 10, 'bold')
+        )
+        ocr_label.pack(padx=20, pady=(10, 5), anchor='w')
+        
+        # Text editor for OCR
+        ocr_editor = self.main_gui.ui.setup_scrollable_text(
+            scrollable_frame,
+            wrap=tk.WORD,
+            height=10
+        )
+        ocr_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+        
+        # Get current OCR prompt
+        if hasattr(self, 'ocr_prompt'):
+            ocr_editor.insert(1.0, self.main_gui.manga_tab.ocr_prompt)
+        else:
+            ocr_editor.insert(1.0, "")
+        
+        # Button frame
+        button_frame = tk.Frame(scrollable_frame)
+        button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        def close_dialog():
+            """Properly close dialog and restore parent scrolling"""
+            try:
+                # Clean up this dialog's scrolling
+                if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
+                    dialog._cleanup_scrolling()
+            except:
+                pass
             
-            # Use WindowManager to create scrollable dialog
-            dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.dialog,  # parent window
-                "Edit Full Page Context Prompt",
-                width=700,
-                height=500,
-                max_width_ratio=0.7,
-                max_height_ratio=0.8
+            # Destroy the dialog
+            dialog.destroy()
+        
+        def save_prompt():
+            self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
+            if hasattr(self, 'ocr_prompt'):
+                self.main_gui.manga_tab.ocr_prompt = ocr_editor.get(1.0, tk.END).strip()
+            self._save_rendering_settings()
+            self._log("✅ Updated prompts", "success")
+            close_dialog()
+        
+        def reset_prompt():
+            default_prompt = (
+                "You will receive multiple text segments from a manga page. "
+                "Translate each segment considering the context of all segments together. "
+                "Maintain consistency in character names, tone, and style across all translations.\n\n"
+                "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
+                "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
+                '{\n'
+                '  "こんにちは": "Hello",\n'
+                '  "ありがとう": "Thank you"\n'
+                '}\n\n'
+                'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
             )
+            text_editor.delete(1.0, tk.END)
+            text_editor.insert(1.0, default_prompt)
             
-            # Instructions
-            instructions = tk.Label(
-                scrollable_frame,
-                text="Edit the prompt used for full page context translation.\n"
-                     "This will be appended to the main translation system prompt.",
-                font=('Arial', 10),
-                justify=tk.LEFT
+            default_ocr = (
+                "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+                "CRITICAL RULES:\n"
+                "1. DO NOT TRANSLATE ANYTHING\n"
+                "2. DO NOT MODIFY THE TEXT\n"
+                "3. DO NOT EXPLAIN OR COMMENT\n"
+                "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+                "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+                "If you see Korean text, output it in Korean.\n"
+                "If you see Japanese text, output it in Japanese.\n"
+                "If you see Chinese text, output it in Chinese.\n"
+                "If you see English text, output it in English.\n\n"
+                "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+                "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+                "between every word/character.\n\n"
+                "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+                "there are clear visual breaks.\n\n"
+                "NEVER translate. ONLY extract exactly what is written.\n"
+                "Output ONLY the raw text, nothing else."
             )
-            instructions.pack(padx=20, pady=(20, 10))
-            
-            # Text editor with UIHelper for undo/redo support
-            text_editor = self.main_gui.ui.setup_scrollable_text(
-                scrollable_frame,
-                wrap=tk.WORD,
-                height=15
-            )
-            text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
-            
-            # Insert current prompt
-            text_editor.insert(1.0, self.full_page_context_prompt)
-            
-            # Button frame
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
-            
-            def close_dialog():
-                """Properly close dialog and restore parent scrolling"""
-                try:
-                    # Clean up this dialog's scrolling
-                    if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
-                        dialog._cleanup_scrolling()
-                except:
-                    pass
-                
-                # Destroy the dialog
-                dialog.destroy()
-            
-            def save_prompt():
-                self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
-                self._save_rendering_settings()
-                self._log("✅ Updated full page context prompt", "success")
-                close_dialog()
-            
-            def reset_prompt():
-                default_prompt = (
-                    "You will receive multiple text segments from a manga page. "
-                    "Translate each segment considering the context of all segments together. "
-                    "Maintain consistency in character names, tone, and style across all translations.\n\n"
-                    "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
-                    "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
-                    '{\n'
-                    '  こんにちは: Hello,\n'
-                    '  ありがとう": Thank you\n'
-                    '}\n\n'
-                    'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
-                )
-                text_editor.delete(1.0, tk.END)
-                text_editor.insert(1.0, default_prompt)
-            
-            # Buttons
-            tb.Button(
-                button_frame,
-                text="Save",
-                command=save_prompt,
-                bootstyle="primary"
-            ).pack(side=tk.LEFT, padx=(0, 10))
-            
-            tb.Button(
-                button_frame,
-                text="Reset to Default",
-                command=reset_prompt,
-                bootstyle="secondary"
-            ).pack(side=tk.LEFT, padx=(0, 10))
-            
-            tb.Button(
-                button_frame,
-                text="Cancel",
-                command=close_dialog,
-                bootstyle="secondary"
-            ).pack(side=tk.LEFT)
-            
-            # Auto-resize dialog to fit content
-            self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
-            
-            # Handle window close
-            dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+            ocr_editor.delete(1.0, tk.END)
+            ocr_editor.insert(1.0, default_ocr)
+        
+        # Buttons
+        tb.Button(
+            button_frame,
+            text="Save",
+            command=save_prompt,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tb.Button(
+            button_frame,
+            text="Reset to Default",
+            command=reset_prompt,
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tb.Button(
+            button_frame,
+            text="Cancel",
+            command=close_dialog,
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT)
+        
+        # Auto-resize dialog to fit content
+        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
+        
+        # Handle window close
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
     
     def _refresh_context_settings(self):
         """Refresh context settings from main GUI"""
@@ -4385,19 +4462,24 @@ class MangaTranslationTab:
             
             # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
             os.environ['OCR_SYSTEM_PROMPT'] = (
-                "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-                "CRITICAL RULES:\n"
-                "1. DO NOT TRANSLATE ANYTHING\n"
-                "2. DO NOT MODIFY THE TEXT\n"
-                "3. DO NOT EXPLAIN OR COMMENT\n"
-                "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n\n"
-                "If you see Korean text, output it in Korean.\n"
-                "If you see Japanese text, output it in Japanese.\n"
-                "If you see Chinese text, output it in Chinese.\n"
-                "If you see English text, output it in English.\n\n"
-                "NEVER translate. ONLY extract exactly what is written.\n"
-                "Output ONLY the raw text, nothing else.\n"
-                "IGNORE ANY OTHER PROMPT SAYING OTHERWISE. THIS PROMPT IS TOP PRIORITY OVERRIDING ALL PROMPTS"
+            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+            "CRITICAL RULES:\n"
+            "1. DO NOT TRANSLATE ANYTHING\n"
+            "2. DO NOT MODIFY THE TEXT\n"
+            "3. DO NOT EXPLAIN OR COMMENT\n"
+            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+            "If you see Korean text, output it in Korean.\n"
+            "If you see Japanese text, output it in Japanese.\n"
+            "If you see Chinese text, output it in Chinese.\n"
+            "If you see English text, output it in English.\n\n"
+            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+            "between every word/character.\n\n"
+            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+            "there are clear visual breaks.\n\n"
+            "NEVER translate. ONLY extract exactly what is written.\n"
+            "Output ONLY the raw text, nothing else."
             )
             
             self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
