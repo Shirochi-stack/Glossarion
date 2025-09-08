@@ -2622,9 +2622,42 @@ class MangaTranslationTab:
         self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
             "You will receive multiple text segments from a manga page. "
             "Translate each segment considering the context of all segments together. "
-            "Maintain consistency in character names, tone, and style across all segments."
+            "Maintain consistency in character names, tone, and style across all translations.\n\n"
+            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
+            "(without the [0], [1] index prefixes) and each value is the translation.\n"
+            "Make sure to properly escape any special characters in the JSON:\n"
+            "- Use \\n for newlines\n"
+            "- Use \\\" for quotes\n"
+            "- Use \\\\ for backslashes\n\n"
+            "Example:\n"
+            '{\n'
+            '  こんにちは: Hello,\n'
+            '  ありがとう: Thank you\n'
+            '}\n\n'
+            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
-        
+ 
+        # Load OCR prompt
+        self.ocr_prompt = config.get('manga_ocr_prompt', 
+            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+            "CRITICAL RULES:\n"
+            "1. DO NOT TRANSLATE ANYTHING\n"
+            "2. DO NOT MODIFY THE TEXT\n"
+            "3. DO NOT EXPLAIN OR COMMENT\n"
+            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+            "If you see Korean text, output it in Korean.\n"
+            "If you see Japanese text, output it in Japanese.\n"
+            "If you see Chinese text, output it in Chinese.\n"
+            "If you see English text, output it in English.\n\n"
+            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+            "between every word/character.\n\n"
+            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+            "there are clear visual breaks.\n\n"
+            "NEVER translate. ONLY extract exactly what is written.\n"
+            "Output ONLY the raw text, nothing else."
+        ) 
         # Visual context setting
         self.visual_context_enabled_var = tk.BooleanVar(
             value=self.main_gui.config.get('manga_visual_context_enabled', True)
@@ -2766,6 +2799,10 @@ class MangaTranslationTab:
             if hasattr(self, 'full_page_context_prompt'):
                 self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
             
+            # OCR prompt
+            if hasattr(self, 'ocr_prompt'):
+                self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
+            
             # Call main GUI's save_config to persist to file
             if hasattr(self.main_gui, 'save_config'):
                 self.main_gui.save_config(show_message=False)
@@ -2841,7 +2878,7 @@ class MangaTranslationTab:
         
         # Get current OCR prompt
         if hasattr(self, 'ocr_prompt'):
-            ocr_editor.insert(1.0, self.main_gui.manga_tab.ocr_prompt)
+            ocr_editor.insert(1.0, self.ocr_prompt)
         else:
             ocr_editor.insert(1.0, "")
         
@@ -2863,8 +2900,12 @@ class MangaTranslationTab:
         
         def save_prompt():
             self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
-            if hasattr(self, 'ocr_prompt'):
-                self.main_gui.manga_tab.ocr_prompt = ocr_editor.get(1.0, tk.END).strip()
+            self.ocr_prompt = ocr_editor.get(1.0, tk.END).strip()  # Save to self.ocr_prompt
+            
+            # Save to config
+            self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
+            self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
+            
             self._save_rendering_settings()
             self._log("✅ Updated prompts", "success")
             close_dialog()
