@@ -747,10 +747,9 @@ class MangaTranslationTab:
                     "Custom API Configuration",
                     "This mode uses your own API key in the main GUI:\n\n"
                     "- Make sure your API supports vision\n"
-                    "- custom url: Your API endpoint under Other settings\n"
                     "- api_key: Your API key\n"
                     "- model: Model name\n"
-                    "- format: 'openai' or 'anthropic'"
+                    "- custom url: You can override API endpoint under Other settings"
                 )
             return
         
