@@ -906,6 +906,19 @@ excludes = [
     'pypdfium2', 'pypdfium2.*',
     'pypdfium2_raw',
 	
+	# Scientific/Data formats (15MB savings)
+    'h5py', 'h5py.*',
+    'tables', 'tables.*',
+    
+    # Geographic/Geometry (2MB)
+    'shapely', 'shapely.*',
+    'Shapely', 'Shapely.*',
+    
+    # Audio processing (2MB)
+    'soundfile', 'soundfile.*',
+    '_soundfile_data',
+    'librosa', 'librosa.*',
+	
     # ============================================================================
     # CUDA & GPU LIBRARIES
     # ============================================================================
@@ -1004,6 +1017,10 @@ a.binaries = [b for b in a.binaries if not any([
     'libscipy_openblas' in b[0],
     '_avif' in b[0],
     'pypdfium' in b[0],
+	'metrics_cpp_avx2' in b[0],  # Remove AVX2 variant (1.5MB)
+    'hdf5.dll' in b[0],  # Remove HDF5 (3MB)
+    'libsndfile' in b[0],  # Remove soundfile (2MB)
+    'geos-' in b[0],  # Remove Shapely (2MB)
 ])]
 print(f"Removed {original_size - len(a.binaries)} duplicate binaries")
 
