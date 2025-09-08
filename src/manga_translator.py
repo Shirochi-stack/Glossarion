@@ -2987,130 +2987,173 @@ class MangaTranslator:
             return {}
 
     def _fix_json_response(self, response_text: str) -> str:
-        """Parse JSON-like response with maximum leniency - quotes optional everywhere"""
+        """Fix JSON response with unescaped newlines, unquoted keys, and other issues"""
         import re
         import json
         
-        # First, try standard JSON parsing
+        # First, try to parse as-is
         try:
             json.loads(response_text)
-            return response_text  # Already valid JSON
+            return response_text  # Already valid
         except json.JSONDecodeError:
             pass
         
-        # Extract key-value pairs with maximum flexibility
-        translations = {}
+        # Method 1: Fix unquoted keys and newlines
+        # This handles cases where keys don't have quotes
+        def fix_unquoted_json(text):
+            # First, escape newlines that are within values
+            lines = text.split('\n')
+            fixed_lines = []
+            in_value = False
+            current_object = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if this line contains a colon (key-value separator)
+                if ':' in line and not in_value:
+                    # This is likely a key-value pair
+                    colon_pos = line.rfind(':')
+                    key_part = line[:colon_pos].strip()
+                    value_part = line[colon_pos+1:].strip()
+                    
+                    # Add quotes around the key if not present
+                    if not (key_part.startswith('"') and key_part.endswith('"')):
+                        # Escape the key content
+                        key_part = key_part.replace('\\', '\\\\').replace('"', '\\"')
+                        key_part = f'"{key_part}"'
+                    
+                    # Check if value starts properly
+                    if value_part and not value_part.startswith('"'):
+                        # Value needs quotes too
+                        value_part = f'"{value_part}'
+                        in_value = True
+                    
+                    current_object.append(f'  {key_part}: {value_part}')
+                elif in_value:
+                    # This is a continuation of a value
+                    if line.endswith(','):
+                        # End of this value
+                        current_object[-1] += '\\n' + line[:-1] + '",'
+                        in_value = False
+                    else:
+                        # Still in value
+                        current_object[-1] += '\\n' + line
+            
+            # Close any open value
+            if in_value and current_object:
+                current_object[-1] += '"'
+            
+            # Reconstruct the JSON
+            if current_object:
+                return '{\n' + '\n'.join(current_object) + '\n}'
+            
+            return text
         
-        # Remove outer braces and clean up
-        text = response_text.strip()
-        if text.startswith('{'):
-            text = text[1:]
-        if text.endswith('}'):
-            text = text[:-1]
+        # Try fixing unquoted keys
+        try:
+            fixed = fix_unquoted_json(response_text)
+            json.loads(fixed)
+            self._log("✅ Fixed JSON by adding quotes to keys", "info")
+            return fixed
+        except:
+            pass
         
-        # Current parsing state
+        # Method 2: Extract key-value pairs more aggressively
+        # Look for patterns like: text_without_quotes: translation
+        extracted = {}
+        
+        # Split by lines and look for key-value patterns
+        lines = response_text.split('\n')
         current_key = None
         current_value = []
-        in_value = False
-        
-        lines = text.split('\n')
         
         for line in lines:
             line = line.strip()
-            if not line:
+            if not line or line in ['{', '}']:
                 continue
             
             # Remove trailing comma if present
-            has_comma = line.endswith(',')
-            if has_comma:
-                line = line[:-1].strip()
+            if line.endswith(','):
+                line = line[:-1]
             
-            # Check if this line contains a key:value separator
-            if ':' in line and not in_value:
+            # Check if this line has a colon
+            if ':' in line:
                 # Save previous key-value if exists
-                if current_key is not None and current_value:
-                    value = '\n'.join(current_value)
-                    # Strip quotes if present
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-                    translations[current_key] = value
-                    current_value = []
+                if current_key and current_value:
+                    value_text = ' '.join(current_value).strip()
+                    if value_text.startswith('"') and value_text.endswith('"'):
+                        value_text = value_text[1:-1]
+                    extracted[current_key] = value_text
                 
-                # Split at the FIRST colon (the key might contain colons too)
-                colon_idx = line.index(':')
-                key_part = line[:colon_idx].strip()
-                value_part = line[colon_idx + 1:].strip()
+                # Split by the last colon (in case key contains colons)
+                colon_pos = line.rfind(':')
+                key_part = line[:colon_pos].strip()
+                value_part = line[colon_pos+1:].strip()
                 
-                # Clean the key - remove quotes if present
+                # Clean the key
                 if key_part.startswith('"') and key_part.endswith('"'):
-                    key_part = key_part[1:-1]
-                elif key_part.startswith("'") and key_part.endswith("'"):
                     key_part = key_part[1:-1]
                 
                 # Unescape the key
-                key_part = key_part.replace('\\n', '\n')
-                current_key = key_part
+                key_part = key_part.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
                 
-                # Check if value exists on same line
-                if value_part:
-                    # Check if value is complete (has closing quote if it started with one)
-                    if value_part.startswith('"'):
-                        if value_part.endswith('"') or has_comma:
-                            # Complete value
-                            if value_part.endswith('"'):
-                                value_part = value_part[1:-1]
-                            else:
-                                value_part = value_part[1:]  # Remove opening quote
-                            translations[current_key] = value_part
-                            current_key = None
-                        else:
-                            # Multi-line value starts
-                            current_value = [value_part[1:]]  # Remove opening quote
-                            in_value = True
-                    else:
-                        # Unquoted value - take it as is
-                        translations[current_key] = value_part
-                        current_key = None
-            elif in_value:
-                # Continuation of multi-line value
-                if line.endswith('"') or has_comma:
-                    # End of value
-                    if line.endswith('"'):
-                        line = line[:-1]
-                    current_value.append(line)
-                    value = '\n'.join(current_value)
-                    translations[current_key] = value
-                    current_key = None
-                    current_value = []
-                    in_value = False
-                else:
-                    # Still in value
-                    current_value.append(line)
-            elif current_key is not None:
-                # This is a value line for the current key (unquoted multi-line)
-                if has_comma or not lines[lines.index(line) + 1:]:  # Last line or has comma
-                    current_value.append(line)
-                    value = '\n'.join(current_value) if current_value else line
-                    translations[current_key] = value
-                    current_key = None
-                    current_value = []
-                else:
+                current_key = key_part
+                current_value = [value_part] if value_part else []
+            else:
+                # This is a continuation of the current value
+                if current_key:
                     current_value.append(line)
         
-        # Handle any remaining key-value
-        if current_key is not None:
-            value = '\n'.join(current_value) if current_value else ""
-            if value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
-            translations[current_key] = value
+        # Don't forget the last key-value pair
+        if current_key and current_value:
+            value_text = ' '.join(current_value).strip()
+            if value_text.startswith('"') and value_text.endswith('"'):
+                value_text = value_text[1:-1]
+            extracted[current_key] = value_text
         
-        # Convert back to valid JSON
-        if translations:
-            result = json.dumps(translations, ensure_ascii=False)
-            self._log(f"✅ Parsed {len(translations)} translations from flexible format", "debug")
-            return result
+        if extracted:
+            # Rebuild as valid JSON
+            rebuilt = json.dumps(extracted, ensure_ascii=False)
+            self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
+            return rebuilt
         
-        # Return original if nothing could be parsed
+        # Method 3: Try regex extraction as last resort
+        # Pattern for both quoted and unquoted keys
+        patterns = [
+            # Pattern 1: Quoted keys
+            r'"([^"]+)"\s*:\s*"([^"]*(?:\\"[^"]*)*)"',
+            # Pattern 2: Unquoted keys (for CJK text)
+            r'([^:"\s][^:"]*[^:"\s])\s*:\s*"([^"]*)"',
+            # Pattern 3: More flexible
+            r'([^:"{}\s][^:"{}\n]*?)\s*:\s*([^,}\n]+)'
+        ]
+        
+        extracted = {}
+        for pattern in patterns:
+            matches = re.finditer(pattern, response_text, re.MULTILINE | re.DOTALL)
+            for match in matches:
+                key = match.group(1).strip()
+                value = match.group(2).strip()
+                
+                # Clean up key and value
+                key = key.replace('\\n', '\n').strip()
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                value = value.replace('\\n', '\n').replace('\\"', '"')
+                
+                if key and value:
+                    extracted[key] = value
+        
+        if extracted:
+            rebuilt = json.dumps(extracted, ensure_ascii=False)
+            self._log(f"✅ Extracted {len(extracted)} translations with regex", "info")
+            return rebuilt
+        
+        # If all else fails, return original
+        self._log("⚠️ Could not fix JSON, returning original", "warning")
         return response_text
     
     def _fix_encoding_issues(self, text: str) -> str:
