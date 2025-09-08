@@ -468,6 +468,10 @@ class XHTMLConverter:
         try:
             import html
             
+            # Add debug at the very start
+            log(f"[DEBUG] Processing chapter: {title}")
+            log(f"[DEBUG] Input HTML length: {len(html_content)}")
+            
             # Fix broken attributes with ="" pattern
             def fix_broken_attributes_only(match):
                 tag_content = match.group(0)
@@ -488,7 +492,7 @@ class XHTMLConverter:
             
             def escape_story_tags(match):
                 tag = match.group(0)
-                return html.escape(tag)
+                return html.escape(tag) 
             
             html_content = re.sub(r'<[^/>][^>]*?:[^>]*?>', escape_story_tags, html_content)
             
@@ -524,6 +528,12 @@ class XHTMLConverter:
             
         except Exception as e:
             log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
+            # ADD MORE DEBUG INFO HERE
+            import traceback
+            log(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
+            log(f"[DEBUG] Failed chapter title: {title}")
+            log(f"[DEBUG] First 500 chars of input: {html_content[:500] if html_content else 'EMPTY'}")
+            
             return XHTMLConverter._build_fallback_xhtml(title)
  
     @staticmethod
