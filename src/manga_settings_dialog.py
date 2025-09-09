@@ -1493,7 +1493,7 @@ class MangaSettingsDialog:
         )
         bubble_enable_cb.pack(anchor='w')
 
-        # Detector type dropdown
+        # Detector type dropdown - PUT THIS DIRECTLY IN bubble_frame
         detector_type_frame = tk.Frame(bubble_frame)
         detector_type_frame.pack(fill='x', pady=(10, 0))
 
@@ -1504,18 +1504,21 @@ class MangaSettingsDialog:
             'RT-DETR': 'ogkalu/comic-text-and-bubble-detector',
             'YOLOv8 Speech': 'ogkalu/comic-speech-bubble-detector-yolov8m',
             'YOLOv8 Text': 'ogkalu/comic-text-segmenter-yolov8m',
-            'YOLOv8 Manga': 'ogkalu/manga-text-detector-yolov8s'
+            'YOLOv8 Manga': 'ogkalu/manga-text-detector-yolov8s',
+            'Custom Model': ''
         }
-        
+
         # Get saved detector type
         saved_type = self.settings['ocr'].get('detector_type', 'rtdetr')
         if saved_type == 'rtdetr':
             initial_selection = 'RT-DETR'
         elif saved_type == 'yolo':
             initial_selection = 'YOLOv8 Speech'
+        elif saved_type == 'custom':
+            initial_selection = 'Custom Model'
         else:
             initial_selection = 'RT-DETR'
-        
+
         self.detector_type = tk.StringVar(value=initial_selection)
 
         detector_combo = ttk.Combobox(
@@ -1527,6 +1530,37 @@ class MangaSettingsDialog:
         )
         detector_combo.pack(side='left', padx=(10, 0))
         detector_combo.bind('<<ComboboxSelected>>', lambda e: self._on_detector_type_changed())
+
+        # NOW create the settings frame
+        self.yolo_settings_frame = tk.LabelFrame(bubble_frame, text="Model Settings", padx=10, pady=5)
+        self.rtdetr_settings_frame = self.yolo_settings_frame  # Alias
+
+        # NOW you can create model_frame inside yolo_settings_frame
+        model_frame = tk.Frame(self.yolo_settings_frame)
+        model_frame.pack(fill='x', pady=(5, 0))
+
+        tk.Label(model_frame, text="Model:", width=12, anchor='w').pack(side='left')
+
+        self.bubble_model_path = tk.StringVar(
+            value=self.settings['ocr'].get('bubble_model_path', '')
+        )
+        self.rtdetr_model_url = self.bubble_model_path  # Alias
+
+        # Style the entry to match GUI theme
+        self.bubble_model_entry = tk.Entry(
+            model_frame,
+            textvariable=self.bubble_model_path,
+            width=35,
+            state='readonly',
+            bg='#2b2b2b',  # Dark background
+            fg='#ffffff',  # White text
+            insertbackground='#ffffff',  # White cursor
+            readonlybackground='#1e1e1e',  # Even darker when readonly
+            relief='flat',
+            bd=1
+        )
+        self.bubble_model_entry.pack(side='left', padx=(0, 10))
+        self.rtdetr_url_entry = self.bubble_model_entry  # Alias
         
         # Store for compatibility
         self.detector_radio_widgets = [detector_combo]
@@ -1707,9 +1741,14 @@ class MangaSettingsDialog:
         # Initialize control states
         self._toggle_bubble_controls()
 
+        # Only call detector change after everything is initialized
         if self.bubble_detection_enabled.get():
-            self._on_detector_type_changed()
-            self._update_bubble_status()
+            try:
+                self._on_detector_type_changed()
+                self._update_bubble_status()
+            except AttributeError:
+                # Frames not yet created, skip initialization
+                pass
 
         # Check status after dialog ready
         self.dialog.after(500, self._check_rtdetr_status)
@@ -1725,10 +1764,34 @@ class MangaSettingsDialog:
         
         detector = self.detector_type.get()
         
-        # Update model URL based on selection
-        if detector in self.detector_models:
+        # Handle different detector types
+        if detector == 'Custom Model':
+            # Custom model - enable manual entry
+            self.bubble_model_path.set(self.settings['ocr'].get('custom_model_path', ''))
+            self.bubble_model_entry.config(
+                state='normal',
+                bg='#2b2b2b',
+                readonlybackground='#2b2b2b'
+            )
+            # Show browse/clear buttons for custom
+            self.bubble_browse_btn.pack(side='left')
+            self.bubble_clear_btn.pack(side='left', padx=(5, 0))
+            # Hide download button
+            self.rtdetr_download_btn.pack_forget()
+        elif detector in self.detector_models:
+            # HuggingFace model
             url = self.detector_models[detector]
             self.bubble_model_path.set(url)
+            # Make entry read-only for HuggingFace models
+            self.bubble_model_entry.config(
+                state='readonly',
+                readonlybackground='#1e1e1e'
+            )
+            # Hide browse/clear buttons for HuggingFace models
+            self.bubble_browse_btn.pack_forget()
+            self.bubble_clear_btn.pack_forget()
+            # Show download button
+            self.rtdetr_download_btn.pack(side='left', padx=(0, 5))
         
         # Show/hide RT-DETR specific controls
         if 'RT-DETR' in detector:
@@ -2284,14 +2347,18 @@ class MangaSettingsDialog:
         self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
         self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
         
-        # Save the detector type as the backend expects
-        detector_display = self.detector_type.get()
-        if 'RT-DETR' in detector_display:
-            self.settings['ocr']['detector_type'] = 'rtdetr'
-        elif 'YOLOv8' in detector_display:
-            self.settings['ocr']['detector_type'] = 'yolo'
-        else:
-            self.settings['ocr']['detector_type'] = 'auto'
+        # Save the detector type as the backend expects - NO AUTO MODE
+        if hasattr(self, 'detector_type'):
+            detector_display = self.detector_type.get()
+            if 'RT-DETR' in detector_display:
+                self.settings['ocr']['detector_type'] = 'rtdetr'
+            elif 'YOLOv8' in detector_display:
+                self.settings['ocr']['detector_type'] = 'yolo'
+            elif detector_display == 'Custom Model':
+                self.settings['ocr']['detector_type'] = 'custom'
+                # Save the custom model path separately
+                self.settings['ocr']['custom_model_path'] = self.bubble_model_path.get()
+            # NO else clause - if nothing matches, don't change the setting
         
         # Inpainting settings - EXPANDED SECTION
         if hasattr(self, 'inpaint_batch_size'):
