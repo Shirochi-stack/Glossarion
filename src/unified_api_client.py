@@ -2327,7 +2327,7 @@ class UnifiedClient:
         elif self.client_type == 'chute':
             # Chute uses OpenAI-compatible endpoint
             if openai is not None:
-                chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1/chat/completions")
+                chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1")
                 
                 # MICROSECOND LOCK for Chute client
                 if hasattr(self, '_instance_model_lock'):
