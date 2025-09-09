@@ -2171,7 +2171,7 @@ Recent translations to summarize:
             "vertex/gemini-2.5-flash-lite",
 
             # Chute AI
-            "chutes/openai/gpt-oss-120b"
+            "chutes/openai/gpt-oss-120b",
             "chutes/deepseek-ai/DeepSeek-V3.1",
             
             # DeepSeek Models
@@ -2230,7 +2230,8 @@ Recent translations to summarize:
             "or/openai/gpt-5",
             "or/openai/gpt-5-mini",
             "or/openai/gpt-5-nano",
-            "or/openai/chatgpt-4o-latest",                   
+            "or/openai/chatgpt-4o-latest",   
+            "or/deepseek/deepseek-r1-0528:free",           
             
             # For ElectronHub, prefix with 'eh/'
             "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
