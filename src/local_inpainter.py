@@ -358,16 +358,20 @@ class LocalInpainter:
         return {}
     
     def _save_config(self):
-        # Load existing config
+        # Don't save if config is empty (prevents purging)
+        if not self.config:
+            return
+        
+        # Load existing
         full_config = {}
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 full_config = json.load(f)
         
-        # Update with inpainter settings directly
+        # Update
         full_config.update(self.config)
         
-        # Write back
+        # Save
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(full_config, f, indent=2, ensure_ascii=False)
 
