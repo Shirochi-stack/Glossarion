@@ -354,13 +354,23 @@ class LocalInpainter:
     
     def _load_config(self):
         if os.path.exists(self.config_path):
-            with open(self.config_path, 'r') as f:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         return {}
     
     def _save_config(self):
-        with open(self.config_path, 'w') as f:
-            json.dump(self.config, f, indent=2)
+        # Load existing config
+        full_config = {}
+        if os.path.exists(self.config_path):
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+        
+        # Update with inpainter settings directly
+        full_config.update(self.config)
+        
+        # Write back
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(full_config, f, indent=2, ensure_ascii=False)
 
     def convert_to_onnx(self, model_path: str, method: str) -> Optional[str]:
         """Convert a PyTorch model to ONNX format"""
