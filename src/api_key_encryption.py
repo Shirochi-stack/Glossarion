@@ -219,6 +219,9 @@ def migrate_config_file(config_file='config.json'):
         if 'multi_api_keys' in config:
             print(f"  - Encrypted {len(config['multi_api_keys'])} multi-key entries")
         
+        if 'fallback_keys' in config:
+            print(f"  - Encrypted {len(config['fallback_keys'])} fallback-key entries")
+    
         return True
         
     except Exception as e:
