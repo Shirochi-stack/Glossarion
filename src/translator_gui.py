@@ -2223,6 +2223,15 @@ Recent translations to summarize:
             "poe/claude", "poe/Assistant",
             "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
             
+            # For OR, prevfix with 'or/'
+            "or/google/gemini-2.5-pro",
+            "or/google/gemini-2.5-flash",
+            "or/google/gemini-2.5-flash-lite",
+            "or/openai/gpt-5",
+            "or/openai/gpt-5-mini",
+            "or/openai/gpt-5-nano",
+            "or/openai/chatgpt-4o-latest",                   
+            
             # For ElectronHub, prefix with 'eh/'
             "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
             "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
