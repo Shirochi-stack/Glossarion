@@ -190,7 +190,7 @@ class BubbleDetector:
         """Load configuration from file."""
         if os.path.exists(self.config_path):
             try:
-                with open(self.config_path, 'r') as f:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load config: {e}")
@@ -199,7 +199,7 @@ class BubbleDetector:
     def _save_config(self):
         """Save configuration to file."""
         try:
-            with open(self.config_path, 'w') as f:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
