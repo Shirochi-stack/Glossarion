@@ -292,8 +292,8 @@ class UnifiedClient:
         'o4': 'openai',
         'gemini': 'gemini',
         'claude': 'anthropic',
-        'chute': 'chute',
-        'chute/': 'chute',
+        'chutes': 'chutes',
+        'chutes/': 'chutes',
         'sonnet': 'anthropic',
         'opus': 'anthropic',
         'haiku': 'anthropic',
@@ -2324,26 +2324,26 @@ class UnifiedClient:
             else:
                 logger.info("ElectronHub will use HTTP API for API calls")
 
-        elif self.client_type == 'chute':
-            # Chute uses OpenAI-compatible endpoint
+        elif self.client_type == 'chutes':
+            # chutes uses OpenAI-compatible endpoint
             if openai is not None:
-                chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1")
+                chutes_base_url = os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1")
                 
-                # MICROSECOND LOCK for Chute client
+                # MICROSECOND LOCK for chutes client
                 if hasattr(self, '_instance_model_lock'):
                     with self._instance_model_lock:
                         self.openai_client = openai.OpenAI(
                             api_key=self.api_key,
-                            base_url=chute_base_url
+                            base_url=chutes_base_url
                         )
                 else:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
-                        base_url=chute_base_url
+                        base_url=chutes_base_url
                     )
-                logger.info(f"Chute client configured with endpoint: {chute_base_url}")
+                logger.info(f"chutes client configured with endpoint: {chutes_base_url}")
             else:
-                logger.info("Chute will use HTTP API")
+                logger.info("chutes will use HTTP API")
         
         elif self.client_type == 'mistral':
             if MistralClient is None:
@@ -2573,7 +2573,7 @@ class UnifiedClient:
                                   'sensenova', 'internlm', 'tii', 'microsoft', 
                                   'azure', 'google', 'alephalpha', 'databricks', 
                                   'huggingface', 'salesforce', 'bigscience', 'meta',
-                                  'electronhub', 'poe', 'openrouter', 'chute']:
+                                  'electronhub', 'poe', 'openrouter', 'chutes']:
             # These providers will use HTTP API or OpenAI-compatible endpoints
             # No client initialization needed here
             logger.info(f"{self.client_type} will use HTTP API or compatible endpoint")
@@ -4289,8 +4289,8 @@ class UnifiedClient:
                 elif self.client_type == 'vertex_model_garden':
                     response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
                                                                    max_tokens or max_completion_tokens, response_name)               
-                elif self.client_type == 'chute':
-                    response = self._send_chute_image(messages, image_base64, temperature, 
+                elif self.client_type == 'chutes':
+                    response = self._send_chutes_image(messages, image_base64, temperature, 
                                                       max_tokens or max_completion_tokens, response_name)
                
                 else:
@@ -6349,32 +6349,46 @@ class UnifiedClient:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
 
-    def _send_chute(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+    def _send_chutes(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Chute AI API"""
         
         # Get Chute API endpoint from environment or use default
-        chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1")
+        chutes_base_url = os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1")
+        
+        # Strip the 'chutes/' prefix from the model name if present
+        model_name = self.model
+        if model_name.startswith('chutes/'):
+            model_name = model_name[7:]  # Remove 'chutes/' prefix
+            logger.info(f"Stripped model name from '{self.model}' to '{model_name}'")
         
         # Log the request
-        logger.info(f"Sending request to Chute AI: {self.model}")
+        logger.info(f"Sending request to Chutes AI: {model_name}")
         
-        # Chute uses OpenAI-compatible endpoint
-        return self._send_openai_compatible(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            base_url=chute_base_url,
-            response_name=response_name,
-            provider="chute"
-        )
+        # Temporarily change self.model for the API call
+        original_model = self.model
+        self.model = model_name
+        
+        try:
+            # Chute uses OpenAI-compatible endpoint
+            return self._send_openai_compatible(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                base_url=chutes_base_url,
+                response_name=response_name,
+                provider="chutes"
+            )
+        finally:
+            # Restore original model name
+            self.model = original_model
 
-    def _send_chute_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+    def _send_chutes_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Chute AI"""
         
         # Get Chute API endpoint
-        chute_base_url = os.getenv("CHUTE_API_URL", "https://api.chute-ai.com/v1")
+        chute_base_url = os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1")
         
-        logger.info(f"Sending image request to Chute AI: {self.model}")
+        logger.info(f"Sending image request to Chutes AI: {self.model}")
         
         # Format messages with image
         formatted_messages = []
@@ -6398,9 +6412,9 @@ class UnifiedClient:
             max_tokens=max_tokens,
             base_url=chute_base_url,
             response_name=response_name,
-            provider="chute"
+            provider="chutes"
         )
- 
+    
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
         Route to appropriate AI provider and get response
@@ -6432,7 +6446,7 @@ class UnifiedClient:
             'anthropic': self._send_anthropic,
             'mistral': self._send_mistral,
             'cohere': self._send_cohere,
-            'chute': self._send_chute,
+            'chutes': self._send_chutes,
             'ai21': self._send_ai21,
             'together': self._send_together,
             'perplexity': self._send_perplexity,
@@ -8819,7 +8833,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chute']
+                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes']
         
         if openai and provider in sdk_compatible:
             # Use OpenAI SDK with custom base URL
@@ -8827,6 +8841,12 @@ class UnifiedClient:
                 try:
                     if self._cancelled:
                         raise UnifiedClientError("Operation cancelled")
+                    
+                    # debug logging for Chutes
+                    if provider == "chutes":
+                        print(f"DEBUG Chutes: base_url = {base_url}")
+                        print(f"DEBUG Chutes: model = {self.model}")
+                        print(f"DEBUG Chutes: api_key = {actual_api_key[:10]}..." if actual_api_key else "No API key")
                     
                     client = openai.OpenAI(
                         api_key=actual_api_key,  # Uses real key for cloud, dummy for local
@@ -8978,6 +8998,14 @@ class UnifiedClient:
                     )
                     
                 except Exception as e:
+                    
+                    # more detailed error logging for Chutes
+                    if provider == "chutes":
+                        print(f"DEBUG Chutes Error: {str(e)}")
+                        print(f"DEBUG Chutes Error Type: {type(e).__name__}")
+                        if hasattr(e, '__dict__'):
+                            print(f"DEBUG Chutes Error Details: {e.__dict__}")
+                    
                     error_str = str(e).lower()
                     
                     # For rate limits, ALWAYS immediately re-raise to let multi-key system handle it
