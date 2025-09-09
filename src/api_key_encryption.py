@@ -86,24 +86,6 @@ class APIKeyEncryption:
         
         return encrypted_keys
     
-    def decrypt_multi_keys(self, multi_keys):
-        """Decrypt API keys in multi_api_keys array"""
-        if not isinstance(multi_keys, list):
-            return multi_keys
-        
-        decrypted_keys = []
-        for key_entry in multi_keys:
-            if isinstance(key_entry, dict):
-                decrypted_entry = key_entry.copy()
-                # Decrypt the api_key field in each entry
-                if 'api_key' in decrypted_entry and decrypted_entry['api_key']:
-                    decrypted_entry['api_key'] = self.decrypt_value(decrypted_entry['api_key'])
-                decrypted_keys.append(decrypted_entry)
-            else:
-                decrypted_keys.append(key_entry)
-        
-        return decrypted_keys
-    
     def encrypt_config(self, config):
         """Encrypt specific API key fields including multi-key support"""
         encrypted = config.copy()
@@ -120,7 +102,30 @@ class APIKeyEncryption:
         if 'multi_api_keys' in encrypted:
             encrypted['multi_api_keys'] = self.encrypt_multi_keys(encrypted['multi_api_keys'])
         
+        # Encrypt fallback_keys if present (reuse multi_keys method)
+        if 'fallback_keys' in encrypted:
+            encrypted['fallback_keys'] = self.encrypt_multi_keys(encrypted['fallback_keys'])
+        
         return encrypted
+    
+    def decrypt_config(self, config):
+        """Decrypt specific API key fields including multi-key support"""
+        decrypted = config.copy()
+        
+        # Decrypt regular API key fields
+        for field in self.api_key_fields:
+            if field in decrypted and decrypted[field]:
+                decrypted[field] = self.decrypt_value(decrypted[field])
+        
+        # Decrypt multi_api_keys if present
+        if 'multi_api_keys' in decrypted:
+            decrypted['multi_api_keys'] = self.decrypt_multi_keys(decrypted['multi_api_keys'])
+        
+        # Decrypt fallback_keys if present (reuse multi_keys method)
+        if 'fallback_keys' in decrypted:
+            decrypted['fallback_keys'] = self.decrypt_multi_keys(decrypted['fallback_keys'])
+        
+        return decrypted
     
     def decrypt_config(self, config):
         """Decrypt specific API key fields including multi-key support"""
