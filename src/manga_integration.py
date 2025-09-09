@@ -640,20 +640,26 @@ class MangaTranslationTab:
             else:
                 self.provider_status_label.config(text="❌ Key needed", fg="red")
 
-        elif provider == 'custom=api':
-            # Custom API - check for configuration
+        elif provider == 'custom-api':
+            # Custom API - check for main API key
+            api_key = None
+            if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
+                api_key = self.main_gui.api_key_entry.get().strip()
+            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+                api_key = self.main_gui.config.get('api_key')
+            
+            # Check if AI bubble detection is enabled
             manga_settings = self.main_gui.config.get('manga_settings', {})
-            custom_config = manga_settings.get('ocr', {}).get('custom_api', {})
+            ocr_settings = manga_settings.get('ocr', {})
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
             
-            # Check if URL is configured (minimum requirement)
-            if custom_config.get('url'):
-                self.provider_status_label.config(text="✅ Configured", fg="green")
+            if api_key:
+                if bubble_detection_enabled:
+                    self.provider_status_label.config(text="✅ Ready", fg="green")
+                else:
+                    self.provider_status_label.config(text="⚠️ Enable AI bubble detection for best results", fg="orange")
             else:
-                self.provider_status_label.config(text="⚙️ Configure API", fg="orange")
-            
-            # Show Configure button
-            self.provider_setup_btn.config(text="Configure", bootstyle="info")
-            self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                self.provider_status_label.config(text="❌ API key needed", fg="red")
      
         elif provider == 'Qwen2-VL':
             # Load saved model size if available
@@ -1268,7 +1274,7 @@ class MangaTranslationTab:
             self.ocr_provider_frame,
             text="",
             font=('Arial', 9),
-            width=25
+            width=40
         )
         self.provider_status_label.pack(side=tk.LEFT, padx=(10, 0))
 
@@ -2254,11 +2260,23 @@ class MangaTranslationTab:
         control_frame = tk.Frame(self.parent_frame)
         control_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        # Check if ready
+        # Check if ready based on selected provider
         has_api_key = bool(self.main_gui.api_key_entry.get().strip()) if hasattr(self.main_gui, 'api_key_entry') else False
-        has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
-        is_ready = has_api_key and has_vision
-        
+        provider = self.ocr_provider_var.get()
+
+        # Determine readiness based on provider
+        if provider == 'google':
+            has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
+            is_ready = has_api_key and has_vision
+        elif provider == 'azure':
+            has_azure = bool(self.main_gui.config.get('azure_vision_key', ''))
+            is_ready = has_api_key and has_azure
+        elif provider == 'custom-api':
+            is_ready = has_api_key  # Only needs API key
+        else:
+            # Local providers (manga-ocr, easyocr, etc.) only need API key for translation
+            is_ready = has_api_key
+
         self.start_button = tb.Button(
             control_frame,
             text="Start Translation",
@@ -2267,14 +2285,16 @@ class MangaTranslationTab:
             state=tk.NORMAL if is_ready else tk.DISABLED
         )
         self.start_button.pack(side=tk.LEFT, padx=(0, 10))
-        
+
         # Add tooltip to show why button is disabled
         if not is_ready:
             reasons = []
             if not has_api_key:
                 reasons.append("API key not configured")
-            if not has_vision:
+            if provider == 'google' and not os.path.exists(self.main_gui.config.get('google_vision_credentials', '')):
                 reasons.append("Google Vision credentials not set")
+            elif provider == 'azure' and not self.main_gui.config.get('azure_vision_key', ''):
+                reasons.append("Azure credentials not configured")
             tooltip_text = "Cannot start: " + ", ".join(reasons)
             # You can add a tooltip here if you have a tooltip library
         
@@ -4499,7 +4519,7 @@ class MangaTranslationTab:
                     
                     self._log("✅ Set custom OCR prompt for Qwen2-VL", "info")
        
-        if ocr_config['provider'] == 'google':
+        elif ocr_config['provider'] == 'google':
             import os
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
             if not google_creds or not os.path.exists(google_creds):
@@ -4786,7 +4806,6 @@ class MangaTranslationTab:
             # Update font mode and multiplier explicitly
             self.translator.font_size_mode = self.font_size_mode_var.get()
             self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
-            self.translator.min_readable_size = self.min_readable_size_var.get()
             self.translator.min_readable_size = self.min_readable_size_var.get()
             self.translator.max_font_size_limit = self.max_font_size_var.get()
             self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
