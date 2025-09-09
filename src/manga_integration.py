@@ -2580,10 +2580,10 @@ class MangaTranslationTab:
         self.constrain_to_bubble_var.trace('w', lambda *args: self._save_rendering_settings())
         
         self.min_readable_size_var = tk.IntVar(value=config.get('manga_min_readable_size', 16))
-        self.min_readable_size_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace RIGHT after creation
+        self.min_readable_size_var.trace('w', lambda *args: self._save_rendering_settings()) 
         
         self.max_font_size_var = tk.IntVar(value=config.get('manga_max_font_size', 24))
-        self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace RIGHT after creation
+        self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  
         
         self.strict_text_wrapping_var = tk.BooleanVar(value=config.get('manga_strict_text_wrapping', False))
         self.strict_text_wrapping_var.trace('w', lambda *args: self._save_rendering_settings())
@@ -2675,6 +2675,7 @@ class MangaTranslationTab:
             value=self.main_gui.config.get('manga_visual_context_enabled', True)
         )
         self.visual_context_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.qwen2vl_model_size = config.get('qwen2vl_model_size', '1')  # Default to '1' (2B)
         
         # Output settings
         self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
@@ -2814,6 +2815,10 @@ class MangaTranslationTab:
             # OCR prompt
             if hasattr(self, 'ocr_prompt'):
                 self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
+             
+            # Qwen and custom models             
+            if hasattr(self, 'qwen2vl_model_size'):
+                self.main_gui.config['qwen2vl_model_size'] = self.qwen2vl_model_size
             
             # Call main GUI's save_config to persist to file
             if hasattr(self.main_gui, 'save_config'):
