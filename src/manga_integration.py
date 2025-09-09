@@ -4636,12 +4636,21 @@ class MangaTranslationTab:
                     self.main_gui,
                     log_callback=self._log
                 )
-                self.translator.ocr_manager = self.ocr_manager
-                # Set cloud inpainting if configured
+                
+                # Fix 4: Safely set OCR manager
+                if hasattr(self, 'ocr_manager'):
+                    self.translator.ocr_manager = self.ocr_manager
+                else:
+                    from ocr_manager import OCRManager
+                    self.ocr_manager = OCRManager(log_callback=self._log)
+                    self.translator.ocr_manager = self.ocr_manager
+                
+                # Set cloud inpainting if configured (only once!)
                 saved_api_key = self.main_gui.config.get('replicate_api_key', '')
                 if saved_api_key:
                     self.translator.use_cloud_inpainting = True
                     self.translator.replicate_api_key = saved_api_key
+                
                 # Apply text rendering settings
                 self._apply_rendering_settings()
                 
@@ -4723,7 +4732,7 @@ class MangaTranslationTab:
             self._log(f"  - Mode: {'SKIP' if self.translator.skip_inpainting else 'CLOUD' if self.translator.use_cloud_inpainting else 'LOCAL'}", "debug")
         
         # Clear log
-        self.log_text.delete('1.0', tk.END)
+        self.parent_frame.after(0, lambda: self.log_text.delete('1.0', tk.END))
         
         # Reset progress
         self.total_files = len(self.selected_files)
@@ -4994,8 +5003,9 @@ class MangaTranslationTab:
             self._log(traceback.format_exc(), "error")
         
         finally:
-            # Reset UI state
-            self.parent_frame.after(0, self._reset_ui_state)
+            # Check if parent frame still exists before scheduling callback
+            if hasattr(self, 'parent_frame') and self.parent_frame.winfo_exists():
+                self.parent_frame.after(0, self._reset_ui_state)
     
     def _stop_translation(self):
         """Stop the translation process"""
