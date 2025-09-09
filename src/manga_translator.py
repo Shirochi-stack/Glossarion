@@ -1245,17 +1245,22 @@ class MangaTranslator:
                             # Clear detection results after extracting regions
                             rtdetr_detections = None
                             
-                            # Process each region with manga-ocr
-                            for i, (x, y, w, h) in enumerate(all_regions):
-                                cropped = image[y:y+h, x:x+w]
-                                result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
-                                if result and len(result) > 0 and result[0].text.strip():
-                                    result[0].bbox = (x, y, w, h)
-                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                    ocr_results.append(result[0])
-                                    self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
-                                    self._log(f"✅ Detected text: {result[0].text[:50]}...")
-                            
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with manga-ocr")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'manga-ocr', confidence_threshold)
+                            else:
+                                # Process each region with manga-ocr
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = image[y:y+h, x:x+w]
+                                    result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
+                                        self._log(f"✅ Detected text: {result[0].text[:50]}...")
+
                             # Clear regions list after processing
                             all_regions = None
                     else:
@@ -1293,15 +1298,20 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with Qwen2-VL")
                             
-                            # Process each region with Qwen2-VL
-                            for i, (x, y, w, h) in enumerate(all_regions):
-                                cropped = image[y:y+h, x:x+w]
-                                result = self.ocr_manager.detect_text(cropped, 'Qwen2-VL', confidence=confidence_threshold)
-                                if result and len(result) > 0 and result[0].text.strip():
-                                    result[0].bbox = (x, y, w, h)
-                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                    ocr_results.append(result[0])
-                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with Qwen2-VL")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'Qwen2-VL', confidence_threshold)
+                            else:
+                                # Process each region with Qwen2-VL
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = image[y:y+h, x:x+w]
+                                    result = self.ocr_manager.detect_text(cropped, 'Qwen2-VL', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
                     else:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with Qwen2-VL")
@@ -1339,20 +1349,24 @@ class MangaTranslator:
                             # Clear detections after extracting regions
                             rtdetr_detections = None
                             
-                            # Process each region with Custom API
-                            for i, (x, y, w, h) in enumerate(all_regions):
-                                cropped = image[y:y+h, x:x+w]
-                                result = self.ocr_manager.detect_text(
-                                    cropped, 
-                                    'custom-api', 
-                                    confidence=confidence_threshold
-                                )
-                                if result and len(result) > 0 and result[0].text.strip():
-                                    # Adjust coordinates to full image space
-                                    result[0].bbox = (x, y, w, h)
-                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                    ocr_results.append(result[0])
-                                    self._log(f"🔍 Region {i+1}/{len(all_regions)}: {result[0].text[:50]}...")
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'custom-api', confidence_threshold)
+                            else:
+                                # Original sequential processing
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = image[y:y+h, x:x+w]
+                                    result = self.ocr_manager.detect_text(
+                                        cropped, 
+                                        'custom-api', 
+                                        confidence=confidence_threshold
+                                    )
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"🔍 Region {i+1}/{len(all_regions)}: {result[0].text[:50]}...")
                             
                             # Clear regions list after processing
                             all_regions = None
@@ -1403,15 +1417,20 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with EasyOCR")
                             
-                            # Process each region with EasyOCR
-                            for i, (x, y, w, h) in enumerate(all_regions):
-                                cropped = image[y:y+h, x:x+w]
-                                result = self.ocr_manager.detect_text(cropped, 'easyocr', confidence=confidence_threshold)
-                                if result and len(result) > 0 and result[0].text.strip():
-                                    result[0].bbox = (x, y, w, h)
-                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                    ocr_results.append(result[0])
-                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with EasyOCR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'easyocr', confidence_threshold)
+                            else:
+                                # Process each region with EasyOCR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = image[y:y+h, x:x+w]
+                                    result = self.ocr_manager.detect_text(cropped, 'easyocr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
                     else:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with EasyOCR")
@@ -1461,15 +1480,20 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with PaddleOCR")
                             
-                            # Process each region with PaddleOCR
-                            for i, (x, y, w, h) in enumerate(all_regions):
-                                cropped = image[y:y+h, x:x+w]
-                                result = self.ocr_manager.detect_text(cropped, 'paddleocr', confidence=confidence_threshold)
-                                if result and len(result) > 0 and result[0].text.strip():
-                                    result[0].bbox = (x, y, w, h)
-                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                    ocr_results.append(result[0])
-                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with PaddleOCR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'paddleocr', confidence_threshold)
+                            else:
+                                # Process each region with PaddleOCR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = image[y:y+h, x:x+w]
+                                    result = self.ocr_manager.detect_text(cropped, 'paddleocr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
                     else:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with PaddleOCR")
@@ -1503,15 +1527,20 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with DocTR")
                             
-                            # Process each region with DocTR
-                            for i, (x, y, w, h) in enumerate(all_regions):
-                                cropped = image[y:y+h, x:x+w]
-                                result = self.ocr_manager.detect_text(cropped, 'doctr', confidence=confidence_threshold)
-                                if result and len(result) > 0 and result[0].text.strip():
-                                    result[0].bbox = (x, y, w, h)
-                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                    ocr_results.append(result[0])
-                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with DocTR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'doctr', confidence_threshold)
+                            else:
+                                # Process each region with DocTR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = image[y:y+h, x:x+w]
+                                    result = self.ocr_manager.detect_text(cropped, 'doctr', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
                     else:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with DocTR")
@@ -1617,6 +1646,69 @@ class MangaTranslator:
                 return result
         
         return languages
+
+    def _parallel_ocr_regions(self, image: np.ndarray, regions: List, provider: str, confidence_threshold: float) -> List:
+        """Process multiple regions in parallel using ThreadPoolExecutor"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        ocr_results = []
+        results_lock = threading.Lock()
+        
+        def process_single_region(index: int, bbox: Tuple[int, int, int, int]):
+            """Process a single region with OCR"""
+            x, y, w, h = bbox
+            try:
+                # Crop the region
+                cropped = image[y:y+h, x:x+w]
+                
+                # Run OCR on this region
+                result = self.ocr_manager.detect_text(
+                    cropped, 
+                    provider,
+                    confidence=confidence_threshold
+                )
+                
+                if result and len(result) > 0 and result[0].text.strip():
+                    # Adjust coordinates to full image space
+                    result[0].bbox = (x, y, w, h)
+                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                    return (index, result[0])
+                return (index, None)
+                
+            except Exception as e:
+                self._log(f"Error processing region {index}: {str(e)}", "error")
+                return (index, None)
+        
+        # Process regions in parallel
+        max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_index = {}
+            for i, bbox in enumerate(regions):
+                future = executor.submit(process_single_region, i, bbox)
+                future_to_index[future] = i
+            
+            # Collect results
+            results_dict = {}
+            completed = 0
+            for future in as_completed(future_to_index):
+                try:
+                    index, result = future.result(timeout=30)
+                    if result:
+                        results_dict[index] = result
+                        completed += 1
+                        self._log(f"✅ [{completed}/{len(regions)}] Processed region {index+1}")
+                except Exception as e:
+                    self._log(f"Failed to process region: {str(e)}", "error")
+            
+            # Sort results by index to maintain order
+            for i in range(len(regions)):
+                if i in results_dict:
+                    ocr_results.append(results_dict[i])
+        
+        self._log(f"📊 Parallel OCR complete: {len(ocr_results)}/{len(regions)} regions extracted")
+        return ocr_results
     
     def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
         """Pre-group Azure lines that are obviously part of the same text block
