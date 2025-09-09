@@ -187,6 +187,14 @@ def migrate_config_file(config_file='config.json'):
                     if key_entry['api_key'] and not key_entry['api_key'].startswith('ENC:'):
                         needs_encryption = True
                         break
+
+        # Check fallback_keys
+        if 'fallback_keys' in config and isinstance(config['fallback_keys'], list):
+            for key_entry in config['fallback_keys']:
+                if isinstance(key_entry, dict) and 'api_key' in key_entry:
+                    if key_entry['api_key'] and not key_entry['api_key'].startswith('ENC:'):
+                        needs_encryption = True
+                        break
         
         if not needs_encryption:
             print("Config already encrypted or no API keys found.")
