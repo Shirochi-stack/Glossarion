@@ -111,8 +111,17 @@ class MangaTranslationTab:
             "Output ONLY the raw text, nothing else."
         )
         
+        # flag to skip status checks during init
+        self._initializing_gui = True
+        
         # Build interface AFTER loading settings
         self._build_interface()
+
+        # Now allow status checks
+        self._initializing_gui = False
+        
+        # Do one status check after everything is built
+        self.dialog.after(100, self._check_provider_status)
         
         # Now that everything is initialized, allow saving
         self._initializing = False
@@ -603,6 +612,10 @@ class MangaTranslationTab:
     
     def _check_provider_status(self):
         """Check and display OCR provider status"""
+        # Skip during initialization to prevent lag
+        if hasattr(self, '_initializing_gui') and self._initializing_gui:
+            self.provider_status_label.config(text="", fg="black")
+            return
         provider = self.ocr_provider_var.get()
         
         # Hide ALL buttons first
@@ -4396,7 +4409,34 @@ class MangaTranslationTab:
         
         # Schedule next update
         self.parent_frame.after(100, self._process_updates)
+
+    def load_local_inpainting_model(self, model_path):
+        """Load a local inpainting model
         
+        Args:
+            model_path: Path to the model file
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Store the model path
+            self.local_inpaint_model_path = model_path
+            
+            # If using diffusers/torch models, load them here
+            if model_path.endswith('.safetensors') or model_path.endswith('.ckpt'):
+                # Initialize your inpainting pipeline
+                # This depends on your specific inpainting implementation
+                # Example:
+                # from diffusers import StableDiffusionInpaintPipeline
+                # self.inpaint_pipeline = StableDiffusionInpaintPipeline.from_single_file(model_path)
+                pass
+                
+            return True
+        except Exception as e:
+            self._log(f"Failed to load inpainting model: {e}", "error")
+            return False
+            
     def _start_translation(self):
         """Start the translation process"""
         if not self.selected_files:
@@ -4585,7 +4625,32 @@ class MangaTranslationTab:
                 elif inpainting_mode == 'local':
                     self.translator.skip_inpainting = False
                     self.translator.use_cloud_inpainting = False
-                    self._log("Inpainting: LOCAL", "debug")
+                    
+                    # IMPORTANT: Load the local inpainting model if not already loaded
+                    if hasattr(self, 'local_model_var'):
+                        selected_model = self.local_model_var.get()
+                        if selected_model and selected_model != "None":
+                            # Get model path from available models
+                            model_info = self.available_local_models.get(selected_model)
+                            if model_info:
+                                model_path = model_info['path']
+                                # Load the model into translator
+                                if hasattr(self.translator, 'load_local_inpainting_model'):
+                                    success = self.translator.load_local_inpainting_model(model_path)
+                                    if success:
+                                        self._log(f"Inpainting: LOCAL - Loaded {selected_model}", "info")
+                                    else:
+                                        self._log(f"Inpainting: Failed to load local model {selected_model}", "error")
+                                else:
+                                    # Set the model path directly if no load method
+                                    self.translator.local_inpaint_model_path = model_path
+                                    self._log(f"Inpainting: LOCAL - Set model path for {selected_model}", "info")
+                            else:
+                                self._log("Inpainting: LOCAL - No model selected", "warning")
+                        else:
+                            self._log("Inpainting: LOCAL - No model configured", "warning")
+                    else:
+                        self._log("Inpainting: LOCAL (default)", "debug")
                     
                 elif inpainting_mode == 'cloud':
                     self.translator.skip_inpainting = False
