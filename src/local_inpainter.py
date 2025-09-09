@@ -2,7 +2,6 @@
 Local inpainting implementation - COMPATIBLE VERSION WITH JIT SUPPORT
 Maintains full backward compatibility while adding proper JIT model support
 """
-
 import os
 import sys
 import json
