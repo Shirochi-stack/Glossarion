@@ -8843,10 +8843,10 @@ class UnifiedClient:
                         raise UnifiedClientError("Operation cancelled")
                     
                     # debug logging for Chutes
-                    if provider == "chutes":
-                        print(f"DEBUG Chutes: base_url = {base_url}")
-                        print(f"DEBUG Chutes: model = {self.model}")
-                        print(f"DEBUG Chutes: api_key = {actual_api_key[:10]}..." if actual_api_key else "No API key")
+                    #if provider == "chutes":
+                    #    print(f"DEBUG Chutes: base_url = {base_url}")
+                    #    print(f"DEBUG Chutes: model = {self.model}")
+                    #    print(f"DEBUG Chutes: api_key = {actual_api_key[:10]}..." if actual_api_key else "No API key")
                     
                     client = openai.OpenAI(
                         api_key=actual_api_key,  # Uses real key for cloud, dummy for local
