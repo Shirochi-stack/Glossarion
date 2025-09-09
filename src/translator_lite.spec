@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v4.2.0 - PyInstaller Specification File
+Glossarion Lite v4.2.4 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
