@@ -1,76 +1,212 @@
-# manga_integration.py
+# manga_translator.py
 """
-Enhanced GUI Integration module for Manga Translation with text visibility controls
-Integrates with TranslatorGUI using WindowManager and existing infrastructure
-Now includes full page context mode with customizable prompt
+Enhanced Manga Translation Pipeline with improved text visibility controls
+Handles OCR, translation, and advanced text rendering for manga panels
+Now with proper history management and full page context support
 """
 
 import os
 import json
-import threading
+import base64
+import logging
 import time
-import hashlib
 import traceback
-from tkinter import filedialog, messagebox
-import tkinter as tk
-from tkinter import ttk
-import ttkbootstrap as tb
-from typing import List, Dict, Optional, Any
-from queue import Queue
-from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
-from manga_settings_dialog import MangaSettingsDialog
+import cv2
+from PIL import ImageEnhance, ImageFilter
+from typing import List, Dict, Tuple, Optional, Any
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+from bubble_detector import BubbleDetector
 
-
-# Try to import UnifiedClient for API initialization
+# Google Cloud Vision imports
 try:
-    from unified_api_client import UnifiedClient
+    from google.cloud import vision
+    GOOGLE_CLOUD_VISION_AVAILABLE = True
 except ImportError:
-    UnifiedClient = None
+    GOOGLE_CLOUD_VISION_AVAILABLE = False
+    print("Warning: Google Cloud Vision not installed. Install with: pip install google-cloud-vision")
 
-class MangaTranslationTab:
-    """GUI interface for manga translation integrated with TranslatorGUI"""
+# Import HistoryManager for proper context management
+try:
+    from history_manager import HistoryManager
+except ImportError:
+    HistoryManager = None
+    print("Warning: HistoryManager not available. Context tracking will be limited.")
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class TextRegion:
+    """Represents a detected text region (speech bubble, narration box, etc.)"""
+    text: str
+    vertices: List[Tuple[int, int]]  # Polygon vertices from Cloud Vision
+    bounding_box: Tuple[int, int, int, int]  # x, y, width, height
+    confidence: float
+    region_type: str  # 'text_block' from Cloud Vision
+    translated_text: Optional[str] = None
     
-    def __init__(self, parent_frame: tk.Frame, main_gui, dialog, canvas):
-        """Initialize manga translation interface
+    def to_dict(self):
+        return {
+            'text': self.text,
+            'vertices': self.vertices,
+            'bounding_box': self.bounding_box,
+            'confidence': self.confidence,
+            'region_type': self.region_type,
+            'translated_text': self.translated_text
+        }
+
+class MangaTranslator:
+    """Main class for manga translation pipeline using Google Cloud Vision + API Key"""
+    
+    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
+        """Initialize with OCR configuration and API client from main GUI
         
         Args:
-            parent_frame: The scrollable frame from WindowManager
-            main_gui: Reference to TranslatorGUI instance
-            dialog: The dialog window
-            canvas: The canvas for scrolling
+            ocr_config: Dictionary with OCR provider settings:
+                {
+                    'provider': 'google' or 'azure',
+                    'google_credentials_path': str (if google),
+                    'azure_key': str (if azure),
+                    'azure_endpoint': str (if azure)
+                }
         """
-        self.parent_frame = parent_frame
+        # Set up logging first
+        self.log_callback = log_callback
         self.main_gui = main_gui
-        self.dialog = dialog
-        self.canvas = canvas
         
-        # Translation state
-        self.translator = None
-        self.is_running = False
-        self.stop_flag = threading.Event()
-        self.translation_thread = None
-        self.selected_files = []
-        self.current_file_index = 0
-        self.font_mapping = {}  # Initialize font mapping dictionary
+        # Set up stdout capture to redirect prints to GUI
+        self._setup_stdout_capture()
+        
+        # Pass log callback to unified client
+        self.client = unified_client
+        if hasattr(self.client, 'log_callback'):
+            self.client.log_callback = log_callback
+        elif hasattr(self.client, 'set_log_callback'):
+            self.client.set_log_callback(log_callback)
+        self.ocr_config = ocr_config
+        self.main_gui = main_gui
+        self.log_callback = log_callback
+        self.config = main_gui.config
+        self.manga_settings = self.config.get('manga_settings', {})
 
+        # Initialize attributes
+        self.current_image = None
+        self.current_mask = None
+        self.text_regions = []
+        self.translated_regions = []
+        self.final_image = None
         
-        # Progress tracking
-        self.total_files = 0
-        self.completed_files = 0
-        self.failed_files = 0
-        self.qwen2vl_model_size = self.main_gui.config.get('qwen2vl_model_size', '1')
+        # Initialize inpainter attributes
+        self.local_inpainter = None
+        self.hybrid_inpainter = None
+        self.inpainter = None
         
-        # Queue for thread-safe GUI updates
-        self.update_queue = Queue()
+        # Initialize bubble detector
+        self.bubble_detector = None
         
-        # Flag to prevent saving during initialization
-        self._initializing = True
+        # Processing flags
+        self.is_processing = False
+        self.cancel_requested = False
+
+        # Initialize batch mode attributes
+        self.batch_mode = main_gui.batch_translation_var.get() if hasattr(main_gui, 'batch_translation_var') else False
+        self.batch_size = int(main_gui.batch_size_var.get()) if hasattr(main_gui, 'batch_size_var') else 1
+        self.batch_current = 1 
         
-        # IMPORTANT: Load settings BEFORE building interface
-        # This ensures all variables are initialized before they're used in the GUI
-        self._load_rendering_settings()
+        if self.batch_mode:
+            self._log(f"📦 BATCH MODE: Processing {self.batch_size} images")
+            self._log(f"⏱️ Keeping API delay for rate limit protection")
+            
+            # Pre-load models for batch processing
+            if self.bubble_detector is None:
+                from bubble_detector import BubbleDetector
+                self.bubble_detector = BubbleDetector()
+            
+            # Pre-load RT-DETR if using it
+            ocr_settings = self.manga_settings.get('ocr', {})
+            if ocr_settings.get('detector_type', 'yolo') == 'rtdetr':
+                self._log("📥 Pre-loading RT-DETR for batch processing...")
+                self.bubble_detector.load_rtdetr_model()
         
-        # Initialize the full page context prompt
+        # Cache for processed images
+        self.cache = {}
+        # Determine OCR provider
+        self.ocr_provider = ocr_config.get('provider', 'google')
+        self.bubble_detector = None
+
+        if self.ocr_provider == 'google':
+            if not GOOGLE_CLOUD_VISION_AVAILABLE:
+                raise ImportError("Google Cloud Vision required. Install with: pip install google-cloud-vision")
+            
+            google_path = ocr_config.get('google_credentials_path')
+            if not google_path:
+                raise ValueError("Google credentials path required")
+                
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
+            self.vision_client = vision.ImageAnnotatorClient()
+            
+        elif self.ocr_provider == 'azure':
+            # Import Azure libraries
+            try:
+                from azure.cognitiveservices.vision.computervision import ComputerVisionClient
+                from msrest.authentication import CognitiveServicesCredentials
+                self.azure_cv = ComputerVisionClient
+                self.azure_creds = CognitiveServicesCredentials
+            except ImportError:
+                raise ImportError("Azure Computer Vision required. Install with: pip install azure-cognitiveservices-vision-computervision")
+            
+            azure_key = ocr_config.get('azure_key')
+            azure_endpoint = ocr_config.get('azure_endpoint')
+            
+            if not azure_key or not azure_endpoint:
+                raise ValueError("Azure key and endpoint required")
+                
+            self.vision_client = self.azure_cv(
+                azure_endpoint,
+                self.azure_creds(azure_key)
+            )
+        else:
+            # New OCR providers handled by OCR manager
+            from ocr_manager import OCRManager
+            self.ocr_manager = OCRManager(log_callback=log_callback)
+            print(f"Initialized OCR Manager for {self.ocr_provider}")
+        
+        self.client = unified_client
+        self.main_gui = main_gui
+        self.log_callback = log_callback
+        
+        # Get all settings from GUI
+        self.api_delay = float(self.main_gui.delay_entry.get() if hasattr(main_gui, 'delay_entry') else 2.0)
+        self.temperature = float(main_gui.trans_temp.get() if hasattr(main_gui, 'trans_temp') else 0.3)
+        self.max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
+        if hasattr(main_gui, 'token_limit_disabled') and main_gui.token_limit_disabled:
+            self.input_token_limit = None  # None means no limit
+            self._log("📊 Input token limit: DISABLED (unlimited)")
+        else:
+            token_limit_value = main_gui.token_limit_entry.get() if hasattr(main_gui, 'token_limit_entry') else '120000'
+            if token_limit_value and token_limit_value.strip().isdigit():
+                self.input_token_limit = int(token_limit_value.strip())
+            else:
+                self.input_token_limit = 120000  # Default
+            self._log(f"📊 Input token limit: {self.input_token_limit} tokens")
+        
+        # Get contextual settings from GUI
+        self.contextual_enabled = main_gui.contextual_var.get() if hasattr(main_gui, 'contextual_var') else False
+        self.translation_history_limit = int(main_gui.trans_history.get() if hasattr(main_gui, 'trans_history') else 3)
+        self.rolling_history_enabled = main_gui.translation_history_rolling_var.get() if hasattr(main_gui, 'translation_history_rolling_var') else False
+        
+        # Initialize HistoryManager placeholder
+        self.history_manager = None
+        self.history_manager_initialized = False
+        self.history_output_dir = None
+        
+        # Full page context translation settings
+        self.full_page_context_enabled = True
+        
+        # Default prompt for full page context mode
         self.full_page_context_prompt = (
             "You will receive multiple text segments from a manga page. "
             "Translate each segment considering the context of all segments together. "
@@ -89,4948 +225,5551 @@ class MangaTranslationTab:
             'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
 
-        # Initialize the OCR system prompt
-        self.ocr_prompt = self.main_gui.config.get('manga_ocr_prompt', 
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
-        )
+        # Visual context setting (for non-vision model support)
+        self.visual_context_enabled = main_gui.config.get('manga_visual_context_enabled', True)
         
-        # flag to skip status checks during init
-        self._initializing_gui = True
+        # Store context for contextual translation (backwards compatibility)
+        self.translation_context = []
         
-        # Build interface AFTER loading settings
-        self._build_interface()
+        # Font settings for text rendering
+        self.font_path = self._find_font()
+        self.min_font_size = 10
+        self.max_font_size = 60
+        self.min_readable_size = main_gui.config.get('manga_min_readable_size', 16)
+        self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
+        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', False)
+        
+        # Enhanced text rendering settings - Load from config if available
+        config = main_gui.config if hasattr(main_gui, 'config') else {}
+        
+        self.text_bg_opacity = config.get('manga_bg_opacity', 255)  # 0-255, default fully opaque
+        self.text_bg_style = config.get('manga_bg_style', 'box')  # 'box', 'circle', 'wrap'
+        self.text_bg_reduction = config.get('manga_bg_reduction', 1.0)  # Size reduction factor (0.5-1.0)
+        self.constrain_to_bubble = config.get('manga_constrain_to_bubble', True) 
+        
+        # Text color from config
+        manga_text_color = config.get('manga_text_color', [0, 0, 0])
+        self.text_color = tuple(manga_text_color)  # Convert list to tuple
+        
+        self.outline_color = (255, 255, 255)  # White outline
+        self.outline_width_factor = 15  # Divider for font_size to get outline width
+        self.selected_font_style = config.get('manga_font_path', None)  # Will store selected font path
+        self.custom_font_size = config.get('manga_font_size', None) if config.get('manga_font_size', 0) > 0 else None
+        
+        # Text shadow settings from config
+        self.shadow_enabled = config.get('manga_shadow_enabled', False)
+        manga_shadow_color = config.get('manga_shadow_color', [128, 128, 128])
+        self.shadow_color = tuple(manga_shadow_color)  # Convert list to tuple
+        self.shadow_offset_x = config.get('manga_shadow_offset_x', 2)
+        self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
+        self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
+        self.force_caps_lock = config.get('manga_force_caps_lock', False)
+        self.skip_inpainting = config.get('manga_skip_inpainting', True)
 
-        # Now allow status checks
-        self._initializing_gui = False
+        # Font size multiplier mode - Load from config
+        self.font_size_mode = config.get('manga_font_size_mode', 'fixed')  # 'fixed' or 'multiplier'
+        self.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)  # Default multiplierr
         
-        # Do one status check after everything is built
-        self.dialog.after(100, self._check_provider_status)
+        #inpainting quality
+        self.inpaint_quality = config.get('manga_inpaint_quality', 'high')  # 'high' or 'fast'        
         
-        # Now that everything is initialized, allow saving
-        self._initializing = False
+        # Stop flag for interruption
+        self.stop_flag = None
         
-        # Start update loop
-        self._process_updates()
+        self._log("\n🔧 MangaTranslator initialized with settings:")
+        self._log(f"   API Delay: {self.api_delay}s")
+        self._log(f"   Temperature: {self.temperature}")
+        self._log(f"   Max Output Tokens: {self.max_tokens}")
+        self._log(f"   Input Token Limit: {'DISABLED' if self.input_token_limit is None else self.input_token_limit}")
+        self._log(f"   Contextual Translation: {'ENABLED' if self.contextual_enabled else 'DISABLED'}")
+        self._log(f"   Translation History Limit: {self.translation_history_limit}")
+        self._log(f"   Rolling History: {'ENABLED' if self.rolling_history_enabled else 'DISABLED'}")
+        self._log(f"   Font Path: {self.font_path or 'Default'}")
+        self._log(f"   Text Rendering: BG {self.text_bg_style}, Opacity {int(self.text_bg_opacity/255*100)}%")
+        self._log(f"   Shadow: {'ENABLED' if self.shadow_enabled else 'DISABLED'}\n")
+        
+        self.manga_settings = config.get('manga_settings', {})
 
-    def _disable_spinbox_mousewheel(self, spinbox):
-        """Disable mousewheel scrolling on a spinbox"""
-        spinbox.bind("<MouseWheel>", lambda e: "break")
-        spinbox.bind("<Button-4>", lambda e: "break")  # Linux scroll up
-        spinbox.bind("<Button-5>", lambda e: "break")  # Linux scroll down
+        # Initialize local inpainter if configured
+        if self.manga_settings.get('inpainting', {}).get('method') == 'local':
+            self._initialize_local_inpainter()
+            
+        # advanced settings
+        self.debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False)
+        self.save_intermediate = self.manga_settings.get('advanced', {}).get('save_intermediate', False)
+        self.parallel_processing = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
+        self.max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+            
+    def set_stop_flag(self, stop_flag):
+        """Set the stop flag for checking interruptions"""
+        self.stop_flag = stop_flag
 
-    def _download_hf_model(self):
-        """Download HuggingFace models with progress tracking"""
-        provider = self.ocr_provider_var.get()
-        
-        # Model sizes (approximate in MB)
-        model_sizes = {
-            'manga-ocr': 450,
-            'Qwen2-VL': {
-                '2B': 4000,
-                '7B': 14000,
-                '72B': 144000,
-                'custom': 10000  # Default estimate for custom models
-            }
-        }
-        
-        # For Qwen2-VL, show model selection dialog first
-        if provider == 'Qwen2-VL':
-            # Use window manager from main_gui
-            selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.dialog,
-                "Select Qwen2-VL Model Size",
-                width=None,
-                height=None,
-                max_width_ratio=0.6,
-                max_height_ratio=0.3
-            )
-            
-            # Title
-            title_frame = tk.Frame(scrollable_frame)
-            title_frame.pack(fill=tk.X, pady=(10, 20))
-            tk.Label(title_frame, text="Select Qwen2-VL Model Size", 
-                    font=('Arial', 14, 'bold')).pack()
-            
-            # Model selection frame
-            model_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Model Options",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            model_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-            
-            model_options = {
-                "2B": {
-                    "title": "2B Model",
-                    "desc": "• Smallest model (~4GB download, 4-8GB VRAM)\n• Fast but less accurate\n• Good for quick testing"
-                },
-                "7B": {
-                    "title": "7B Model", 
-                    "desc": "• Medium model (~14GB download, 12-16GB VRAM)\n• Best balance of speed and quality\n• Recommended for most users"
-                },
-                "72B": {
-                    "title": "72B Model",
-                    "desc": "• Largest model (~144GB download, 80GB+ VRAM)\n• Highest quality but very slow\n• Requires high-end GPU"
-                },
-                "custom": {
-                    "title": "Custom Model",
-                    "desc": "• Enter any Hugging Face model ID\n• For advanced users\n• Size varies by model"
-                }
-            }
-            
-            selected_model = tk.StringVar(value="2B")
-            custom_model_id = tk.StringVar()
-            
-            for key, info in model_options.items():
-                option_frame = tk.Frame(model_frame)
-                option_frame.pack(fill=tk.X, pady=5)
-                
-                rb = tk.Radiobutton(option_frame, text=info["title"], 
-                                   variable=selected_model, value=key, 
-                                   font=('Arial', 11, 'bold'))
-                rb.pack(anchor='w')
-                
-                desc_label = tk.Label(option_frame, text=info["desc"], 
-                                     font=('Arial', 9), justify=tk.LEFT, fg='#666666')
-                desc_label.pack(anchor='w', padx=(20, 0))
-                
-                if key != "custom":
-                    ttk.Separator(option_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 0))
-            
-            # Custom model ID frame
-            custom_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Custom Model ID",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            
-            entry_frame = tk.Frame(custom_frame)
-            entry_frame.pack(fill=tk.X, pady=5)
-            tk.Label(entry_frame, text="Model ID:", font=('Arial', 10)).pack(side=tk.LEFT, padx=(0, 10))
-            custom_entry = tk.Entry(entry_frame, textvariable=custom_model_id, width=40, font=('Arial', 10))
-            custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            
-            def toggle_custom_frame(*args):
-                if selected_model.get() == "custom":
-                    custom_frame.pack(fill=tk.X, padx=20, pady=10, after=model_frame)
-                else:
-                    custom_frame.pack_forget()
-            
-            selected_model.trace('w', toggle_custom_frame)
-            
-            # GPU status frame
-            gpu_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="System Status",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            gpu_frame.pack(fill=tk.X, padx=20, pady=10)
-            
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-                    gpu_text = f"✓ GPU: {torch.cuda.get_device_name(0)} ({gpu_mem:.1f}GB)"
-                    gpu_color = '#4CAF50'
-                else:
-                    gpu_text = "✗ No GPU detected - will use CPU (very slow)"
-                    gpu_color = '#f44336'
-            except:
-                gpu_text = "? GPU status unknown - install torch with CUDA"
-                gpu_color = '#FF9800'
-            
-            tk.Label(gpu_frame, text=gpu_text, font=('Arial', 10), fg=gpu_color).pack(anchor='w')
-            
-            # Buttons
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill=tk.X, pady=20)
-            
-            model_confirmed = {'value': False, 'model_key': None, 'model_id': None}
-            
-            def confirm_selection():
-                selected = selected_model.get()
-                if selected == "custom":
-                    if not custom_model_id.get().strip():
-                        messagebox.showerror("Error", "Please enter a model ID")
-                        return
-                    model_confirmed['model_key'] = selected
-                    model_confirmed['model_id'] = custom_model_id.get().strip()
-                else:
-                    model_confirmed['model_key'] = selected
-                    model_confirmed['model_id'] = f"Qwen/Qwen2-VL-{selected}-Instruct"
-                model_confirmed['value'] = True
-                selection_dialog.destroy()
-            
-            # Center the buttons by creating an inner frame
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()
+    def _check_stop(self):
+        """Check if stop has been requested"""
+        if self.stop_flag and self.stop_flag.is_set():
+            return True
+        return False
 
-            proceed_btn = tk.Button(
-                button_inner_frame, text="Continue", command=confirm_selection,
-                bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
-                padx=20, pady=8, cursor='hand2'
-            )
-            proceed_btn.pack(side=tk.LEFT, padx=5)
-
-            cancel_btn = tk.Button(
-                button_inner_frame, text="Cancel", command=selection_dialog.destroy,
-                bg='#9E9E9E', fg='white', font=('Arial', 10),
-                padx=20, pady=8, cursor='hand2'
-            )
-            cancel_btn.pack(side=tk.LEFT, padx=5)
+    def _setup_stdout_capture(self):
+        """Set up stdout capture to redirect print statements to GUI"""
+        import sys
+        import builtins
+        
+        # Store original print function
+        self._original_print = builtins.print
+        
+        # Create custom print function
+        def gui_print(*args, **kwargs):
+            """Custom print that redirects to GUI"""
+            # Convert args to string
+            message = ' '.join(str(arg) for arg in args)
             
-            # Auto-resize and wait
-            self.main_gui.wm.auto_resize_dialog(selection_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.6)
-            self.dialog.wait_window(selection_dialog)
+            # Check if this is one of the specific messages we want to capture
+            if any(marker in message for marker in ['🔍', '✅', '⏳', 'INFO:', 'ERROR:', 'WARNING:']):
+                if self.log_callback:
+                    # Clean up the message
+                    message = message.strip()
+                    
+                    # Determine level
+                    level = 'info'
+                    if 'ERROR:' in message or '❌' in message:
+                        level = 'error'
+                    elif 'WARNING:' in message or '⚠️' in message:
+                        level = 'warning'
+                    
+                    # Remove prefixes like "INFO:" if present
+                    for prefix in ['INFO:', 'ERROR:', 'WARNING:', 'DEBUG:']:
+                        message = message.replace(prefix, '').strip()
+                    
+                    # Send to GUI
+                    self.log_callback(message, level)
+                    return  # Don't print to console
             
-            if not model_confirmed['value']:
-                return
-            
-            selected_model_key = model_confirmed['model_key']
-            model_id = model_confirmed['model_id']
-            total_size_mb = model_sizes['Qwen2-VL'][selected_model_key]
-        else:
-            total_size_mb = model_sizes.get(provider, 500)
-            model_id = None
-            selected_model_key = None
+            # For other messages, use original print
+            self._original_print(*args, **kwargs)
         
-        # Create download dialog with window manager
-        download_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,
-            f"Download {provider} Model",
-            width=600,
-            height=450,
-            max_width_ratio=0.6,
-            max_height_ratio=0.6
-        )
-        
-        # Info section
-        info_frame = tk.LabelFrame(
-            scrollable_frame,
-            text="Model Information",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        info_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        if provider == 'Qwen2-VL':
-            info_text = f"📚 Qwen2-VL {selected_model_key} Model\n"
-            info_text += f"Model ID: {model_id}\n"
-            info_text += f"Estimated size: ~{total_size_mb/1000:.1f}GB\n"
-            info_text += "Vision-Language model for Korean OCR"
-        else:
-            info_text = f"📚 {provider} Model\nOptimized for manga/manhwa text detection"
-        
-        tk.Label(info_frame, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack(anchor='w')
-        
-        # Progress section
-        progress_frame = tk.LabelFrame(
-            scrollable_frame,
-            text="Download Progress",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        progress_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        progress_label = tk.Label(progress_frame, text="Ready to download", font=('Arial', 10))
-        progress_label.pack(pady=(5, 10))
-        
-        progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
-                                      variable=progress_var)
-        progress_bar.pack(pady=(0, 5))
-        
-        size_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
-        size_label.pack()
-        
-        speed_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
-        speed_label.pack()
-        
-        status_label = tk.Label(progress_frame, text="Click 'Download' to begin", 
-                              font=('Arial', 9), fg='#666666')
-        status_label.pack(pady=(5, 0))
-        
-        # Log section
-        log_frame = tk.LabelFrame(
-            scrollable_frame,
-            text="Download Log",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-
-        # Create a frame to hold the text widget and scrollbar
-        text_frame = tk.Frame(log_frame)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-
-        details_text = tk.Text(
-            text_frame, 
-            height=12, 
-            width=70, 
-            font=('Courier', 9), 
-            bg='#f5f5f5'
-        )
-        details_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Attach scrollbar to the frame, not the text widget
-        scrollbar = ttk.Scrollbar(text_frame, command=details_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        details_text.config(yscrollcommand=scrollbar.set)
-            
-        def add_log(message):
-            """Add message to log"""
-            details_text.insert(tk.END, f"{message}\n")
-            details_text.see(tk.END)
-            details_text.update()
-        
-        # Buttons frame
-        button_frame = tk.Frame(download_dialog)
-        button_frame.pack(pady=15)
-        
-        # Download tracking variables
-        download_active = {'value': False}
-        
-        def get_dir_size(path):
-            """Get total size of directory"""
-            total = 0
-            try:
-                for dirpath, dirnames, filenames in os.walk(path):
-                    for filename in filenames:
-                        filepath = os.path.join(dirpath, filename)
-                        if os.path.exists(filepath):
-                            total += os.path.getsize(filepath)
-            except:
-                pass
-            return total
-        
-        def download_with_progress():
-            """Download model with real progress tracking"""
-            import time
-            
-            download_active['value'] = True
-            total_size = total_size_mb * 1024 * 1024
-            
-            try:
-                if provider == 'manga-ocr':
-                    progress_label.config(text="Loading manga-ocr model...")
-                    add_log("Initializing manga-ocr...")
-                    progress_var.set(10)
-                    
-                    from manga_ocr import MangaOcr
-                    
-                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-                    initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                    
-                    def init_model_with_progress():
-                        start_time = time.time()
-                        
-                        import threading
-                        model_ready = threading.Event()
-                        model_instance = [None]
-                        
-                        def init_model():
-                            model_instance[0] = MangaOcr()
-                            model_ready.set()
-                        
-                        init_thread = threading.Thread(target=init_model)
-                        init_thread.start()
-                        
-                        while not model_ready.is_set() and download_active['value']:
-                            current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                            downloaded = current_size - initial_size
-                            
-                            if downloaded > 0:
-                                progress = min((downloaded / total_size) * 100, 99)
-                                progress_var.set(progress)
-                                
-                                elapsed = time.time() - start_time
-                                if elapsed > 0:
-                                    speed = downloaded / elapsed
-                                    speed_mb = speed / (1024 * 1024)
-                                    speed_label.config(text=f"Speed: {speed_mb:.1f} MB/s")
-                                
-                                mb_downloaded = downloaded / (1024 * 1024)
-                                mb_total = total_size / (1024 * 1024)
-                                size_label.config(text=f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
-                                progress_label.config(text=f"Downloading: {progress:.1f}%")
-                            
-                            time.sleep(0.5)
-                        
-                        init_thread.join(timeout=1)
-                        return model_instance[0]
-                    
-                    model = init_model_with_progress()
-                    
-                    if model:
-                        progress_var.set(100)
-                        size_label.config(text=f"{total_size_mb} MB / {total_size_mb} MB")
-                        progress_label.config(text="✅ Download complete!")
-                        status_label.config(text="Model ready to use!")
-                        
-                        self.ocr_manager.get_provider('manga-ocr').model = model
-                        self.ocr_manager.get_provider('manga-ocr').is_loaded = True
-                        self.ocr_manager.get_provider('manga-ocr').is_installed = True
-                        
-                        self.dialog.after(0, self._check_provider_status)
-                        
-                elif provider == 'Qwen2-VL':
-                    try:
-                        from transformers import AutoProcessor, AutoTokenizer, AutoModelForVision2Seq
-                        import torch
-                    except ImportError as e:
-                        progress_label.config(text="❌ Missing dependencies")
-                        status_label.config(text="Install dependencies first")
-                        add_log(f"ERROR: {str(e)}")
-                        add_log("Please install manually:")
-                        add_log("pip install transformers torch torchvision")
-                        return
-                    
-                    progress_label.config(text=f"Downloading model...")
-                    add_log(f"Starting download of {model_id}")
-                    progress_var.set(10)
-                    
-                    add_log("Downloading processor...")
-                    status_label.config(text="Downloading processor...")
-                    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-                    progress_var.set(30)
-                    add_log("✓ Processor downloaded")
-                    
-                    add_log("Downloading tokenizer...")
-                    status_label.config(text="Downloading tokenizer...")
-                    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-                    progress_var.set(50)
-                    add_log("✓ Tokenizer downloaded")
-                    
-                    add_log("Downloading model weights (this may take several minutes)...")
-                    status_label.config(text="Downloading model weights...")
-                    progress_label.config(text="Downloading model weights...")
-                    
-                    if torch.cuda.is_available():
-                        add_log(f"Using GPU: {torch.cuda.get_device_name(0)}")
-                        model = AutoModelForVision2Seq.from_pretrained(
-                            model_id,
-                            dtype=torch.float16,
-                            device_map="auto",
-                            trust_remote_code=True
-                        )
-                    else:
-                        add_log("No GPU detected, will load on CPU")
-                        model = AutoModelForVision2Seq.from_pretrained(
-                            model_id,
-                            dtype=torch.float32,
-                            trust_remote_code=True
-                        )
-                    
-                    progress_var.set(90)
-                    add_log("✓ Model weights downloaded")
-                    
-                    add_log("Initializing model...")
-                    status_label.config(text="Initializing...")
-                    
-                    qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-                    if qwen_provider:
-                        qwen_provider.processor = processor
-                        qwen_provider.tokenizer = tokenizer  
-                        qwen_provider.model = model
-                        qwen_provider.model.eval()
-                        qwen_provider.is_loaded = True
-                        qwen_provider.is_installed = True
-                        
-                        if selected_model_key:
-                            qwen_provider.loaded_model_size = selected_model_key
-                    
-                    progress_var.set(100)
-                    progress_label.config(text="✅ Download complete!")
-                    status_label.config(text="Model ready for Korean OCR!")
-                    add_log("✓ Model ready to use!")
-                    
-                    self.dialog.after(0, self._check_provider_status)
-                    
-                    download_btn.config(state=tk.DISABLED)
-                    cancel_btn.config(text="Close", bootstyle="success")
-                        
-            except Exception as e:
-                progress_label.config(text="❌ Download failed")
-                status_label.config(text=f"Error: {str(e)[:50]}")
-                add_log(f"ERROR: {str(e)}")
-                self._log(f"Download error: {str(e)}", "error")
-                
-            finally:
-                download_active['value'] = False
-        
-        def start_download():
-            """Start download in background thread"""
-            download_btn.config(state=tk.DISABLED)
-            cancel_btn.config(text="Cancel")
-            
-            import threading
-            download_thread = threading.Thread(target=download_with_progress, daemon=True)
-            download_thread.start()
-        
-        def cancel_download():
-            """Cancel or close dialog"""
-            if download_active['value']:
-                download_active['value'] = False
-                status_label.config(text="Cancelling...")
-            else:
-                download_dialog.destroy()
-        
-        download_btn = tb.Button(button_frame, text="Download", command=start_download, bootstyle="primary")
-        download_btn.pack(side=tk.LEFT, padx=5)
-        
-        cancel_btn = tb.Button(button_frame, text="Close", command=cancel_download, bootstyle="secondary")
-        cancel_btn.pack(side=tk.LEFT, padx=5)
+        # Replace the built-in print
+        builtins.print = gui_print
     
-        # Auto-resize
-        self.main_gui.wm.auto_resize_dialog(download_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.6)
-    
-    def _check_provider_status(self):
-        """Check and display OCR provider status"""
-        # Skip during initialization to prevent lag
-        if hasattr(self, '_initializing_gui') and self._initializing_gui:
-            self.provider_status_label.config(text="", fg="black")
-            return
-        provider = self.ocr_provider_var.get()
+    def __del__(self):
+        """Restore original print when MangaTranslator is destroyed"""
+        if hasattr(self, '_original_print'):
+            import builtins
+            builtins.print = self._original_print
+
+    def set_batch_mode(self, enabled: bool, batch_size: int = 1):
+        """Enable or disable batch mode optimizations"""
+        self.batch_mode = enabled
+        self.batch_size = batch_size
         
-        # Hide ALL buttons first
-        if hasattr(self, 'provider_setup_btn'):
-            self.provider_setup_btn.pack_forget()
-        if hasattr(self, 'download_model_btn'):
-            self.download_model_btn.pack_forget()
-        
-        if provider == 'google':
-            # Google - check for credentials file
-            google_creds = self.main_gui.config.get('google_vision_credentials', '')
-            if google_creds and os.path.exists(google_creds):
-                self.provider_status_label.config(text="✅ Ready", fg="green")
-            else:
-                self.provider_status_label.config(text="❌ Credentials needed", fg="red")
-            
-        elif provider == 'azure':
-            # Azure - check for API key
-            azure_key = self.main_gui.config.get('azure_vision_key', '')
-            if azure_key:
-                self.provider_status_label.config(text="✅ Ready", fg="green")
-            else:
-                self.provider_status_label.config(text="❌ Key needed", fg="red")
-
-        elif provider == 'custom-api':
-            # Custom API - check for main API key
-            api_key = None
-            if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
-                api_key = self.main_gui.api_key_entry.get().strip()
-            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
-                api_key = self.main_gui.config.get('api_key')
-            
-            # Check if AI bubble detection is enabled
-            manga_settings = self.main_gui.config.get('manga_settings', {})
-            ocr_settings = manga_settings.get('ocr', {})
-            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
-            
-            if api_key:
-                if bubble_detection_enabled:
-                    self.provider_status_label.config(text="✅ Ready", fg="green")
-                else:
-                    self.provider_status_label.config(text="⚠️ Enable AI bubble detection for best results", fg="orange")
-            else:
-                self.provider_status_label.config(text="❌ API key needed", fg="red")
-     
-        elif provider == 'Qwen2-VL':
-            # Load saved model size if available
-            if hasattr(self, 'qwen2vl_model_size'):
-                saved_model_size = self.qwen2vl_model_size
-            else:
-                saved_model_size = self.main_gui.config.get('qwen2vl_model_size', '1')
-            
-            # When displaying status for loaded model
-            if status['loaded']:
-                # Map the saved size to display name
-                size_names = {'1': '2B', '2': '7B', '3': '72B', '4': 'custom'}
-                display_size = size_names.get(saved_model_size, saved_model_size)
-                self.provider_status_label.config(text=f"✅ {display_size} model loaded", fg="green")
- 
-        else:
-            # Local OCR providers
-            if not hasattr(self, 'ocr_manager'):
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=self._log)
-                
-            status = self.ocr_manager.check_provider_status(provider)
-            
-            if status['loaded']:
-                # Model is loaded and ready
-                if provider == 'Qwen2-VL':
-                    # Check which model size is loaded
-                    qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-                    if qwen_provider and hasattr(qwen_provider, 'loaded_model_size'):
-                        model_size = qwen_provider.loaded_model_size
-                        status_text = f"✅ {model_size} model loaded"
-                    else:
-                        status_text = "✅ Model loaded"
-                    self.provider_status_label.config(text=status_text, fg="green")
-                else:
-                    self.provider_status_label.config(text="✅ Model loaded", fg="green")
-                
-                # Show reload button for all local providers
-                self.provider_setup_btn.config(text="Reload", bootstyle="secondary")
-                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
-                
-            elif status['installed']:
-                # Dependencies installed but model not loaded
-                self.provider_status_label.config(text="📦 Dependencies ready", fg="orange")
-                
-                # Show Load button for all providers
-                self.provider_setup_btn.config(text="Load Model", bootstyle="primary")
-                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
-                
-                # Also show Download button for models that need downloading
-                if provider in ['Qwen2-VL', 'manga-ocr']:
-                    self.download_model_btn.config(text="📥 Download Model")
-                    self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
-                
-            else:
-                # Not installed
-                self.provider_status_label.config(text="❌ Not installed", fg="red")
-                
-                # Categorize providers
-                huggingface_providers = ['manga-ocr', 'Qwen2-VL']
-                pip_providers = ['easyocr', 'paddleocr', 'doctr']
-                
-                if provider in huggingface_providers:
-                    # For HuggingFace models, show BOTH buttons
-                    # Load Model button (will fail if dependencies missing and tell user to install)
-                    self.provider_setup_btn.config(text="Load Model", bootstyle="primary")
-                    self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
-                    
-                    # Download button
-                    self.download_model_btn.config(text=f"📥 Download {provider}")
-                    self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
-                    
-                elif provider in pip_providers:
-                    # Check if running as .exe
-                    if getattr(sys, 'frozen', False):
-                        # Running as .exe - can't pip install
-                        self.provider_status_label.config(
-                            text="❌ Not available in .exe", 
-                            fg="red"
-                        )
-                        self._log(f"⚠️ {provider} cannot be installed in standalone .exe version", "warning")
-                    else:
-                        # Running from Python - can pip install
-                        self.provider_setup_btn.config(text="Install", bootstyle="success")
-                        self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
-        
-        # Additional GPU status check for Qwen2-VL
-        if provider == 'Qwen2-VL' and not status['loaded']:
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    self._log("⚠️ No GPU detected - Qwen2-VL will run slowly on CPU", "warning")
-            except ImportError:
-                pass
-
-    def _setup_ocr_provider(self):
-        """Setup/install/load OCR provider"""
-        provider = self.ocr_provider_var.get()
-        
-        if provider in ['google', 'azure']:
-            return  # Cloud providers don't need setup
-
-        # your own api key
-        if provider == 'custom-api':
-            # Open configuration dialog for custom API
-            try:
-                from custom_api_config_dialog import CustomAPIConfigDialog
-                dialog = CustomAPIConfigDialog(
-                    self.manga_window,
-                    self.main_gui.config,
-                    self.main_gui.save_config
-                )
-                # After dialog closes, refresh status
-                self.dialog.after(100, self._check_provider_status)
-            except ImportError:
-                # If dialog not available, show message
-                messagebox.showinfo(
-                    "Custom API Configuration",
-                    "This mode uses your own API key in the main GUI:\n\n"
-                    "- Make sure your API supports vision\n"
-                    "- api_key: Your API key\n"
-                    "- model: Model name\n"
-                    "- custom url: You can override API endpoint under Other settings"
-                )
-            return
-        
-        status = self.ocr_manager.check_provider_status(provider)
-        
-        # For Qwen2-VL, check if we need to select model size first
-        model_size = None
-        if provider == 'Qwen2-VL' and status['installed'] and not status['loaded']:
-            # Use window manager for dialog
-            selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.dialog,
-                "Select Qwen2-VL Model Size",
-                width=None,
-                height=None,
-                max_width_ratio=0.5,
-                max_height_ratio=0.3
-            )
-            
-            # Title
-            title_frame = tk.Frame(scrollable_frame)
-            title_frame.pack(fill=tk.X, pady=(10, 20))
-            tk.Label(title_frame, text="Select Model Size to Load", 
-                    font=('Arial', 12, 'bold')).pack()
-            
-            # Model selection frame
-            model_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Available Models",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            model_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-            
-            # Model options
-            model_options = {
-                "1": {"name": "Qwen2-VL 2B", "desc": "Smallest (4-8GB VRAM)"},
-                "2": {"name": "Qwen2-VL 7B", "desc": "Medium (12-16GB VRAM)"},
-                "3": {"name": "Qwen2-VL 72B", "desc": "Largest (80GB+ VRAM)"},
-                "4": {"name": "Custom Model", "desc": "Enter any HF model ID"},
-            }
-            
-            selected_model = tk.StringVar(value="1")
-            custom_model_id = tk.StringVar()
-            
-            for key, info in model_options.items():
-                option_frame = tk.Frame(model_frame)
-                option_frame.pack(fill=tk.X, pady=5)
-                
-                rb = tk.Radiobutton(
-                    option_frame, 
-                    text=f"{info['name']} - {info['desc']}", 
-                    variable=selected_model, 
-                    value=key,
-                    font=('Arial', 10),
-                    anchor='w'
-                )
-                rb.pack(anchor='w')
-                
-                if key != "4":
-                    ttk.Separator(option_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 0))
-            
-            # Custom model ID frame
-            custom_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Custom Model Configuration",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            
-            entry_frame = tk.Frame(custom_frame)
-            entry_frame.pack(fill=tk.X, pady=5)
-            tk.Label(entry_frame, text="Model ID:", font=('Arial', 10)).pack(side=tk.LEFT, padx=(0, 10))
-            custom_entry = tk.Entry(entry_frame, textvariable=custom_model_id, width=35, font=('Arial', 10))
-            custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            
-            def toggle_custom_frame(*args):
-                if selected_model.get() == "4":
-                    custom_frame.pack(fill=tk.X, padx=20, pady=10, after=model_frame)
-                else:
-                    custom_frame.pack_forget()
-            
-            selected_model.trace('w', toggle_custom_frame)
-            
-            # Buttons with centering
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill=tk.X, pady=20)
-            
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()
-            
-            model_confirmed = {'value': False, 'size': None}
-            
-            def confirm_selection():
-                selected = selected_model.get()
-                self._log(f"DEBUG: Radio button selection = {selected}")
-                if selected == "4":
-                    if not custom_model_id.get().strip():
-                        messagebox.showerror("Error", "Please enter a model ID")
-                        return
-                    model_confirmed['size'] = f"custom:{custom_model_id.get().strip()}"
-                else:
-                    model_confirmed['size'] = selected
-                model_confirmed['value'] = True
-                selection_dialog.destroy()
-            
-            load_btn = tk.Button(
-                button_inner_frame, text="Load", command=confirm_selection,
-                bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
-                padx=20, pady=8, cursor='hand2', width=12
-            )
-            load_btn.pack(side=tk.LEFT, padx=5)
-            
-            cancel_btn = tk.Button(
-                button_inner_frame, text="Cancel", command=selection_dialog.destroy,
-                bg='#9E9E9E', fg='white', font=('Arial', 10),
-                padx=20, pady=8, cursor='hand2', width=12
-            )
-            cancel_btn.pack(side=tk.LEFT, padx=5)
-            
-            # Auto-resize and wait
-            self.main_gui.wm.auto_resize_dialog(selection_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.35)
-            self.dialog.wait_window(selection_dialog)
-            
-            if not model_confirmed['value']:
-                return
-            
-            model_size = model_confirmed['size']
-            self._log(f"DEBUG: Dialog closed, model_size set to: {model_size}")
-        
-        # Create progress dialog with window manager
-        progress_dialog, progress_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,
-            f"Setting up {provider}",
-            width=400,
-            height=200,
-            max_width_ratio=0.4,
-            max_height_ratio=0.3
-        )
-        
-        # Progress section
-        progress_section = tk.LabelFrame(
-            progress_frame,
-            text="Setup Progress",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        progress_section.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        progress_label = tk.Label(progress_section, text="Initializing...", font=('Arial', 10))
-        progress_label.pack(pady=(10, 15))
-        
-        progress_bar = ttk.Progressbar(
-            progress_section,
-            length=350,
-            mode='indeterminate'
-        )
-        progress_bar.pack(pady=(0, 10))
-        progress_bar.start(10)
-        
-        status_label = tk.Label(progress_section, text="", font=('Arial', 9), fg='#666666')
-        status_label.pack(pady=(0, 10))
-        
-        def update_progress(message, percent=None):
-            """Update progress display"""
-            progress_label.config(text=message)
-            if percent is not None:
-                progress_bar.stop()
-                progress_bar.config(mode='determinate', value=percent)
-        
-        def setup_thread():
-            """Run setup in background thread"""
-            nonlocal model_size
-            try:
-                success = False
-                
-                if not status['installed']:
-                    # Install provider
-                    update_progress(f"Installing {provider}...")
-                    success = self.ocr_manager.install_provider(provider, update_progress)
-                    
-                    if not success:
-                        update_progress("❌ Installation failed!", 0)
-                        self._log(f"Failed to install {provider}", "error")
-                        return
-                
-                # Load model
-                update_progress(f"Loading {provider} model...")
-                
-                # Special handling for Qwen2-VL - pass model_size
-                if provider == 'Qwen2-VL':
-                    if success and model_size:
-                        # Save the model size to config
-                        self.qwen2vl_model_size = model_size
-                        self.main_gui.config['qwen2vl_model_size'] = model_size
-                        
-                        # Save config immediately
-                        if hasattr(self.main_gui, 'save_config'):
-                            self.main_gui.save_config(show_message=False)
-                    self._log(f"DEBUG: In thread, about to load with model_size={model_size}")
-                    if model_size:
-                        success = self.ocr_manager.load_provider(provider, model_size=model_size)
-                        
-                        if success:
-                            provider_obj = self.ocr_manager.get_provider('Qwen2-VL')
-                            if provider_obj:
-                                provider_obj.loaded_model_size = {
-                                    "1": "2B",
-                                    "2": "7B", 
-                                    "3": "72B",
-                                    "4": "custom"
-                                }.get(model_size, model_size)
-                    else:
-                        self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
-                        success = self.ocr_manager.load_provider(provider, model_size="1")
-                else:
-                    success = self.ocr_manager.load_provider(provider)
-                
-                if success:
-                    update_progress(f"✅ {provider} ready!", 100)
-                    self._log(f"✅ {provider} is ready to use", "success")
-                    self.dialog.after(0, self._check_provider_status)
-                else:
-                    update_progress("❌ Failed to load model!", 0)
-                    self._log(f"Failed to load {provider} model", "error")
-                
-            except Exception as e:
-                update_progress(f"❌ Error: {str(e)}", 0)
-                self._log(f"Setup error: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "debug")
-            
-            finally:
-                self.dialog.after(2000, progress_dialog.destroy)
-        
-        # Auto-resize
-        self.main_gui.wm.auto_resize_dialog(progress_dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.3)
-        
-        # Start setup in background
-        import threading
-        threading.Thread(target=setup_thread, daemon=True).start()
-
-    def _on_ocr_provider_change(self, event=None):
-        """Handle OCR provider change"""
-        provider = self.ocr_provider_var.get()
-        
-        # Hide ALL provider-specific frames first
-        if hasattr(self, 'google_creds_frame'):
-            self.google_creds_frame.pack_forget()
-        if hasattr(self, 'azure_frame'):
-            self.azure_frame.pack_forget()
-        
-        # Update the API label based on provider
-        api_label_text = {
-            'custom-api': "OCR: Custom API | Translation: API Key",
-            'google': "OCR: Google Cloud Vision | Translation: API Key",
-            'azure': "OCR: Azure Computer Vision | Translation: API Key",
-            'manga-ocr': "OCR: Manga OCR (Japanese) | Translation: API Key",
-            'Qwen2-VL': "OCR: Qwen2-VL (Korean) | Translation: API Key",
-            'easyocr': "OCR: EasyOCR (Multi-lang) | Translation: API Key",
-            'paddleocr': "OCR: PaddleOCR | Translation: API Key",
-            'doctr': "OCR: DocTR | Translation: API Key"
-        }.get(provider, f"OCR: {provider} | Translation: API Key")
-        
-        # Update the label in the UI
-        for widget in self.parent_frame.winfo_children():
-            if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
-                for child in widget.winfo_children():
-                    if isinstance(child, tk.Frame):
-                        for subchild in child.winfo_children():
-                            if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
-                                subchild.config(text=api_label_text)
-                                break
-        
-        # Show only the relevant settings frame for the selected provider
-        if provider == 'google':
-            # Show Google credentials frame
-            self.google_creds_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
-            
-        elif provider == 'azure':
-            # Show Azure settings frame  
-            self.azure_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
-            
-        # For all other providers (manga-ocr, Qwen2-VL, easyocr, paddleocr, doctr)
-        # Don't show any cloud credential frames - they use local models
-        
-        # Check provider status to show appropriate buttons
-        self._check_provider_status()
-        
-        # Log the change
-        provider_descriptions = {
-            'custom-api': "Custom API - use your own vision model",
-            'google': "Google Cloud Vision (requires credentials)",
-            'azure': "Azure Computer Vision (requires API key)",
-            'manga-ocr': "Manga OCR - optimized for Japanese manga",
-            'Qwen2-VL': "Qwen2-VL - a big model", 
-            'easyocr': "EasyOCR - multi-language support",
-            'paddleocr': "PaddleOCR - CJK language support",
-            'doctr': "DocTR - document text recognition"
-        }
-        
-        self._log(f"📋 OCR provider changed to: {provider_descriptions.get(provider, provider)}", "info")
-        
-        # Save the selection
-        self.main_gui.config['manga_ocr_provider'] = provider
-        if hasattr(self.main_gui, 'save_config'):
-            self.main_gui.save_config(show_message=False)
-        
-        # IMPORTANT: Reset translator to force recreation with new OCR provider
-        if hasattr(self, 'translator') and self.translator:
-            self._log(f"OCR provider changed to {provider.upper()}. Translator will be recreated on next run.", "info")
-            self.translator = None  # Force recreation on next translation
-    
-    def _build_interface(self):
-        """Build the enhanced manga translation interface"""
-        # Title
-        title_frame = tk.Frame(self.parent_frame)
-        title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
-        
-        title_label = tk.Label(
-            title_frame,
-            text="🎌 Manga Translation",
-            font=('Arial', 16, 'bold')
-        )
-        title_label.pack(side=tk.LEFT)
-        
-        # Requirements check
-        has_api_key = bool(self.main_gui.api_key_entry.get().strip())
-        has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
-        
-        status_text = "✅ Ready" if (has_api_key and has_vision) else "❌ Setup Required"
-        status_color = "green" if (has_api_key and has_vision) else "red"
-        
-        status_label = tk.Label(
-            title_frame,
-            text=status_text,
-            font=('Arial', 12),
-            fg=status_color
-        )
-        status_label.pack(side=tk.RIGHT)
-        
-        # Store reference for updates
-        self.status_label = status_label
-        
-        # Add instructions and Google Cloud setup
-        if not (has_api_key and has_vision):
-            req_frame = tk.Frame(self.parent_frame)
-            req_frame.pack(fill=tk.X, padx=20, pady=5)
-            
-            req_text = []
-            if not has_api_key:
-                req_text.append("• API Key not configured")
-            if not has_vision:
-                req_text.append("• Google Cloud Vision credentials not set")
-            
-            tk.Label(
-                req_frame,
-                text="\n".join(req_text),
-                font=('Arial', 10),
-                fg='red',
-                justify=tk.LEFT
-            ).pack(anchor=tk.W)
-        
-        # File selection frame
-        file_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Select Manga Images",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        file_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        
-        # File listbox with scrollbar
-        list_frame = tk.Frame(file_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.file_listbox = tk.Listbox(
-            list_frame,
-            yscrollcommand=scrollbar.set,
-            height=8,
-            selectmode=tk.EXTENDED
-        )
-        self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.file_listbox.yview)
-        
-        # File buttons
-        file_btn_frame = tk.Frame(file_frame)
-        file_btn_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        tb.Button(
-            file_btn_frame,
-            text="Add Files",
-            command=self._add_files,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        tb.Button(
-            file_btn_frame,
-            text="Add Folder",
-            command=self._add_folder,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(
-            file_btn_frame,
-            text="Remove Selected",
-            command=self._remove_selected,
-            bootstyle="danger"
-        ).pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(
-            file_btn_frame,
-            text="Clear All",
-            command=self._clear_all,
-            bootstyle="warning"
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # Settings frame
-        settings_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Translation Settings",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-      
-        settings_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        # API Settings - Hybrid approach
-        api_frame = tk.Frame(settings_frame)
-        api_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(api_frame, text="OCR: Google Cloud Vision | Translation: API Key", 
-                font=('Arial', 10, 'italic'), fg='gray').pack(side=tk.LEFT)
-        
-        # Show current model
-        current_model = 'Unknown'
-        if hasattr(self.main_gui, 'model_var'):
-            current_model = self.main_gui.model_var.get()
-        elif hasattr(self.main_gui, 'model_combo'):
-            current_model = self.main_gui.model_combo.get()
-        elif hasattr(self.main_gui, 'config'):
-            current_model = self.main_gui.config.get('model', 'Unknown')
-        
-        tk.Label(api_frame, text=f"Model: {current_model}", 
-                font=('Arial', 10, 'italic'), fg='gray').pack(side=tk.RIGHT)
-
-        # OCR Provider Selection - ENHANCED VERSION
-        self.ocr_provider_frame = tk.Frame(settings_frame)
-        self.ocr_provider_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tk.Label(self.ocr_provider_frame, text="OCR Provider:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        # Expanded provider list with descriptions
-        ocr_providers = [
-            ('custom-api', 'Your Own key'),
-            ('google', 'Google Cloud Vision'),
-            ('azure', 'Azure Computer Vision'),
-            ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
-            ('Qwen2-VL', '🇰🇷 Qwen2-VL (Korean)'),
-            ('easyocr', '🌏 EasyOCR (Multi-lang)'),
-            ('paddleocr', '🐼 PaddleOCR'),
-            ('doctr', '📄 DocTR'),
-        ]
-
-        # Just the values for the combobox
-        provider_values = [p[0] for p in ocr_providers]
-        provider_display = [f"{p[0]} - {p[1]}" for p in ocr_providers]
-
-        self.ocr_provider_var = tk.StringVar(value=self.main_gui.config.get('manga_ocr_provider', 'custom-api'))
-        provider_combo = ttk.Combobox(
-            self.ocr_provider_frame,
-            textvariable=self.ocr_provider_var,
-            values=provider_values,
-            state='readonly',
-            width=15
-        )
-        provider_combo.pack(side=tk.LEFT, padx=10)
-        provider_combo.bind('<<ComboboxSelected>>', self._on_ocr_provider_change)
-
-        # Provider status indicator with more detail
-        self.provider_status_label = tk.Label(
-            self.ocr_provider_frame,
-            text="",
-            font=('Arial', 9),
-            width=40
-        )
-        self.provider_status_label.pack(side=tk.LEFT, padx=(10, 0))
-
-        # Setup/Install button for non-cloud providers - ALWAYS VISIBLE for local providers
-        self.provider_setup_btn = tb.Button(
-            self.ocr_provider_frame,
-            text="Setup",
-            command=self._setup_ocr_provider,
-            bootstyle="info",
-            width=12
-        )
-        # Don't pack yet, let _check_provider_status handle it
-
-        # Add explicit download button for Hugging Face models
-        self.download_model_btn = tb.Button(
-            self.ocr_provider_frame,
-            text="📥 Download",
-            command=self._download_hf_model,
-            bootstyle="success",
-            width=22
-        )
-        # Don't pack yet
-
-        # Initialize OCR manager
-        from ocr_manager import OCRManager
-        self.ocr_manager = OCRManager(log_callback=self._log)
-
-        # Check initial provider status
-        self._check_provider_status()
-
-        # Google Cloud Credentials section (now in a frame that can be hidden)
-        self.google_creds_frame = tk.Frame(settings_frame)
-        self.google_creds_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tk.Label(self.google_creds_frame, text="Google Cloud Credentials:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        # Show current credentials file
-        google_creds_path = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
-        creds_display = os.path.basename(google_creds_path) if google_creds_path else "Not Set"
-
-        self.creds_label = tk.Label(self.google_creds_frame, text=creds_display, 
-                                   font=('Arial', 9), fg='green' if google_creds_path else 'red')
-        self.creds_label.pack(side=tk.LEFT, padx=10)
-
-        tb.Button(
-            self.google_creds_frame,
-            text="Browse",
-            command=self._browse_google_credentials_permanent,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
-
-        # Azure settings frame (hidden by default)
-        self.azure_frame = tk.Frame(settings_frame)
-
-        # Azure Key
-        azure_key_frame = tk.Frame(self.azure_frame)
-        azure_key_frame.pack(fill=tk.X, pady=(0, 5))
-
-        tk.Label(azure_key_frame, text="Azure Key:", width=20, anchor='w').pack(side=tk.LEFT)
-        self.azure_key_entry = tk.Entry(azure_key_frame, show='*', width=30)
-        self.azure_key_entry.pack(side=tk.LEFT, padx=10)
-
-        # Show/Hide button for Azure key
-        self.show_azure_key_var = tk.BooleanVar(value=False)
-        tb.Checkbutton(
-            azure_key_frame,
-            text="Show",
-            variable=self.show_azure_key_var,
-            command=lambda: self.azure_key_entry.config(show='' if self.show_azure_key_var.get() else '*'),
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=5)
-
-        # Azure Endpoint
-        azure_endpoint_frame = tk.Frame(self.azure_frame)
-        azure_endpoint_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tk.Label(azure_endpoint_frame, text="Azure Endpoint:", width=20, anchor='w').pack(side=tk.LEFT)
-        self.azure_endpoint_entry = tk.Entry(azure_endpoint_frame, width=40)
-        self.azure_endpoint_entry.pack(side=tk.LEFT, padx=10)
-
-        # Load saved Azure settings
-        saved_key = self.main_gui.config.get('azure_vision_key', '')
-        saved_endpoint = self.main_gui.config.get('azure_vision_endpoint', 'https://YOUR-RESOURCE.cognitiveservices.azure.com/')
-        self.azure_key_entry.insert(0, saved_key)
-        self.azure_endpoint_entry.insert(0, saved_endpoint)
-
-        # Initially show/hide based on saved provider
-        self._on_ocr_provider_change()
-
-        # Separator for context settings
-        ttk.Separator(settings_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-        
-        # Context and Full Page Mode Settings
-        context_frame = tk.LabelFrame(
-            settings_frame,
-            text="🔄 Context & Translation Mode",
-            font=('Arial', 11, 'bold'),
-            padx=10,
-            pady=10
-        )
-        context_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Show current contextual settings from main GUI
-        context_info = tk.Frame(context_frame)
-        context_info.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(
-            context_info,
-            text="Main GUI Context Settings:",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W)
-        
-        # Display current settings
-        settings_frame_display = tk.Frame(context_info)
-        settings_frame_display.pack(fill=tk.X, padx=(20, 0))
-        
-        # Contextual enabled status
-        contextual_status = "Enabled" if self.main_gui.contextual_var.get() else "Disabled"
-        self.contextual_status_label = tk.Label(
-            settings_frame_display,
-            text=f"• Contextual Translation: {contextual_status}",
-            font=('Arial', 10)
-        )
-        self.contextual_status_label.pack(anchor=tk.W)
-        
-        # History limit
-        history_limit = self.main_gui.trans_history.get() if hasattr(self.main_gui, 'trans_history') else "3"
-        self.history_limit_label = tk.Label(
-            settings_frame_display,
-            text=f"• Translation History Limit: {history_limit} exchanges",
-            font=('Arial', 10)
-        )
-        self.history_limit_label.pack(anchor=tk.W)
-        
-        # Rolling history status
-        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var.get() else "Disabled (Reset on Limit)"
-        self.rolling_status_label = tk.Label(
-            settings_frame_display,
-            text=f"• Rolling History: {rolling_status}",
-            font=('Arial', 10)
-        )
-        self.rolling_status_label.pack(anchor=tk.W)
-
-        # Refresh button to update from main GUI
-        tb.Button(
-            context_frame,
-            text="↻ Refresh from Main GUI",
-            command=self._refresh_context_settings,
-            bootstyle="secondary"
-        ).pack(pady=(10, 0))
-        
-        # Separator
-        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-        
-        # Full Page Context Translation Settings
-        full_page_frame = tk.Frame(context_frame)
-        full_page_frame.pack(fill=tk.X)
-
-        tk.Label(
-            full_page_frame,
-            text="Full Page Context Mode (Manga-specific):",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W, pady=(0, 5))
-
-        # Enable/disable toggle
-        self.full_page_context_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_full_page_context', True)
-        )
-
-        toggle_frame = tk.Frame(full_page_frame)
-        toggle_frame.pack(fill=tk.X, padx=(20, 0))
-
-        self.context_checkbox = tb.Checkbutton(
-            toggle_frame,
-            text="Enable Full Page Context Translation",
-            variable=self.full_page_context_var,
-            command=self._on_context_toggle,
-            bootstyle="round-toggle"
-        )
-        self.context_checkbox.pack(side=tk.LEFT)
-
-        # Edit prompt button
-        tb.Button(
-            toggle_frame,
-            text="Edit Prompt",
-            command=self._edit_context_prompt,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=(10, 0))
-
-        # Help button for full page context
-        tb.Button(
-            toggle_frame,
-            text="?",
-            command=lambda: self._show_help_dialog(
-                "Full Page Context Mode",
-                "Full page context sends all text regions from the page together in a single request.\n\n"
-                "This allows the AI to see all text at once for more contextually accurate translations, "
-                "especially useful for maintaining character name consistency and understanding "
-                "conversation flow across multiple speech bubbles.\n\n"
-                "✅ Pros:\n"
-                "• Better context awareness\n"
-                "• Consistent character names\n"
-                "• Understanding of conversation flow\n"
-                "• Maintains tone across bubbles\n\n"
-                "❌ Cons:\n"
-                "• Single API call failure affects all text\n"
-                "• May use more tokens\n"
-                "• Slower for pages with many text regions"
-            ),
-            bootstyle="info",
-            width=2
-        ).pack(side=tk.LEFT, padx=(5, 0))
-
-        # Separator
-        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-
-        # Visual Context Settings (for non-vision model support)
-        visual_frame = tk.Frame(context_frame)
-        visual_frame.pack(fill=tk.X)
-
-        tk.Label(
-            visual_frame,
-            text="Visual Context (Image Support):",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W, pady=(0, 5))
-
-        # Visual context toggle
-        self.visual_context_enabled_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_visual_context_enabled', True)
-        )
-
-        visual_toggle_frame = tk.Frame(visual_frame)
-        visual_toggle_frame.pack(fill=tk.X, padx=(20, 0))
-
-        self.visual_context_checkbox = tb.Checkbutton(
-            visual_toggle_frame,
-            text="Include page image in translation requests",
-            variable=self.visual_context_enabled_var,
-            command=self._on_visual_context_toggle,
-            bootstyle="round-toggle"
-        )
-        self.visual_context_checkbox.pack(side=tk.LEFT)
-
-        # Help button for visual context
-        tb.Button(
-            visual_toggle_frame,
-            text="?",
-            command=lambda: self._show_help_dialog(
-                "Visual Context Settings",
-                "Visual context includes the manga page image with translation requests.\n\n"
-                "⚠️ WHEN TO DISABLE:\n"
-                "• Using text-only models (Claude, GPT-3.5, standard Gemini)\n"
-                "• Model doesn't support images\n"
-                "• Want to reduce token usage\n"
-                "• Testing text-only translation\n\n"
-                "✅ WHEN TO ENABLE:\n"
-                "• Using vision models (Gemini Vision, GPT-4V, Claude 3)\n"
-                "• Want spatial awareness of text position\n"
-                "• Need visual context for better translation\n\n"
-                "Impact:\n"
-                "• Disabled: Only text is sent (compatible with any model)\n"
-                "• Enabled: Text + image sent (requires vision model)\n\n"
-                "Note: Disabling may reduce translation quality as the AI won't see\n"
-                "the artwork context or spatial layout of the text."
-            ),
-            bootstyle="info",
-            width=2
-        ).pack(side=tk.LEFT, padx=(5, 0))
-        
-        # Text Rendering Settings Frame
-        render_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Text Visibility Settings",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        render_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        # Advanced Settings button at the top of render_frame
-        advanced_button_frame = tk.Frame(render_frame)
-        advanced_button_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tb.Button(
-            advanced_button_frame,
-            text="⚙️ Advanced Settings",
-            command=self._open_advanced_settings,
-            bootstyle="info"
-        ).pack(side=tk.RIGHT)
-
-        tk.Label(
-            advanced_button_frame,
-            text="Configure OCR, preprocessing, and performance options",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side=tk.LEFT)
-
-        # Force Caps Lock Checkbox
-        force_caps_check = ttk.Checkbutton(
-            render_frame,
-            text="Force CAPS LOCK (All text in uppercase)",
-            variable=self.force_caps_lock_var,
-            command=self._apply_rendering_settings
-        )
-        force_caps_check.pack(anchor=tk.W, padx=20, pady=(0, 5))
-        
-        # Background opacity slider
-        opacity_frame = tk.Frame(render_frame)
-        opacity_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(opacity_frame, text="Background Opacity:", width=20, anchor='w').pack(side=tk.LEFT)
-        
-        opacity_scale = tk.Scale(
-            opacity_frame,
-            from_=0,
-            to=255,
-            orient=tk.HORIZONTAL,
-            variable=self.bg_opacity_var,
-            command=self._update_opacity_label,
-            length=200
-        )
-        opacity_scale.pack(side=tk.LEFT, padx=10)
-        
-        self.opacity_label = tk.Label(opacity_frame, text="100%", width=5)
-        self.opacity_label.pack(side=tk.LEFT)
-        
-        # Initialize the label with the loaded value
-        self._update_opacity_label(self.bg_opacity_var.get())
-
-        # Background style selection
-        style_frame = tk.Frame(render_frame)
-        style_frame.pack(fill=tk.X, pady=5)
-
-        tk.Label(style_frame, text="Background Style:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        # Radio buttons for background style
-        style_selection_frame = tk.Frame(style_frame)
-        style_selection_frame.pack(side=tk.LEFT, padx=10)
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Box",
-            variable=self.bg_style_var,
-            value="box",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Circle",
-            variable=self.bg_style_var,
-            value="circle",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Wrap",
-            variable=self.bg_style_var,
-            value="wrap",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
-
-        # Add tooltips or descriptions
-        style_help = tk.Label(
-            style_frame,
-            text="(Box: rounded rectangle, Circle: ellipse, Wrap: per-line)",
-            font=('Arial', 9),
-            fg='gray'
-        )
-        style_help.pack(side=tk.LEFT, padx=(10, 0))
- 
-        # Skip inpainting toggle - store as instance variable
-        self.skip_inpainting_checkbox = tb.Checkbutton(
-            render_frame, 
-            text="Skip Inpainter (Recommended)", 
-            variable=self.skip_inpainting_var,
-            bootstyle="round-toggle",
-            command=self._toggle_inpaint_visibility
-        )
-        self.skip_inpainting_checkbox.pack(anchor='w', pady=5)
-
-        # Inpainting method selection (only visible when inpainting is enabled)
-        self.inpaint_method_frame = tk.Frame(render_frame)
-        self.inpaint_method_frame.pack(fill=tk.X, pady=5)
-
-        tk.Label(self.inpaint_method_frame, text="Inpaint Method:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        # Radio buttons for inpaint method
-        method_selection_frame = tk.Frame(self.inpaint_method_frame)
-        method_selection_frame.pack(side=tk.LEFT, padx=5)
-
-        self.inpaint_method_var = tk.StringVar(value=self.main_gui.config.get('manga_inpaint_method', 'cloud'))
-
-        tb.Radiobutton(
-            method_selection_frame,
-            text="Cloud API",
-            variable=self.inpaint_method_var,
-            value="cloud",
-            command=self._on_inpaint_method_change,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            method_selection_frame,
-            text="Local Model",
-            variable=self.inpaint_method_var,
-            value="local",
-            command=self._on_inpaint_method_change,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            method_selection_frame,
-            text="Hybrid",
-            variable=self.inpaint_method_var,
-            value="hybrid",
-            command=self._on_inpaint_method_change,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
-
-        # Cloud settings frame
-        self.cloud_inpaint_frame = tk.Frame(render_frame)
-        self.cloud_inpaint_frame.pack(fill=tk.X, pady=5)
-
-        # Quality selection for cloud
-        quality_frame = tk.Frame(self.cloud_inpaint_frame)
-        quality_frame.pack(fill=tk.X)
-
-        tk.Label(quality_frame, text="Cloud Quality:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        quality_options = [('high', 'High Quality'), ('fast', 'Fast')]
-        for value, text in quality_options:
-            tb.Radiobutton(
-                quality_frame,
-                text=text,
-                variable=self.inpaint_quality_var,
-                value=value,
-                bootstyle="primary",
-                command=self._save_rendering_settings
-            ).pack(side=tk.LEFT, padx=10)
-
-        # Conditional separator
-        self.inpaint_separator = ttk.Separator(render_frame, orient='horizontal')
-        if not self.skip_inpainting_var.get():
-            self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))
-
-        # Cloud API status
-        api_status_frame = tk.Frame(self.cloud_inpaint_frame)
-        api_status_frame.pack(fill=tk.X, pady=(10, 0))
-
-        # Check if API key exists
-        saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-        if saved_api_key:
-            status_text = "✅ Cloud API configured"
-            status_color = 'green'
-        else:
-            status_text = "❌ Cloud API not configured"
-            status_color = 'red'
-
-        self.inpaint_api_status_label = tk.Label(
-            api_status_frame, 
-            text=status_text,
-            font=('Arial', 9),
-            fg=status_color
-        )
-        self.inpaint_api_status_label.pack(side=tk.LEFT)
-
-        tb.Button(
-            api_status_frame,
-            text="Configure API Key",
-            command=self._configure_inpaint_api,
-            bootstyle="info"
-        ).pack(side=tk.LEFT, padx=(10, 0))
-
-        if saved_api_key:
-            tb.Button(
-                api_status_frame,
-                text="Clear",
-                command=self._clear_inpaint_api,
-                bootstyle="secondary"
-            ).pack(side=tk.LEFT, padx=(5, 0))
-
-        # Local inpainting settings frame
-        self.local_inpaint_frame = tk.Frame(render_frame)
-
-        # Local model selection
-        local_model_frame = tk.Frame(self.local_inpaint_frame)
-        local_model_frame.pack(fill=tk.X)
-
-        tk.Label(local_model_frame, text="Local Model:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        self.local_model_type_var = tk.StringVar(value=self.main_gui.config.get('manga_local_inpaint_model', 'lama'))
-        local_model_combo = ttk.Combobox(
-            local_model_frame,
-            textvariable=self.local_model_type_var,
-            values=['lama', 'aot', 'mat', 'sd_local', 'anime'],
-            state='readonly',
-            width=15
-        )
-        local_model_combo.pack(side=tk.LEFT, padx=10)
-        local_model_combo.bind('<<ComboboxSelected>>', self._on_local_model_change)
-        self._disable_spinbox_mousewheel(local_model_combo)
-
-        # Model descriptions
-        model_desc = {
-            'lama': 'LaMa (Best quality)',
-            'aot': 'AOT GAN (Fast)',
-            'mat': 'MAT (High-res)',
-            'sd_local': 'Stable Diffusion (Anime)',
-            'anime': 'Anime/Manga Inpainting',
-        }
-        self.model_desc_label = tk.Label(
-            local_model_frame,
-            text=model_desc.get(self.local_model_type_var.get(), ''),
-            font=('Arial', 9),
-            fg='gray'
-        )
-        self.model_desc_label.pack(side=tk.LEFT, padx=(10, 0))
-
-        # Model file selection
-        model_path_frame = tk.Frame(self.local_inpaint_frame)
-        model_path_frame.pack(fill=tk.X, pady=(5, 0))
-
-        tk.Label(model_path_frame, text="Model File:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        self.local_model_path_var = tk.StringVar(
-            value=self.main_gui.config.get(f'manga_{self.local_model_type_var.get()}_model_path', '')
-        )
-        self.local_model_entry = tk.Entry(
-            model_path_frame,
-            textvariable=self.local_model_path_var,
-            width=30,
-            state='readonly',
-            bg='#2b2b2b',  # Dark gray background
-            fg='#ffffff',  # White text
-            readonlybackground='#2b2b2b'  # Gray even when readonly
-        )
-        self.local_model_entry.pack(side=tk.LEFT, padx=(10, 5))
-
-        tb.Button(
-            model_path_frame,
-            text="Browse",
-            command=self._browse_local_model,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
-
-        # Model status
-        self.local_model_status_label = tk.Label(
-            self.local_inpaint_frame,
-            text="",
-            font=('Arial', 9)
-        )
-        self.local_model_status_label.pack(anchor='w', pady=(5, 0))
-
-        # Download model button
-        tb.Button(
-            self.local_inpaint_frame,
-            text="📥 Download Model",
-            command=self._download_model,
-            bootstyle="info"
-        ).pack(anchor='w', pady=(5, 0))
-
-        # Model info button
-        tb.Button(
-            self.local_inpaint_frame,
-            text="ℹ️ Model Info",
-            command=self._show_model_info,
-            bootstyle="secondary"
-        ).pack(anchor='w', pady=(5, 0))
-
-        # Try to load saved model for current type on dialog open
-        initial_model_type = self.local_model_type_var.get()
-        initial_model_path = self.main_gui.config.get(f'manga_{initial_model_type}_model_path', '')
-
-        if initial_model_path and os.path.exists(initial_model_path):
-            self.local_model_path_var.set(initial_model_path)
-            self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
-            # Auto-load after dialog is ready
-            self.dialog.after(500, lambda: self._try_load_model(initial_model_type, initial_model_path))
-        else:
-            self.local_model_status_label.config(text="No model loaded", fg='gray')
-
-        # Initialize visibility based on current settings
-        self._toggle_inpaint_visibility()
-        
-        # Background size reduction
-        reduction_frame = tk.Frame(render_frame)
-        reduction_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(reduction_frame, text="Background Size:", width=20, anchor='w').pack(side=tk.LEFT)
-        
-        reduction_scale = tk.Scale(
-            reduction_frame,
-            from_=0.5,
-            to=2.0,
-            resolution=0.05,
-            orient=tk.HORIZONTAL,
-            variable=self.bg_reduction_var,
-            command=self._update_reduction_label,
-            length=200
-        )
-        reduction_scale.pack(side=tk.LEFT, padx=10)
-        
-        self.reduction_label = tk.Label(reduction_frame, text="100%", width=5)
-        self.reduction_label.pack(side=tk.LEFT)
-        
-        # Initialize the label with the loaded value
-        self._update_reduction_label(self.bg_reduction_var.get())
-        
-        # Font size selection with mode toggle
-        font_frame = tk.Frame(render_frame)
-        font_frame.pack(fill=tk.X, pady=5)
-        
-        # Mode selection frame
-        mode_frame = tk.Frame(font_frame)
-        mode_frame.pack(fill=tk.X)
-
-        tk.Label(mode_frame, text="Font Size Mode:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        # Radio buttons for mode selection
-        mode_selection_frame = tk.Frame(mode_frame)
-        mode_selection_frame.pack(side=tk.LEFT, padx=10)
-
-        tb.Radiobutton(
-            mode_selection_frame,
-            text="Fixed Size",
-            variable=self.font_size_mode_var,
-            value="fixed",
-            command=self._toggle_font_size_mode,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            mode_selection_frame,
-            text="Dynamic Multiplier",
-            variable=self.font_size_mode_var,
-            value="multiplier",
-            command=self._toggle_font_size_mode,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
-
-        # Fixed font size frame
-        self.fixed_size_frame = tk.Frame(font_frame)
-        # Don't pack yet - let _toggle_font_size_mode handle it
-
-        tk.Label(self.fixed_size_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        font_size_spinbox = tb.Spinbox(
-            self.fixed_size_frame,
-            from_=0,
-            to=72,
-            textvariable=self.font_size_var,
-            width=10,
-            command=self._save_rendering_settings
-        )
-        font_size_spinbox.pack(side=tk.LEFT, padx=10)
-        # Also bind to save on manual entry
-        font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        font_size_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        self._disable_spinbox_mousewheel(font_size_spinbox)
-
-        tk.Label(self.fixed_size_frame, text="(0 = Auto)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
-
-        # Dynamic multiplier frame
-        self.multiplier_frame = tk.Frame(font_frame)
-        # Don't pack yet - let _toggle_font_size_mode handle it
-
-        tk.Label(self.multiplier_frame, text="Size Multiplier:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        multiplier_scale = tk.Scale(
-            self.multiplier_frame,
-            from_=0.5,
-            to=2.0,
-            resolution=0.1,
-            orient=tk.HORIZONTAL,
-            variable=self.font_size_multiplier_var,
-            command=self._update_multiplier_label,
-            length=200
-        )
-        multiplier_scale.pack(side=tk.LEFT, padx=10)
-
-        self.multiplier_label = tk.Label(self.multiplier_frame, text="1.0x", width=5)
-        self.multiplier_label.pack(side=tk.LEFT)
-
-        tk.Label(self.multiplier_frame, text="(Scales with panel size)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT, padx=5)
-
-        # Constraint checkbox frame (only visible in multiplier mode)
-        self.constraint_frame = tk.Frame(font_frame)
-        # Don't pack yet - let _toggle_font_size_mode handle it
-        
-        self.constrain_checkbox = tb.Checkbutton(
-            self.constraint_frame,
-            text="Constrain text to bubble boundaries",
-            variable=self.constrain_to_bubble_var,
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        )
-        self.constrain_checkbox.pack(side=tk.LEFT, padx=(20, 0))
-
-        tk.Label(
-            self.constraint_frame, 
-            text="(Unchecked allows text to exceed bubbles)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
-
-        # Initialize visibility AFTER all frames are created
-        self._toggle_font_size_mode()
-
-        # Minimum font size setting (for auto mode)
-        min_size_frame = tk.Frame(render_frame)
-        min_size_frame.pack(fill=tk.X, pady=5)
-
-        tk.Label(min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        min_size_spinbox = ttk.Spinbox(
-            min_size_frame,
-            from_=10,
-            to=24,
-            textvariable=self.min_readable_size_var,
-            width=10,
-            command=self._save_rendering_settings
-        )
-        min_size_spinbox.pack(side=tk.LEFT, padx=10)
-        self._disable_spinbox_mousewheel(min_size_spinbox)
-
-
-        tk.Label(
-            min_size_frame, 
-            text="(Auto mode won't go below this)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
-    
-        # Maximum font size setting
-        max_size_frame = tk.Frame(render_frame)
-        max_size_frame.pack(fill=tk.X, pady=5)
-
-        tk.Label(max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        max_size_spinbox = ttk.Spinbox(
-            max_size_frame,
-            from_=20,
-            to=100,
-            textvariable=self.max_font_size_var,
-            width=10,
-            command=self._save_rendering_settings
-        )
-        max_size_spinbox.pack(side=tk.LEFT, padx=10)
-        self._disable_spinbox_mousewheel(max_size_spinbox)
-
-        tk.Label(
-            max_size_frame, 
-            text="(Limits maximum text size)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
-
-        # Text wrapping mode
-        wrap_frame = tk.Frame(render_frame)
-        wrap_frame.pack(fill=tk.X, pady=5)
-
-        self.strict_wrap_checkbox = tb.Checkbutton(
-            wrap_frame,
-            text="Strict text wrapping (force text to fit within bubbles)",
-            variable=self.strict_text_wrapping_var,
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        )
-        self.strict_wrap_checkbox.pack(side=tk.LEFT)
-
-        tk.Label(
-            wrap_frame, 
-            text="(Break words with hyphens if needed)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
-    
-        # Update multiplier label with loaded value
-        self._update_multiplier_label(self.font_size_multiplier_var.get())
-        
-        font_size_spinbox.pack(side=tk.LEFT, padx=10)
-        # Also bind to save on manual entry
-        font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        font_size_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        
-        tk.Label(font_frame, text="(0 = Auto)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
-        
-        # Font style selection
-        font_style_frame = tk.Frame(render_frame)
-        font_style_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(font_style_frame, text="Font Style:", width=20, anchor='w').pack(side=tk.LEFT)
-        
-        # Font style will be set from loaded config in _load_rendering_settings
-        self.font_combo = ttk.Combobox(
-            font_style_frame,
-            textvariable=self.font_style_var,
-            values=self._get_available_fonts(),
-            width=30,
-            state='readonly'
-        )
-        self.font_combo.pack(side=tk.LEFT, padx=10)
-        self.font_combo.bind('<<ComboboxSelected>>', self._on_font_selected)
-
-        # Disable mousewheel scrolling completely
-        self.font_combo.bind("<MouseWheel>", lambda e: "break")
-        self.font_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
-        self.font_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
-        
-        # Font color selection
-        color_frame = tk.Frame(render_frame)
-        color_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(color_frame, text="Font Color:", width=20, anchor='w').pack(side=tk.LEFT)
-        
-        # Color button and preview
-        color_button_frame = tk.Frame(color_frame)
-        color_button_frame.pack(side=tk.LEFT, padx=10)
-        
-        # Color preview
-        self.color_preview = tk.Canvas(color_button_frame, width=40, height=30, 
-                                     highlightthickness=1, highlightbackground="gray")
-        self.color_preview.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # RGB display label
-        r, g, b = self.text_color_r.get(), self.text_color_g.get(), self.text_color_b.get()
-        self.rgb_label = tk.Label(color_button_frame, text=f"RGB({r},{g},{b})", width=12)
-        self.rgb_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Color picker button
-        def pick_font_color():
-            from tkinter import colorchooser
-            # Get current color
-            current_color = (self.text_color_r.get(), self.text_color_g.get(), self.text_color_b.get())
-            color_hex = f'#{current_color[0]:02x}{current_color[1]:02x}{current_color[2]:02x}'
-            
-            # Open color dialog
-            color = colorchooser.askcolor(initialcolor=color_hex, parent=self.dialog, 
-                                         title="Choose Font Color")
-            if color[0]:  # If a color was chosen (not cancelled)
-                # Update RGB values
-                self.text_color_r.set(int(color[0][0]))
-                self.text_color_g.set(int(color[0][1]))
-                self.text_color_b.set(int(color[0][2]))
-                # Update display
-                self.rgb_label.config(text=f"RGB({int(color[0][0])},{int(color[0][1])},{int(color[0][2])})")
-                self._update_color_preview(None)
-        
-        tb.Button(
-            color_button_frame,
-            text="Choose Color",
-            command=pick_font_color,
-            bootstyle="info"
-        ).pack(side=tk.LEFT)
-        
-        self._update_color_preview(None)  # Initialize with loaded colors
-        
-        # Shadow settings frame
-        shadow_frame = tk.LabelFrame(render_frame, text="Text Shadow", padx=10, pady=5)
-        shadow_frame.pack(fill=tk.X, pady=10)
-        
-        # Shadow enabled checkbox
-        tb.Checkbutton(
-            shadow_frame,
-            text="Enable Shadow",
-            variable=self.shadow_enabled_var,
-            bootstyle="round-toggle",
-            command=self._toggle_shadow_controls
-        ).pack(anchor='w')
-        
-        # Shadow controls container
-        self.shadow_controls = tk.Frame(shadow_frame)
-        self.shadow_controls.pack(fill=tk.X, pady=5)
-        
-        # Shadow color
-        shadow_color_frame = tk.Frame(self.shadow_controls)
-        shadow_color_frame.pack(fill=tk.X, pady=2)
-        
-        tk.Label(shadow_color_frame, text="Shadow Color:", width=15, anchor='w').pack(side=tk.LEFT)
-        
-        # Shadow color button and preview
-        shadow_button_frame = tk.Frame(shadow_color_frame)
-        shadow_button_frame.pack(side=tk.LEFT, padx=10)
-        
-        # Shadow color preview
-        self.shadow_preview = tk.Canvas(shadow_button_frame, width=30, height=25, 
-                                      highlightthickness=1, highlightbackground="gray")
-        self.shadow_preview.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Shadow RGB display label
-        sr, sg, sb = self.shadow_color_r.get(), self.shadow_color_g.get(), self.shadow_color_b.get()
-        self.shadow_rgb_label = tk.Label(shadow_button_frame, text=f"RGB({sr},{sg},{sb})", width=15)
-        self.shadow_rgb_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Shadow color picker button
-        def pick_shadow_color():
-            from tkinter import colorchooser
-            # Get current color
-            current_color = (self.shadow_color_r.get(), self.shadow_color_g.get(), self.shadow_color_b.get())
-            color_hex = f'#{current_color[0]:02x}{current_color[1]:02x}{current_color[2]:02x}'
-            
-            # Open color dialog
-            color = colorchooser.askcolor(initialcolor=color_hex, parent=self.dialog, 
-                                         title="Choose Shadow Color")
-            if color[0]:  # If a color was chosen (not cancelled)
-                # Update RGB values
-                self.shadow_color_r.set(int(color[0][0]))
-                self.shadow_color_g.set(int(color[0][1]))
-                self.shadow_color_b.set(int(color[0][2]))
-                # Update display
-                self.shadow_rgb_label.config(text=f"RGB({int(color[0][0])},{int(color[0][1])},{int(color[0][2])})")
-                self._update_shadow_preview(None)
-        
-        tb.Button(
-            shadow_button_frame,
-            text="Choose Color",
-            command=pick_shadow_color,
-            bootstyle="info",
-            width=12
-        ).pack(side=tk.LEFT)
-        
-        self._update_shadow_preview(None)  # Initialize with loaded colors
-        
-        # Shadow offset
-        offset_frame = tk.Frame(self.shadow_controls)
-        offset_frame.pack(fill=tk.X, pady=2)
-        
-        tk.Label(offset_frame, text="Shadow Offset:", width=15, anchor='w').pack(side=tk.LEFT)
-        
-        # X offset
-        x_frame = tk.Frame(offset_frame)
-        x_frame.pack(side=tk.LEFT, padx=10)
-        tk.Label(x_frame, text="X:", width=2).pack(side=tk.LEFT)
-        x_spinbox = tb.Spinbox(x_frame, from_=-10, to=10, textvariable=self.shadow_offset_x_var,
-                  width=5, command=self._save_rendering_settings)
-        x_spinbox.pack(side=tk.LEFT)
-        x_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        x_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        self._disable_spinbox_mousewheel(x_spinbox)
-        
-        # Y offset
-        y_frame = tk.Frame(offset_frame)
-        y_frame.pack(side=tk.LEFT, padx=10)
-        tk.Label(y_frame, text="Y:", width=2).pack(side=tk.LEFT)
-        y_spinbox = tb.Spinbox(y_frame, from_=-10, to=10, textvariable=self.shadow_offset_y_var,
-                  width=5, command=self._save_rendering_settings)
-        y_spinbox.pack(side=tk.LEFT)
-        y_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        y_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        self._disable_spinbox_mousewheel(y_spinbox)
-        
-        # Shadow blur
-        blur_frame = tk.Frame(self.shadow_controls)
-        blur_frame.pack(fill=tk.X, pady=2)
-        
-        tk.Label(blur_frame, text="Shadow Blur:", width=15, anchor='w').pack(side=tk.LEFT)
-        tk.Scale(blur_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.shadow_blur_var,
-                length=150, command=lambda v: self._save_rendering_settings()).pack(side=tk.LEFT, padx=10)
-        tk.Label(blur_frame, text="(0=sharp, 10=blurry)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
-        
-        # Initially disable shadow controls
-        self._toggle_shadow_controls()
-        
-        # Output settings
-        output_frame = tk.Frame(settings_frame)
-        output_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        self.create_subfolder_var = tk.BooleanVar(value=self.main_gui.config.get('manga_create_subfolder', True))
-        tb.Checkbutton(
-            output_frame,
-            text="Create 'translated' subfolder for output",
-            variable=self.create_subfolder_var,
-            bootstyle="round-toggle",
-            command=self._save_rendering_settings
-        ).pack(side=tk.LEFT)
-        
-        # Control buttons
-        control_frame = tk.Frame(self.parent_frame)
-        control_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        # Check if ready based on selected provider
-        has_api_key = bool(self.main_gui.api_key_entry.get().strip()) if hasattr(self.main_gui, 'api_key_entry') else False
-        provider = self.ocr_provider_var.get()
-
-        # Determine readiness based on provider
-        if provider == 'google':
-            has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
-            is_ready = has_api_key and has_vision
-        elif provider == 'azure':
-            has_azure = bool(self.main_gui.config.get('azure_vision_key', ''))
-            is_ready = has_api_key and has_azure
-        elif provider == 'custom-api':
-            is_ready = has_api_key  # Only needs API key
-        else:
-            # Local providers (manga-ocr, easyocr, etc.) only need API key for translation
-            is_ready = has_api_key
-
-        self.start_button = tb.Button(
-            control_frame,
-            text="Start Translation",
-            command=self._start_translation,
-            bootstyle="success",
-            state=tk.NORMAL if is_ready else tk.DISABLED
-        )
-        self.start_button.pack(side=tk.LEFT, padx=(0, 10))
-
-        # Add tooltip to show why button is disabled
-        if not is_ready:
-            reasons = []
-            if not has_api_key:
-                reasons.append("API key not configured")
-            if provider == 'google' and not os.path.exists(self.main_gui.config.get('google_vision_credentials', '')):
-                reasons.append("Google Vision credentials not set")
-            elif provider == 'azure' and not self.main_gui.config.get('azure_vision_key', ''):
-                reasons.append("Azure credentials not configured")
-            tooltip_text = "Cannot start: " + ", ".join(reasons)
-            # You can add a tooltip here if you have a tooltip library
-        
-        self.stop_button = tb.Button(
-            control_frame,
-            text="Stop",
-            command=self._stop_translation,
-            bootstyle="danger",
-            state=tk.DISABLED
-        )
-        self.stop_button.pack(side=tk.LEFT)
-        
-        # Progress frame
-        progress_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Progress",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        progress_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        # Overall progress
-        self.progress_label = tk.Label(
-            progress_frame,
-            text="Ready to start",
-            font=('Arial', 11)
-        )
-        self.progress_label.pack(anchor=tk.W)
-        
-        self.progress_bar = ttk.Progressbar(
-            progress_frame,
-            mode='determinate',
-            length=400
-        )
-        self.progress_bar.pack(fill=tk.X, pady=(5, 10))
-        
-        # Current file status
-        self.current_file_label = tk.Label(
-            progress_frame,
-            text="",
-            font=('Arial', 10),
-            fg='gray'
-        )
-        self.current_file_label.pack(anchor=tk.W)
-        
-        # Log frame
-        log_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Translation Log",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(10, 20))
-        
-        # Log text with scrollbar
-        log_scroll_frame = tk.Frame(log_frame)
-        log_scroll_frame.pack(fill=tk.BOTH, expand=True)
-        
-        log_scrollbar = tk.Scrollbar(log_scroll_frame)
-        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.log_text = tk.Text(
-            log_scroll_frame,
-            height=15,
-            wrap=tk.WORD,
-            yscrollcommand=log_scrollbar.set
-        )
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        log_scrollbar.config(command=self.log_text.yview)
-        
-        # Configure text tags for colored output
-        self.log_text.tag_config('info', foreground='white')
-        self.log_text.tag_config('success', foreground='green')
-        self.log_text.tag_config('warning', foreground='orange')
-        self.log_text.tag_config('error', foreground='red')
-
-    def _show_help_dialog(self, title: str, message: str):
-        """Show a help dialog with the given title and message"""
-        # Create a simple dialog
-        help_dialog = tk.Toplevel(self.dialog)
-        help_dialog.title(title)
-        help_dialog.geometry("500x400")
-        help_dialog.transient(self.dialog)
-        help_dialog.grab_set()
-        
-        # Center the dialog
-        help_dialog.update_idletasks()
-        x = (help_dialog.winfo_screenwidth() // 2) - (help_dialog.winfo_width() // 2)
-        y = (help_dialog.winfo_screenheight() // 2) - (help_dialog.winfo_height() // 2)
-        help_dialog.geometry(f"+{x}+{y}")
-        
-        # Main frame with padding
-        main_frame = tk.Frame(help_dialog, padx=20, pady=20)
-        main_frame.pack(fill='both', expand=True)
-        
-        # Icon and title
-        title_frame = tk.Frame(main_frame)
-        title_frame.pack(fill='x', pady=(0, 10))
-        
-        tk.Label(
-            title_frame,
-            text="ℹ️",
-            font=('Arial', 20)
-        ).pack(side='left', padx=(0, 10))
-        
-        tk.Label(
-            title_frame,
-            text=title,
-            font=('Arial', 12, 'bold')
-        ).pack(side='left')
-        
-        # Help text in a scrollable frame
-        text_frame = tk.Frame(main_frame)
-        text_frame.pack(fill='both', expand=True)
-        
-        # Scrollbar
-        scrollbar = tk.Scrollbar(text_frame)
-        scrollbar.pack(side='right', fill='y')
-        
-        # Text widget
-        text_widget = tk.Text(
-            text_frame,
-            wrap='word',
-            yscrollcommand=scrollbar.set,
-            font=('Arial', 10),
-            padx=10,
-            pady=10
-        )
-        text_widget.pack(side='left', fill='both', expand=True)
-        scrollbar.config(command=text_widget.yview)
-        
-        # Insert the help text
-        text_widget.insert('1.0', message)
-        text_widget.config(state='disabled')  # Make read-only
-        
-        # Close button
-        tb.Button(
-            main_frame,
-            text="Close",
-            command=help_dialog.destroy,
-            bootstyle="secondary"
-        ).pack(pady=(10, 0))
-        
-        # Bind Escape key to close
-        help_dialog.bind('<Escape>', lambda e: help_dialog.destroy())
-
-    def _on_visual_context_toggle(self):
-        """Handle visual context toggle"""
-        enabled = self.visual_context_enabled_var.get()
-        self.main_gui.config['manga_visual_context_enabled'] = enabled
-        
-        # Update translator if it exists
-        if self.translator:
-            self.translator.visual_context_enabled = enabled
-        
-        # Save config
-        if hasattr(self.main_gui, 'save_config'):
-            self.main_gui.save_config(show_message=False)
-        
-        # Log the change
         if enabled:
-            self._log("📷 Visual context ENABLED - Images will be sent to API", "info")
-            self._log("   Make sure you're using a vision-capable model", "warning")
+            # Pre-load models to avoid repeated loading
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                if not self.bubble_detector.rtdetr_loaded:
+                    self._log("📦 BATCH MODE: Pre-loading RT-DETR model...")
+                    self.bubble_detector.load_rtdetr_model()
+            
+            # Pre-load other models if needed
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
+                if not provider_status['loaded']:
+                    self._log(f"📦 BATCH MODE: Pre-loading {self.ocr_provider}...")
+                    self.ocr_manager.load_provider(self.ocr_provider)
+            
+            self._log(f"📦 BATCH MODE ENABLED: Processing {batch_size} images")
+            self._log(f"⏱️ API delay: {self.api_delay}s (preserved for rate limiting)")
         else:
-            self._log("📝 Visual context DISABLED - Text-only mode", "info")
-            self._log("   Compatible with non-vision models (Claude, GPT-3.5, etc.)", "success")
- 
-    def _open_advanced_settings(self):
-        """Open the manga advanced settings dialog"""
+            self._log("📝 BATCH MODE DISABLED")
+
+    def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
+        """Merge text regions by bubble and filter based on RT-DETR class settings"""
         try:
-            def on_settings_saved(settings):
-                """Callback when settings are saved"""
-                # Update config with new settings
-                self.main_gui.config['manga_settings'] = settings
+            # Get detector settings from config
+            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
+            detector_type = ocr_settings.get('detector_type', 'yolo')
+            
+            # Check if bubble detection is enabled
+            if not ocr_settings.get('bubble_detection_enabled', False):
+                self._log("📦 Bubble detection is disabled in settings", "info")
+                return self._merge_nearby_regions(regions)
+            
+            # Initialize detector if needed
+            if self.bubble_detector is None:
+                from bubble_detector import BubbleDetector
+                self.bubble_detector = BubbleDetector()
+            
+            bubbles = None
+            rtdetr_detections = None
+            
+            if detector_type == 'rtdetr':
+                # BATCH OPTIMIZATION: Less verbose logging
+                if not self.batch_mode:
+                    self._log("🤖 Using RT-DETR for bubble detection", "info")
                 
-                # Reload settings in translator if it exists
-                if self.translator:
-                    self._log("📋 Reloading settings in translator...", "info")
-                    # The translator will pick up new settings on next operation
+                # BATCH OPTIMIZATION: Don't reload if already loaded
+                if self.batch_mode and self.bubble_detector.rtdetr_loaded:
+                    # Model already loaded, skip the loading step entirely
+                    pass
+                elif not self.bubble_detector.rtdetr_loaded:
+                    self._log("📥 Loading RT-DETR model...", "info")
+                    if not self.bubble_detector.load_rtdetr_model():
+                        self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
+                        return self._merge_nearby_regions(regions)
                 
-                self._log("✅ Advanced settings saved and applied", "success")
-            
-            # Open the settings dialog
-            MangaSettingsDialog(
-                parent=self.dialog,
-                main_gui=self.main_gui,
-                config=self.main_gui.config,
-                callback=on_settings_saved
-            )
-            
-        except Exception as e:
-            self._log(f"❌ Error opening settings dialog: {str(e)}", "error")
-            messagebox.showerror("Error", f"Failed to open settings dialog:\n{str(e)}")
-        
-    def _toggle_font_size_mode(self):
-        """Toggle between fixed size and multiplier modes"""
-        mode = self.font_size_mode_var.get()
-        
-        # Check if frames exist before trying to pack/unpack them
-        if hasattr(self, 'fixed_size_frame') and hasattr(self, 'multiplier_frame'):
-            if mode == "fixed":
-                self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
-                self.multiplier_frame.pack_forget()
-                # Hide constraint frame if it exists
-                if hasattr(self, 'constraint_frame'):
-                    self.constraint_frame.pack_forget()
-            else:
-                self.fixed_size_frame.pack_forget()
-                self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
-                # Show constraint frame if it exists
-                if hasattr(self, 'constraint_frame'):
-                    self.constraint_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        # Only save if we're not initializing
-        if not hasattr(self, '_initializing') or not self._initializing:
-            self._save_rendering_settings()
-
-    def _update_multiplier_label(self, value):
-        """Update multiplier label"""
-        self.multiplier_label.config(text=f"{float(value):.1f}x")
-        # Auto-save on change
-        self._save_rendering_settings()
-    
-    def _update_color_preview(self, event):
-        """Update the font color preview"""
-        r = self.text_color_r.get()
-        g = self.text_color_g.get()
-        b = self.text_color_b.get()
-        color = f'#{r:02x}{g:02x}{b:02x}'
-        self.color_preview.configure(bg=color)
-        # Auto-save on change
-        if event is not None:  # Only save on user interaction, not initial load
-            self._save_rendering_settings()
-    
-    def _update_shadow_preview(self, event):
-        """Update the shadow color preview"""
-        r = self.shadow_color_r.get()
-        g = self.shadow_color_g.get()
-        b = self.shadow_color_b.get()
-        color = f'#{r:02x}{g:02x}{b:02x}'
-        self.shadow_preview.configure(bg=color)
-        # Auto-save on change
-        if event is not None:  # Only save on user interaction, not initial load
-            self._save_rendering_settings()
-    
-    def _toggle_shadow_controls(self):
-        """Enable/disable shadow controls based on checkbox"""
-        if self.shadow_enabled_var.get():
-            for widget in self.shadow_controls.winfo_children():
-                self._enable_widget_tree(widget)
-        else:
-            for widget in self.shadow_controls.winfo_children():
-                self._disable_widget_tree(widget)
-        # Auto-save on change (but not during initialization)
-        if not getattr(self, '_initializing', False):
-            self._save_rendering_settings()
-    
-    def _enable_widget_tree(self, widget):
-        """Recursively enable a widget and its children"""
-        try:
-            widget.configure(state=tk.NORMAL)
-        except:
-            pass
-        for child in widget.winfo_children():
-            self._enable_widget_tree(child)
-    
-    def _disable_widget_tree(self, widget):
-        """Recursively disable a widget and its children"""
-        try:
-            widget.configure(state=tk.DISABLED)
-        except:
-            pass
-        for child in widget.winfo_children():
-            self._disable_widget_tree(child)
-        
-    def _load_rendering_settings(self):
-        """Load text rendering settings from config"""
-        config = self.main_gui.config
-        
-        # Get inpainting settings from the nested location
-        manga_settings = config.get('manga_settings', {})
-        inpaint_settings = manga_settings.get('inpainting', {})
-        
-        # Load inpaint method from the correct location
-        self.inpaint_method_var = tk.StringVar(value=inpaint_settings.get('method', 'cloud'))
-        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'lama'))
-        
-        # Load model paths
-        for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
-            path = inpaint_settings.get(f'{model_type}_model_path', '')
-            if model_type == self.local_model_type_var.get():
-                self.local_model_path_var = tk.StringVar(value=path)
-        
-        # Initialize with defaults
-        self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
-        self.bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace right after creation
-        
-        self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'circle'))
-        self.bg_style_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.bg_reduction_var = tk.DoubleVar(value=config.get('manga_bg_reduction', 1.0))
-        self.bg_reduction_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.font_size_var = tk.IntVar(value=config.get('manga_font_size', 0))
-        self.font_size_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.selected_font_path = config.get('manga_font_path', None)
-        self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', True))
-        self.inpaint_quality_var = tk.StringVar(value=config.get('manga_inpaint_quality', 'high'))
-        self.inpaint_dilation_var = tk.IntVar(value=config.get('manga_inpaint_dilation', 15))
-        self.inpaint_passes_var = tk.IntVar(value=config.get('manga_inpaint_passes', 2))
-        
-        self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
-        self.font_size_mode_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
-        self.font_size_multiplier_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.force_caps_lock_var = tk.BooleanVar(value=config.get('manga_force_caps_lock', False))
-        self.force_caps_lock_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
-        self.constrain_to_bubble_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.min_readable_size_var = tk.IntVar(value=config.get('manga_min_readable_size', 16))
-        self.min_readable_size_var.trace('w', lambda *args: self._save_rendering_settings()) 
-        
-        self.max_font_size_var = tk.IntVar(value=config.get('manga_max_font_size', 24))
-        self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  
-        
-        self.strict_text_wrapping_var = tk.BooleanVar(value=config.get('manga_strict_text_wrapping', False))
-        self.strict_text_wrapping_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        # Font color settings
-        manga_text_color = config.get('manga_text_color', [102, 0, 0])
-        self.text_color_r = tk.IntVar(value=manga_text_color[0])
-        self.text_color_r.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.text_color_g = tk.IntVar(value=manga_text_color[1])
-        self.text_color_g.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.text_color_b = tk.IntVar(value=manga_text_color[2])
-        self.text_color_b.trace('w', lambda *args: self._save_rendering_settings())
-        
-        # Shadow settings
-        self.shadow_enabled_var = tk.BooleanVar(value=config.get('manga_shadow_enabled', True))
-        self.shadow_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        manga_shadow_color = config.get('manga_shadow_color', [204, 128, 128])
-        self.shadow_color_r = tk.IntVar(value=manga_shadow_color[0])
-        self.shadow_color_r.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_color_g = tk.IntVar(value=manga_shadow_color[1])
-        self.shadow_color_g.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_color_b = tk.IntVar(value=manga_shadow_color[2])
-        self.shadow_color_b.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_offset_x_var = tk.IntVar(value=config.get('manga_shadow_offset_x', 2))
-        self.shadow_offset_x_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_offset_y_var = tk.IntVar(value=config.get('manga_shadow_offset_y', 2))
-        self.shadow_offset_y_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_blur_var = tk.IntVar(value=config.get('manga_shadow_blur', 0))
-        self.shadow_blur_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        # Initialize font_style_var with saved value or default
-        saved_font_style = config.get('manga_font_style', 'Default')
-        self.font_style_var = tk.StringVar(value=saved_font_style)
-        self.font_style_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        # Full page context settings
-        self.full_page_context_var = tk.BooleanVar(value=config.get('manga_full_page_context', False))
-        self.full_page_context_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
-            "You will receive multiple text segments from a manga page. "
-            "Translate each segment considering the context of all segments together. "
-            "Maintain consistency in character names, tone, and style across all translations.\n\n"
-            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
-            "(without the [0], [1] index prefixes) and each value is the translation.\n"
-            "Make sure to properly escape any special characters in the JSON:\n"
-            "- Use \\n for newlines\n"
-            "- Use \\\" for quotes\n"
-            "- Use \\\\ for backslashes\n\n"
-            "Example:\n"
-            '{\n'
-            '  こんにちは: Hello,\n'
-            '  ありがとう: Thank you\n'
-            '}\n\n'
-            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
-        )
- 
-        # Load OCR prompt
-        self.ocr_prompt = config.get('manga_ocr_prompt', 
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
-        ) 
-        # Visual context setting
-        self.visual_context_enabled_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_visual_context_enabled', True)
-        )
-        self.visual_context_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
-        self.qwen2vl_model_size = config.get('qwen2vl_model_size', '1')  # Default to '1' (2B)
-        
-        # Output settings
-        self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
-        self.create_subfolder_var.trace('w', lambda *args: self._save_rendering_settings())
-    
-    def _save_rendering_settings(self):
-        """Save rendering settings with validation"""
-        # Don't save during initialization
-        if hasattr(self, '_initializing') and self._initializing:
-            return
-        
-        # Validate that variables exist and have valid values before saving
-        try:
-            # Ensure manga_settings structure exists
-            if 'manga_settings' not in self.main_gui.config:
-                self.main_gui.config['manga_settings'] = {}
-            if 'inpainting' not in self.main_gui.config['manga_settings']:
-                self.main_gui.config['manga_settings']['inpainting'] = {}
-            
-            # Save to nested location
-            inpaint = self.main_gui.config['manga_settings']['inpainting']
-            if hasattr(self, 'inpaint_method_var'):
-                inpaint['method'] = self.inpaint_method_var.get()
-            if hasattr(self, 'local_model_type_var'):
-                inpaint['local_method'] = self.local_model_type_var.get()
-                model_type = self.local_model_type_var.get()
-                if hasattr(self, 'local_model_path_var'):
-                    inpaint[f'{model_type}_model_path'] = self.local_model_path_var.get()
-            
-            # Add new inpainting settings
-            if hasattr(self, 'inpaint_method_var'):
-                self.main_gui.config['manga_inpaint_method'] = self.inpaint_method_var.get()
-            if hasattr(self, 'local_model_type_var'):
-                self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
-            
-            # Save model paths for each type
-            for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
-                if hasattr(self, 'local_model_type_var'):
-                    if model_type == self.local_model_type_var.get():
-                        if hasattr(self, 'local_model_path_var'):
-                            path = self.local_model_path_var.get()
-                            if path:
-                                self.main_gui.config[f'manga_{model_type}_model_path'] = path
-            
-            # Save all other settings with validation
-            if hasattr(self, 'bg_opacity_var'):
-                self.main_gui.config['manga_bg_opacity'] = self.bg_opacity_var.get()
-            if hasattr(self, 'bg_style_var'):
-                self.main_gui.config['manga_bg_style'] = self.bg_style_var.get()
-            if hasattr(self, 'bg_reduction_var'):
-                self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_var.get()
-            
-            # CRITICAL: Font size settings - validate before saving
-            if hasattr(self, 'font_size_var'):
-                try:
-                    value = self.font_size_var.get()
-                    self.main_gui.config['manga_font_size'] = value
-                except tk.TclError:
-                    pass  # Skip if variable is in invalid state
-            
-            if hasattr(self, 'min_readable_size_var'):
-                try:
-                    value = self.min_readable_size_var.get()
-                    # Validate the value is reasonable
-                    if 0 <= value <= 100:
-                        self.main_gui.config['manga_min_readable_size'] = value
-                except (tk.TclError, ValueError):
-                    pass  # Skip if variable is in invalid state
-            
-            if hasattr(self, 'max_font_size_var'):
-                try:
-                    value = self.max_font_size_var.get()
-                    # Validate the value is reasonable
-                    if 0 <= value <= 200:
-                        self.main_gui.config['manga_max_font_size'] = value
-                except (tk.TclError, ValueError):
-                    pass  # Skip if variable is in invalid state
-            
-            # Continue with other settings
-            self.main_gui.config['manga_font_path'] = self.selected_font_path
-            
-            if hasattr(self, 'skip_inpainting_var'):
-                self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
-            if hasattr(self, 'inpaint_quality_var'):
-                self.main_gui.config['manga_inpaint_quality'] = self.inpaint_quality_var.get()
-            if hasattr(self, 'inpaint_dilation_var'):
-                self.main_gui.config['manga_inpaint_dilation'] = self.inpaint_dilation_var.get()
-            if hasattr(self, 'inpaint_passes_var'):
-                self.main_gui.config['manga_inpaint_passes'] = self.inpaint_passes_var.get()
-            if hasattr(self, 'font_size_mode_var'):
-                self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
-            if hasattr(self, 'font_size_multiplier_var'):
-                self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
-            if hasattr(self, 'font_style_var'):
-                self.main_gui.config['manga_font_style'] = self.font_style_var.get()
-            if hasattr(self, 'constrain_to_bubble_var'):
-                self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
-            if hasattr(self, 'strict_text_wrapping_var'):
-                self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_var.get()
-            if hasattr(self, 'force_caps_lock_var'):
-                self.main_gui.config['manga_force_caps_lock'] = self.force_caps_lock_var.get()
-            
-            # Save font color as list
-            if hasattr(self, 'text_color_r') and hasattr(self, 'text_color_g') and hasattr(self, 'text_color_b'):
-                self.main_gui.config['manga_text_color'] = [
-                    self.text_color_r.get(),
-                    self.text_color_g.get(),
-                    self.text_color_b.get()
-                ]
-            
-            # Save shadow settings
-            if hasattr(self, 'shadow_enabled_var'):
-                self.main_gui.config['manga_shadow_enabled'] = self.shadow_enabled_var.get()
-            if hasattr(self, 'shadow_color_r') and hasattr(self, 'shadow_color_g') and hasattr(self, 'shadow_color_b'):
-                self.main_gui.config['manga_shadow_color'] = [
-                    self.shadow_color_r.get(),
-                    self.shadow_color_g.get(),
-                    self.shadow_color_b.get()
-                ]
-            if hasattr(self, 'shadow_offset_x_var'):
-                self.main_gui.config['manga_shadow_offset_x'] = self.shadow_offset_x_var.get()
-            if hasattr(self, 'shadow_offset_y_var'):
-                self.main_gui.config['manga_shadow_offset_y'] = self.shadow_offset_y_var.get()
-            if hasattr(self, 'shadow_blur_var'):
-                self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_var.get()
-            
-            # Save output settings
-            if hasattr(self, 'create_subfolder_var'):
-                self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_var.get()
-            
-            # Save full page context settings
-            if hasattr(self, 'full_page_context_var'):
-                self.main_gui.config['manga_full_page_context'] = self.full_page_context_var.get()
-            if hasattr(self, 'full_page_context_prompt'):
-                self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
-            
-            # OCR prompt
-            if hasattr(self, 'ocr_prompt'):
-                self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
-             
-            # Qwen and custom models             
-            if hasattr(self, 'qwen2vl_model_size'):
-                self.main_gui.config['qwen2vl_model_size'] = self.qwen2vl_model_size
-            
-            # Call main GUI's save_config to persist to file
-            if hasattr(self.main_gui, 'save_config'):
-                self.main_gui.save_config(show_message=False)
+                # Get settings
+                rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
+                detect_empty = ocr_settings.get('detect_empty_bubbles', True)
+                detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
+                detect_free_text = ocr_settings.get('detect_free_text', True)
                 
-        except Exception as e:
-            # Log error but don't crash
-            print(f"Error saving manga settings: {e}")
-    
-    def _on_context_toggle(self):
-        """Handle full page context toggle"""
-        enabled = self.full_page_context_var.get()
-        self._save_rendering_settings()
-    
-    def _edit_context_prompt(self):
-        """Open dialog to edit full page context prompt and OCR prompt"""
-        # Store parent canvas for scroll restoration
-        parent_canvas = self.canvas
-        
-        # Use WindowManager to create scrollable dialog
-        dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,  # parent window
-            "Edit Prompts",
-            width=700,
-            height=600,
-            max_width_ratio=0.7,
-            max_height_ratio=0.85
-        )
-        
-        # Instructions
-        instructions = tk.Label(
-            scrollable_frame,
-            text="Edit the prompt used for full page context translation.\n"
-                 "This will be appended to the main translation system prompt.",
-            font=('Arial', 10),
-            justify=tk.LEFT
-        )
-        instructions.pack(padx=20, pady=(20, 10))
-        
-        # Full Page Context label
-        context_label = tk.Label(
-            scrollable_frame,
-            text="Full Page Context Prompt:",
-            font=('Arial', 10, 'bold')
-        )
-        context_label.pack(padx=20, pady=(10, 5), anchor='w')
-        
-        # Text editor for context
-        text_editor = self.main_gui.ui.setup_scrollable_text(
-            scrollable_frame,
-            wrap=tk.WORD,
-            height=10
-        )
-        text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-        
-        # Insert current prompt
-        text_editor.insert(1.0, self.full_page_context_prompt)
-        
-        # OCR Prompt label
-        ocr_label = tk.Label(
-            scrollable_frame,
-            text="OCR System Prompt:",
-            font=('Arial', 10, 'bold')
-        )
-        ocr_label.pack(padx=20, pady=(10, 5), anchor='w')
-        
-        # Text editor for OCR
-        ocr_editor = self.main_gui.ui.setup_scrollable_text(
-            scrollable_frame,
-            wrap=tk.WORD,
-            height=10
-        )
-        ocr_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
-        
-        # Get current OCR prompt
-        if hasattr(self, 'ocr_prompt'):
-            ocr_editor.insert(1.0, self.ocr_prompt)
-        else:
-            ocr_editor.insert(1.0, "")
-        
-        # Button frame
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
-        
-        def close_dialog():
-            """Properly close dialog and restore parent scrolling"""
-            try:
-                # Clean up this dialog's scrolling
-                if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
-                    dialog._cleanup_scrolling()
-            except:
-                pass
-            
-            # Destroy the dialog
-            dialog.destroy()
-        
-        def save_prompt():
-            self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
-            self.ocr_prompt = ocr_editor.get(1.0, tk.END).strip()  # Save to self.ocr_prompt
-            
-            # Save to config
-            self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
-            self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
-            
-            self._save_rendering_settings()
-            self._log("✅ Updated prompts", "success")
-            close_dialog()
-        
-        def reset_prompt():
-            default_prompt = (
-                "You will receive multiple text segments from a manga page. "
-                "Translate each segment considering the context of all segments together. "
-                "Maintain consistency in character names, tone, and style across all translations.\n\n"
-                "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
-                "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
-                '{\n'
-                '  こんにちは: Hello,\n'
-                '  ありがとう: Thank you\n'
-                '}\n\n'
-                'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
-            )
-            text_editor.delete(1.0, tk.END)
-            text_editor.insert(1.0, default_prompt)
-            
-            default_ocr = (
-                "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-                "CRITICAL RULES:\n"
-                "1. DO NOT TRANSLATE ANYTHING\n"
-                "2. DO NOT MODIFY THE TEXT\n"
-                "3. DO NOT EXPLAIN OR COMMENT\n"
-                "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-                "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-                "If you see Korean text, output it in Korean.\n"
-                "If you see Japanese text, output it in Japanese.\n"
-                "If you see Chinese text, output it in Chinese.\n"
-                "If you see English text, output it in English.\n\n"
-                "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-                "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-                "between every word/character.\n\n"
-                "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-                "there are clear visual breaks.\n\n"
-                "NEVER translate. ONLY extract exactly what is written.\n"
-                "Output ONLY the raw text, nothing else."
-            )
-            ocr_editor.delete(1.0, tk.END)
-            ocr_editor.insert(1.0, default_ocr)
-        
-        # Buttons
-        tb.Button(
-            button_frame,
-            text="Save",
-            command=save_prompt,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tb.Button(
-            button_frame,
-            text="Reset to Default",
-            command=reset_prompt,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tb.Button(
-            button_frame,
-            text="Cancel",
-            command=close_dialog,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT)
-        
-        # Auto-resize dialog to fit content
-        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
-        
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
-    
-    def _refresh_context_settings(self):
-        """Refresh context settings from main GUI"""
-        # Actually fetch the current values from main GUI
-        if hasattr(self.main_gui, 'contextual_var'):
-            contextual_enabled = self.main_gui.contextual_var.get()
-            self.contextual_status_label.config(text=f"• Contextual Translation: {'Enabled' if contextual_enabled else 'Disabled'}")
-        
-        if hasattr(self.main_gui, 'trans_history'):
-            history_limit = self.main_gui.trans_history.get()
-            self.history_limit_label.config(text=f"• Translation History Limit: {history_limit} exchanges")
-        
-        if hasattr(self.main_gui, 'translation_history_rolling_var'):
-            rolling_enabled = self.main_gui.translation_history_rolling_var.get()
-            rolling_status = "Enabled (Rolling Window)" if rolling_enabled else "Disabled (Reset on Limit)"
-            self.rolling_status_label.config(text=f"• Rolling History: {rolling_status}")
-        
-        # Get and update model from main GUI
-        current_model = None
-        model_changed = False
-        
-        if hasattr(self.main_gui, 'model_var'):
-            current_model = self.main_gui.model_var.get()
-        elif hasattr(self.main_gui, 'model_combo'):
-            current_model = self.main_gui.model_combo.get()
-        elif hasattr(self.main_gui, 'config'):
-            current_model = self.main_gui.config.get('model', 'Unknown')
-        
-        # Update model display in the API Settings frame
-        for widget in self.parent_frame.winfo_children():
-            if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
-                for child in widget.winfo_children():
-                    if isinstance(child, tk.Frame):
-                        for subchild in child.winfo_children():
-                            if isinstance(subchild, tk.Label) and "Model:" in subchild.cget("text"):
-                                old_model_text = subchild.cget("text")
-                                old_model = old_model_text.split("Model: ")[-1] if "Model: " in old_model_text else None
-                                if old_model != current_model:
-                                    model_changed = True
-                                subchild.config(text=f"Model: {current_model}")
-                                break
-        
-        # If model changed, reset translator and client to force recreation
-        if model_changed and current_model:
-            if self.translator:
-                self._log(f"Model changed to {current_model}. Translator will be recreated on next run.", "info")
-                self.translator = None  # Force recreation on next translation
-            
-            # Also reset the client if it exists to ensure new model is used
-            if hasattr(self.main_gui, 'client') and self.main_gui.client:
-                if hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != current_model:
-                    self.main_gui.client = None  # Force recreation with new model
-        
-        # If translator exists, update its history manager settings
-        if self.translator and hasattr(self.translator, 'history_manager'):
-            try:
-                # Update the history manager with current main GUI settings
-                if hasattr(self.main_gui, 'contextual_var'):
-                    self.translator.history_manager.contextual_enabled = self.main_gui.contextual_var.get()
-                
-                if hasattr(self.main_gui, 'trans_history'):
-                    self.translator.history_manager.max_history = int(self.main_gui.trans_history.get())
-                
-                if hasattr(self.main_gui, 'translation_history_rolling_var'):
-                    self.translator.history_manager.rolling_enabled = self.main_gui.translation_history_rolling_var.get()
-                
-                # Reset the history to apply new settings
-                self.translator.history_manager.reset()
-                
-                self._log("✅ Refreshed context settings from main GUI and updated translator", "success")
-            except Exception as e:
-                self._log(f"✅ Refreshed context settings display (translator will update on next run)", "success")
-        else:
-            log_message = "✅ Refreshed context settings from main GUI"
-            if model_changed:
-                log_message += f" (Model: {current_model})"
-            self._log(log_message, "success")
-    
-    def _browse_google_credentials_permanent(self):
-        """Browse and set Google Cloud Vision credentials from the permanent button"""
-        file_path = filedialog.askopenfilename(
-            title="Select Google Cloud Service Account JSON",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        
-        if file_path:
-            # Save to config with both keys for compatibility
-            self.main_gui.config['google_vision_credentials'] = file_path
-            self.main_gui.config['google_cloud_credentials'] = file_path
-            
-            # Save configuration
-            if hasattr(self.main_gui, 'save_config'):
-                self.main_gui.save_config(show_message=False)
+                # BATCH OPTIMIZATION: Reduce logging
+                if not self.batch_mode:
+                    self._log(f"📋 RT-DETR class filters:", "info")
+                    self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                    self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                    self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                    self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
 
-            
-            # Update button state immediately
-            self.start_button.config(state=tk.NORMAL)
-            
-            # Update credentials display
-            self.creds_label.config(text=os.path.basename(file_path), fg='green')
-            
-            # Update status if we have a reference
-            if hasattr(self, 'status_label'):
-                self.status_label.config(text="✅ Ready", fg="green")
-            
-            messagebox.showinfo("Success", "Google Cloud credentials set successfully!")
-    
-    def _update_status_display(self):
-        """Update the status display after credentials change"""
-        # This would update the status label if we had a reference to it
-        # For now, we'll just ensure the button is enabled
-        google_creds_path = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
-        has_vision = os.path.exists(google_creds_path) if google_creds_path else False
-        
-        if has_vision:
-            self.start_button.config(state=tk.NORMAL)
-    
-    def _get_available_fonts(self):
-        """Get list of available fonts from system and custom directories"""
-        fonts = ["Default"]  # Default option
-        
-        # Reset font mapping
-        self.font_mapping = {}
-        
-        # Comprehensive map of Windows font filenames to proper display names
-        font_name_map = {
-            # === BASIC LATIN FONTS ===
-            # Arial family
-            'arial': 'Arial',
-            'ariali': 'Arial Italic',
-            'arialbd': 'Arial Bold',
-            'arialbi': 'Arial Bold Italic',
-            'ariblk': 'Arial Black',
-            
-            # Times New Roman
-            'times': 'Times New Roman',
-            'timesbd': 'Times New Roman Bold',
-            'timesi': 'Times New Roman Italic',
-            'timesbi': 'Times New Roman Bold Italic',
-            
-            # Calibri family
-            'calibri': 'Calibri',
-            'calibrib': 'Calibri Bold',
-            'calibrii': 'Calibri Italic',
-            'calibriz': 'Calibri Bold Italic',
-            'calibril': 'Calibri Light',
-            'calibrili': 'Calibri Light Italic',
-            
-            # Comic Sans family
-            'comic': 'Comic Sans MS',
-            'comici': 'Comic Sans MS Italic',
-            'comicbd': 'Comic Sans MS Bold',
-            'comicz': 'Comic Sans MS Bold Italic',
-            
-            # Segoe UI family
-            'segoeui': 'Segoe UI',
-            'segoeuib': 'Segoe UI Bold',
-            'segoeuii': 'Segoe UI Italic',
-            'segoeuiz': 'Segoe UI Bold Italic',
-            'segoeuil': 'Segoe UI Light',
-            'segoeuisl': 'Segoe UI Semilight',
-            'seguisb': 'Segoe UI Semibold',
-            'seguisbi': 'Segoe UI Semibold Italic',
-            'seguisli': 'Segoe UI Semilight Italic',
-            'seguili': 'Segoe UI Light Italic',
-            'seguibl': 'Segoe UI Black',
-            'seguibli': 'Segoe UI Black Italic',
-            'seguihis': 'Segoe UI Historic',
-            'seguiemj': 'Segoe UI Emoji',
-            'seguisym': 'Segoe UI Symbol',
-            
-            # Courier
-            'cour': 'Courier New',
-            'courbd': 'Courier New Bold',
-            'couri': 'Courier New Italic',
-            'courbi': 'Courier New Bold Italic',
-            
-            # Verdana
-            'verdana': 'Verdana',
-            'verdanab': 'Verdana Bold',
-            'verdanai': 'Verdana Italic',
-            'verdanaz': 'Verdana Bold Italic',
-            
-            # Georgia
-            'georgia': 'Georgia',
-            'georgiab': 'Georgia Bold',
-            'georgiai': 'Georgia Italic',
-            'georgiaz': 'Georgia Bold Italic',
-            
-            # Tahoma
-            'tahoma': 'Tahoma',
-            'tahomabd': 'Tahoma Bold',
-            
-            # Trebuchet
-            'trebuc': 'Trebuchet MS',
-            'trebucbd': 'Trebuchet MS Bold',
-            'trebucit': 'Trebuchet MS Italic',
-            'trebucbi': 'Trebuchet MS Bold Italic',
-            
-            # Impact
-            'impact': 'Impact',
-            
-            # Consolas
-            'consola': 'Consolas',
-            'consolab': 'Consolas Bold',
-            'consolai': 'Consolas Italic',
-            'consolaz': 'Consolas Bold Italic',
-            
-            # Sitka family (from your screenshot)
-            'sitka': 'Sitka Small',
-            'sitkab': 'Sitka Small Bold',
-            'sitkai': 'Sitka Small Italic',
-            'sitkaz': 'Sitka Small Bold Italic',
-            'sitkavf': 'Sitka Text',
-            'sitkavfb': 'Sitka Text Bold',
-            'sitkavfi': 'Sitka Text Italic',
-            'sitkavfz': 'Sitka Text Bold Italic',
-            'sitkasubheading': 'Sitka Subheading',
-            'sitkasubheadingb': 'Sitka Subheading Bold',
-            'sitkasubheadingi': 'Sitka Subheading Italic',
-            'sitkasubheadingz': 'Sitka Subheading Bold Italic',
-            'sitkaheading': 'Sitka Heading',
-            'sitkaheadingb': 'Sitka Heading Bold',
-            'sitkaheadingi': 'Sitka Heading Italic',
-            'sitkaheadingz': 'Sitka Heading Bold Italic',
-            'sitkadisplay': 'Sitka Display',
-            'sitkadisplayb': 'Sitka Display Bold',
-            'sitkadisplayi': 'Sitka Display Italic',
-            'sitkadisplayz': 'Sitka Display Bold Italic',
-            'sitkabanner': 'Sitka Banner',
-            'sitkabannerb': 'Sitka Banner Bold',
-            'sitkabanneri': 'Sitka Banner Italic',
-            'sitkabannerz': 'Sitka Banner Bold Italic',
-            
-            # Ink Free (from your screenshot)
-            'inkfree': 'Ink Free',
-            
-            # Lucida family
-            'l_10646': 'Lucida Sans Unicode',
-            'lucon': 'Lucida Console',
-            'ltype': 'Lucida Sans Typewriter',
-            'ltypeb': 'Lucida Sans Typewriter Bold',
-            'ltypei': 'Lucida Sans Typewriter Italic',
-            'ltypebi': 'Lucida Sans Typewriter Bold Italic',
-
-            # Palatino Linotype
-            'pala': 'Palatino Linotype',
-            'palab': 'Palatino Linotype Bold',
-            'palabi': 'Palatino Linotype Bold Italic',
-            'palai': 'Palatino Linotype Italic',
-
-            # Noto fonts
-            'notosansjp': 'Noto Sans JP',
-            'notoserifjp': 'Noto Serif JP',
-
-            # UD Digi Kyokasho (Japanese educational font)
-            'uddigikyokashon-b': 'UD Digi Kyokasho NK-B',
-            'uddigikyokashon-r': 'UD Digi Kyokasho NK-R',
-            'uddigikyokashonk-b': 'UD Digi Kyokasho NK-B',
-            'uddigikyokashonk-r': 'UD Digi Kyokasho NK-R',
-
-            # Urdu Typesetting
-            'urdtype': 'Urdu Typesetting',
-            'urdtypeb': 'Urdu Typesetting Bold',
-
-            # Segoe variants
-            'segmdl2': 'Segoe MDL2 Assets',
-            'segoeicons': 'Segoe Fluent Icons',
-            'segoepr': 'Segoe Print',
-            'segoeprb': 'Segoe Print Bold',
-            'segoesc': 'Segoe Script',
-            'segoescb': 'Segoe Script Bold',
-            'seguivar': 'Segoe UI Variable',
-
-            # Sans Serif Collection
-            'sansserifcollection': 'Sans Serif Collection',
-
-            # Additional common Windows 10/11 fonts
-            'holomdl2': 'HoloLens MDL2 Assets',
-            'gadugi': 'Gadugi',
-            'gadugib': 'Gadugi Bold',
-
-            # Cascadia Code (developer font)
-            'cascadiacode': 'Cascadia Code',
-            'cascadiacodepl': 'Cascadia Code PL',
-            'cascadiamono': 'Cascadia Mono',
-            'cascadiamonopl': 'Cascadia Mono PL',
-
-            # More Segoe UI variants
-            'seguibli': 'Segoe UI Black Italic',
-            'segoeuiblack': 'Segoe UI Black',
-
-            # Other fonts
-            'aldhabi': 'Aldhabi',
-            'andiso': 'Andalus',  # This is likely Andalus font
-            'arabtype': 'Arabic Typesetting',
-            'mstmc': 'Myanmar Text',  # Alternate file name
-            'monbaiti': 'Mongolian Baiti',  # Shorter filename variant
-            'leeluisl': 'Leelawadee UI Semilight',  # Missing variant
-            'simsunextg': 'SimSun-ExtG',  # Extended SimSun variant
-            'ebrima': 'Ebrima',
-            'ebrimabd': 'Ebrima Bold',
-            'gabriola': 'Gabriola',
-
-            # Bahnschrift variants
-            'bahnschrift': 'Bahnschrift',
-            'bahnschriftlight': 'Bahnschrift Light',
-            'bahnschriftsemibold': 'Bahnschrift SemiBold',
-            'bahnschriftbold': 'Bahnschrift Bold',
-
-            # Majalla (African language font)
-            'majalla': 'Sakkal Majalla',
-            'majallab': 'Sakkal Majalla Bold',
-
-            # Additional fonts that might be missing
-            'amiri': 'Amiri',
-            'amiri-bold': 'Amiri Bold',
-            'amiri-slanted': 'Amiri Slanted',
-            'amiri-boldslanted': 'Amiri Bold Slanted',
-            'aparaj': 'Aparajita',
-            'aparajb': 'Aparajita Bold',
-            'aparaji': 'Aparajita Italic',
-            'aparajbi': 'Aparajita Bold Italic',
-            'kokila': 'Kokila',
-            'kokilab': 'Kokila Bold',
-            'kokilai': 'Kokila Italic',
-            'kokilabi': 'Kokila Bold Italic',
-            'utsaah': 'Utsaah',
-            'utsaahb': 'Utsaah Bold',
-            'utsaahi': 'Utsaah Italic',
-            'utsaahbi': 'Utsaah Bold Italic',
-            'vani': 'Vani',
-            'vanib': 'Vani Bold',
-            
-            # === JAPANESE FONTS ===
-            'msgothic': 'MS Gothic',
-            'mspgothic': 'MS PGothic',
-            'msmincho': 'MS Mincho',
-            'mspmincho': 'MS PMincho',
-            'meiryo': 'Meiryo',
-            'meiryob': 'Meiryo Bold',
-            'yugothic': 'Yu Gothic',
-            'yugothb': 'Yu Gothic Bold',
-            'yugothl': 'Yu Gothic Light',
-            'yugothm': 'Yu Gothic Medium',
-            'yugothr': 'Yu Gothic Regular',
-            'yumin': 'Yu Mincho',
-            'yumindb': 'Yu Mincho Demibold',
-            'yuminl': 'Yu Mincho Light',
-            
-            # === KOREAN FONTS ===
-            'malgun': 'Malgun Gothic',
-            'malgunbd': 'Malgun Gothic Bold',
-            'malgunsl': 'Malgun Gothic Semilight',
-            'gulim': 'Gulim',
-            'gulimche': 'GulimChe',
-            'dotum': 'Dotum',
-            'dotumche': 'DotumChe',
-            'batang': 'Batang',
-            'batangche': 'BatangChe',
-            'gungsuh': 'Gungsuh',
-            'gungsuhche': 'GungsuhChe',
-            
-            # === CHINESE FONTS ===
-            # Simplified Chinese
-            'simsun': 'SimSun',
-            'simsunb': 'SimSun Bold',
-            'simsunextb': 'SimSun ExtB',
-            'nsimsun': 'NSimSun',
-            'simhei': 'SimHei',
-            'simkai': 'KaiTi',
-            'simfang': 'FangSong',
-            'simli': 'LiSu',
-            'simyou': 'YouYuan',
-            'stcaiyun': 'STCaiyun',
-            'stfangsong': 'STFangsong',
-            'sthupo': 'STHupo',
-            'stkaiti': 'STKaiti',
-            'stliti': 'STLiti',
-            'stsong': 'STSong',
-            'stxihei': 'STXihei',
-            'stxingkai': 'STXingkai',
-            'stxinwei': 'STXinwei',
-            'stzhongsong': 'STZhongsong',
-            
-            # Traditional Chinese  
-            'msjh': 'Microsoft JhengHei',
-            'msjhbd': 'Microsoft JhengHei Bold',
-            'msjhl': 'Microsoft JhengHei Light',
-            'mingliu': 'MingLiU',
-            'pmingliu': 'PMingLiU',
-            'mingliub': 'MingLiU Bold',
-            'mingliuhk': 'MingLiU_HKSCS',
-            'mingliuextb': 'MingLiU ExtB',
-            'pmingliuextb': 'PMingLiU ExtB',
-            'mingliuhkextb': 'MingLiU_HKSCS ExtB',
-            'kaiu': 'DFKai-SB',
-            
-            # Microsoft YaHei
-            'msyh': 'Microsoft YaHei',
-            'msyhbd': 'Microsoft YaHei Bold',
-            'msyhl': 'Microsoft YaHei Light',
-            
-            # === THAI FONTS ===
-            'leelawui': 'Leelawadee UI',
-            'leelauib': 'Leelawadee UI Bold',
-            'leelauisl': 'Leelawadee UI Semilight',
-            'leelawad': 'Leelawadee',
-            'leelawdb': 'Leelawadee Bold',
-            
-            # === INDIC FONTS ===
-            'mangal': 'Mangal',
-            'vrinda': 'Vrinda',
-            'raavi': 'Raavi',
-            'shruti': 'Shruti',
-            'tunga': 'Tunga',
-            'gautami': 'Gautami',
-            'kartika': 'Kartika',
-            'latha': 'Latha',
-            'kalinga': 'Kalinga',
-            'vijaya': 'Vijaya',
-            'nirmala': 'Nirmala UI',
-            'nirmalab': 'Nirmala UI Bold',
-            'nirmalas': 'Nirmala UI Semilight',
-            
-            # === ARABIC FONTS ===
-            'arial': 'Arial',
-            'trado': 'Traditional Arabic',
-            'tradbdo': 'Traditional Arabic Bold',
-            'simpo': 'Simplified Arabic',
-            'simpbdo': 'Simplified Arabic Bold',
-            'simpfxo': 'Simplified Arabic Fixed',
-            
-            # === OTHER ASIAN FONTS ===
-            'javatext': 'Javanese Text',
-            'himalaya': 'Microsoft Himalaya',
-            'mongolianbaiti': 'Mongolian Baiti',
-            'msuighur': 'Microsoft Uighur',
-            'msuighub': 'Microsoft Uighur Bold',
-            'msyi': 'Microsoft Yi Baiti',
-            'taileb': 'Microsoft Tai Le Bold',
-            'taile': 'Microsoft Tai Le',
-            'ntailu': 'Microsoft New Tai Lue',
-            'ntailub': 'Microsoft New Tai Lue Bold',
-            'phagspa': 'Microsoft PhagsPa',
-            'phagspab': 'Microsoft PhagsPa Bold',
-            'mmrtext': 'Myanmar Text',
-            'mmrtextb': 'Myanmar Text Bold',
-            
-            # === SYMBOL FONTS ===
-            'symbol': 'Symbol',
-            'webdings': 'Webdings',
-            'wingding': 'Wingdings',
-            'wingdng2': 'Wingdings 2',
-            'wingdng3': 'Wingdings 3',
-            'mtextra': 'MT Extra',
-            'marlett': 'Marlett',
-            
-            # === OTHER FONTS ===
-            'mvboli': 'MV Boli',
-            'sylfaen': 'Sylfaen',
-            'estrangelo': 'Estrangelo Edessa',
-            'euphemia': 'Euphemia',
-            'plantagenet': 'Plantagenet Cherokee',
-            'micross': 'Microsoft Sans Serif',
-            
-            # Franklin Gothic
-            'framd': 'Franklin Gothic Medium',
-            'framdit': 'Franklin Gothic Medium Italic',
-            'fradm': 'Franklin Gothic Demi',
-            'fradmcn': 'Franklin Gothic Demi Cond',
-            'fradmit': 'Franklin Gothic Demi Italic',
-            'frahv': 'Franklin Gothic Heavy',
-            'frahvit': 'Franklin Gothic Heavy Italic',
-            'frabook': 'Franklin Gothic Book',
-            'frabookit': 'Franklin Gothic Book Italic',
-            
-            # Cambria
-            'cambria': 'Cambria',
-            'cambriab': 'Cambria Bold',
-            'cambriai': 'Cambria Italic',
-            'cambriaz': 'Cambria Bold Italic',
-            'cambria&cambria math': 'Cambria Math',
-            
-            # Candara
-            'candara': 'Candara',
-            'candarab': 'Candara Bold',
-            'candarai': 'Candara Italic',
-            'candaraz': 'Candara Bold Italic',
-            'candaral': 'Candara Light',
-            'candarali': 'Candara Light Italic',
-            
-            # Constantia
-            'constan': 'Constantia',
-            'constanb': 'Constantia Bold',
-            'constani': 'Constantia Italic',
-            'constanz': 'Constantia Bold Italic',
-            
-            # Corbel
-            'corbel': 'Corbel',
-            'corbelb': 'Corbel Bold',
-            'corbeli': 'Corbel Italic',
-            'corbelz': 'Corbel Bold Italic',
-            'corbell': 'Corbel Light',
-            'corbelli': 'Corbel Light Italic',
-            
-            # Bahnschrift
-            'bahnschrift': 'Bahnschrift',
-            
-            # Garamond
-            'gara': 'Garamond',
-            'garabd': 'Garamond Bold',
-            'garait': 'Garamond Italic',
-            
-            # Century Gothic
-            'gothic': 'Century Gothic',
-            'gothicb': 'Century Gothic Bold',
-            'gothici': 'Century Gothic Italic',
-            'gothicz': 'Century Gothic Bold Italic',
-            
-            # Bookman Old Style
-            'bookos': 'Bookman Old Style',
-            'bookosb': 'Bookman Old Style Bold',
-            'bookosi': 'Bookman Old Style Italic',
-            'bookosbi': 'Bookman Old Style Bold Italic',
-        }
-        
-        # Dynamically discover all Windows fonts
-        windows_fonts = []
-        windows_font_dir = "C:/Windows/Fonts"
-        
-        if os.path.exists(windows_font_dir):
-            for font_file in os.listdir(windows_font_dir):
-                font_path = os.path.join(windows_font_dir, font_file)
-                
-                # Check if it's a font file
-                if os.path.isfile(font_path) and font_file.lower().endswith(('.ttf', '.ttc', '.otf')):
-                    # Get base name without extension
-                    base_name = os.path.splitext(font_file)[0]
-                    base_name_lower = base_name.lower()
-                    
-                    # Check if we have a proper name mapping
-                    if base_name_lower in font_name_map:
-                        display_name = font_name_map[base_name_lower]
-                    else:
-                        # Generic cleanup for unmapped fonts
-                        display_name = base_name.replace('_', ' ').replace('-', ' ')
-                        display_name = ' '.join(word.capitalize() for word in display_name.split())
-                    
-                    windows_fonts.append((display_name, font_path))
-        
-        # Sort alphabetically
-        windows_fonts.sort(key=lambda x: x[0])
-        
-        # Add all discovered fonts to the list
-        for font_name, font_path in windows_fonts:
-            fonts.append(font_name)
-            self.font_mapping[font_name] = font_path
-        
-        # Check for custom fonts directory (keep your existing code)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        fonts_dir = os.path.join(script_dir, "fonts")
-        
-        if os.path.exists(fonts_dir):
-            for root, dirs, files in os.walk(fonts_dir):
-                for font_file in files:
-                    if font_file.endswith(('.ttf', '.ttc', '.otf')):
-                        font_path = os.path.join(root, font_file)
-                        font_name = os.path.splitext(font_file)[0]
-                        # Add category from folder
-                        category = os.path.basename(root)
-                        if category != "fonts":
-                            font_name = f"{font_name} ({category})"
-                        fonts.append(font_name)
-                        self.font_mapping[font_name] = font_path
-        
-        # Load previously saved custom fonts (keep your existing code)
-        if 'custom_fonts' in self.main_gui.config:
-            for custom_font in self.main_gui.config['custom_fonts']:
-                if os.path.exists(custom_font['path']):
-                    # Check if this font is already in the list
-                    if custom_font['name'] not in fonts:
-                        fonts.append(custom_font['name'])
-                        self.font_mapping[custom_font['name']] = custom_font['path']
-        
-        # Add custom fonts option at the end
-        fonts.append("Browse Custom Font...")
-        
-        return fonts
-    
-    def _on_font_selected(self, event):
-        """Handle font selection"""
-        selected = self.font_style_var.get()
-        
-        if selected == "Default":
-            self.selected_font_path = None
-        elif selected == "Browse Custom Font...":
-            # Open file dialog to select custom font
-            font_path = filedialog.askopenfilename(
-                title="Select Font File",
-                filetypes=[
-                    ("Font files", "*.ttf *.ttc *.otf"),
-                    ("TrueType fonts", "*.ttf"),
-                    ("TrueType collections", "*.ttc"),
-                    ("OpenType fonts", "*.otf"),
-                    ("All files", "*.*")
-                ]
-            )
-            
-            if font_path:
-                # Add to combo box
-                font_name = os.path.basename(font_path)
-                current_values = list(self.font_combo['values'])
-                
-                # Insert before "Browse Custom Font..." option
-                if font_name not in [n for n in self.font_mapping.keys()]:
-                    current_values.insert(-1, font_name)
-                    self.font_combo['values'] = current_values
-                    self.font_combo.set(font_name)
-                    
-                    # Update font mapping
-                    self.font_mapping[font_name] = font_path
-                    self.selected_font_path = font_path
-                    
-                    # Save custom font to config
-                    if 'custom_fonts' not in self.main_gui.config:
-                        self.main_gui.config['custom_fonts'] = []
-                    
-                    custom_font_entry = {'name': font_name, 'path': font_path}
-                    # Check if this exact entry already exists
-                    font_exists = False
-                    for existing_font in self.main_gui.config['custom_fonts']:
-                        if existing_font['path'] == font_path:
-                            font_exists = True
-                            break
-                    
-                    if not font_exists:
-                        self.main_gui.config['custom_fonts'].append(custom_font_entry)
-                        # Save config immediately to persist custom fonts
-                        if hasattr(self.main_gui, 'save_config'):
-                            self.main_gui.save_config(show_message=False)
-                else:
-                    # Font already exists, just select it
-                    self.font_combo.set(font_name)
-                    self.selected_font_path = self.font_mapping[font_name]
-            else:
-                # User cancelled, revert to previous selection
-                if hasattr(self, 'previous_font_selection'):
-                    self.font_combo.set(self.previous_font_selection)
-                else:
-                    self.font_combo.set("Default")
-                return
-        else:
-            # Check if it's in the font mapping
-            if selected in self.font_mapping:
-                self.selected_font_path = self.font_mapping[selected]
-            else:
-                # This shouldn't happen, but just in case
-                self.selected_font_path = None
-        
-        # Store current selection for next time
-        self.previous_font_selection = selected
-        
-        # Auto-save on change
-        self._save_rendering_settings()
-    
-    def _update_opacity_label(self, value):
-        """Update opacity percentage label"""
-        percentage = int((float(value) / 255) * 100)
-        self.opacity_label.config(text=f"{percentage}%")
-        # Auto-save on change
-        self._save_rendering_settings()
-    
-    def _update_reduction_label(self, value):
-        """Update size reduction percentage label"""
-        percentage = int(float(value) * 100)
-        self.reduction_label.config(text=f"{percentage}%")
-        # Auto-save on change
-        self._save_rendering_settings()
-        
-    def _toggle_inpaint_quality_visibility(self):
-        """Show/hide inpaint quality options based on skip_inpainting setting"""
-        if hasattr(self, 'inpaint_quality_frame'):
-            if self.skip_inpainting_var.get():
-                # Hide quality options when inpainting is skipped
-                self.inpaint_quality_frame.pack_forget()
-            else:
-                # Show quality options when inpainting is enabled
-                self.inpaint_quality_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
-
-    def _toggle_inpaint_visibility(self):
-        """Show/hide inpainting options based on skip toggle"""
-        if self.skip_inpainting_var.get():
-            # Hide all inpainting options
-            self.inpaint_method_frame.pack_forget()
-            self.cloud_inpaint_frame.pack_forget()
-            self.local_inpaint_frame.pack_forget()
-            self.inpaint_separator.pack_forget()  # Hide separator
-        else:
-            # Show method selection
-            self.inpaint_method_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
-            self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))  # Show separator
-            self._on_inpaint_method_change()
-        
-        self._save_rendering_settings()
-
-    def _on_inpaint_method_change(self):
-        """Show appropriate inpainting settings based on method"""
-        method = self.inpaint_method_var.get()
-        
-        if method == 'cloud':
-            self.cloud_inpaint_frame.pack(fill=tk.X, pady=5, after=self.inpaint_method_frame)
-            self.local_inpaint_frame.pack_forget()
-        elif method == 'local':
-            self.local_inpaint_frame.pack(fill=tk.X, pady=10, after=self.inpaint_method_frame)
-            self.cloud_inpaint_frame.pack_forget()
-        elif method == 'hybrid':
-            # Show both frames for hybrid
-            self.local_inpaint_frame.pack(fill=tk.X, pady=5, after=self.inpaint_method_frame)
-            self.cloud_inpaint_frame.pack(fill=tk.X, pady=5, after=self.local_inpaint_frame)
-        
-        self._save_rendering_settings()
-
-    def _on_local_model_change(self, event=None):
-        """Handle model type change and auto-load if model exists"""
-        model_type = self.local_model_type_var.get()
-        
-        # Update description
-        model_desc = {
-            'lama': 'LaMa (Best quality)',
-            'aot': 'AOT GAN (Fast)',
-            'mat': 'MAT (High-res)',
-            'sd_local': 'Stable Diffusion (Anime)',
-            'anime': 'Anime/Manga Inpainting',
-        }
-        self.model_desc_label.config(text=model_desc.get(model_type, ''))
-        
-        # Check for saved path for this model type
-        saved_path = self.main_gui.config.get(f'manga_{model_type}_model_path', '')
-        
-        if saved_path and os.path.exists(saved_path):
-            # Update the path display
-            self.local_model_path_var.set(saved_path)
-            self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
-            
-            # Auto-load the model after a short delay
-            self.dialog.after(100, lambda: self._try_load_model(model_type, saved_path))
-        else:
-            # Clear the path display
-            self.local_model_path_var.set("")
-            self.local_model_status_label.config(text="No model loaded", fg='gray')
-        
-        self._save_rendering_settings()
-
-    def _browse_local_model(self):
-        """Browse for local inpainting model and auto-load"""
-        model_type = self.local_model_type_var.get()
-        
-        if model_type == 'sd_local':
-            filetypes = [
-                ("Model files", "*.safetensors *.pt *.pth *.ckpt *.onnx"),
-                ("SafeTensors", "*.safetensors"),
-                ("Checkpoint files", "*.ckpt"),
-                ("PyTorch models", "*.pt *.pth"),
-                ("ONNX models", "*.onnx"),
-                ("All files", "*.*")
-            ]
-        else:
-            filetypes = [
-                ("Model files", "*.pt *.pth *.ckpt *.onnx"),
-                ("Checkpoint files", "*.ckpt"),
-                ("PyTorch models", "*.pt *.pth"),
-                ("ONNX models", "*.onnx"),
-                ("All files", "*.*")
-            ]
-        
-        path = filedialog.askopenfilename(
-            title=f"Select {model_type.upper()} Model",
-            filetypes=filetypes
-        )
-        
-        if path:
-            self.local_model_path_var.set(path)
-            # Save to config
-            self.main_gui.config[f'manga_{model_type}_model_path'] = path
-            self._save_rendering_settings()
-            
-            # Update status first
-            self._update_local_model_status()
-            
-            # Auto-load the selected model
-            self.dialog.after(100, lambda: self._try_load_model(model_type, path))
-
-    def _try_load_model(self, method: str, model_path: str):
-        """Try to load a model and update status"""
-        try:
-            # Show loading status
-            self.local_model_status_label.config(text="⏳ Loading model...", fg='orange')
-            self.dialog.update_idletasks()
-            
-            self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
-            
-            # Try to load using LocalInpainter
-            from local_inpainter import LocalInpainter
-            
-            # Initialize test inpainter
-            test_inpainter = LocalInpainter()
-            
-            # Try to load the model
-            if test_inpainter.load_model(method, model_path, force_reload=True):
-                # Success - update status using existing method
-                self._update_local_model_status()
-                
-                # Override with success message temporarily
-                self.local_model_status_label.config(
-                    text=f"✅ {method.upper()} model loaded successfully!",
-                    fg='green'
+                # Get FULL RT-DETR detections (not just bubbles)
+                rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                    image_path=image_path,
+                    confidence=rtdetr_confidence,
+                    return_all_bubbles=False  # Get dict with all classes
                 )
                 
-                self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
+                # Combine enabled bubble types for merging
+                bubbles = []
+                if detect_empty and 'bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['bubbles'])
+                if detect_text_bubbles and 'text_bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['text_bubbles'])
                 
-                # Update the translator's inpainter if it exists
-                if hasattr(self, 'translator') and self.translator:
-                    # Force reinitialize with new model
-                    if hasattr(self.translator, 'local_inpainter'):
-                        self.translator.local_inpainter = None
-                    if hasattr(self.translator, '_last_local_method'):
-                        self.translator._last_local_method = None
-                    if hasattr(self.translator, '_last_local_model_path'):
-                        self.translator._last_local_model_path = None
+                # Store free text locations for filtering later
+                free_text_regions = rtdetr_detections.get('text_free', []) if detect_free_text else []
                 
-                # After 3 seconds, revert to normal status display
-                self.dialog.after(3000, self._update_local_model_status)
+                self._log(f"✅ RT-DETR detected:", "success")
+                self._log(f"   {len(rtdetr_detections.get('bubbles', []))} empty bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_bubbles', []))} text bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_free', []))} free text regions", "info")
                 
-                return True
-            else:
-                self.local_model_status_label.config(
-                    text="⚠️ Model file found but failed to load",
-                    fg='orange'
+            elif detector_type == 'yolo':
+                # Use YOLOv8 (existing code)
+                self._log("🤖 Using YOLOv8 for bubble detection", "info")
+                
+                model_path = ocr_settings.get('bubble_model_path')
+                if not model_path:
+                    self._log("⚠️ No YOLO model configured, falling back to traditional merging", "warning")
+                    return self._merge_nearby_regions(regions)
+                
+                if not self.bubble_detector.model_loaded:
+                    self._log(f"📥 Loading YOLO model: {os.path.basename(model_path)}")
+                    if not self.bubble_detector.load_model(model_path):
+                        self._log("⚠️ Failed to load YOLO model, falling back to traditional merging", "warning")
+                        return self._merge_nearby_regions(regions)
+                
+                confidence = ocr_settings.get('bubble_confidence', 0.5)
+                self._log(f"🎯 Detecting bubbles with YOLO (confidence >= {confidence:.2f})")
+                bubbles = self.bubble_detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
+                
+            else:  # auto mode
+                self._log("🤖 Auto mode: using best available detector", "info")
+                
+                if not self.bubble_detector.rtdetr_loaded:
+                    self.bubble_detector.load_rtdetr_model()
+                
+                confidence = ocr_settings.get('bubble_confidence', 0.5)
+                bubbles = self.bubble_detector.detect_bubbles(
+                    image_path, 
+                    confidence=confidence,
+                    use_rtdetr=None
                 )
-                self.main_gui.append_log(f"⚠️ Model file found but failed to load")
-                return False
+            
+            if not bubbles:
+                self._log("⚠️ No bubbles detected, using traditional merging", "warning")
+                return self._merge_nearby_regions(regions)
+            
+            self._log(f"✅ Found {len(bubbles)} bubbles for grouping", "success")
+            
+            # Merge regions within bubbles
+            merged_regions = []
+            used_indices = set()
+            
+            for bubble_idx, (bx, by, bw, bh) in enumerate(bubbles):
+                bubble_regions = []
                 
-        except ImportError:
-            self.local_model_status_label.config(
-                text="❌ Local inpainter module not available",
-                fg='red'
-            )
-            self.main_gui.append_log("❌ Local inpainter module not available", "error")
-            return False
-        except Exception as e:
-            self.local_model_status_label.config(
-                text=f"❌ Error: {str(e)[:50]}",
-                fg='red'
-            )
-            print(f"❌ Error loading model: {str(e)}")
-            return False
-        
-    def _update_local_model_status(self):
-        """Update local model status display"""
-        path = self.local_model_path_var.get()
-        
-        if not path:
-            self.local_model_status_label.config(text="⚠️ No model selected", fg='orange')
-            return
-        
-        if not os.path.exists(path):
-            self.local_model_status_label.config(text="❌ Model file not found", fg='red')
-            return
-        
-        # Check for ONNX cache
-        if path.endswith(('.pt', '.pth', '.safetensors')):
-            onnx_dir = os.path.join(os.path.dirname(path), 'onnx_cache')
-            if os.path.exists(onnx_dir):
-                # Check if ONNX file exists for this model
-                model_hash = hashlib.md5(path.encode()).hexdigest()[:8]
-                onnx_files = [f for f in os.listdir(onnx_dir) if model_hash in f]
-                if onnx_files:
-                    self.local_model_status_label.config(
-                        text="✅ Model ready (ONNX cached)",
-                        fg='green'
-                    )
-                else:
-                    self.local_model_status_label.config(
-                        text="ℹ️ Will convert to ONNX on first use",
-                        fg='blue'
-                    )
-            else:
-                self.local_model_status_label.config(
-                    text="ℹ️ Will convert to ONNX on first use",
-                    fg='blue'
-                )
-        else:
-            self.local_model_status_label.config(
-                text="✅ ONNX model ready",
-                fg='green'
-            )
-
-    def _download_model(self):
-        """Actually download the model for the selected type"""
-        model_type = self.local_model_type_var.get()
-        
-        # Define URLs for each model type (matching manga_settings_dialog)
-        model_urls = {
-            'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
-            'lama': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
-            'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
-            'mat': '',  # User must provide
-            'ollama': '',  # Not applicable
-            'sd_local': ''  # User must provide
-        }
-        
-        url = model_urls.get(model_type, '')
-        
-        if not url:
-            if model_type == 'ollama':
-                messagebox.showinfo("Ollama", "Ollama doesn't require a download. Run 'ollama pull llava' in terminal.")
-                return
-            else:
-                # Ask user for URL
-                from tkinter import simpledialog
-                url = simpledialog.askstring(
-                    f"{model_type.upper()} Model URL",
-                    f"Enter the download URL for {model_type.upper()} model:",
-                    parent=self.dialog
-                )
-                if not url:
-                    return
-        
-        # Select download location
-        default_filename = f"{model_type}_model.pt"
-        save_path = filedialog.asksaveasfilename(
-            title=f"Save {model_type.upper()} Model",
-            defaultextension=".pt",
-            initialfile=default_filename,
-            filetypes=[
-                ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
-                ("All files", "*.*")
-            ]
-        )
-        
-        if not save_path:
-            return
-        
-        # Download the model
-        self._perform_download(url, save_path, model_type)
-
-    def _perform_download(self, url: str, save_path: str, model_name: str):
-        """Perform the actual download with progress indication"""
-        import threading
-        import requests
-        
-        # Create a progress dialog
-        progress_dialog = tk.Toplevel(self.dialog)
-        progress_dialog.title(f"Downloading {model_name.upper()} Model")
-        progress_dialog.geometry("400x150")
-        progress_dialog.transient(self.dialog)
-        progress_dialog.grab_set()
-        
-        # Center the dialog
-        progress_dialog.update_idletasks()
-        x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
-        y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
-        progress_dialog.geometry(f"+{x}+{y}")
-        
-        # Progress label
-        progress_label = tk.Label(progress_dialog, text="⏳ Downloading...", font=('Arial', 10))
-        progress_label.pack(pady=20)
-        
-        # Progress bar
-        progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(
-            progress_dialog,
-            length=350,
-            mode='determinate',
-            variable=progress_var
-        )
-        progress_bar.pack(pady=10)
-        
-        # Status label
-        status_label = tk.Label(progress_dialog, text="0%", font=('Arial', 9))
-        status_label.pack()
-        
-        # Cancel flag
-        cancel_download = {'value': False}
-        
-        def on_cancel():
-            cancel_download['value'] = True
-            progress_dialog.destroy()
-        
-        progress_dialog.protocol("WM_DELETE_WINDOW", on_cancel)
-        
-        def download_thread():
-            try:
-                # Download with progress
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                
-                with open(save_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if cancel_download['value']:
-                            # Clean up partial file
-                            f.close()
-                            if os.path.exists(save_path):
-                                os.remove(save_path)
-                            return
+                for idx, region in enumerate(regions):
+                    if idx in used_indices:
+                        continue
                         
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            # Update progress
-                            if total_size > 0:
-                                progress = (downloaded / total_size) * 100
-                                progress_dialog.after(0, lambda p=progress: [
-                                    progress_var.set(p),
-                                    status_label.config(text=f"{p:.1f}%"),
-                                    progress_label.config(text=f"⏳ Downloading... {downloaded//1024//1024}MB / {total_size//1024//1024}MB")
-                                ])
-                
-                # Success - update UI in main thread
-                progress_dialog.after(0, lambda: [
-                    progress_dialog.destroy(),
-                    self._download_complete(save_path, model_name)
-                ])
-                
-            except requests.exceptions.RequestException as e:
-                # Error - update UI in main thread
-                if not cancel_download['value']:
-                    progress_dialog.after(0, lambda: [
-                        progress_dialog.destroy(),
-                        self._download_failed(str(e))
-                    ])
-            except Exception as e:
-                if not cancel_download['value']:
-                    progress_dialog.after(0, lambda: [
-                        progress_dialog.destroy(),
-                        self._download_failed(str(e))
-                    ])
-        
-        # Start download in background thread
-        thread = threading.Thread(target=download_thread, daemon=True)
-        thread.start()
-
-    def _download_complete(self, save_path: str, model_name: str):
-        """Handle successful download"""
-        # Update the model path entry
-        self.local_model_path_var.set(save_path)
-        
-        # Save to config
-        self.main_gui.config[f'manga_{model_name}_model_path'] = save_path
-        self._save_rendering_settings()
-        
-        # Auto-load the downloaded model
-        self.local_model_status_label.config(text="⏳ Loading downloaded model...", fg='orange')
-        
-        def load_after_download():
-            if self._try_load_model(model_name, save_path):
-                messagebox.showinfo("Success", f"{model_name.upper()} model downloaded and loaded!")
-            else:
-                messagebox.showinfo("Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
-        
-        self.dialog.after(100, load_after_download)
-        
-        # Log to main GUI
-        self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
-
-    def _download_failed(self, error: str):
-        """Handle download failure"""
-        messagebox.showerror("Download Failed", f"Failed to download model:\n{error}")
-        self.main_gui.append_log(f"❌ Model download failed: {error}")
-
-    def _show_model_info(self):
-        """Show information about models"""
-        model_type = self.local_model_type_var.get()
-        
-        info = {
-            'aot': "AOT GAN Model:\n\n"
-                   "• Auto-downloads from HuggingFace\n"
-                   "• Traced PyTorch JIT model\n"
-                   "• Good for general inpainting\n"
-                   "• Fast processing speed\n"
-                   "• File size: ~100MB",
-            
-            'lama': "LaMa Model:\n\n"
-                    "• Auto-downloads anime-optimized version\n"
-                    "• Best quality for manga/anime\n"
-                    "• Large model (~200MB)\n"
-                    "• Excellent at removing text from bubbles\n"
-                    "• Preserves art style well",
-            
-            'anime': "Anime-Specific Model:\n\n"
-                     "• Same as LaMa anime version\n"
-                     "• Optimized for manga/anime art\n"
-                     "• Auto-downloads from GitHub\n"
-                     "• Recommended for manga translation\n"
-                     "• Preserves screen tones and patterns",
-            
-            'mat': "MAT Model:\n\n"
-                   "• Manual download required\n"
-                   "• Get from: github.com/fenglinglwb/MAT\n"
-                   "• Good for high-resolution images\n"
-                   "• Slower but high quality\n"
-                   "• File size: ~500MB",
-            
-            'ollama': "Ollama:\n\n"
-                      "• Uses local Ollama server\n"
-                      "• No model download needed here\n"
-                      "• Run: ollama pull llava\n"
-                      "• Context-aware inpainting\n"
-                      "• Requires Ollama running locally",
-            
-            'sd_local': "Stable Diffusion:\n\n"
-                        "• Manual download required\n"
-                        "• Get from HuggingFace\n"
-                        "• Requires significant VRAM (4-8GB)\n"
-                        "• Best quality but slowest\n"
-                        "• Can use custom prompts"
-        }
-        
-        # Create info dialog
-        info_dialog = tk.Toplevel(self.dialog)
-        info_dialog.title(f"{model_type.upper()} Model Information")
-        info_dialog.geometry("450x350")
-        info_dialog.transient(self.dialog)
-        
-        # Center the dialog
-        info_dialog.update_idletasks()
-        x = (info_dialog.winfo_screenwidth() // 2) - (info_dialog.winfo_width() // 2)
-        y = (info_dialog.winfo_screenheight() // 2) - (info_dialog.winfo_height() // 2)
-        info_dialog.geometry(f"+{x}+{y}")
-        
-        # Info text
-        text_widget = tk.Text(info_dialog, wrap=tk.WORD, padx=20, pady=20)
-        text_widget.pack(fill='both', expand=True)
-        text_widget.insert(1.0, info.get(model_type, "Please select a model type first"))
-        text_widget.config(state='disabled')
-        
-        # Close button
-        tb.Button(
-            info_dialog,
-            text="Close",
-            command=info_dialog.destroy,
-            bootstyle="secondary"
-        ).pack(pady=10)
-
-    def _toggle_inpaint_controls_visibility(self):
-            """Toggle visibility of inpaint controls (mask expansion and passes) based on skip inpainting setting"""
-            # Just return if the frame doesn't exist - prevents AttributeError
-            if not hasattr(self, 'inpaint_controls_frame'):
-                return
-                
-            if self.skip_inpainting_var.get():
-                self.inpaint_controls_frame.pack_forget()
-            else:
-                # Pack it back in the right position
-                self.inpaint_controls_frame.pack(fill=tk.X, pady=5, after=self.inpaint_quality_frame)
-
-    def _configure_inpaint_api(self):
-        """Configure cloud inpainting API"""
-        # Show instructions
-        result = messagebox.askyesno(
-            "Configure Cloud Inpainting",
-            "Cloud inpainting uses Replicate API for questionable results.\n\n"
-            "1. Go to replicate.com and sign up (free tier available?)\n"
-            "2. Get your API token from Account Settings\n"
-            "3. Enter it here\n\n"
-            "Pricing: ~$0.0023 per image?\n"
-            "Free tier: ~100 images per month?\n\n"
-            "Would you like to proceed?"
-        )
-        
-        if not result:
-            return
-        
-        # Open Replicate page
-        import webbrowser
-        webbrowser.open("https://replicate.com/account/api-tokens")
-        
-        # Get API key from user using WindowManager
-        dialog = self.main_gui.wm.create_simple_dialog(
-            self.main_gui.master,
-            "Replicate API Key",
-            width=None,
-            height=None,
-            hide_initially=True  # Hide initially so we can position it
-        )
-        
-        # Force the height by overriding after creation
-        dialog.update_idletasks()  # Process pending geometry
-        dialog.minsize(None, None)   # Set minimum size
-        dialog.maxsize(None, None)   # Set maximum size to lock it
-        
-        # Get cursor position
-        cursor_x = self.main_gui.master.winfo_pointerx()
-        cursor_y = self.main_gui.master.winfo_pointery()
-        
-        # Offset the dialog slightly so it doesn't appear directly under cursor
-        # This prevents the cursor from immediately being over a button
-        offset_x = 10
-        offset_y = 10
-        
-        # Ensure dialog doesn't go off-screen
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        
-        # Adjust position if it would go off-screen
-        if cursor_x + 400 + offset_x > screen_width:
-            cursor_x = screen_width - 400 - offset_x
-        if cursor_y + 150 + offset_y > screen_height:
-            cursor_y = screen_height - 150 - offset_y
-        
-        # Set position and show
-        dialog.geometry(f"400x150+{cursor_x + offset_x}+{cursor_y + offset_y}")
-        dialog.deiconify()  # Show the dialog
-        
-        # Variables
-        api_key_var = tk.StringVar()
-        result = {'key': None}
-        
-        # Content
-        frame = tk.Frame(dialog, padx=20, pady=20)
-        frame.pack(fill='both', expand=True)
-        
-        tk.Label(frame, text="Enter your Replicate API key:").pack(anchor='w', pady=(0, 10))
-        
-        # Entry with show/hide
-        entry_frame = tk.Frame(frame)
-        entry_frame.pack(fill='x')
-        
-        entry = tk.Entry(entry_frame, textvariable=api_key_var, show='*', width=20)
-        entry.pack(side='left', fill='x', expand=True)
-        
-        # Toggle show/hide
-        def toggle_show():
-            current = entry.cget('show')
-            entry.config(show='' if current else '*')
-            show_btn.config(text='Hide' if current else 'Show')
-        
-        show_btn = tb.Button(entry_frame, text="Show", command=toggle_show, width=8)
-        show_btn.pack(side='left', padx=(10, 0))
-        
-        # Buttons
-        btn_frame = tk.Frame(frame)
-        btn_frame.pack(fill='x', pady=(20, 0))
-        
-        def on_ok():
-            result['key'] = api_key_var.get().strip()
-            dialog.destroy()
-        
-        tb.Button(btn_frame, text="OK", command=on_ok, bootstyle="success").pack(side='right', padx=(5, 0))
-        tb.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side='right')
-        
-        # Focus and bindings
-        entry.focus_set()
-        dialog.bind('<Return>', lambda e: on_ok())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
-        
-        # Wait for dialog
-        dialog.wait_window()
-        
-        api_key = result['key']
-        
-        if api_key:
-            try:
-                # Save the API key
-                self.main_gui.config['replicate_api_key'] = api_key
-                self.main_gui.save_config(show_message=False)
-                
-                # Update UI
-                self.inpaint_api_status_label.config(
-                    text="✅ Cloud inpainting configured",
-                    fg='green'
-                )
-                
-                # Add clear button if it doesn't exist
-                clear_button_exists = False
-                for widget in self.inpaint_api_status_label.master.winfo_children():
-                    if isinstance(widget, tb.Button) and widget.cget('text') == 'Clear':
-                        clear_button_exists = True
-                        break
-                
-                if not clear_button_exists:
-                    tb.Button(
-                        self.inpaint_api_status_label.master,
-                        text="Clear",
-                        command=self._clear_inpaint_api,
-                        bootstyle="secondary"
-                    ).pack(side=tk.LEFT, padx=(5, 0))
-                
-                # Set flag on translator
-                if self.translator:
-                    self.translator.use_cloud_inpainting = True
-                    self.translator.replicate_api_key = api_key
+                    rx, ry, rw, rh = region.bounding_box
+                    region_center_x = rx + rw / 2
+                    region_center_y = ry + rh / 2
                     
-                self._log("✅ Cloud inpainting API configured", "success")
+                    if (bx <= region_center_x <= bx + bw and 
+                        by <= region_center_y <= by + bh):
+                        bubble_regions.append(region)
+                        used_indices.add(idx)
                 
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save API key:\n{str(e)}")
-
-    def _clear_inpaint_api(self):
-        """Clear the inpainting API configuration"""
-        self.main_gui.config['replicate_api_key'] = ''
-        self.main_gui.save_config(show_message=False)
-        
-        self.inpaint_api_status_label.config(
-            text="❌ Inpainting API not configured", 
-            fg='red'
-        )
-        
-        if hasattr(self, 'translator') and self.translator:
-            self.translator.use_cloud_inpainting = False
-            self.translator.replicate_api_key = None
+                if bubble_regions:
+                    merged_text = " ".join(r.text for r in bubble_regions)
+                    
+                    min_x = min(r.bounding_box[0] for r in bubble_regions)
+                    min_y = min(r.bounding_box[1] for r in bubble_regions)
+                    max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in bubble_regions)
+                    max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in bubble_regions)
+                    
+                    all_vertices = []
+                    for r in bubble_regions:
+                        if hasattr(r, 'vertices') and r.vertices:
+                            all_vertices.extend(r.vertices)
+                    
+                    if not all_vertices:
+                        all_vertices = [
+                            (min_x, min_y),
+                            (max_x, min_y),
+                            (max_x, max_y),
+                            (min_x, max_y)
+                        ]
+                    
+                    merged_region = TextRegion(
+                        text=merged_text,
+                        vertices=all_vertices,
+                        bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
+                        confidence=0.95,
+                        region_type='bubble_detected'
+                    )
+                    
+                    # Store original regions for masking
+                    merged_region.original_regions = bubble_regions
+                    merged_region.bubble_bounds = (bx, by, bw, bh)
+                    # Mark that this should be inpainted
+                    merged_region.should_inpaint = True
+                    
+                    merged_regions.append(merged_region)
+                    self._log(f"   Bubble {bubble_idx + 1}: Merged {len(bubble_regions)} text regions", "info")
             
-        self._log("🗑️ Cleared inpainting API configuration", "info")
-        
-        # Find and destroy the clear button
-        for widget in self.inpaint_api_status_label.master.winfo_children():
-            if isinstance(widget, tb.Button) and widget.cget('text') == 'Clear':
-                widget.destroy()
-                break 
-            
-    def _add_files(self):
-        """Add image files to the list"""
-        files = filedialog.askopenfilenames(
-            title="Select Manga Images",
-            filetypes=[
-                ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-                ("All files", "*.*")
-            ]
-        )
-        
-        for file in files:
-            if file not in self.selected_files:
-                self.selected_files.append(file)
-                self.file_listbox.insert(tk.END, os.path.basename(file))
-    
-    def _add_folder(self):
-        """Add all images from a folder"""
-        folder = filedialog.askdirectory(title="Select Folder with Manga Images")
-        if not folder:
-            return
-        
-        # Find all image files in folder
-        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
-        
-        for filename in sorted(os.listdir(folder)):
-            if any(filename.lower().endswith(ext) for ext in image_extensions):
-                filepath = os.path.join(folder, filename)
-                if filepath not in self.selected_files:
-                    self.selected_files.append(filepath)
-                    self.file_listbox.insert(tk.END, filename)
-    
-    def _remove_selected(self):
-        """Remove selected files from the list"""
-        selected_indices = list(self.file_listbox.curselection())
-        
-        # Remove in reverse order to maintain indices
-        for index in reversed(selected_indices):
-            self.file_listbox.delete(index)
-            del self.selected_files[index]
-    
-    def _clear_all(self):
-        """Clear all files from the list"""
-        self.file_listbox.delete(0, tk.END)
-        self.selected_files.clear()
-    
-    def _log(self, message: str, level: str = "info"):
-        """Log message to GUI text widget or console"""
-        # Check if log_text widget exists yet
-        if hasattr(self, 'log_text') and self.log_text:
-            # Thread-safe logging to GUI
-            if threading.current_thread() == threading.main_thread():
-                # We're in the main thread, update directly
-                self.log_text.insert(tk.END, message + '\n', level)
-                self.log_text.see(tk.END)
-            else:
-                # We're in a background thread, use queue
-                self.update_queue.put(('log', message, level))
-        else:
-            # Widget doesn't exist yet or we're in initialization, print to console
-            print(message)
-    
-    def _update_progress(self, current: int, total: int, status: str):
-        """Thread-safe progress update"""
-        self.update_queue.put(('progress', current, total, status))
-    
-    def _update_current_file(self, filename: str):
-        """Thread-safe current file update"""
-        self.update_queue.put(('current_file', filename))
-    
-    def _process_updates(self):
-        """Process queued GUI updates"""
-        try:
-            while True:
-                update = self.update_queue.get_nowait()
-                
-                if update[0] == 'log':
-                    _, message, level = update
-                    self.log_text.insert(tk.END, message + '\n', level)
-                    self.log_text.see(tk.END)
+            # Handle text outside bubbles based on RT-DETR settings
+            for idx, region in enumerate(regions):
+                if idx not in used_indices:
+                    # This text is outside any bubble
                     
-                elif update[0] == 'progress':
-                    _, current, total, status = update
-                    if total > 0:
-                        percentage = (current / total) * 100
-                        self.progress_bar['value'] = percentage
-                    self.progress_label.config(text=status)
+                    # For RT-DETR mode, check if we should include free text
+                    if detector_type == 'rtdetr':
+                        # If "Free Text" checkbox is checked, include ALL text outside bubbles
+                        # Don't require RT-DETR to specifically detect it as free text
+                        if ocr_settings.get('detect_free_text', True):
+                            region.should_inpaint = True
+                            self._log(f"   Text outside bubbles INCLUDED: '{region.text[:30]}...'", "debug")
+                        else:
+                            region.should_inpaint = False
+                            self._log(f"   Text outside bubbles EXCLUDED (Free Text unchecked): '{region.text[:30]}...'", "info")
+                    else:
+                        # For YOLO/auto, include all text by default
+                        region.should_inpaint = True
                     
-                elif update[0] == 'current_file':
-                    _, filename = update
-                    self.current_file_label.config(text=f"Current: {filename}")
-                    
-        except:
-            pass
-        
-        # Schedule next update
-        self.parent_frame.after(100, self._process_updates)
+                    merged_regions.append(region)
 
-    def load_local_inpainting_model(self, model_path):
-        """Load a local inpainting model
+            # Log summary
+            regions_to_inpaint = sum(1 for r in merged_regions if getattr(r, 'should_inpaint', True))
+            regions_to_skip = len(merged_regions) - regions_to_inpaint
+
+            self._log(f"📊 Bubble detection complete: {len(regions)} → {len(merged_regions)} regions", "success")
+            if detector_type == 'rtdetr':
+                self._log(f"   {regions_to_inpaint} regions will be inpainted", "info")
+                if regions_to_skip > 0:
+                    self._log(f"   {regions_to_skip} regions will be preserved (Free Text unchecked)", "info")
+
+            return merged_regions
+            
+        except Exception as e:
+            self._log(f"❌ Bubble detection error: {str(e)}", "error")
+            self._log("   Falling back to traditional merging", "warning")
+            return self._merge_nearby_regions(regions)
+        
+    def set_full_page_context(self, enabled: bool, custom_prompt: str = None):
+        """Configure full page context translation mode
         
         Args:
-            model_path: Path to the model file
-            
-        Returns:
-            bool: True if successful
+            enabled: Whether to translate all text regions in a single contextual request
+            custom_prompt: Optional custom prompt for full page context mode
         """
-        try:
-            # Store the model path
-            self.local_inpaint_model_path = model_path
+        self.full_page_context_enabled = enabled
+        if custom_prompt:
+            self.full_page_context_prompt = custom_prompt
+        
+        self._log(f"📄 Full page context mode: {'ENABLED' if enabled else 'DISABLED'}")
+        if enabled:
+            self._log("   All text regions will be sent together for contextual translation")
+        else:
+            self._log("   Text regions will be translated individually")
+    
+    def update_text_rendering_settings(self, 
+                                     bg_opacity: int = None,
+                                     bg_style: str = None,
+                                     bg_reduction: float = None,
+                                     font_style: str = None,
+                                     font_size: int = None,
+                                     text_color: tuple = None,
+                                     shadow_enabled: bool = None,
+                                     shadow_color: tuple = None,
+                                     shadow_offset_x: int = None,
+                                     shadow_offset_y: int = None,
+                                     shadow_blur: int = None,
+                                     force_caps_lock: bool = None):  # ADD THIS PARAMETER
+        """Update text rendering settings"""
+        self._log("📐 Updating text rendering settings:", "info")
+        
+        if bg_opacity is not None:
+            self.text_bg_opacity = max(0, min(255, bg_opacity))
+            self._log(f"  Background opacity: {int(self.text_bg_opacity/255*100)}%", "info")
+        if bg_style is not None and bg_style in ['box', 'circle', 'wrap']:
+            self.text_bg_style = bg_style
+            self._log(f"  Background style: {bg_style}", "info")
+        if bg_reduction is not None:
+            self.text_bg_reduction = max(0.5, min(2.0, bg_reduction))
+            self._log(f"  Background size: {int(self.text_bg_reduction*100)}%", "info")
+        if font_style is not None:
+            self.selected_font_style = font_style
+            font_name = os.path.basename(font_style) if font_style else 'Default'
+            self._log(f"  Font: {font_name}", "info")
+        if font_size is not None:
+            if font_size < 0:
+                # Negative value indicates multiplier mode
+                self.font_size_mode = 'multiplier'
+                self.font_size_multiplier = abs(font_size)
+                self.custom_font_size = None  # Clear fixed size
+                self._log(f"  Font size mode: Dynamic multiplier ({self.font_size_multiplier:.1f}x)", "info")
+            else:
+                # Positive value or 0 indicates fixed mode
+                self.font_size_mode = 'fixed'
+                self.custom_font_size = font_size if font_size > 0 else None
+                self._log(f"  Font size mode: Fixed ({font_size if font_size > 0 else 'Auto'})", "info")
+        if text_color is not None:
+            self.text_color = text_color
+            self._log(f"  Text color: RGB{text_color}", "info")
+        if shadow_enabled is not None:
+            self.shadow_enabled = shadow_enabled
+            self._log(f"  Shadow: {'Enabled' if shadow_enabled else 'Disabled'}", "info")
+        if shadow_color is not None:
+            self.shadow_color = shadow_color
+            self._log(f"  Shadow color: RGB{shadow_color}", "info")
+        if shadow_offset_x is not None:
+            self.shadow_offset_x = shadow_offset_x
+        if shadow_offset_y is not None:
+            self.shadow_offset_y = shadow_offset_y
+        if shadow_blur is not None:
+            self.shadow_blur = max(0, shadow_blur)
+        if force_caps_lock is not None:  # ADD THIS BLOCK
+            self.force_caps_lock = force_caps_lock
+            self._log(f"  Force Caps Lock: {'Enabled' if force_caps_lock else 'Disabled'}", "info")
             
-            # If using diffusers/torch models, load them here
-            if model_path.endswith('.safetensors') or model_path.endswith('.ckpt'):
-                # Initialize your inpainting pipeline
-                # This depends on your specific inpainting implementation
-                # Example:
-                # from diffusers import StableDiffusionInpaintPipeline
-                # self.inpaint_pipeline = StableDiffusionInpaintPipeline.from_single_file(model_path)
-                pass
-                
-            return True
-        except Exception as e:
-            self._log(f"Failed to load inpainting model: {e}", "error")
+        self._log("✅ Rendering settings updated", "info")
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log message to GUI or console"""
+        # In batch mode, only log important messages
+        if self.batch_mode:
+            # Skip verbose/debug messages in batch mode
+            if level == "debug" or "DEBUG:" in message:
+                return
+            # Skip repetitive messages
+            if any(skip in message for skip in [
+                "Using vertex-based", "Using", "Applying", "Font size", 
+                "Region", "Found text", "Style:"
+            ]):
+                return
+        
+        if self.log_callback:
+            self.log_callback(message, level)
+        else:
+            print(message)
+
+    def _is_primarily_english(self, text: str) -> bool:
+        """Check if text is primarily English/ASCII characters"""
+        if not text:
             return False
-            
-    def _start_translation(self):
-        """Start the translation process"""
-        if not self.selected_files:
-            messagebox.showwarning("No Files", "Please select manga images to translate.")
-            return
         
-        # Build OCR configuration
-        ocr_config = {'provider': self.ocr_provider_var.get()}
-
-        if ocr_config['provider'] == 'Qwen2-VL':
-            qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-            if qwen_provider:
-                # Set model size configuration
-                if hasattr(qwen_provider, 'loaded_model_size'):
-                    if qwen_provider.loaded_model_size == "Custom":
-                        ocr_config['model_size'] = f"custom:{qwen_provider.model_id}"
-                    else:
-                        size_map = {'2B': '1', '7B': '2', '72B': '3'}
-                        ocr_config['model_size'] = size_map.get(qwen_provider.loaded_model_size, '2')
-                    self._log(f"Setting ocr_config['model_size'] = {ocr_config['model_size']}", "info")
-                
-                # Set OCR prompt if available
-                if hasattr(self, 'ocr_prompt'):
-                    # Set it via environment variable (Qwen2VL will read this)
-                    os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
-                    
-                    # Also set it directly on the provider if it has the method
-                    if hasattr(qwen_provider, 'set_ocr_prompt'):
-                        qwen_provider.set_ocr_prompt(self.ocr_prompt)
-                    else:
-                        # If no setter method, set it directly
-                        qwen_provider.ocr_prompt = self.ocr_prompt
-                    
-                    self._log("✅ Set custom OCR prompt for Qwen2-VL", "info")
-       
-        if ocr_config['provider'] == 'google':
-            import os
-            google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
-            if not google_creds or not os.path.exists(google_creds):
-                messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
-                return
-            ocr_config['google_credentials_path'] = google_creds
-            
-        elif ocr_config['provider'] == 'azure':
-            azure_key = self.azure_key_entry.get().strip()
-            azure_endpoint = self.azure_endpoint_entry.get().strip()
-            
-            if not azure_key or not azure_endpoint:
-                messagebox.showerror("Error", "Azure credentials not configured.")
-                return
-            
-            # Save Azure settings
-            self.main_gui.config['azure_vision_key'] = azure_key
-            self.main_gui.config['azure_vision_endpoint'] = azure_endpoint
-            if hasattr(self.main_gui, 'save_config'):
-                self.main_gui.save_config(show_message=False)
-            
-            ocr_config['azure_key'] = azure_key
-            ocr_config['azure_endpoint'] = azure_endpoint
-        
-        # Get current API key and model for translation
-        api_key = None
-        model = 'gemini-2.5-flash'  # default
-        
-        # Try to get API key from various sources
-        if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
-            api_key = self.main_gui.api_key_entry.get().strip()
-        elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
-            api_key = self.main_gui.config.get('api_key')
-        
-        # Try to get model - ALWAYS get the current selection from GUI
-        if hasattr(self.main_gui, 'model_var'):
-            model = self.main_gui.model_var.get()
-        elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
-            model = self.main_gui.config.get('model')
-        
-        if not api_key:
-            messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings.")
-            return
-        
-        # Check if we need to create or update the client
-        needs_new_client = False
-        
-        if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
-            needs_new_client = True
-            self._log(f"Creating new API client with model: {model}", "info")
-        elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
-            needs_new_client = True
-            self._log(f"Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
-        
-        if needs_new_client:
-            # Create the unified client with the current model
-            try:
-                from unified_api_client import UnifiedClient
-                self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
-                self._log(f"Created API client with model: {model}", "info")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
-                return
-        
-        # Reset the translator's history manager for new batch
-        if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
-            self.translator.reset_history_manager()
-
-        # Set environment variables for custom-api provider
-        if ocr_config['provider'] == 'custom-api':
-            env_vars = self.main_gui._get_environment_variables(
-                epub_path='',  # Not needed for manga
-                api_key=api_key
-            )
-            
-            # Apply all environment variables EXCEPT SYSTEM_PROMPT
-            import os
-            for key, value in env_vars.items():
-                if key == 'SYSTEM_PROMPT':
-                    # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
-                    continue
-                os.environ[key] = str(value)
-            
-            # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
-            os.environ['OCR_SYSTEM_PROMPT'] = (
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
-            )
-            
-            self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
-        
-        # Initialize translator if needed
-        if not self.translator:
-            try:
-                self.translator = MangaTranslator(
-                    ocr_config,
-                    self.main_gui.client,
-                    self.main_gui,
-                    log_callback=self._log
-                )
-                self.translator.ocr_manager = self.ocr_manager
-                # Set cloud inpainting if configured
-                saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-                if saved_api_key:
-                    self.translator.use_cloud_inpainting = True
-                    self.translator.replicate_api_key = saved_api_key
-                # Apply text rendering settings
-                self._apply_rendering_settings()
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
-                self._log(f"Initialization error: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "error")
-                return
-        else:
-            # Update the translator with the new client if model changed
-            if needs_new_client and hasattr(self.translator, 'client'):
-                self.translator.client = self.main_gui.client
-                self._log(f"Updated translator with new API client", "info")
-            
-            # Update rendering settings
-            self._apply_rendering_settings()
-            
-            # Ensure inpainting settings are properly synchronized
-            if hasattr(self, 'inpainting_mode_var'):
-                inpainting_mode = self.inpainting_mode_var.get()
-                
-                if inpainting_mode == 'skip':
-                    self.translator.skip_inpainting = True
-                    self.translator.use_cloud_inpainting = False
-                    self._log("Inpainting: SKIP", "debug")
-                    
-                elif inpainting_mode == 'local':
-                    self.translator.skip_inpainting = False
-                    self.translator.use_cloud_inpainting = False
-                    
-                    # IMPORTANT: Load the local inpainting model if not already loaded
-                    if hasattr(self, 'local_model_var'):
-                        selected_model = self.local_model_var.get()
-                        if selected_model and selected_model != "None":
-                            # Get model path from available models
-                            model_info = self.available_local_models.get(selected_model)
-                            if model_info:
-                                model_path = model_info['path']
-                                # Load the model into translator
-                                if hasattr(self.translator, 'load_local_inpainting_model'):
-                                    success = self.translator.load_local_inpainting_model(model_path)
-                                    if success:
-                                        self._log(f"Inpainting: LOCAL - Loaded {selected_model}", "info")
-                                    else:
-                                        self._log(f"Inpainting: Failed to load local model {selected_model}", "error")
-                                else:
-                                    # Set the model path directly if no load method
-                                    self.translator.local_inpaint_model_path = model_path
-                                    self._log(f"Inpainting: LOCAL - Set model path for {selected_model}", "info")
-                            else:
-                                self._log("Inpainting: LOCAL - No model selected", "warning")
-                        else:
-                            self._log("Inpainting: LOCAL - No model configured", "warning")
-                    else:
-                        self._log("Inpainting: LOCAL (default)", "debug")
-                    
-                elif inpainting_mode == 'cloud':
-                    self.translator.skip_inpainting = False
-                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-                    if saved_api_key:
-                        self.translator.use_cloud_inpainting = True
-                        self.translator.replicate_api_key = saved_api_key
-                        self._log("Inpainting: CLOUD (Replicate)", "debug")
-                    else:
-                        # Fallback to local if no API key
-                        self.translator.use_cloud_inpainting = False
-                        self._log("Inpainting: LOCAL (no Replicate key, fallback)", "warning")
-            else:
-                # Default to local inpainting if variable doesn't exist
-                self.translator.skip_inpainting = False
-                self.translator.use_cloud_inpainting = False
-                self._log("Inpainting: LOCAL (default)", "debug")
-
-            # Double-check the settings are applied correctly
-            self._log(f"Inpainting final status:", "debug")
-            self._log(f"  - Skip: {self.translator.skip_inpainting}", "debug")
-            self._log(f"  - Cloud: {self.translator.use_cloud_inpainting}", "debug")
-            self._log(f"  - Mode: {'SKIP' if self.translator.skip_inpainting else 'CLOUD' if self.translator.use_cloud_inpainting else 'LOCAL'}", "debug")
-        
-        # Clear log
-        self.log_text.delete('1.0', tk.END)
-        
-        # Reset progress
-        self.total_files = len(self.selected_files)
-        self.completed_files = 0
-        self.failed_files = 0
-        self.current_file_index = 0
-        
-        # Update UI state
-        self.is_running = True
-        self.stop_flag.clear()
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        
-        # Disable file modification during translation
-        for widget in [self.file_listbox]:
-            widget.config(state=tk.DISABLED)
-        
-        # Log start message
-        self._log(f"Starting translation of {self.total_files} files...", "info")
-        self._log(f"Using OCR provider: {ocr_config['provider'].upper()}", "info")
-        if ocr_config['provider'] == 'google':
-            self._log(f"Using Google Vision credentials: {os.path.basename(ocr_config['google_credentials_path'])}", "info")
-        elif ocr_config['provider'] == 'azure':
-            self._log(f"Using Azure endpoint: {ocr_config['azure_endpoint']}", "info")
-        else:
-            self._log(f"Using local OCR provider: {ocr_config['provider'].upper()}", "info")
-            self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
-            self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
-            self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
-            self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
-            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
-        
-        # Start translation thread
-        self.translation_thread = threading.Thread(
-            target=self._translation_worker,
-            daemon=True
+        # Check for CJK characters FIRST - if found, it's NOT English
+        has_cjk = any(
+            '\u4e00' <= char <= '\u9fff' or  # Chinese
+            '\u3040' <= char <= '\u309f' or  # Hiragana  
+            '\u30a0' <= char <= '\u30ff' or  # Katakana
+            '\uac00' <= char <= '\ud7af' or  # Korean
+            '\uff00' <= char <= '\uffef'     # Full-width characters
+            for char in text
         )
-        self.translation_thread.start()
-    
-    def _apply_rendering_settings(self):
-        """Apply current rendering settings to translator"""
-        if self.translator:
-            # Get text color as tuple
-            text_color = (
-                self.text_color_r.get(),
-                self.text_color_g.get(),
-                self.text_color_b.get()
-            )
-            
-            # Get shadow color as tuple
-            shadow_color = (
-                self.shadow_color_r.get(),
-                self.shadow_color_g.get(),
-                self.shadow_color_b.get()
-            )
-            
-            # Determine font size value based on mode
-            if self.font_size_mode_var.get() == 'multiplier':
-                # Pass negative value to indicate multiplier mode
-                font_size = -self.font_size_multiplier_var.get()
+        
+        if has_cjk:
+            return False  # Has Asian characters, NOT English
+        
+        # Only NOW check for English patterns
+        text_stripped = text.strip()
+        
+        # Single ASCII letters
+        if len(text_stripped) == 1 and text_stripped.isalpha() and ord(text_stripped) < 128:
+            self._log(f"   Excluding single English letter: '{text_stripped}'", "debug")
+            return True
+        
+        # Short English text
+        if len(text_stripped) <= 3:
+            ascii_letters = sum(1 for char in text_stripped if char.isalpha() and ord(char) < 128)
+            if ascii_letters >= len(text_stripped) * 0.5:
+                self._log(f"   Excluding short English text: '{text_stripped}'", "debug")
+                return True
+        
+        # Count ASCII (excluding spaces which manga-ocr adds)
+        ascii_chars = sum(1 for char in text if 33 <= ord(char) <= 126)
+        total_chars = sum(1 for char in text if not char.isspace())
+        
+        if total_chars == 0:
+            return False
+        
+        ratio = ascii_chars / total_chars
+        
+        if ratio > 0.7:
+            self._log(f"   Excluding English text ({ratio:.0%} ASCII): '{text[:30]}...'", "debug")
+            return True
+        
+        return False
+
+    def _load_bubble_detector(self, ocr_settings, image_path):
+        """Load bubble detector with appropriate model based on settings
+        
+        Returns:
+            dict: Detection results or None if failed
+        """
+        detector_type = ocr_settings.get('detector_type', 'rtdetr')
+        model_path = ocr_settings.get('bubble_model_path', '')
+        confidence = ocr_settings.get('bubble_confidence', 0.5)
+        
+        if detector_type == 'rtdetr' or 'RT-DETR' in detector_type:
+            # Load RT-DETR model
+            if self.bubble_detector.load_rtdetr_model(model_id=model_path):
+                return self.bubble_detector.detect_with_rtdetr(
+                    image_path=image_path,
+                    confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                    return_all_bubbles=False
+                )
+        elif detector_type == 'custom':
+            # Custom model - try to determine type from path
+            custom_path = ocr_settings.get('custom_model_path', model_path)
+            if 'rtdetr' in custom_path.lower():
+                # Custom RT-DETR model
+                if self.bubble_detector.load_rtdetr_model(model_id=custom_path):
+                    return self.bubble_detector.detect_with_rtdetr(
+                        image_path=image_path,
+                        confidence=confidence,
+                        return_all_bubbles=False
+                    )
             else:
-                # Fixed mode - use the font size value directly
-                font_size = self.font_size_var.get() if self.font_size_var.get() > 0 else None
+                # Assume YOLO format for other custom models
+                if custom_path and self.bubble_detector.load_model(custom_path):
+                    detections = self.bubble_detector.detect_bubbles(
+                        image_path,
+                        confidence=confidence
+                    )
+                    return {
+                        'text_bubbles': detections if detections else [],
+                        'text_free': [],
+                        'bubbles': []
+                    }
+        else:
+            # Standard YOLO model
+            if model_path and self.bubble_detector.load_model(model_path):
+                detections = self.bubble_detector.detect_bubbles(
+                    image_path,
+                    confidence=confidence
+                )
+                return {
+                    'text_bubbles': detections if detections else [],
+                    'text_free': [],
+                    'bubbles': []
+                }
+        return None
             
-            self.translator.update_text_rendering_settings(
-                bg_opacity=self.bg_opacity_var.get(),
-                bg_style=self.bg_style_var.get(),
-                bg_reduction=self.bg_reduction_var.get(),
-                font_style=self.selected_font_path,
-                font_size=font_size,
-                text_color=text_color,
-                shadow_enabled=self.shadow_enabled_var.get(),
-                shadow_color=shadow_color,
-                shadow_offset_x=self.shadow_offset_x_var.get(),
-                shadow_offset_y=self.shadow_offset_y_var.get(),
-                shadow_blur=self.shadow_blur_var.get(),
-                force_caps_lock=self.force_caps_lock_var.get()
-            )
-            
-            # Update font mode and multiplier explicitly
-            self.translator.font_size_mode = self.font_size_mode_var.get()
-            self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
-            self.translator.min_readable_size = self.min_readable_size_var.get()
-            self.translator.min_readable_size = self.min_readable_size_var.get()
-            self.translator.max_font_size_limit = self.max_font_size_var.get()
-            self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
-            self.translator.force_caps_lock = self.force_caps_lock_var.get()
-            
-            # Update constrain to bubble setting
-            if hasattr(self, 'constrain_to_bubble_var'):
-                self.translator.constrain_to_bubble = self.constrain_to_bubble_var.get()
-            
-            # Handle inpainting mode (3 radio buttons: skip/local/cloud)
-            if hasattr(self, 'inpainting_mode_var'):
-                mode = self.inpainting_mode_var.get()
-                
-                if mode == 'skip':
-                    self.translator.skip_inpainting = True
-                    self.translator.use_cloud_inpainting = False
-                    self._log("  Inpainting: Skipped", "info")
-                elif mode == 'local':
-                    self.translator.skip_inpainting = False
-                    self.translator.use_cloud_inpainting = False
-                    self._log("  Inpainting: Local", "info")
-                elif mode == 'cloud':
-                    self.translator.skip_inpainting = False
-                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-                    if saved_api_key:
-                        self.translator.use_cloud_inpainting = True
-                        self.translator.replicate_api_key = saved_api_key
-                        self._log("  Inpainting: Cloud (Replicate)", "info")
-                    else:
-                        # Fallback to local if no API key
-                        self.translator.use_cloud_inpainting = False
-                        self._log("  Inpainting: Local (no Replicate key, fallback)", "warning")
-            
-            # Set full page context mode
-            self.translator.set_full_page_context(
-                enabled=self.full_page_context_var.get(),
-                custom_prompt=self.full_page_context_prompt
-            )
-            
-            # Update logging to include new settings
-            self._log(f"Applied rendering settings:", "info")
-            self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
-            self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
-            self._log(f"  Minimum Font Size: {self.min_readable_size_var.get()}pt", "info")
-            self._log(f"  Maximum Font Size: {self.max_font_size_var.get()}pt", "info")
-            self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_var.get() else 'Disabled (allow overflow)'}", "info")
-            
-            # Log font size mode
-            if self.font_size_mode_var.get() == 'multiplier':
-                self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_var.get():.1f}x)", "info")
-                if hasattr(self, 'constrain_to_bubble_var'):
-                    constraint_status = "constrained" if self.constrain_to_bubble_var.get() else "unconstrained"
-                    self._log(f"  Text Constraint: {constraint_status}", "info")
+    def detect_text_regions(self, image_path: str) -> List[TextRegion]:
+        """Detect text regions using configured OCR provider"""
+        # Reduce logging in batch mode
+        if not self.batch_mode:
+            self._log(f"🔍 Detecting text regions in: {os.path.basename(image_path)}")
+            self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
+        else:
+            # Only show batch progress if batch_current is set properly
+            if hasattr(self, 'batch_current') and hasattr(self, 'batch_size'):
+                self._log(f"🔍 [{self.batch_current}/{self.batch_size}] {os.path.basename(image_path)}")
             else:
-                size_text = f"{self.font_size_var.get()}pt" if self.font_size_var.get() > 0 else "Auto"
-                self._log(f"  Font Size: Fixed ({size_text})", "info")
-            
-            self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
-            self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
-            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
-    
-    def _translation_worker(self):
-        """Worker thread for translation"""
+                self._log(f"🔍 Detecting text: {os.path.basename(image_path)}")
+        
         try:
-            self.translator.set_stop_flag(self.stop_flag)
+            # BATCH OPTIMIZATION: Skip clearing cache in batch mode
+            if not self.batch_mode:
+                # Clear any cached state from previous image
+                if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                    if hasattr(self.ocr_manager, 'last_results'):
+                        self.ocr_manager.last_results = None
+                    if hasattr(self.ocr_manager, 'cache'):
+                        self.ocr_manager.cache = {}
+                        
+            # CLEAR ANY CACHED STATE FROM PREVIOUS IMAGE
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                # Clear any cached results in OCR manager
+                if hasattr(self.ocr_manager, 'last_results'):
+                    self.ocr_manager.last_results = None
+                if hasattr(self.ocr_manager, 'cache'):
+                    self.ocr_manager.cache = {}
             
-            for index, filepath in enumerate(self.selected_files):
-                if self.stop_flag.is_set():
-                    self._log("\n⏹️ Translation stopped by user", "warning")
-                    break
+            # Clear bubble detector cache if it exists
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                if hasattr(self.bubble_detector, 'last_detections'):
+                    self.bubble_detector.last_detections = None
+            
+            # Get manga settings from main_gui config
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            preprocessing = manga_settings.get('preprocessing', {})
+            ocr_settings = manga_settings.get('ocr', {})
+            
+            # Get text filtering settings
+            min_text_length = ocr_settings.get('min_text_length', 2)
+            exclude_english = ocr_settings.get('exclude_english_text', True)
+            confidence_threshold = ocr_settings.get('confidence_threshold', 0.1)
+            
+            # Load and preprocess image if enabled
+            if preprocessing.get('enabled', True):
+                self._log("📐 Preprocessing enabled - enhancing image quality")
+                processed_image_data = self._preprocess_image(image_path, preprocessing)
+            else:
+                # Read image file without preprocessing
+                with open(image_path, 'rb') as image_file:
+                    processed_image_data = image_file.read()
+            
+            regions = []
+            
+            # Route to appropriate provider
+            if self.ocr_provider == 'google':
+                # === GOOGLE CLOUD VISION (unchanged) ===
+                # Create Vision API image object
+                image = vision.Image(content=processed_image_data)
                 
-                # IMPORTANT: Reset translator state for each new image
-                if hasattr(self.translator, 'reset_for_new_image'):
-                    self.translator.reset_for_new_image()
-                
-                self.current_file_index = index
-                filename = os.path.basename(filepath)
-                
-                self._update_current_file(filename)
-                self._update_progress(
-                    index,
-                    self.total_files,
-                    f"Processing {index + 1}/{self.total_files}: {filename}"
+                # Build image context with all parameters
+                image_context = vision.ImageContext(
+                    language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
                 )
                 
-                try:
-                    # Determine output path
-                    if self.create_subfolder_var.get():
-                        output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                        os.makedirs(output_dir, exist_ok=True)
-                        output_path = os.path.join(output_dir, filename)
-                    else:
-                        base, ext = os.path.splitext(filepath)
-                        output_path = f"{base}_translated{ext}"
-                    
-                    # Process the image
-                    result = self.translator.process_image(filepath, output_path)
-                    
-                    # Check if translation was interrupted
-                    if result.get('interrupted', False):
-                        self._log(f"⏸️ Translation of {filename} was interrupted", "warning")
-                        self.failed_files += 1
-                        if self.stop_flag.is_set():
-                            break
-                    elif result['success']:
-                        self.completed_files += 1
-                        self._log(f"✅ Successfully translated: {filename}", "success")
-                    else:
-                        self.failed_files += 1
-                        errors = '\n'.join(result['errors'])
-                        self._log(f"❌ Failed to translate {filename}:\n{errors}", "error")
+                # Add text detection params if available in your API version
+                if hasattr(vision, 'TextDetectionParams'):
+                    image_context.text_detection_params = vision.TextDetectionParams(
+                        enable_text_detection_confidence_score=True
+                    )
+                
+                # Configure text detection based on settings
+                detection_mode = ocr_settings.get('text_detection_mode', 'document')
+                
+                if detection_mode == 'document':
+                    response = self.vision_client.document_text_detection(
+                        image=image,
+                        image_context=image_context
+                    )
+                else:
+                    response = self.vision_client.text_detection(
+                        image=image,
+                        image_context=image_context
+                    )
+                
+                if response.error.message:
+                    raise Exception(f"Cloud Vision API error: {response.error.message}")
+                
+                # Process each page (usually just one for manga)
+                for page in response.full_text_annotation.pages:
+                    for block in page.blocks:
+                        # Extract text first to check if it's worth processing
+                        block_text = ""
+                        total_confidence = 0.0
+                        word_count = 0
                         
-                        # Check for specific error types in the error messages
-                        errors_lower = errors.lower()
-                        if '429' in errors or 'rate limit' in errors_lower:
-                            self._log(f"⚠️ RATE LIMIT DETECTED - Please wait before continuing", "error")
-                            self._log(f"   The API provider is limiting your requests", "error")
-                            self._log(f"   Consider increasing delay between requests in settings", "error")
+                        for paragraph in block.paragraphs:
+                            for word in paragraph.words:
+                                # Get word-level confidence (more reliable than block level)
+                                word_confidence = getattr(word, 'confidence', 0.0)  # Default to 0 if not available
+                                word_text = ''.join([symbol.text for symbol in word.symbols])
+                                
+                                # Only include words above threshold
+                                if word_confidence >= confidence_threshold:
+                                    block_text += word_text + " "
+                                    total_confidence += word_confidence
+                                    word_count += 1
+                                else:
+                                    self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
+                        
+                        block_text = block_text.strip()
+                        
+                        # TEXT FILTERING SECTION
+                        # Skip if text is too short
+                        if len(block_text) < min_text_length:
+                            self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
+                            continue
+                        
+                        # Skip if primarily English and exclude_english is enabled
+                        if exclude_english and self._is_primarily_english(block_text):
+                            self._log(f"   Skipping English text: {block_text[:50]}...")
+                            continue
+                        
+                        # Skip if no confident words found
+                        if word_count == 0 or not block_text:
+                            self._log(f"   Skipping block - no words above threshold {confidence_threshold}")
+                            continue
+                        
+                        # Calculate average confidence for the block
+                        avg_confidence = total_confidence / word_count if word_count > 0 else 0.0
+                        
+                        # Extract vertices and create region
+                        vertices = [(v.x, v.y) for v in block.bounding_box.vertices]
+                        
+                        # Calculate bounding box
+                        xs = [v[0] for v in vertices]
+                        ys = [v[1] for v in vertices]
+                        x_min, x_max = min(xs), max(xs)
+                        y_min, y_max = min(ys), max(ys)
+                        
+                        region = TextRegion(
+                            text=block_text,
+                            vertices=vertices,
+                            bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                            confidence=avg_confidence,  # Use average confidence
+                            region_type='text_block'
+                        )
+                        regions.append(region)
+                        self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
+                        
+            elif self.ocr_provider == 'azure':
+                # === AZURE COMPUTER VISION (unchanged) ===
+                import io
+                import time
+                from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+                
+                # Check if image needs format conversion for Azure
+                file_ext = os.path.splitext(image_path)[1].lower()
+                azure_supported_formats = ['.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.tiff']
+                
+                if file_ext == '.webp' or file_ext not in azure_supported_formats:
+                    self._log(f"⚠️ Converting {file_ext} to PNG for Azure compatibility")
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(processed_image_data))
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='PNG')
+                    processed_image_data = buffer.getvalue()
+                
+                # Create stream from image data
+                image_stream = io.BytesIO(processed_image_data)
+                
+                # Get Azure-specific settings
+                reading_order = ocr_settings.get('azure_reading_order', 'natural')
+                model_version = ocr_settings.get('azure_model_version', 'latest')
+                max_wait = ocr_settings.get('azure_max_wait', 60)
+                poll_interval = ocr_settings.get('azure_poll_interval', 0.5)
+                
+                # Map language hints to Azure language codes
+                language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                
+                # Build parameters dictionary
+                read_params = {
+                    'raw': True,
+                    'readingOrder': reading_order
+                }
+                
+                # Add model version if not using latest
+                if model_version != 'latest':
+                    read_params['model-version'] = model_version
+                
+                # Use language parameter only if single language is selected
+                if len(language_hints) == 1:
+                    azure_lang = language_hints[0]
+                    # Map to Azure language codes
+                    lang_mapping = {
+                        'zh': 'zh-Hans',
+                        'zh-TW': 'zh-Hant',
+                        'zh-CN': 'zh-Hans',
+                        'ja': 'ja',
+                        'ko': 'ko',
+                        'en': 'en'
+                    }
+                    azure_lang = lang_mapping.get(azure_lang, azure_lang)
+                    read_params['language'] = azure_lang
+                    self._log(f"   Using Azure Read API with language: {azure_lang}, order: {reading_order}")
+                else:
+                    self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages, order: {reading_order})")
+                
+                # Start Read operation with error handling
+                try:
+                    read_response = self.vision_client.read_in_stream(
+                        image_stream,
+                        **read_params
+                    )
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'Bad Request' in error_msg:
+                        self._log("❌ Azure Read API Bad Request - retrying without language parameter", "error")
+                        # Retry without language parameter
+                        image_stream.seek(0)
+                        read_params.pop('language', None)
+                        read_response = self.vision_client.read_in_stream(
+                            image_stream,
+                            **read_params
+                        )
+                    else:
+                        raise
+                
+                # Get operation ID
+                operation_location = read_response.headers["Operation-Location"]
+                operation_id = operation_location.split("/")[-1]
+                
+                # Poll for results with configurable timeout
+                self._log(f"   Waiting for Azure OCR to complete (max {max_wait}s)...")
+                wait_time = 0
+                last_status = None
+                
+                while wait_time < max_wait:
+                    result = self.vision_client.get_read_result(operation_id)
+                    
+                    # Log status changes
+                    if result.status != last_status:
+                        self._log(f"   Status: {result.status}")
+                        last_status = result.status
+                    
+                    if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
+                        break
+                    
+                    time.sleep(poll_interval)
+                    wait_time += poll_interval
+                
+                if result.status == OperationStatusCodes.succeeded:
+                    # Track statistics
+                    total_lines = 0
+                    handwritten_lines = 0
+                    
+                    for page_num, page in enumerate(result.analyze_result.read_results):
+                        if len(result.analyze_result.read_results) > 1:
+                            self._log(f"   Processing page {page_num + 1}/{len(result.analyze_result.read_results)}")
+                        
+                        for line in page.lines:
+                            # TEXT FILTERING FOR AZURE
+                            # Skip if text is too short
+                            if len(line.text) < min_text_length:
+                                self._log(f"   Skipping short text ({len(line.text)} chars): {line.text}")
+                                continue
                             
-                            # Optionally pause for a bit
-                            self._log(f"   Pausing for 60 seconds...", "warning")
-                            for sec in range(60):
-                                if self.stop_flag.is_set():
-                                    break
-                                time.sleep(1)
-                                if sec % 10 == 0:
-                                    self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
+                            # Skip if primarily English and exclude_english is enabled
+                            if exclude_english and self._is_primarily_english(line.text):
+                                self._log(f"   Skipping English text: {line.text[:50]}...")
+                                continue
+                            
+                            # Azure provides 8-point bounding box
+                            bbox = line.bounding_box
+                            vertices = [
+                                (bbox[0], bbox[1]),
+                                (bbox[2], bbox[3]),
+                                (bbox[4], bbox[5]),
+                                (bbox[6], bbox[7])
+                            ]
+                            
+                            # Calculate rectangular bounding box
+                            xs = [v[0] for v in vertices]
+                            ys = [v[1] for v in vertices]
+                            x_min, x_max = min(xs), max(xs)
+                            y_min, y_max = min(ys), max(ys)
+                            
+                            # Calculate confidence from word-level data
+                            confidence = 0.95  # Default high confidence
+                            
+                            if hasattr(line, 'words') and line.words:
+                                # Calculate average confidence from words
+                                confidences = []
+                                for word in line.words:
+                                    if hasattr(word, 'confidence'):
+                                        confidences.append(word.confidence)
+                                
+                                if confidences:
+                                    confidence = sum(confidences) / len(confidences)
+                                    self._log(f"   Line has {len(line.words)} words, avg confidence: {confidence:.3f}")
+                            
+                            # Check for handwriting style (if available)
+                            style = 'print'  # Default
+                            style_confidence = None
+                            
+                            if hasattr(line, 'appearance') and line.appearance:
+                                if hasattr(line.appearance, 'style'):
+                                    style_info = line.appearance.style
+                                    if hasattr(style_info, 'name'):
+                                        style = style_info.name
+                                        if style == 'handwriting':
+                                            handwritten_lines += 1
+                                    if hasattr(style_info, 'confidence'):
+                                        style_confidence = style_info.confidence
+                                        self._log(f"   Style: {style} (confidence: {style_confidence:.2f})")
+                            
+                            # Apply confidence threshold filtering
+                            if confidence >= confidence_threshold:
+                                region = TextRegion(
+                                    text=line.text,
+                                    vertices=vertices,
+                                    bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                    confidence=confidence,
+                                    region_type='text_line'
+                                )
+                                
+                                # Add extra attributes for Azure-specific info
+                                region.style = style
+                                region.style_confidence = style_confidence
+                                
+                                regions.append(region)
+                                total_lines += 1
+                                
+                                # More detailed logging
+                                if style == 'handwriting':
+                                    self._log(f"   Found handwritten text ({confidence:.2f}): {line.text[:50]}...")
+                                else:
+                                    self._log(f"   Found text region ({confidence:.2f}): {line.text[:50]}...")
+                            else:
+                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {line.text[:30]}...")
+                    
+                    # Log summary statistics
+                    if total_lines > 0:
+                        self._log(f"   Total lines detected: {total_lines}")
+                        if handwritten_lines > 0:
+                            self._log(f"   Handwritten lines: {handwritten_lines} ({handwritten_lines/total_lines*100:.1f}%)")
+                    
+                elif result.status == OperationStatusCodes.failed:
+                    # More detailed error handling
+                    error_msg = "Azure OCR failed"
+                    if hasattr(result, 'message'):
+                        error_msg += f": {result.message}"
+                    if hasattr(result.analyze_result, 'errors') and result.analyze_result.errors:
+                        for error in result.analyze_result.errors:
+                            self._log(f"   Error: {error}", "error")
+                    raise Exception(error_msg)
+                else:
+                    # Timeout or other status
+                    raise Exception(f"Azure OCR ended with status: {result.status} after {wait_time}s")
+                    
+            else:
+                # === NEW OCR PROVIDERS ===
+                import cv2
+                import numpy as np
+                from ocr_manager import OCRManager
+                
+                # Load image as numpy array
+                if isinstance(processed_image_data, bytes):
+                    # Convert bytes to numpy array
+                    nparr = np.frombuffer(processed_image_data, np.uint8)
+                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                else:
+                    # Load from file path
+                    image = cv2.imread(image_path)
+                    if image is None:
+                        # Try with PIL for Unicode paths
+                        from PIL import Image as PILImage
+                        pil_image = PILImage.open(image_path)
+                        image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                
+                # Create OCR manager if not exists
+                if not hasattr(self, 'ocr_manager'):
+                    self.ocr_manager = gui.ocr_manager
+                
+                # Check provider status and load if needed
+                provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
+
+                if not provider_status['installed']:
+                    self._log(f"❌ {self.ocr_provider} is not installed", "error")
+                    self._log(f"   Please install it from the GUI settings", "error")
+                    raise Exception(f"{self.ocr_provider} OCR provider is not installed")
+
+                if not provider_status['loaded']:
+                    # Check if Qwen2-VL - if it's supposedly not loaded but actually is, skip
+                    if self.ocr_provider == 'Qwen2-VL':
+                        provider = self.ocr_manager.get_provider('Qwen2-VL')
+                        if provider and hasattr(provider, 'model') and provider.model is not None:
+                            self._log("✅ Qwen2-VL model actually already loaded, skipping reload")
+                        else:
+                            # Only actually load if truly not loaded
+                            model_size = self.ocr_config.get('model_size', '2') if hasattr(self, 'ocr_config') else '2'
+                            self._log(f"Loading Qwen2-VL with model_size={model_size}")
+                            success = self.ocr_manager.load_provider(self.ocr_provider, model_size=model_size)
+                            if not success:
+                                raise Exception(f"Failed to load {self.ocr_provider} model")
+                    else:
+                        # Other providers
+                        success = self.ocr_manager.load_provider(self.ocr_provider)
+                        if not success:
+                            raise Exception(f"Failed to load {self.ocr_provider} model")
+                    
+                    if not success:
+                        raise Exception(f"Failed to load {self.ocr_provider} model")
+                
+                # Initialize ocr_results here before any provider-specific code
+                ocr_results = []
+                
+                # Special handling for manga-ocr (needs region detection first)
+                if self.ocr_provider == 'manga-ocr':
+                    # IMPORTANT: Initialize fresh results list
+                    ocr_results = []
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for manga-ocr...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process detections immediately and don't store
+                            all_regions = []
+                            
+                            # ONLY ADD TEXT-CONTAINING REGIONS
+                            # Skip empty bubbles since they shouldn't have text
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # DO NOT ADD empty bubbles - they're duplicates of text_bubbles
+                            # if 'bubbles' in rtdetr_detections:  # <-- REMOVE THIS
+                            #     all_regions.extend(rtdetr_detections.get('bubbles', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text-containing regions (skipping empty bubbles)")
+                            
+                            # Clear detection results after extracting regions
+                            rtdetr_detections = None
+                            
+                            # Process each region with manga-ocr
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
+                                    self._log(f"✅ Detected text: {result[0].text[:50]}...")
+                            
+                            # Clear regions list after processing
+                            all_regions = None
+                    else:
+                        # NO bubble detection - just process full image
+                        self._log("📝 Processing full image with manga-ocr (no bubble detection)")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider, confidence=confidence_threshold)  
+                    
+                elif self.ocr_provider == 'Qwen2-VL':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure Qwen2-VL for Korean text
+                    language_hints = ocr_settings.get('language_hints', ['ko'])
+                    self._log("🍩 Qwen2-VL OCR for Korean text recognition")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for Qwen2-VL...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Qwen2-VL")
+                            
+                            # Process each region with Qwen2-VL
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'Qwen2-VL', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Qwen2-VL")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'custom-api':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure Custom API for text extraction
+                    self._log("🔌 Using Custom API for OCR")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for Custom API...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Custom API")
+                            
+                            # Clear detections after extracting regions
+                            rtdetr_detections = None
+                            
+                            # Process each region with Custom API
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(
+                                    cropped, 
+                                    'custom-api', 
+                                    confidence=confidence_threshold
+                                )
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    # Adjust coordinates to full image space
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"🔍 Region {i+1}/{len(all_regions)}: {result[0].text[:50]}...")
+                            
+                            # Clear regions list after processing
+                            all_regions = None
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Custom API")
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            'custom-api',
+                            confidence=confidence_threshold
+                        )
+
+                elif self.ocr_provider == 'easyocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure EasyOCR languages
+                    language_hints = ocr_settings.get('language_hints', ['ja', 'en'])
+                    validated_languages = self._validate_easyocr_languages(language_hints)
+                    
+                    easyocr_provider = self.ocr_manager.get_provider('easyocr')
+                    if easyocr_provider:
+                        if easyocr_provider.languages != validated_languages:
+                            easyocr_provider.languages = validated_languages
+                            easyocr_provider.is_loaded = False
+                            self._log(f"🔥 Reloading EasyOCR with languages: {validated_languages}")
+                            self.ocr_manager.load_provider('easyocr')
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for EasyOCR...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with EasyOCR")
+                            
+                            # Process each region with EasyOCR
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'easyocr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with EasyOCR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'paddleocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Configure PaddleOCR language
+                    language_hints = ocr_settings.get('language_hints', ['ja'])
+                    lang_map = {'ja': 'japan', 'ko': 'korean', 'zh': 'ch', 'en': 'en'}
+                    paddle_lang = lang_map.get(language_hints[0] if language_hints else 'ja', 'japan')
+                    
+                    # Reload if language changed
+                    paddle_provider = self.ocr_manager.get_provider('paddleocr')
+                    if paddle_provider and paddle_provider.is_loaded:
+                        if hasattr(paddle_provider.model, 'lang') and paddle_provider.model.lang != paddle_lang:
+                            from paddleocr import PaddleOCR
+                            paddle_provider.model = PaddleOCR(
+                                use_angle_cls=True,
+                                lang=paddle_lang,
+                                use_gpu=True,
+                                show_log=False
+                            )
+                            self._log(f"🔥 Reloaded PaddleOCR with language: {paddle_lang}")
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for PaddleOCR...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with PaddleOCR")
+                            
+                            # Process each region with PaddleOCR
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'paddleocr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with PaddleOCR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                elif self.ocr_provider == 'doctr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    self._log("📄 DocTR OCR for document text recognition")
+                    
+                    # Check if we should use bubble detection
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for DocTR...")
+                        
+                        # Run bubble detection to get regions
+                        if self.bubble_detector is None:
+                            from bubble_detector import BubbleDetector
+                            self.bubble_detector = BubbleDetector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with DocTR")
+                            
+                            # Process each region with DocTR
+                            for i, (x, y, w, h) in enumerate(all_regions):
+                                cropped = image[y:y+h, x:x+w]
+                                result = self.ocr_manager.detect_text(cropped, 'doctr', confidence=confidence_threshold)
+                                if result and len(result) > 0 and result[0].text.strip():
+                                    result[0].bbox = (x, y, w, h)
+                                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                    ocr_results.append(result[0])
+                                    self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with DocTR")
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
+                else:
+                    # Default processing for any other providers
+                    ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                
+                # Convert OCR results to TextRegion format
+                for result in ocr_results:
+                    # Apply filtering
+                    if len(result.text) < min_text_length:
+                        self._log(f"   Skipping short text ({len(result.text)} chars): {result.text}")
+                        continue
+                    
+                    if exclude_english and self._is_primarily_english(result.text):
+                        self._log(f"   Skipping English text: {result.text[:50]}...")
+                        continue
+                    
+                    if result.confidence < confidence_threshold:
+                        self._log(f"   Skipping low confidence ({result.confidence:.2f}): {result.text[:30]}...")
+                        continue
+                    
+                    # Create TextRegion
+                    region = TextRegion(
+                        text=result.text,
+                        vertices=result.vertices if result.vertices else [
+                            (result.bbox[0], result.bbox[1]),
+                            (result.bbox[0] + result.bbox[2], result.bbox[1]),
+                            (result.bbox[0] + result.bbox[2], result.bbox[1] + result.bbox[3]),
+                            (result.bbox[0], result.bbox[1] + result.bbox[3])
+                        ],
+                        bounding_box=result.bbox,
+                        confidence=result.confidence,
+                        region_type='text_block'
+                    )
+                    regions.append(region)
+                    self._log(f"   Found text ({result.confidence:.2f}): {result.text[:50]}...")
+            
+            # MERGING SECTION (applies to all providers)
+            # Check if bubble detection is enabled
+            if ocr_settings.get('bubble_detection_enabled', False):
+                self._log("🤖 Using AI bubble detection for merging")
+                regions = self._merge_with_bubble_detection(regions, image_path)
+            else:
+                # Traditional merging
+                merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
+                
+                # Apply provider-specific adjustments
+                if self.ocr_provider == 'azure':
+                    azure_multiplier = ocr_settings.get('azure_merge_multiplier', 2.0)
+                    merge_threshold = int(merge_threshold * azure_multiplier)
+                    self._log(f"📋 Using Azure-adjusted merge threshold: {merge_threshold}px")
+                    
+                    # Pre-group Azure lines if the method exists
+                    if hasattr(self, '_pregroup_azure_lines'):
+                        regions = self._pregroup_azure_lines(regions, merge_threshold)
+                
+                elif self.ocr_provider in ['paddleocr', 'easyocr', 'doctr']:
+                    # These providers often return smaller text segments
+                    line_multiplier = ocr_settings.get('line_ocr_merge_multiplier', 1.5)
+                    merge_threshold = int(merge_threshold * line_multiplier)
+                    self._log(f"📋 Using line-based OCR adjusted threshold: {merge_threshold}px")
+                
+                # Apply standard merging
+                regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
+            
+            self._log(f"✅ Detected {len(regions)} text regions after merging")
+            
+            # Save debug images if enabled
+            advanced_settings = manga_settings.get('advanced', {})
+            if advanced_settings.get('debug_mode', False) or advanced_settings.get('save_intermediate', False):
+                self._save_debug_image(image_path, regions)
+            
+            return regions
+            
+        except Exception as e:
+            self._log(f"❌ Error detecting text: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "error")
+            raise
+
+    def _validate_easyocr_languages(self, languages):
+        """Validate EasyOCR language combinations"""
+        # EasyOCR compatibility rules
+        incompatible_sets = [
+            {'ja', 'ko'},  # Japanese + Korean
+            {'ja', 'zh'},  # Japanese + Chinese  
+            {'ko', 'zh'}   # Korean + Chinese
+        ]
+        
+        lang_set = set(languages)
+        
+        for incompatible in incompatible_sets:
+            if incompatible.issubset(lang_set):
+                # Conflict detected - keep first language + English
+                primary_lang = languages[0] if languages else 'en'
+                result = [primary_lang, 'en'] if primary_lang != 'en' else ['en']
+                
+                self._log(f"⚠️ EasyOCR: {' + '.join(incompatible)} not compatible", "warning")
+                self._log(f"🔧 Auto-adjusted from {languages} to {result}", "info")
+                return result
+        
+        return languages
+    
+    def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
+        """Pre-group Azure lines that are obviously part of the same text block
+        This makes them more like Google's blocks before the main merge logic"""
+        
+        if len(lines) <= 1:
+            return lines
+        
+        # Sort by vertical position first, then horizontal
+        lines.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        
+        pregrouped = []
+        i = 0
+        
+        while i < len(lines):
+            current_group = [lines[i]]
+            current_bbox = list(lines[i].bounding_box)
+            
+            # Look ahead for lines that should obviously be grouped
+            j = i + 1
+            while j < len(lines):
+                x1, y1, w1, h1 = current_bbox
+                x2, y2, w2, h2 = lines[j].bounding_box
+                
+                # Calculate gaps
+                vertical_gap = y2 - (y1 + h1) if y2 > y1 + h1 else 0
+                
+                # Check horizontal alignment
+                center_x1 = x1 + w1 / 2
+                center_x2 = x2 + w2 / 2
+                horizontal_offset = abs(center_x1 - center_x2)
+                avg_width = (w1 + w2) / 2
+                
+                # Group if:
+                # 1. Lines are vertically adjacent (small gap)
+                # 2. Lines are well-aligned horizontally (likely same bubble)
+                if (vertical_gap < h1 * 0.5 and  # Less than half line height gap
+                    horizontal_offset < avg_width * 0.5):  # Well centered
+                    
+                    # Add to group
+                    current_group.append(lines[j])
+                    
+                    # Update bounding box to include new line
+                    min_x = min(x1, x2)
+                    min_y = min(y1, y2)
+                    max_x = max(x1 + w1, x2 + w2)
+                    max_y = max(y1 + h1, y2 + h2)
+                    current_bbox = [min_x, min_y, max_x - min_x, max_y - min_y]
+                    
+                    j += 1
+                else:
+                    break
+            
+            # Create merged region from group
+            if len(current_group) > 1:
+                merged_text = " ".join([line.text for line in current_group])
+                all_vertices = []
+                for line in current_group:
+                    all_vertices.extend(line.vertices)
+                
+                merged_region = TextRegion(
+                    text=merged_text,
+                    vertices=all_vertices,
+                    bounding_box=tuple(current_bbox),
+                    confidence=0.95,
+                    region_type='pregrouped_lines'
+                )
+                pregrouped.append(merged_region)
+                
+                self._log(f"   Pre-grouped {len(current_group)} Azure lines into block")
+            else:
+                # Single line, keep as is
+                pregrouped.append(lines[i])
+            
+            i = j if j > i + 1 else i + 1
+        
+        self._log(f"   Azure pre-grouping: {len(lines)} lines → {len(pregrouped)} blocks")
+        return pregrouped
+
+    def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
+        """Detect text using Azure Computer Vision"""
+        import io
+        from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+        
+        stream = io.BytesIO(image_data)
+        
+        # Use Read API for better manga text detection
+        read_result = self.vision_client.read_in_stream(
+            stream,
+            raw=True,
+            language='ja'  # or from ocr_settings
+        )
+        
+        # Get operation ID from headers
+        operation_location = read_result.headers["Operation-Location"]
+        operation_id = operation_location.split("/")[-1]
+        
+        # Wait for completion
+        import time
+        while True:
+            result = self.vision_client.get_read_result(operation_id)
+            if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
+                break
+            time.sleep(0.5)
+        
+        regions = []
+        confidence_threshold = ocr_settings.get('confidence_threshold', 0.8)
+        
+        if result.status == OperationStatusCodes.succeeded:
+            for page in result.analyze_result.read_results:
+                for line in page.lines:
+                    # Azure returns bounding box as 8 coordinates
+                    bbox = line.bounding_box
+                    vertices = [
+                        (bbox[0], bbox[1]),
+                        (bbox[2], bbox[3]),
+                        (bbox[4], bbox[5]),
+                        (bbox[6], bbox[7])
+                    ]
+                    
+                    xs = [v[0] for v in vertices]
+                    ys = [v[1] for v in vertices]
+                    x_min, x_max = min(xs), max(xs)
+                    y_min, y_max = min(ys), max(ys)
+                    
+                    # Azure doesn't provide per-line confidence in Read API
+                    confidence = 0.95  # Default high confidence
+                    
+                    if confidence >= confidence_threshold:
+                        region = TextRegion(
+                            text=line.text,
+                            vertices=vertices,
+                            bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                            confidence=confidence,
+                            region_type='text_line'
+                        )
+                        regions.append(region)
+        
+        return regions
+
+    def _preprocess_image(self, image_path: str, preprocessing_settings: Dict) -> bytes:
+        """Preprocess image for better OCR results"""
+        try:
+            # Open image with PIL
+            pil_image = Image.open(image_path)
+            
+            # Convert to RGB if necessary
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Auto-detect quality issues if enabled
+            if preprocessing_settings.get('auto_detect_quality', True):
+                needs_enhancement = self._detect_quality_issues(pil_image, preprocessing_settings)
+                if needs_enhancement:
+                    self._log("   Auto-detected quality issues - applying enhancements")
+            else:
+                needs_enhancement = True
+            
+            if needs_enhancement:
+                # Apply contrast enhancement
+                contrast_threshold = preprocessing_settings.get('contrast_threshold', 0.4)
+                enhancer = ImageEnhance.Contrast(pil_image)
+                pil_image = enhancer.enhance(1 + contrast_threshold)
+                
+                # Apply sharpness enhancement
+                sharpness_threshold = preprocessing_settings.get('sharpness_threshold', 0.3)
+                enhancer = ImageEnhance.Sharpness(pil_image)
+                pil_image = enhancer.enhance(1 + sharpness_threshold)
+                
+                # Apply general enhancement strength
+                enhancement_strength = preprocessing_settings.get('enhancement_strength', 1.5)
+                if enhancement_strength != 1.0:
+                    # Brightness adjustment
+                    enhancer = ImageEnhance.Brightness(pil_image)
+                    pil_image = enhancer.enhance(enhancement_strength)
+            
+            # Resize if too large
+            max_dimension = preprocessing_settings.get('max_image_dimension', 2000)
+            if pil_image.width > max_dimension or pil_image.height > max_dimension:
+                ratio = min(max_dimension / pil_image.width, max_dimension / pil_image.height)
+                new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
+                self._log(f"   Resized image to {new_size[0]}x{new_size[1]}")
+            
+            # Convert back to bytes
+            from io import BytesIO
+            buffered = BytesIO()
+            pil_image.save(buffered, format="PNG", optimize=True)
+            return buffered.getvalue()
+            
+        except Exception as e:
+            self._log(f"⚠️ Preprocessing failed: {str(e)}, using original image", "warning")
+            with open(image_path, 'rb') as f:
+                return f.read()
+
+    def _detect_quality_issues(self, image: Image.Image, settings: Dict) -> bool:
+        """Auto-detect if image needs quality enhancement"""
+        # Convert to grayscale for analysis
+        gray = image.convert('L')
+        
+        # Get histogram
+        hist = gray.histogram()
+        
+        # Calculate contrast (simplified)
+        pixels = sum(hist)
+        mean = sum(i * hist[i] for i in range(256)) / pixels
+        variance = sum(hist[i] * (i - mean) ** 2 for i in range(256)) / pixels
+        std_dev = variance ** 0.5
+        
+        # Low contrast if std deviation is low
+        contrast_threshold = settings.get('contrast_threshold', 0.4) * 100
+        if std_dev < contrast_threshold:
+            self._log("   Low contrast detected")
+            return True
+        
+        # Check for blur using Laplacian variance
+        import numpy as np
+        gray_array = np.array(gray)
+        laplacian = cv2.Laplacian(gray_array, cv2.CV_64F)
+        variance = laplacian.var()
+        
+        sharpness_threshold = settings.get('sharpness_threshold', 0.3) * 100
+        if variance < sharpness_threshold:
+            self._log("   Blur detected")
+            return True
+        
+        return False
+
+    def _save_debug_image(self, image_path: str, regions: List[TextRegion]):
+        """Save debug image with detected regions highlighted"""
+        # Skip debug images in batch mode unless explicitly requested
+        if self.batch_mode and not self.manga_settings.get('advanced', {}).get('force_debug_batch', False):
+            return
+        
+        # Check if debug mode is enabled
+        if not self.manga_settings.get('advanced', {}).get('debug_mode', False):
+            return
+        
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image as PILImage
+            
+            # Handle Unicode paths
+            try:
+                img = cv2.imread(image_path)
+                if img is None:
+                    # Fallback to PIL for Unicode paths
+                    pil_image = PILImage.open(image_path)
+                    img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            except Exception as e:
+                self._log(f"   Failed to load image for debug: {str(e)}", "warning")
+                return
+            
+            # Create debug directory if save_intermediate is enabled
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                debug_dir = os.path.join(os.path.dirname(image_path), 'debug')
+                os.makedirs(debug_dir, exist_ok=True)
+                base_name = os.path.splitext(os.path.basename(image_path))[0]
+            
+            # Draw rectangles around detected text regions
+            overlay = img.copy()
+            
+            # Calculate statistics
+            total_chars = sum(len(r.text) for r in regions)
+            avg_confidence = np.mean([r.confidence for r in regions]) if regions else 0
+            
+            for i, region in enumerate(regions):
+                x, y, w, h = region.bounding_box
+                
+                # Color based on confidence
+                if region.confidence > 0.95:
+                    color = (0, 255, 0)  # Green - high confidence
+                elif region.confidence > 0.8:
+                    color = (0, 165, 255)  # Orange - medium confidence
+                else:
+                    color = (0, 0, 255)  # Red - low confidence
+                
+                # Draw rectangle
+                cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 2)
+                
+                # Add region info
+                info_text = f"#{i} ({region.confidence:.2f})"
+                cv2.putText(overlay, info_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.5, color, 1, cv2.LINE_AA)
+                
+                # Add character count
+                char_count = len(region.text.strip())
+                cv2.putText(overlay, f"{char_count} chars", (x, y + h + 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                
+                # Add detected text preview if in verbose debug mode
+                if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                    text_preview = region.text[:20] + "..." if len(region.text) > 20 else region.text
+                    cv2.putText(overlay, text_preview, (x, y + h + 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.4, color, 1, cv2.LINE_AA)
+            
+            # Add overall statistics to the image
+            stats_bg = overlay.copy()
+            cv2.rectangle(stats_bg, (10, 10), (300, 90), (0, 0, 0), -1)
+            cv2.addWeighted(stats_bg, 0.7, overlay, 0.3, 0, overlay)
+            
+            stats_text = [
+                f"Regions: {len(regions)}",
+                f"Total chars: {total_chars}",
+                f"Avg confidence: {avg_confidence:.2f}"
+            ]
+            
+            for i, text in enumerate(stats_text):
+                cv2.putText(overlay, text, (20, 35 + i*20), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            
+            # Save main debug image
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                debug_path = os.path.join(debug_dir, f"{base_name}_debug_regions.png")
+            else:
+                debug_path = image_path.replace('.', '_debug.')
+            
+            cv2.imwrite(debug_path, overlay)
+            self._log(f"   📸 Saved debug image: {debug_path}")
+            
+            # Save text mask
+            mask = self.create_text_mask(img, regions)
+            mask_debug_path = debug_path.replace('_debug', '_mask')
+            cv2.imwrite(mask_debug_path, mask)
+            mask_percentage = ((mask > 0).sum() / mask.size) * 100
+            self._log(f"   🎭 Saved mask image: {mask_debug_path}", "info")
+            self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                        
+            # If save_intermediate is enabled, save additional debug images
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                # Save confidence heatmap
+                heatmap = self._create_confidence_heatmap(img, regions)
+                heatmap_path = os.path.join(debug_dir, f"{base_name}_confidence_heatmap.png")
+                cv2.imwrite(heatmap_path, heatmap)
+                self._log(f"   🌡️ Saved confidence heatmap: {heatmap_path}")
+                
+                # Save polygon visualization with safe text areas
+                if any(hasattr(r, 'vertices') and r.vertices for r in regions):
+                    polygon_img = img.copy()
+                    for region in regions:
+                        if hasattr(region, 'vertices') and region.vertices:
+                            # Draw polygon
+                            pts = np.array(region.vertices, np.int32)
+                            pts = pts.reshape((-1, 1, 2))
+                            
+                            # Fill with transparency
+                            overlay_poly = polygon_img.copy()
+                            cv2.fillPoly(overlay_poly, [pts], (0, 255, 255))
+                            cv2.addWeighted(overlay_poly, 0.2, polygon_img, 0.8, 0, polygon_img)
+                            
+                            # Draw outline
+                            cv2.polylines(polygon_img, [pts], True, (255, 0, 0), 2)
+                            
+                            # Draw safe text area
+                            try:
+                                safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region)
+                                cv2.rectangle(polygon_img, (safe_x, safe_y), 
+                                            (safe_x + safe_w, safe_y + safe_h), 
+                                            (0, 255, 0), 1)
+                            except:
+                                pass  # Skip if get_safe_text_area fails
+                    
+                    polygon_path = os.path.join(debug_dir, f"{base_name}_polygons.png")
+                    cv2.imwrite(polygon_path, polygon_img)
+                    self._log(f"   🔷 Saved polygon visualization: {polygon_path}")
+                
+                # Save individual region crops with more info
+                regions_dir = os.path.join(debug_dir, 'regions')
+                os.makedirs(regions_dir, exist_ok=True)
+                
+                for i, region in enumerate(regions[:10]):  # Limit to first 10 regions
+                    x, y, w, h = region.bounding_box
+                    # Add padding
+                    pad = 10
+                    x1 = max(0, x - pad)
+                    y1 = max(0, y - pad)
+                    x2 = min(img.shape[1], x + w + pad)
+                    y2 = min(img.shape[0], y + h + pad)
+                    
+                    region_crop = img[y1:y2, x1:x2].copy()
+                    
+                    # Draw bounding box on crop
+                    cv2.rectangle(region_crop, (pad, pad), 
+                                (pad + w, pad + h), (0, 255, 0), 2)
+                    
+                    # Add text info on the crop
+                    info = f"Conf: {region.confidence:.2f} | Chars: {len(region.text)}"
+                    cv2.putText(region_crop, info, (5, 15), cv2.FONT_HERSHEY_SIMPLEX,
+                               0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    
+                    # Save with meaningful filename
+                    safe_text = region.text[:20].replace('/', '_').replace('\\', '_').strip()
+                    region_path = os.path.join(regions_dir, f"region_{i:03d}_{safe_text}.png")
+                    cv2.imwrite(region_path, region_crop)
+                
+                self._log(f"   📁 Saved individual region crops to: {regions_dir}")
+            
+        except Exception as e:
+            self._log(f"   ❌ Failed to save debug image: {str(e)}", "warning")
+            if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                # If debug mode is on, log the full traceback
+                import traceback
+                self._log(traceback.format_exc(), "warning")
+
+    def _create_confidence_heatmap(self, img, regions):
+        """Create a heatmap showing OCR confidence levels"""
+        heatmap = np.zeros_like(img[:, :, 0], dtype=np.float32)
+        
+        for region in regions:
+            x, y, w, h = region.bounding_box
+            confidence = region.confidence
+            heatmap[y:y+h, x:x+w] = confidence
+        
+        # Convert to color heatmap
+        heatmap_normalized = (heatmap * 255).astype(np.uint8)
+        heatmap_colored = cv2.applyColorMap(heatmap_normalized, cv2.COLORMAP_JET)
+        
+        # Blend with original image
+        result = cv2.addWeighted(img, 0.7, heatmap_colored, 0.3, 0)
+        return result
+
+    def _get_translation_history_context(self) -> List[Dict[str, str]]:
+        """Get translation history context from HistoryManager"""
+        if not self.history_manager or not self.contextual_enabled:
+            return []
+        
+        try:
+            # Load full history
+            full_history = self.history_manager.load_history()
+            
+            if not full_history:
+                return []
+            
+            # Extract only the contextual messages up to the limit
+            context = []
+            exchange_count = 0
+            
+            # Process history in pairs (user + assistant messages)
+            for i in range(0, len(full_history), 2):
+                if i + 1 < len(full_history):
+                    user_msg = full_history[i]
+                    assistant_msg = full_history[i + 1]
+                    
+                    if user_msg.get("role") == "user" and assistant_msg.get("role") == "assistant":
+                        context.extend([user_msg, assistant_msg])
+                        exchange_count += 1
+                        
+                        # Only keep up to the history limit
+                        if exchange_count >= self.translation_history_limit:
+                            # Get only the most recent exchanges
+                            context = context[-(self.translation_history_limit * 2):]
+                            break
+            
+            return context
+            
+        except Exception as e:
+            self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
+            return []
+    
+    def translate_text(self, text: str, context: Optional[List[Dict]] = None, image_path: str = None, region: TextRegion = None) -> str:
+        """Translate text using API with GUI system prompt and full image context"""
+        try:
+            self._log(f"\n🌐 Starting translation for text: '{text[:50]}...'")
+            # CHECK 1: Before starting
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before full page context processing", "warning")
+                return {}
+            
+            # Get system prompt from GUI profile
+            profile_name = self.main_gui.profile_var.get()
+
+            # Get the prompt from prompt_profiles dictionary
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                self._log(f"📋 Using profile: {profile_name}")
+            else:
+                self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
+
+            self._log(f"📝 System prompt: {system_prompt[:100]}..." if system_prompt else "📝 No system prompt configured")
+
+            if system_prompt:
+                messages = [{"role": "system", "content": system_prompt}]
+            else:
+                messages = []
+            
+            self._log(f"📋 Using profile: {profile_name}")
+            if system_prompt:
+                self._log(f"📝 System prompt: {system_prompt[:100]}...")
+                messages = [{"role": "system", "content": system_prompt}]
+            else:
+                self._log(f"📝 No system prompt configured")
+                messages = []
+            
+            # Add contextual translations if enabled
+            if self.contextual_enabled and self.history_manager:
+                # Get history from HistoryManager
+                history_context = self._get_translation_history_context()
+                
+                if history_context:
+                    context_count = len(history_context) // 2  # Each exchange is 2 messages
+                    self._log(f"🔗 Adding {context_count} previous exchanges from history (limit: {self.translation_history_limit})")
+                    messages.extend(history_context)
+                else:
+                    self._log(f"🔗 Contextual enabled but no history available yet")
+            else:
+                self._log(f"🔗 Contextual: {'Disabled' if not self.contextual_enabled else 'No HistoryManager'}")
+            
+            # Add full image context if available AND visual context is enabled
+            if image_path and self.visual_context_enabled:
+                try:
+                    import base64
+                    from PIL import Image as PILImage
+                    
+                    self._log(f"📷 Adding full page visual context for translation")
+                    
+                    # Read and encode the full image
+                    with open(image_path, 'rb') as img_file:
+                        img_data = img_file.read()
+                    
+                    # Check image size
+                    img_size_mb = len(img_data) / (1024 * 1024)
+                    self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                    
+                    # Optionally resize if too large (Gemini has limits)
+                    if img_size_mb > 10:  # If larger than 10MB
+                        self._log(f"📉 Resizing large image for API limits...")
+                        pil_image = PILImage.open(image_path)
+                        
+                        # Calculate new size (max 2048px on longest side)
+                        max_size = 2048
+                        ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                        if ratio < 1:
+                            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                            pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                            
+                            # Re-encode
+                            from io import BytesIO
+                            buffered = BytesIO()
+                            pil_image.save(buffered, format="PNG", optimize=True)
+                            img_data = buffered.getvalue()
+                            self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                    
+                    # Encode to base64
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+                    
+                    # Build the message with image and text location info
+                    location_description = ""
+                    if region:
+                        x, y, w, h = region.bounding_box
+                        # Describe where on the page this text is located
+                        page_width = PILImage.open(image_path).width
+                        page_height = PILImage.open(image_path).height
+                        
+                        # Determine position
+                        h_pos = "left" if x < page_width/3 else "center" if x < 2*page_width/3 else "right"
+                        v_pos = "top" if y < page_height/3 else "middle" if y < 2*page_height/3 else "bottom"
+                        
+                        location_description = f"\n\nThe text to translate is located in the {v_pos}-{h_pos} area of the page, "
+                        location_description += f"at coordinates ({x}, {y}) with size {w}x{h} pixels."
+                    
+                    # Add image and text to translate
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": f"Looking at this full manga page, translate the following text: '{text}'{location_description}"
+                            }
+                        ]
+                    })
+                    
+                    self._log(f"✅ Added full page image as visual context")
                     
                 except Exception as e:
-                    self.failed_files += 1
-                    error_str = str(e)
-                    error_type = type(e).__name__
-                    
-                    self._log(f"❌ Error processing {filename}:", "error")
-                    self._log(f"   Error type: {error_type}", "error")
-                    self._log(f"   Details: {error_str}", "error")
-                    
-                    # Check for specific API errors
-                    if "429" in error_str or "rate limit" in error_str.lower():
-                        self._log(f"⚠️ RATE LIMIT ERROR (429) - API is throttling requests", "error")
-                        self._log(f"   Please wait before continuing or reduce request frequency", "error")
-                        self._log(f"   Consider increasing the API delay in settings", "error")
-                        
-                        # Pause for rate limit
-                        self._log(f"   Pausing for 60 seconds...", "warning")
-                        for sec in range(60):
-                            if self.stop_flag.is_set():
-                                break
-                            time.sleep(1)
-                            if sec % 10 == 0:
-                                self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
-                        
-                    elif "401" in error_str or "unauthorized" in error_str.lower():
-                        self._log(f"❌ AUTHENTICATION ERROR (401) - Check your API key", "error")
-                        self._log(f"   The API key appears to be invalid or expired", "error")
-                        
-                    elif "403" in error_str or "forbidden" in error_str.lower():
-                        self._log(f"❌ FORBIDDEN ERROR (403) - Access denied", "error")
-                        self._log(f"   Check your API subscription and permissions", "error")
-                        
-                    elif "timeout" in error_str.lower():
-                        self._log(f"⏱️ TIMEOUT ERROR - Request took too long", "error")
-                        self._log(f"   Consider increasing timeout settings", "error")
-                        
+                    self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                    self._log(f"   Error type: {type(e).__name__}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "warning")
+                    # Fall back to text-only translation
+                    messages.append({"role": "user", "content": text})
+            elif image_path and not self.visual_context_enabled:
+                # Visual context disabled - text-only mode
+                self._log(f"📝 Text-only mode (visual context disabled)")
+                messages.append({"role": "user", "content": text})
+            else:
+                # No image path provided - text-only translation
+                messages.append({"role": "user", "content": text})
+            
+            # Check input token limit
+            text_tokens = 0
+            image_tokens = 0
+
+            for msg in messages:
+                if isinstance(msg.get("content"), str):
+                    # Simple text message
+                    text_tokens += len(msg["content"]) // 4
+                elif isinstance(msg.get("content"), list):
+                    # Message with mixed content (text + image)
+                    for content_part in msg["content"]:
+                        if content_part.get("type") == "text":
+                            text_tokens += len(content_part.get("text", "")) // 4
+                        elif content_part.get("type") == "image_url":
+                            # Only count image tokens if visual context is enabled
+                            if self.visual_context_enabled:
+                                image_tokens += 258
+
+            estimated_tokens = text_tokens + image_tokens
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt, image, and current text only
+                    if image_path:
+                        messages = [messages[0], messages[-1]]  
                     else:
-                        # Generic error with full traceback
-                        self._log(f"   Full traceback:", "error")
-                        self._log(traceback.format_exc(), "error")
+                        messages = [messages[0], {"role": "user", "content": text}]
+                    # Recalculate tokens after trimming
+                    text_tokens = len(messages[0]["content"]) // 4
+                    if isinstance(messages[-1].get("content"), str):
+                        text_tokens += len(messages[-1]["content"]) // 4
+                    else:
+                        text_tokens += len(messages[-1]["content"][0]["text"]) // 4
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
             
-            # Final summary
-            self._log(f"\n{'='*60}", "info")
-            self._log(f"📊 Translation Summary:", "info")
-            self._log(f"   Total files: {self.total_files}", "info")
-            self._log(f"   ✅ Successful: {self.completed_files}", "success")
-            self._log(f"   ❌ Failed: {self.failed_files}", "error" if self.failed_files > 0 else "info")
-            self._log(f"{'='*60}\n", "info")
+            start_time = time.time()
+            api_time = 0  # Initialize to avoid NameError
             
-            self._update_progress(
-                self.total_files,
-                self.total_files,
-                f"Complete! {self.completed_files} successful, {self.failed_files} failed"
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens
+                )
+                api_time = time.time() - start_time
+                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
+            
+            # Extract content from response
+            if hasattr(response, 'content'):
+                translated = response.content.strip()
+            else:
+                # If response is a string or other format
+                translated = str(response).strip()
+
+            # Check if response looks like JSON (contains both { and } and : characters)
+            if '{' in translated and '}' in translated and ':' in translated:
+                try:
+                    # It might be JSON, try to fix and parse it
+                    fixed_json = self._fix_json_response(translated)
+                    import json
+                    parsed = json.loads(fixed_json)
+                    
+                    # If it's a dict with a single translation, extract it
+                    if isinstance(parsed, dict) and len(parsed) == 1:
+                        translated = list(parsed.values())[0]
+                        translated = self._clean_translation_text(translated)
+                        self._log("📦 Extracted translation from JSON response", "debug")
+                except:
+                    # Not JSON or failed to parse, use as-is
+                    pass
+            
+            self._log(f"🔍 Raw response type: {type(response)}")
+            self._log(f"🔍 Raw response content: '{translated[:100]}...'")
+            
+            # Check if the response looks like a Python literal (tuple/string representation)
+            if translated.startswith("('") or translated.startswith('("') or translated.startswith("('''"):
+                self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
+                original = translated
+                try:
+                    # Try to evaluate it as a Python literal
+                    import ast
+                    evaluated = ast.literal_eval(translated)
+                    self._log(f"📦 Evaluated type: {type(evaluated)}")
+                    
+                    if isinstance(evaluated, tuple):
+                        # Take the first element of the tuple
+                        translated = str(evaluated[0])
+                        self._log(f"📦 Extracted from tuple: '{translated[:50]}...'")
+                    elif isinstance(evaluated, str):
+                        translated = evaluated
+                        self._log(f"📦 Extracted string: '{translated[:50]}...'")
+                    else:
+                        self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
+                        
+                except Exception as e:
+                    self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
+                    self._log(f"⚠️ Original content: {original[:200]}", "warning")
+                    
+                    # Try multiple levels of unescaping
+                    temp = translated
+                    for i in range(5):  # Try up to 5 levels of unescaping
+                        if temp.startswith("('") or temp.startswith('("'):
+                            # Try regex as fallback
+                            import re
+                            match = re.search(r"^\(['\"](.+)['\"]\)$", temp, re.DOTALL)
+                            if match:
+                                temp = match.group(1)
+                                self._log(f"📦 Regex extracted (level {i+1}): '{temp[:50]}...'")
+                            else:
+                                break
+                        else:
+                            break
+                    translated = temp
+            
+            # Additional check for escaped content
+            if '\\\\' in translated or '\\n' in translated or "\\'" in translated or '\\"' in translated:
+                self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+                try:
+                    # DON'T use unicode_escape for Korean text - it corrupts it
+                    # Instead, just replace the escape sequences manually
+                    before = translated
+                    
+                    # Handle quotes and apostrophes
+                    translated = translated.replace("\\'", "'")  # Escaped apostrophe
+                    translated = translated.replace('\\"', '"')  # Escaped quote
+                    translated = translated.replace("\\`", "`")  # Escaped backtick
+                    translated = translated.replace("\\u2019", "'")  # Unicode right single quote
+                    translated = translated.replace("\\u2018", "'")  # Unicode left single quote
+                    translated = translated.replace("\\u201c", '"')  # Unicode left double quote
+                    translated = translated.replace("\\u201d", '"')  # Unicode right double quote
+                    
+                    # Handle newlines and other escapes
+                    translated = translated.replace('\\n', '\n')
+                    translated = translated.replace('\\\\', '\\')
+                    translated = translated.replace('\\/', '/')
+                    translated = translated.replace('\\t', '\t')
+                    translated = translated.replace('\\r', '\r')
+                    
+                    # Clean up smart quotes using Unicode escape codes
+                    translated = translated.replace('\u2018', "'")  # Left single quotation mark
+                    translated = translated.replace('\u2019', "'")  # Right single quotation mark
+                    translated = translated.replace('\u201c', '"')  # Left double quotation mark
+                    translated = translated.replace('\u201d', '"')  # Right double quotation mark
+                    
+                    self._log(f"📦 Unescaped safely: '{before[:50]}...' -> '{translated[:50]}...'")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to unescape: {e}", "warning")
+            
+            # Clean up unwanted trailing apostrophes/quotes
+            import re
+            response_text = translated
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            translated = response_text
+            translated = self._clean_translation_text(translated)
+            self._log(f"🎯 Final translation result: '{translated[:50]}...'")
+            
+            # Apply glossary if available
+            if hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                glossary_count = len(self.main_gui.manual_glossary)
+                self._log(f"📚 Applying glossary with {glossary_count} entries")
+                
+                replacements = 0
+                for entry in self.main_gui.manual_glossary:
+                    if 'source' in entry and 'target' in entry:
+                        if entry['source'] in translated:
+                            translated = translated.replace(entry['source'], entry['target'])
+                            replacements += 1
+                
+                if replacements > 0:
+                    self._log(f"   ✏️ Made {replacements} glossary replacements")
+            
+            translated = self._clean_translation_text(translated)
+            
+            # Store in history if HistoryManager is available
+            if self.history_manager and self.contextual_enabled:
+                try:
+                    # Append to history with proper limit handling
+                    self.history_manager.append_to_history(
+                        user_content=text,
+                        assistant_content=translated,
+                        hist_limit=self.translation_history_limit,
+                        reset_on_limit=not self.rolling_history_enabled,
+                        rolling_window=self.rolling_history_enabled
+                    )
+                    
+                    # Check if we're about to hit the limit
+                    if self.history_manager.will_reset_on_next_append(
+                        self.translation_history_limit, 
+                        self.rolling_history_enabled
+                    ):
+                        mode = "roll over" if self.rolling_history_enabled else "reset"
+                        self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
+            
+            # Also store in legacy context for compatibility
+            self.translation_context.append({
+                "original": text,
+                "translated": translated
+            })
+            
+            return translated
+            
+        except Exception as e:
+            self._log(f"❌ Translation error: {str(e)}", "error")
+            self._log(f"   Error type: {type(e).__name__}", "error")
+            import traceback
+            self._log(f"   Traceback: {traceback.format_exc()}", "error")
+            return text
+
+    def translate_full_page_context(self, regions: List[TextRegion], image_path: str) -> Dict[str, str]:
+        """Translate all text regions with full page context in a single request"""
+        try:
+            import time
+            import traceback
+            
+            self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
+            
+            # Get system prompt from GUI profile
+            profile_name = self.main_gui.profile_var.get()
+            
+            # Ensure visual_context_enabled exists (temporary fix)
+            if not hasattr(self, 'visual_context_enabled'):
+                self.visual_context_enabled = self.main_gui.config.get('manga_visual_context_enabled', True)
+            
+            # Try to get the prompt from prompt_profiles dictionary (for all profiles including custom ones)
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                self._log(f"📋 Using profile: {profile_name}")
+            else:
+                # Fallback to check if it's stored as a direct attribute (legacy support)
+                system_prompt = getattr(self.main_gui, profile_name.replace(' ', '_'), '')
+                if system_prompt:
+                    self._log(f"📋 Using profile (legacy): {profile_name}")
+                else:
+                    self._log(f"⚠️ Profile '{profile_name}' not found, using empty prompt", "warning")
+            
+            # Combine with full page context instructions
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
+            else:
+                system_prompt = self.full_page_context_prompt
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # CHECK 2: Before adding context
+            if self._check_stop():
+                self._log("⏹️ Translation stopped during context preparation", "warning")
+                return {}
+            
+            # Add contextual translations if enabled
+            if self.contextual_enabled and self.history_manager:
+                history_context = self._get_translation_history_context()
+                if history_context:
+                    context_count = len(history_context) // 2
+                    self._log(f"🔗 Adding {context_count} previous exchanges from history")
+                    messages.extend(history_context)
+            
+            # Prepare text segments with indices
+            all_texts = {}
+            text_list = []
+            for i, region in enumerate(regions):
+                # Use index-based key to handle duplicate texts
+                key = f"[{i}] {region.text}"
+                all_texts[key] = region.text
+                text_list.append(f"{key}")
+                
+            # CHECK 3: Before image processing
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before image processing", "warning")
+                return {}
+            
+            # Create the full context message text
+            context_text = "\n".join(text_list)
+            
+            # Log text content info
+            total_chars = sum(len(region.text) for region in regions)
+            self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
+            
+            # Process image if visual context is enabled
+            if self.visual_context_enabled:
+                try:
+                    import base64
+                    from PIL import Image as PILImage
+                    
+                    self._log(f"📷 Adding full page visual context for translation")
+                    
+                    # Read and encode the image
+                    with open(image_path, 'rb') as img_file:
+                        img_data = img_file.read()
+                    
+                    # Check image size
+                    img_size_mb = len(img_data) / (1024 * 1024)
+                    self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                    
+                    # Get image dimensions
+                    pil_image = PILImage.open(image_path)
+                    self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
+                    
+                    # CHECK 4: Before resizing (which can take time)
+                    if self._check_stop():
+                        self._log("⏹️ Translation stopped during image preparation", "warning")
+                        return {}
+                    
+                    # Resize if needed
+                    if img_size_mb > 10:
+                        self._log(f"📉 Resizing large image for API limits...")
+                        max_size = 2048
+                        ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                        if ratio < 1:
+                            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                            pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                            from io import BytesIO
+                            buffered = BytesIO()
+                            pil_image.save(buffered, format="PNG", optimize=True)
+                            img_data = buffered.getvalue()
+                            self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                    
+                    # Convert to base64
+                    img_b64 = base64.b64encode(img_data).decode('utf-8')
+                    
+                    # Create message with both text and image
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": context_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                        ]
+                    })
+                    
+                    self._log(f"✅ Added full page image as visual context")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                    self._log(f"   Error type: {type(e).__name__}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "warning")
+                    self._log(f"   Falling back to text-only translation", "warning")
+                    
+                    # Fall back to text-only translation
+                    messages.append({"role": "user", "content": context_text})
+            else:
+                # Visual context disabled - send text only
+                self._log(f"📝 Text-only mode (visual context disabled for non-vision models)")
+                messages.append({"role": "user", "content": context_text})
+            
+            # CHECK 5: Before API call
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before API call", "warning")
+                return {}
+            
+            # Check input token limit
+            text_tokens = 0
+            image_tokens = 0
+
+            for msg in messages:
+                if isinstance(msg.get("content"), str):
+                    # Simple text message
+                    text_tokens += len(msg["content"]) // 4
+                elif isinstance(msg.get("content"), list):
+                    # Message with mixed content (text + image)
+                    for content_part in msg["content"]:
+                        if content_part.get("type") == "text":
+                            text_tokens += len(content_part.get("text", "")) // 4
+                        elif content_part.get("type") == "image_url":
+                            # Only count image tokens if visual context is enabled
+                            if self.visual_context_enabled:
+                                image_tokens += 258
+
+            estimated_tokens = text_tokens + image_tokens
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt and current message only
+                    messages = [messages[0], messages[-1]]  
+                    # Recalculate tokens
+                    text_tokens = len(messages[0]["content"]) // 4
+                    if isinstance(messages[-1]["content"], str):
+                        text_tokens += len(messages[-1]["content"]) // 4
+                    else:
+                        for content_part in messages[-1]["content"]:
+                            if content_part.get("type") == "text":
+                                text_tokens += len(content_part.get("text", "")) // 4
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+            
+            # [Rest of the method remains the same - API call, response handling, etc.]
+            # Make API call using the client's send method (matching translate_text)
+            self._log(f"🌐 Sending full page context to API...")
+            self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
+            self._log(f"   Temperature: {self.temperature}")
+            self._log(f"   Max Output Tokens: {self.max_tokens}")
+            
+            start_time = time.time()
+            api_time = 0  # Initialize to avoid NameError
+            
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens  # Use the configured max tokens without multiplication
+                )
+                api_time = time.time() - start_time
+                
+                # CHECK 6: Immediately after API response
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped after API call ({api_time:.2f}s)", "warning")
+                    return {}
+                
+                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+                
+                # CHECK 7: After API error
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped during API error handling", "warning")
+                    return {}
+                
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
+            
+            # Extract content from response (matching translate_text method)
+            if hasattr(response, 'content'):
+                response_text = response.content.strip()
+            else:
+                response_text = str(response).strip()
+            
+            self._log(f"📥 Received response ({len(response_text)} chars)")
+            
+            # CHECK 8: Before parsing response
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before parsing response", "warning")
+                return {}
+            
+            self._log(f"🔍 Raw response type: {type(response)}")
+            self._log(f"🔍 Raw response preview: '{response_text[:100]}...'")
+            
+            # Check if the response looks like a Python literal (tuple/string representation)
+            if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
+                self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
+                original_response = response_text
+                try:
+                    # Try to evaluate it as a Python literal
+                    import ast
+                    evaluated = ast.literal_eval(response_text)
+                    self._log(f"📦 Evaluated type: {type(evaluated)}")
+                    
+                    if isinstance(evaluated, tuple):
+                        # Take the first element of the tuple
+                        response_text = str(evaluated[0])
+                        self._log(f"📦 Extracted from tuple: '{response_text[:50]}...'")
+                    elif isinstance(evaluated, str):
+                        response_text = evaluated
+                        self._log(f"📦 Extracted string: '{response_text[:50]}...'")
+                    else:
+                        self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
+                        
+                except Exception as e:
+                    self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
+                    self._log(f"⚠️ Original content: {original_response[:200]}", "warning")
+                    
+                    # Try regex as fallback
+                    import re
+                    match = re.search(r"^\(['\"](.+)['\"]\)$", response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                        self._log(f"📦 Regex extracted: '{response_text[:50]}...'")
+            
+            # Additional check for escaped content
+            if '\\\\' in response_text or '\\n' in response_text or "\\'" in response_text or '\\"' in response_text:
+                self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+                try:
+                    # DON'T use unicode_escape for Korean text - it corrupts it
+                    # Instead, just replace the escape sequences manually
+                    
+                    # Handle quotes and apostrophes
+                    response_text = response_text.replace("\\'", "'")  # Escaped apostrophe
+                    response_text = response_text.replace('\\"', '"')  # Escaped quote
+                    response_text = response_text.replace("\\`", "`")  # Escaped backtick
+                    response_text = response_text.replace("\\u2019", "'")  # Unicode right single quote
+                    response_text = response_text.replace("\\u2018", "'")  # Unicode left single quote
+                    response_text = response_text.replace("\\u201c", '"')  # Unicode left double quote
+                    response_text = response_text.replace("\\u201d", '"')  # Unicode right double quote
+                    
+                    # Handle newlines and other escapes
+                    response_text = response_text.replace('\\n', '\n')
+                    response_text = response_text.replace('\\\\', '\\')
+                    response_text = response_text.replace('\\/', '/')
+                    response_text = response_text.replace('\\t', '\t')
+                    response_text = response_text.replace('\\r', '\r')
+                    
+                    # Clean up smart quotes using Unicode escape codes
+                    response_text = response_text.replace('\u2018', "'")  # Left single quotation mark
+                    response_text = response_text.replace('\u2019', "'")  # Right single quotation mark
+                    response_text = response_text.replace('\u201c', '"')  # Left double quotation mark
+                    response_text = response_text.replace('\u201d', '"')  # Right double quotation mark
+                    
+                    self._log(f"📦 Unescaped content safely")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to unescape: {e}", "warning")
+            
+            # Clean up unwanted trailing apostrophes/quotes
+            import re
+            
+            # Define response_text to match translated (since it was being used incorrectly)
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            
+            # Try to parse as JSON
+            translations = {}
+            try:
+                # Fix any JSON formatting issues first
+                response_text = self._fix_json_response(response_text)
+                
+                # Clean up response if needed
+                if "```json" in response_text:
+                    import re
+                    match = re.search(r'```json\s*(.*?)```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                elif "```" in response_text:
+                    import re
+                    match = re.search(r'```\s*(.*?)```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                
+                # Parse JSON
+                import json
+                translations = json.loads(response_text)
+                self._log(f"✅ Successfully parsed {len(translations)} translations")
+                
+            except json.JSONDecodeError as e:
+                self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
+                self._log(f"Response preview: {response_text[:200]}...", "warning")
+                
+                # Fix encoding issues first
+                response_text = self._fix_encoding_issues(response_text)
+                
+                # Try parsing JSON again after fixing encoding
+                try:
+                    translations = json.loads(response_text)
+                    self._log(f"✅ Successfully parsed {len(translations)} translations after encoding fix", "success")
+                except json.JSONDecodeError:
+                    # If it still fails, continue with the existing fallback
+                    # Fallback: try to fix common JSON issues
+                    try:
+                        self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
+                        
+                        # Method 1: Use json.dumps to properly escape the string, then parse it
+                        import re
+                        
+                        # First, try to extract key-value pairs manually
+                        translations = {}
+                        
+                        # Pattern to match "key": "value" pairs, handling quotes and newlines
+                        pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                        matches = re.findall(pattern, response_text)
+                        
+                        for key, value in matches:
+                            # Unescape the value
+                            try:
+                                # Replace literal \n with actual newlines
+                                value = value.replace('\\n', '\n')
+                                value = value.replace('\\"', '"')
+                                value = value.replace('\\\\', '\\')
+                                translations[key] = value
+                                self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
+                            except Exception as ex:
+                                self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
+                        
+                        if translations:
+                            self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
+                        else:
+                            # Method 2: Try to clean and re-parse
+                            cleaned = response_text
+                            # Remove any actual newlines within string values
+                            cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
+                            cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
+                            cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
+                            
+                            translations = json.loads(cleaned)
+                            self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
+                            
+                    except Exception as e2:
+                        self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
+                        self._log(f"   Returning empty translations", "error")
+                        return {}
+            
+            # Map translations back to regions
+            result = {}
+            all_originals = []
+            all_translations = []
+            
+            # Extract translation values in order
+            translation_values = list(translations.values()) if translations else []
+
+            # Clean all translation values to remove quotes
+            translation_values = [self._clean_translation_text(t) for t in translation_values]
+            
+            # Use position-based mapping if counts match
+            if len(translation_values) >= len(regions) - 1:  # Allow 1 missing
+                self._log(f"📊 Using position-based mapping ({len(translation_values)} translations for {len(regions)} regions)")
+                
+                for i, region in enumerate(regions):
+                    # CHECK 9: During mapping
+                    if i % 10 == 0 and self._check_stop():
+                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                        return result
+                    
+                    # Use position-based translation
+                    if i < len(translation_values):
+                        translated = translation_values[i]
+                    else:
+                        translated = region.text  # Fallback
+                    
+                    # Apply glossary
+                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                        for entry in self.main_gui.manual_glossary:
+                            if 'source' in entry and 'target' in entry:
+                                if entry['source'] in translated:
+                                    translated = translated.replace(entry['source'], entry['target'])
+                    
+                    result[region.text] = translated
+                    region.translated_text = translated
+                    self._log(f"  ✅ Applied translation for: '{region.text[:40]}...'", "info")
+                    
+                    if translated != region.text:
+                        all_originals.append(f"[{i+1}] {region.text}")
+                        all_translations.append(f"[{i+1}] {translated}")
+            else:
+                # Fallback to key-based matching
+                for i, region in enumerate(regions):
+                    if i % 10 == 0 and self._check_stop():
+                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                        return result
+                    
+                    key = f"[{i}] {region.text}"
+                    
+                    if key in translations:
+                        translated = self._clean_translation_text(translations[key])  # Clean here
+                    elif region.text in translations:
+                        translated = self._clean_translation_text(translations[region.text])  # Clean here
+                    else:
+                        translated = region.text
+                    
+                    # Apply glossary
+                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                        for entry in self.main_gui.manual_glossary:
+                            if 'source' in entry and 'target' in entry:
+                                if entry['source'] in translated:
+                                    translated = translated.replace(entry['source'], entry['target'])
+                    
+                    result[region.text] = translated
+                    region.translated_text = translated
+                    
+                    if translated != region.text:
+                        self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
+                        all_originals.append(f"[{i+1}] {region.text}")
+                        all_translations.append(f"[{i+1}] {translated}")
+            
+            # Save as ONE combined history entry for the entire page
+            if self.history_manager and self.contextual_enabled and all_originals:
+                try:
+                    # Combine all text from this page into a single exchange
+                    combined_original = "\n".join(all_originals)
+                    combined_translation = "\n".join(all_translations)
+                    
+                    # Save as a single history entry
+                    self.history_manager.append_to_history(
+                        user_content=combined_original,
+                        assistant_content=combined_translation,
+                        hist_limit=self.translation_history_limit,
+                        reset_on_limit=not self.rolling_history_enabled,
+                        rolling_window=self.rolling_history_enabled
+                    )
+                    
+                    self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
+                    
+                    # Check current history status
+                    current_history = self.history_manager.load_history()
+                    current_exchanges = len(current_history) // 2
+                    self._log(f"📚 History now contains {current_exchanges} exchanges (pages)", "info")
+                    
+                    if self.history_manager.will_reset_on_next_append(
+                        self.translation_history_limit, 
+                        self.rolling_history_enabled
+                    ):
+                        mode = "roll over" if self.rolling_history_enabled else "reset"
+                        self._log(f"📚 History will {mode} on next page (at limit: {self.translation_history_limit})", "info")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to save page to history: {str(e)}", "warning")
+            
+            return result
+            
+        except Exception as e:
+            
+            # CHECK 10: In exception handler
+            if self._check_stop():
+                self._log("⏹️ Translation stopped due to user request", "warning")
+                return {}  
+                
+            self._log(f"❌ Full page context translation error: {str(e)}", "error")
+            self._log(traceback.format_exc(), "error")
+            return {}
+
+    def _fix_json_response(self, response_text: str) -> str:
+        """Fix JSON response with unescaped newlines, unquoted keys, and other issues"""
+        import re
+        import json
+        
+        # First, try to parse as-is
+        try:
+            json.loads(response_text)
+            return response_text  # Already valid
+        except json.JSONDecodeError:
+            pass
+        
+        # Method 1: Fix unquoted keys and newlines
+        # This handles cases where keys don't have quotes
+        def fix_unquoted_json(text):
+            # First, escape newlines that are within values
+            lines = text.split('\n')
+            fixed_lines = []
+            in_value = False
+            current_object = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if this line contains a colon (key-value separator)
+                if ':' in line and not in_value:
+                    # This is likely a key-value pair
+                    colon_pos = line.rfind(':')
+                    key_part = line[:colon_pos].strip()
+                    value_part = line[colon_pos+1:].strip()
+                    
+                    # Add quotes around the key if not present
+                    if not (key_part.startswith('"') and key_part.endswith('"')):
+                        # Escape the key content
+                        key_part = key_part.replace('\\', '\\\\').replace('"', '\\"')
+                        key_part = f'"{key_part}"'
+                    
+                    # Check if value starts properly
+                    if value_part and not value_part.startswith('"'):
+                        # Value needs quotes too
+                        value_part = f'"{value_part}'
+                        in_value = True
+                    
+                    current_object.append(f'  {key_part}: {value_part}')
+                elif in_value:
+                    # This is a continuation of a value
+                    if line.endswith(','):
+                        # End of this value
+                        current_object[-1] += '\\n' + line[:-1] + '",'
+                        in_value = False
+                    else:
+                        # Still in value
+                        current_object[-1] += '\\n' + line
+            
+            # Close any open value
+            if in_value and current_object:
+                current_object[-1] += '"'
+            
+            # Reconstruct the JSON
+            if current_object:
+                return '{\n' + '\n'.join(current_object) + '\n}'
+            
+            return text
+        
+        # Try fixing unquoted keys
+        try:
+            fixed = fix_unquoted_json(response_text)
+            json.loads(fixed)
+            self._log("✅ Fixed JSON by adding quotes to keys", "info")
+            return fixed
+        except:
+            pass
+        
+        # Method 2: Extract key-value pairs more aggressively
+        # Look for patterns like: text_without_quotes: translation
+        extracted = {}
+        
+        # Split by lines and look for key-value patterns
+        lines = response_text.split('\n')
+        current_key = None
+        current_value = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line in ['{', '}']:
+                continue
+            
+            # Remove trailing comma if present
+            if line.endswith(','):
+                line = line[:-1]
+            
+            # Check if this line has a colon
+            if ':' in line:
+                # Save previous key-value if exists
+                if current_key and current_value:
+                    value_text = ' '.join(current_value).strip()
+                    if value_text.startswith('"') and value_text.endswith('"'):
+                        value_text = value_text[1:-1]
+                    extracted[current_key] = value_text
+                
+                # Split by the last colon (in case key contains colons)
+                colon_pos = line.rfind(':')
+                key_part = line[:colon_pos].strip()
+                value_part = line[colon_pos+1:].strip()
+                
+                # Clean the key
+                if key_part.startswith('"') and key_part.endswith('"'):
+                    key_part = key_part[1:-1]
+                
+                # Unescape the key
+                key_part = key_part.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                
+                current_key = key_part
+                current_value = [value_part] if value_part else []
+            else:
+                # This is a continuation of the current value
+                if current_key:
+                    current_value.append(line)
+        
+        # Don't forget the last key-value pair
+        if current_key and current_value:
+            value_text = ' '.join(current_value).strip()
+            if value_text.startswith('"') and value_text.endswith('"'):
+                value_text = value_text[1:-1]
+            extracted[current_key] = value_text
+        
+        if extracted:
+            # Rebuild as valid JSON
+            rebuilt = json.dumps(extracted, ensure_ascii=False)
+            self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
+            return rebuilt
+        
+        # Method 3: Try regex extraction as last resort
+        # Pattern for both quoted and unquoted keys
+        patterns = [
+            # Pattern 1: Quoted keys
+            r'"([^"]+)"\s*:\s*"([^"]*(?:\\"[^"]*)*)"',
+            # Pattern 2: Unquoted keys (for CJK text)
+            r'([^:"\s][^:"]*[^:"\s])\s*:\s*"([^"]*)"',
+            # Pattern 3: More flexible
+            r'([^:"{}\s][^:"{}\n]*?)\s*:\s*([^,}\n]+)'
+        ]
+        
+        extracted = {}
+        for pattern in patterns:
+            matches = re.finditer(pattern, response_text, re.MULTILINE | re.DOTALL)
+            for match in matches:
+                key = match.group(1).strip()
+                value = match.group(2).strip()
+                
+                # Clean up key and value
+                key = key.replace('\\n', '\n').strip()
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                value = value.replace('\\n', '\n').replace('\\"', '"')
+                
+                if key and value:
+                    extracted[key] = value
+        
+        if extracted:
+            rebuilt = json.dumps(extracted, ensure_ascii=False)
+            self._log(f"✅ Extracted {len(extracted)} translations with regex", "info")
+            return rebuilt
+        
+        # If all else fails, return original
+        self._log("⚠️ Could not fix JSON, returning original", "warning")
+        return response_text
+
+    def _clean_translation_text(self, text: str) -> str:
+        """Remove unnecessary quotation marks and dots from translated text"""
+        if not text:
+            return text
+        
+        # Log what we're cleaning
+        original = text
+        
+        # Remove leading and trailing whitespace
+        text = text.strip()
+        
+        # Remove ALL types of quotes and dots from start/end
+        # Keep removing until no more quotes/dots at edges
+        while len(text) > 0:
+            old_len = len(text)
+            
+            # Remove from start
+            text = text.lstrip('"\'`''""「」『』【】《》〈〉.·•°')
+            
+            # Remove from end (but preserve ... and !!)
+            if not text.endswith('...') and not text.endswith('!!'):
+                text = text.rstrip('"\'`''""「」『』【】《》〈〉.·•°')
+            
+            # If nothing changed, we're done
+            if len(text) == old_len:
+                break
+        
+        # Final strip
+        text = text.strip()
+        
+        # Log if we made changes
+        if text != original:
+            self._log(f"🧹 Cleaned quotes/dots: '{original}' → '{text}'", "debug")
+        
+        return text
+    
+    def _fix_encoding_issues(self, text: str) -> str:
+        """Fix common encoding issues in text, especially for Korean"""
+        if not text:
+            return text
+        
+        # Check for mojibake indicators (UTF-8 misinterpreted as Latin-1)
+        mojibake_indicators = ['ë', 'ì', 'ê°', 'ã', 'Ã', 'â', 'ä', 'ð', 'í', 'ë­', 'ì´']
+        
+        if any(indicator in text for indicator in mojibake_indicators):
+            self._log("🔧 Detected mojibake encoding issue, attempting fixes...", "debug")
+            
+            # Try multiple encoding fixes
+            encodings_to_try = [
+                ('latin-1', 'utf-8'),
+                ('windows-1252', 'utf-8'),
+                ('iso-8859-1', 'utf-8'),
+                ('cp1252', 'utf-8')
+            ]
+            
+            for from_enc, to_enc in encodings_to_try:
+                try:
+                    fixed = text.encode(from_enc, errors='ignore').decode(to_enc, errors='ignore')
+                    
+                    # Check if the fix actually improved things
+                    # Should have Korean characters (Hangul range) or be cleaner
+                    if any('\uAC00' <= c <= '\uD7AF' for c in fixed) or fixed.count('�') < text.count('�'):
+                        self._log(f"✅ Fixed encoding using {from_enc} -> {to_enc}", "debug")
+                        return fixed
+                except:
+                    continue
+        
+        # Clean up any remaining control characters
+        import re
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text)
+        
+        return text
+                
+    def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
+        """Create mask with comprehensive per-text-type dilation settings"""
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        regions_masked = 0
+        regions_skipped = 0
+        
+        self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
+        
+        # Get manga settings
+        manga_settings = self.main_gui.config.get('manga_settings', {})
+        
+        # Get dilation settings
+        base_dilation_size = manga_settings.get('mask_dilation', 15)
+        
+        # Check if using uniform iterations for all text types
+        use_all_iterations = manga_settings.get('use_all_iterations', False)
+        
+        if use_all_iterations:
+            # Use the same iteration count for all text types
+            all_iterations = manga_settings.get('all_iterations', 2)
+            text_bubble_iterations = all_iterations
+            empty_bubble_iterations = all_iterations
+            free_text_iterations = all_iterations
+            self._log(f"📏 Using uniform iterations: {all_iterations} for all text types", "info")
+        else:
+            # Use individual iteration settings
+            text_bubble_iterations = manga_settings.get('text_bubble_dilation_iterations',
+                                                       manga_settings.get('bubble_dilation_iterations', 2))
+            empty_bubble_iterations = manga_settings.get('empty_bubble_dilation_iterations', 3)
+            free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
+            self._log(f"📏 Using individual iterations - Text bubbles: {text_bubble_iterations}, "
+                     f"Empty bubbles: {empty_bubble_iterations}, Free text: {free_text_iterations}", "info")
+        
+        # Create separate masks for different text types
+        text_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        empty_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        free_text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        
+        text_bubble_count = 0
+        empty_bubble_count = 0
+        free_text_count = 0
+        
+        for i, region in enumerate(regions):
+            # CHECK: Should this region be inpainted?
+            if not getattr(region, 'should_inpaint', True):
+                # Skip this region - it shouldn't be inpainted
+                regions_skipped += 1
+                self._log(f"   Region {i+1}: SKIPPED (filtered by settings)", "debug")
+                continue
+            
+            regions_masked += 1
+            
+            # Determine text type
+            text_type = 'free_text'  # default
+            
+            # Check if region has bubble_type attribute (from bubble detection)
+            if hasattr(region, 'bubble_type'):
+                # RT-DETR classifications
+                if region.bubble_type == 'empty_bubble':
+                    text_type = 'empty_bubble'
+                elif region.bubble_type == 'text_bubble':
+                    text_type = 'text_bubble'
+                else:  # 'free_text' or others
+                    text_type = 'free_text'
+            else:
+                # Fallback: use simple heuristics if no bubble detection
+                x, y, w, h = region.bounding_box
+                x, y, w, h = int(x), int(y), int(w), int(h)
+                aspect_ratio = w / h if h > 0 else 1
+                
+                # Check if region has text
+                has_text = hasattr(region, 'text') and region.text and len(region.text.strip()) > 0
+                
+                # Heuristic: bubbles tend to be more square-ish or tall
+                # Free text tends to be wide and short
+                if aspect_ratio < 2.5 and w > 50 and h > 50:
+                    if has_text:
+                        text_type = 'text_bubble'
+                    else:
+                        # Could be empty bubble if it's round/oval shaped
+                        text_type = 'empty_bubble'
+                else:
+                    text_type = 'free_text'
+            
+            # Select appropriate mask and increment counter
+            if text_type == 'text_bubble':
+                target_mask = text_bubble_mask
+                text_bubble_count += 1
+                mask_type = "TEXT BUBBLE"
+            elif text_type == 'empty_bubble':
+                target_mask = empty_bubble_mask
+                empty_bubble_count += 1
+                mask_type = "EMPTY BUBBLE"
+            else:
+                target_mask = free_text_mask
+                free_text_count += 1
+                mask_type = "FREE TEXT"
+            
+            # Check if this is a merged region with original regions
+            if hasattr(region, 'original_regions') and region.original_regions:
+                # Use original regions for precise masking
+                self._log(f"   Region {i+1} ({mask_type}): Using {len(region.original_regions)} original regions", "debug")
+                
+                for orig_region in region.original_regions:
+                    if hasattr(orig_region, 'vertices') and orig_region.vertices:
+                        pts = np.array(orig_region.vertices, np.int32)
+                        pts = pts.reshape((-1, 1, 2))
+                        cv2.fillPoly(target_mask, [pts], 255)
+                    else:
+                        x, y, w, h = orig_region.bounding_box
+                        x, y, w, h = int(x), int(y), int(w), int(h)
+                        cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
+            else:
+                # Normal region
+                if hasattr(region, 'vertices') and region.vertices and len(region.vertices) <= 8:
+                    pts = np.array(region.vertices, np.int32)
+                    pts = pts.reshape((-1, 1, 2))
+                    cv2.fillPoly(target_mask, [pts], 255)
+                    self._log(f"   Region {i+1} ({mask_type}): Using polygon", "debug")
+                else:
+                    x, y, w, h = region.bounding_box
+                    x, y, w, h = int(x), int(y), int(w), int(h)
+                    cv2.rectangle(target_mask, (x, y), (x + w, y + h), 255, -1)
+                    self._log(f"   Region {i+1} ({mask_type}): Using bounding box", "debug")
+        
+        self._log(f"📊 Mask breakdown: {text_bubble_count} text bubbles, {empty_bubble_count} empty bubbles, "
+                 f"{free_text_count} free text regions, {regions_skipped} skipped", "info")
+        
+        # Apply different dilation settings to each mask type
+        if base_dilation_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilation_size, base_dilation_size))
+            
+            # Apply dilation to text bubble mask
+            if text_bubble_count > 0 and text_bubble_iterations > 0:
+                self._log(f"📏 Applying text bubble dilation: {base_dilation_size}px, {text_bubble_iterations} iterations", "info")
+                text_bubble_mask = cv2.dilate(text_bubble_mask, kernel, iterations=text_bubble_iterations)
+            
+            # Apply dilation to empty bubble mask
+            if empty_bubble_count > 0 and empty_bubble_iterations > 0:
+                self._log(f"📏 Applying empty bubble dilation: {base_dilation_size}px, {empty_bubble_iterations} iterations", "info")
+                empty_bubble_mask = cv2.dilate(empty_bubble_mask, kernel, iterations=empty_bubble_iterations)
+            
+            # Apply dilation to free text mask
+            if free_text_count > 0 and free_text_iterations > 0:
+                self._log(f"📏 Applying free text dilation: {base_dilation_size}px, {free_text_iterations} iterations", "info")
+                free_text_mask = cv2.dilate(free_text_mask, kernel, iterations=free_text_iterations)
+            elif free_text_count > 0 and free_text_iterations == 0:
+                self._log(f"📏 No dilation for free text (iterations=0, perfect for B&W panels)", "info")
+        
+        # Combine all masks
+        mask = cv2.bitwise_or(text_bubble_mask, empty_bubble_mask)
+        mask = cv2.bitwise_or(mask, free_text_mask)
+        
+        coverage_percent = (np.sum(mask > 0) / mask.size) * 100
+        self._log(f"📊 Final mask coverage: {coverage_percent:.1f}% of image", "info")
+        
+        return mask
+    
+    def _initialize_local_inpainter(self):
+        """Initialize local inpainting if configured"""
+        try:
+            from local_inpainter import LocalInpainter, HybridInpainter, AnimeMangaInpaintModel
+            
+            inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
+            
+            if inpaint_method == 'local':
+                # Get current settings
+                local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                model_path = self.manga_settings.get('inpainting', {}).get(f'{local_method}_model_path', '')
+                
+                # Check if we need to reinitialize due to changes
+                need_reload = False
+                
+                # Initialize tracking attributes if they don't exist
+                if not hasattr(self, '_last_local_method'):
+                    self._last_local_method = None
+                    self._last_local_model_path = None
+                
+                # Check for changes
+                if self._last_local_method != local_method:
+                    self._log(f"🔄 Local method changed from {self._last_local_method} to {local_method}", "info")
+                    need_reload = True
+                
+                if self._last_local_model_path != model_path:
+                    self._log(f"🔄 Model path changed", "info")
+                    if self._last_local_model_path:
+                        self._log(f"   Old: {os.path.basename(self._last_local_model_path)}", "debug")
+                    if model_path:
+                        self._log(f"   New: {os.path.basename(model_path)}", "debug")
+                    need_reload = True
+                
+                # Store current settings
+                self._last_local_method = local_method
+                self._last_local_model_path = model_path
+                
+                # Initialize inpainter if needed
+                if self.local_inpainter is None:
+                    self.local_inpainter = LocalInpainter()
+                    need_reload = True  # First time, definitely need to load
+                
+                # If no model path or doesn't exist, try to find or download one
+                if not model_path or not os.path.exists(model_path):
+                    self._log(f"⚠️ Model path not found: {model_path}", "warning")
+                    
+                    # Try to download JIT model automatically
+                    self._log("📥 Attempting to download JIT model...", "info")
+                    downloaded_path = self.local_inpainter.download_jit_model(local_method)
+                    if downloaded_path:
+                        model_path = downloaded_path
+                        self._log(f"✅ Downloaded JIT model to: {model_path}")
+                        need_reload = True  # Downloaded new model
+                
+                # Load or reload the model if needed
+                if model_path and os.path.exists(model_path):
+                    if need_reload or not self.local_inpainter.model_loaded:
+                        self._log(f"📥 Loading {local_method} model...", "info")
+                        if self.local_inpainter.load_model(local_method, model_path, force_reload=need_reload):
+                            self._log(f"✅ Local inpainter loaded with {local_method.upper()}")
+                        else:
+                            self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
+                    else:
+                        self._log(f"✅ Using already loaded {local_method.upper()} model", "info")
+                else:
+                    self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
+                
+                # Always return True so local_inpainter exists
+                return True
+            
+            elif inpaint_method == 'hybrid':
+                # Track hybrid settings changes
+                if not hasattr(self, '_last_hybrid_config'):
+                    self._last_hybrid_config = None
+                
+                current_hybrid_config = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
+                
+                # Check if hybrid config changed
+                need_reload = self._last_hybrid_config != current_hybrid_config
+                if need_reload:
+                    self._log("🔄 Hybrid configuration changed, reloading...", "info")
+                    self.hybrid_inpainter = None  # Clear old instance
+                
+                self._last_hybrid_config = current_hybrid_config.copy() if current_hybrid_config else []
+                
+                if self.hybrid_inpainter is None:
+                    self.hybrid_inpainter = HybridInpainter()
+                
+                # Load multiple methods
+                methods = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
+                loaded = 0
+                
+                for method_config in methods:
+                    method = method_config.get('method')
+                    model_path = method_config.get('model_path')
+                    
+                    if method and model_path:
+                        if self.hybrid_inpainter.add_method(method, method, model_path):
+                            loaded += 1
+                            self._log(f"✅ Added {method.upper()} to hybrid inpainter")
+                
+                if loaded > 0:
+                    self._log(f"✅ Hybrid inpainter ready with {loaded} methods")
+                else:
+                    self._log("⚠️ Hybrid inpainter initialized but no methods loaded", "warning")
+                
+                return True
+            
+            return False
+            
+        except ImportError:
+            self._log("❌ Local inpainter module not available", "error")
+            return False
+        except Exception as e:
+            self._log(f"❌ Error initializing inpainter: {e}", "error")
+            return False
+
+
+    def inpaint_regions(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Inpaint using configured method (cloud, local, or hybrid)"""
+        if self.skip_inpainting:
+            self._log("   ⏭️ Skipping inpainting (preserving original art)", "info")
+            return image.copy()
+        
+        inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
+        
+        if inpaint_method == 'local':
+            # Check if local_inpainter exists
+            if not hasattr(self, 'local_inpainter'):
+                self._log("   ⚠️ Local inpainter not initialized, attempting now...", "warning")
+                self._initialize_local_inpainter()
+            
+            if hasattr(self, 'local_inpainter') and self.local_inpainter:
+                # Check if model is loaded
+                if not self.local_inpainter.model_loaded:
+                    self._log("   ⚠️ No model loaded, attempting to load...", "warning")
+                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                    
+                    # Try to download JIT model
+                    model_path = self.local_inpainter.download_jit_model(local_method)
+                    if model_path:
+                        self.local_inpainter.load_model(local_method, model_path)
+                
+                if self.local_inpainter.model_loaded:
+                    self._log("   🖥️ Using local inpainting", "info")
+                    return self.local_inpainter.inpaint(image, mask)
+                else:
+                    self._log("   ❌ No model loaded, returning original", "error")
+                    return image.copy()
+            else:
+                self._log("   ❌ Local inpainter not available", "error")
+                return image.copy()
+        
+        elif inpaint_method == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
+            self._log("   🔄 Using hybrid ensemble inpainting", "info")
+            return self.hybrid_inpainter.inpaint_ensemble(image, mask)
+        
+        elif inpaint_method == 'cloud' and hasattr(self, 'use_cloud_inpainting') and self.use_cloud_inpainting:
+            return self._cloud_inpaint(image, mask)
+        
+        else:
+            self._log(f"   ⚠️ No valid inpainting method '{inpaint_method}' available, returning original", "error")
+            return image.copy()
+            
+    def _cloud_inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+            """Use Replicate API for inpainting"""
+            try:
+                import requests
+                import base64
+                from io import BytesIO
+                from PIL import Image as PILImage
+                import cv2
+                
+                self._log("   ☁️ Cloud inpainting via Replicate API", "info")
+                
+                # Convert to PIL
+                image_pil = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                mask_pil = PILImage.fromarray(mask).convert('L')
+                
+                # Convert to base64
+                img_buffer = BytesIO()
+                image_pil.save(img_buffer, format='PNG')
+                img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+                
+                mask_buffer = BytesIO()
+                mask_pil.save(mask_buffer, format='PNG')
+                mask_base64 = base64.b64encode(mask_buffer.getvalue()).decode()
+                
+                # Get cloud settings
+                cloud_settings = self.main_gui.config.get('manga_settings', {})
+                model_type = cloud_settings.get('cloud_inpaint_model', 'ideogram-v2')
+                timeout = cloud_settings.get('cloud_timeout', 60)
+                
+                # Determine model identifier based on model type
+                if model_type == 'ideogram-v2':
+                    model = 'ideogram-ai/ideogram-v2'
+                    self._log(f"   Using Ideogram V2 inpainting model", "info")
+                elif model_type == 'sd-inpainting':
+                    model = 'stability-ai/stable-diffusion-inpainting'
+                    self._log(f"   Using Stable Diffusion inpainting model", "info")
+                elif model_type == 'flux-inpainting':
+                    model = 'zsxkib/flux-dev-inpainting'
+                    self._log(f"   Using FLUX inpainting model", "info")
+                elif model_type == 'custom':
+                    model = cloud_settings.get('cloud_custom_version', '')
+                    if not model:
+                        raise Exception("No custom model identifier specified")
+                    self._log(f"   Using custom model: {model}", "info")
+                else:
+                    # Default to Ideogram V2
+                    model = 'ideogram-ai/ideogram-v2'
+                    self._log(f"   Using default Ideogram V2 model", "info")
+                
+                # Build input data based on model type
+                input_data = {
+                    'image': f'data:image/png;base64,{img_base64}',
+                    'mask': f'data:image/png;base64,{mask_base64}'
+                }
+                
+                # Add prompt settings for models that support them
+                if model_type in ['ideogram-v2', 'sd-inpainting', 'flux-inpainting', 'custom']:
+                    prompt = cloud_settings.get('cloud_inpaint_prompt', 'clean background, smooth surface')
+                    input_data['prompt'] = prompt
+                    self._log(f"   Prompt: {prompt}", "info")
+                    
+                    # SD-specific parameters
+                    if model_type == 'sd-inpainting':
+                        negative_prompt = cloud_settings.get('cloud_negative_prompt', 'text, writing, letters')
+                        input_data['negative_prompt'] = negative_prompt
+                        input_data['num_inference_steps'] = cloud_settings.get('cloud_inference_steps', 20)
+                        self._log(f"   Negative prompt: {negative_prompt}", "info")
+                
+                # Get the latest version of the model
+                headers = {
+                    'Authorization': f'Token {self.replicate_api_key}',
+                    'Content-Type': 'application/json'
+                }
+                
+                # First, get the latest version of the model
+                model_response = requests.get(
+                    f'https://api.replicate.com/v1/models/{model}',
+                    headers=headers
+                )
+                
+                if model_response.status_code != 200:
+                    # If model lookup fails, try direct prediction with model identifier
+                    self._log(f"   Model lookup returned {model_response.status_code}, trying direct prediction", "warning")
+                    version = None
+                else:
+                    model_info = model_response.json()
+                    version = model_info.get('latest_version', {}).get('id')
+                    if not version:
+                        raise Exception(f"Could not get version for model {model}")
+                
+                # Create prediction
+                prediction_data = {
+                    'input': input_data
+                }
+                
+                if version:
+                    prediction_data['version'] = version
+                else:
+                    # For custom models, try extracting version from model string
+                    if ':' in model:
+                        # Format: owner/model:version
+                        model_name, version_id = model.split(':', 1)
+                        prediction_data['version'] = version_id
+                    else:
+                        raise Exception(f"Could not determine version for model {model}. Try using format: owner/model:version")
+                
+                response = requests.post(
+                    'https://api.replicate.com/v1/predictions',
+                    headers=headers,
+                    json=prediction_data
+                )
+                
+                if response.status_code != 201:
+                    raise Exception(f"API error: {response.text}")
+                    
+                # Get prediction URL
+                prediction = response.json()
+                prediction_url = prediction.get('urls', {}).get('get') or prediction.get('id')
+                
+                if not prediction_url:
+                    raise Exception("No prediction URL returned")
+                
+                # If we only got an ID, construct the URL
+                if not prediction_url.startswith('http'):
+                    prediction_url = f'https://api.replicate.com/v1/predictions/{prediction_url}'
+                
+                # Poll for result with configured timeout
+                import time
+                for i in range(timeout):
+                    response = requests.get(prediction_url, headers=headers)
+                    result = response.json()
+                    
+                    # Log progress every 5 seconds
+                    if i % 5 == 0 and i > 0:
+                        self._log(f"   ⏳ Still processing... ({i}s elapsed)", "info")
+                    
+                    if result['status'] == 'succeeded':
+                        # Download result image (handle both single URL and list)
+                        output = result.get('output')
+                        if not output:
+                            raise Exception("No output returned from model")
+                        
+                        if isinstance(output, list):
+                            output_url = output[0] if output else None
+                        else:
+                            output_url = output
+                        
+                        if not output_url:
+                            raise Exception("No output URL in result")
+                            
+                        img_response = requests.get(output_url)
+                        
+                        # Convert back to numpy
+                        result_pil = PILImage.open(BytesIO(img_response.content))
+                        result_bgr = cv2.cvtColor(np.array(result_pil), cv2.COLOR_RGB2BGR)
+                        
+                        self._log("   ✅ Cloud inpainting completed", "success")
+                        return result_bgr
+                        
+                    elif result['status'] == 'failed':
+                        error_msg = result.get('error', 'Unknown error')
+                        # Check for common errors
+                        if 'version' in error_msg.lower():
+                            error_msg += f" (Try using the model identifier '{model}' in the custom field)"
+                        raise Exception(f"Inpainting failed: {error_msg}")
+                        
+                    time.sleep(1)
+                    
+                raise Exception(f"Timeout waiting for inpainting (>{timeout}s)")
+                
+            except Exception as e:
+                self._log(f"   ❌ Cloud inpainting failed: {str(e)}", "error")
+                return image.copy()         
+            
+
+    def _regions_overlap(self, region1: TextRegion, region2: TextRegion) -> bool:
+        """Check if two regions overlap"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Check if rectangles overlap
+        if (x1 + w1 < x2 or x2 + w2 < x1 or 
+            y1 + h1 < y2 or y2 + h2 < y1):
+            return False
+        
+        return True
+
+    def _calculate_overlap_area(self, region1: TextRegion, region2: TextRegion) -> float:
+        """Calculate the area of overlap between two regions"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate intersection
+        x_left = max(x1, x2)
+        y_top = max(y1, y2)
+        x_right = min(x1 + w1, x2 + w2)
+        y_bottom = min(y1 + h1, y2 + h2)
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+        
+        return (x_right - x_left) * (y_bottom - y_top)
+
+    def _adjust_overlapping_regions(self, regions: List[TextRegion], image_width: int, image_height: int) -> List[TextRegion]:
+        """Adjust positions of overlapping regions to prevent overlap while preserving text mapping"""
+        if len(regions) <= 1:
+            return regions
+        
+        # Create a copy of regions with preserved indices
+        adjusted_regions = []
+        for idx, region in enumerate(regions):
+            # Create a new TextRegion with copied values
+            adjusted_region = TextRegion(
+                text=region.text,
+                vertices=list(region.vertices),
+                bounding_box=list(region.bounding_box),
+                confidence=region.confidence,
+                region_type=region.region_type
+            )
+            if hasattr(region, 'translated_text'):
+                adjusted_region.translated_text = region.translated_text
+            
+            # IMPORTANT: Preserve original index to maintain text mapping
+            adjusted_region.original_index = idx
+            adjusted_region.original_bbox = tuple(region.bounding_box)  # Store original position
+            
+            adjusted_regions.append(adjusted_region)
+        
+        # DON'T SORT - This breaks the text-to-region mapping!
+        # Process in original order to maintain associations
+        
+        # Track which regions have been moved to avoid cascade effects
+        moved_regions = set()
+        
+        # Adjust overlapping regions
+        for i in range(len(adjusted_regions)):
+            if i in moved_regions:
+                continue  # Skip if already moved
+                
+            for j in range(i + 1, len(adjusted_regions)):
+                if j in moved_regions:
+                    continue  # Skip if already moved
+                    
+                region1 = adjusted_regions[i]
+                region2 = adjusted_regions[j]
+                
+                if self._regions_overlap(region1, region2):
+                    x1, y1, w1, h1 = region1.bounding_box
+                    x2, y2, w2, h2 = region2.bounding_box
+                    
+                    # Calculate centers using ORIGINAL positions for better logic
+                    orig_x1, orig_y1, _, _ = region1.original_bbox
+                    orig_x2, orig_y2, _, _ = region2.original_bbox
+                    
+                    # Determine which region to move based on original positions
+                    # Move the one that's naturally "later" in reading order
+                    if orig_y2 > orig_y1 + h1/2:  # region2 is below
+                        # Move region2 down slightly
+                        min_gap = 10
+                        new_y2 = y1 + h1 + min_gap
+                        if new_y2 + h2 <= image_height:
+                            region2.bounding_box = (x2, new_y2, w2, h2)
+                            moved_regions.add(j)
+                            self._log(f"  📍 Adjusted region {j} down (preserving order)", "debug")
+                    elif orig_y1 > orig_y2 + h2/2:  # region1 is below
+                        # Move region1 down slightly
+                        min_gap = 10
+                        new_y1 = y2 + h2 + min_gap
+                        if new_y1 + h1 <= image_height:
+                            region1.bounding_box = (x1, new_y1, w1, h1)
+                            moved_regions.add(i)
+                            self._log(f"  📍 Adjusted region {i} down (preserving order)", "debug")
+                    elif orig_x2 > orig_x1 + w1/2:  # region2 is to the right
+                        # Move region2 right slightly
+                        min_gap = 10
+                        new_x2 = x1 + w1 + min_gap
+                        if new_x2 + w2 <= image_width:
+                            region2.bounding_box = (new_x2, y2, w2, h2)
+                            moved_regions.add(j)
+                            self._log(f"  📍 Adjusted region {j} right (preserving order)", "debug")
+                    else:
+                        # Minimal adjustment - just separate them slightly
+                        # without changing their relative order
+                        min_gap = 5
+                        if y2 >= y1:  # region2 is lower or same level
+                            new_y2 = y2 + min_gap
+                            if new_y2 + h2 <= image_height:
+                                region2.bounding_box = (x2, new_y2, w2, h2)
+                                moved_regions.add(j)
+                        else:  # region1 is lower
+                            new_y1 = y1 + min_gap
+                            if new_y1 + h1 <= image_height:
+                                region1.bounding_box = (x1, new_y1, w1, h1)
+                                moved_regions.add(i)
+        
+        # IMPORTANT: Return in ORIGINAL order to preserve text mapping
+        # Sort by original_index to restore the original order
+        adjusted_regions.sort(key=lambda r: r.original_index)
+        
+        return adjusted_regions
+
+    
+    def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
+        """Enhanced text rendering with customizable backgrounds and styles"""
+        self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
+        self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
+        self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
+        self._log(f"  Text color: RGB{self.text_color}", "info")
+        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
+        self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
+        if self.force_caps_lock:  
+            self._log(f"  Force Caps Lock: ENABLED", "info")
+        
+        # Convert to PIL for text rendering
+        import cv2
+        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        
+        # Get image dimensions for boundary checking
+        image_height, image_width = image.shape[:2]  # <-- Add this line
+        
+        # Only adjust overlapping regions if constraining to bubbles
+        if self.constrain_to_bubble:
+            adjusted_regions = self._adjust_overlapping_regions(regions, image_width, image_height)
+        else:
+            # Skip adjustment when not constraining (allows overflow)
+            adjusted_regions = regions
+            self._log("  📝 Using original regions (overflow allowed)", "info")
+        
+        # Check if any regions still overlap after adjustment (shouldn't happen, but let's verify)
+        has_overlaps = False
+        for i, region1 in enumerate(adjusted_regions):
+            for region2 in adjusted_regions[i+1:]:
+                if self._regions_overlap(region1, region2):
+                    has_overlaps = True
+                    self._log("  ⚠️ Regions still overlap after adjustment", "warning")
+                    break
+            if has_overlaps:
+                break
+        
+        # Handle transparency settings based on overlaps
+        if has_overlaps and self.text_bg_opacity < 255 and self.text_bg_opacity > 0:
+            self._log("  ⚠️ Overlapping regions detected with partial transparency", "warning")
+            self._log("  ℹ️ Rendering with requested transparency level", "info")
+        
+        region_count = 0
+        
+        # Decide rendering path based on transparency needs
+        # For full transparency (opacity = 0) or no overlaps, use RGBA rendering
+        # For overlaps with partial transparency, we still use RGBA to honor user settings
+        use_rgba_rendering = True  # Always use RGBA for consistent transparency support
+        
+        if use_rgba_rendering:
+            # Transparency-enabled rendering path
+            pil_image = pil_image.convert('RGBA')
+            
+            for region in adjusted_regions:
+                if not region.translated_text:
+                    continue
+                
+                # APPLY CAPS LOCK TRANSFORMATION HERE (First location)
+                if self.force_caps_lock:
+                    region.translated_text = region.translated_text.upper()
+                
+                region_count += 1
+                self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
+                
+                # Create a separate layer for this region only
+                region_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
+                region_draw = ImageDraw.Draw(region_overlay)
+                
+                x, y, w, h = region.bounding_box
+                
+                # Find optimal font size
+                if self.custom_font_size:
+                    # Fixed size specified
+                    font_size = self.custom_font_size
+                    # Pass the region to use vertices
+                    if hasattr(region, 'vertices') and region.vertices:
+                        _, _, safe_w, safe_h = self.get_safe_text_area(region)
+                        lines = self._wrap_text(region.translated_text, 
+                                              self._get_font(font_size), 
+                                              safe_w, region_draw)
+                    else:
+                        lines = self._wrap_text(region.translated_text, 
+                                              self._get_font(font_size), 
+                                              int(w * 0.8), region_draw)
+                elif self.font_size_mode == 'multiplier':
+                    # Use dynamic sizing with multiplier - pass region for vertices
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, w, h, region_draw, region
+                    )
+                else:
+                    # Auto mode - use standard fitting - pass region for vertices
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, w, h, region_draw, region
+                    )
+                
+                # Load font
+                font = self._get_font(font_size)
+                
+                # Calculate text layout
+                line_height = font_size * 1.2
+                total_height = len(lines) * line_height
+                start_y = y + (h - total_height) // 2
+                
+                # Draw background if opacity > 0
+                if self.text_bg_opacity > 0:
+                    self._draw_text_background(region_draw, x, y, w, h, lines, font, 
+                                             font_size, start_y)
+                
+                # Draw text on the same region overlay
+                for i, line in enumerate(lines):
+                    text_bbox = region_draw.textbbox((0, 0), line, font=font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    
+                    text_x = x + (w - text_width) // 2
+                    text_y = start_y + i * line_height
+                    
+                    if self.shadow_enabled:
+                        self._draw_text_shadow(region_draw, text_x, text_y, line, font)
+                    
+                    outline_width = max(1, font_size // self.outline_width_factor)
+                    
+                    # Draw outline
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                region_draw.text((text_x + dx, text_y + dy), line, 
+                                        font=font, fill=self.outline_color + (255,))
+                    
+                    # Draw main text
+                    region_draw.text((text_x, text_y), line, font=font, fill=self.text_color + (255,))
+                
+                # Composite this region onto the main image
+                pil_image = Image.alpha_composite(pil_image, region_overlay)
+            
+            # Convert back to RGB
+            pil_image = pil_image.convert('RGB')
+        
+        else:
+            # This path is now deprecated but kept for backwards compatibility
+            # Direct rendering without transparency layers
+            draw = ImageDraw.Draw(pil_image)
+            
+            for region in adjusted_regions:
+                if not region.translated_text:
+                    continue
+                
+                # APPLY CAPS LOCK TRANSFORMATION HERE
+                if self.force_caps_lock:
+                    region.translated_text = region.translated_text.upper()
+                
+                region_count += 1
+                self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
+                
+                x, y, w, h = region.bounding_box
+                
+                # Find optimal font size
+                if self.custom_font_size:
+                    font_size = self.custom_font_size
+                    lines = self._wrap_text(region.translated_text, 
+                                          self._get_font(font_size), 
+                                          int(w * 0.8), draw)
+                else:
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, w, h, draw
+                    )
+                
+                # Load font
+                font = self._get_font(font_size)
+                
+                # Calculate text layout
+                line_height = font_size * 1.2
+                total_height = len(lines) * line_height
+                start_y = y + (h - total_height) // 2
+                
+                # Draw opaque background
+                if self.text_bg_opacity > 0:
+                    self._draw_text_background(draw, x, y, w, h, lines, font, 
+                                             font_size, start_y)
+                
+                # Draw text
+                for i, line in enumerate(lines):
+                    text_bbox = draw.textbbox((0, 0), line, font=font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    
+                    text_x = x + (w - text_width) // 2
+                    text_y = start_y + i * line_height
+                    
+                    if self.shadow_enabled:
+                        self._draw_text_shadow(draw, text_x, text_y, line, font)
+                    
+                    outline_width = max(1, font_size // self.outline_width_factor)
+                    
+                    # Draw outline
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                draw.text((text_x + dx, text_y + dy), line, 
+                                        font=font, fill=self.outline_color)
+                    
+                    # Draw main text
+                    draw.text((text_x, text_y), line, font=font, fill=self.text_color)
+        
+        # Convert back to numpy array
+        result = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
+        return result
+    
+    def _draw_text_background(self, draw: ImageDraw, x: int, y: int, w: int, h: int,
+                            lines: List[str], font: ImageFont, font_size: int, 
+                            start_y: int):
+        """Draw background behind text with selected style"""
+        # Early return if opacity is 0 (fully transparent)
+        if self.text_bg_opacity == 0:
+            return
+        
+        # Calculate actual text bounds
+        line_height = font_size * 1.2
+        max_width = 0
+        
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            max_width = max(max_width, line_width)
+        
+        # Apply size reduction
+        padding = int(font_size * 0.3)
+        bg_width = int((max_width + padding * 2) * self.text_bg_reduction)
+        bg_height = int((len(lines) * line_height + padding * 2) * self.text_bg_reduction)
+        
+        # Center background
+        bg_x = x + (w - bg_width) // 2
+        bg_y = int(start_y - padding)
+        
+        # Create semi-transparent color
+        bg_color = (255, 255, 255, self.text_bg_opacity)
+        
+        if self.text_bg_style == 'box':
+            # Rounded rectangle
+            radius = min(20, bg_width // 10, bg_height // 10)
+            self._draw_rounded_rectangle(draw, bg_x, bg_y, bg_x + bg_width, 
+                                       bg_y + bg_height, radius, bg_color)
+            
+        elif self.text_bg_style == 'circle':
+            # Ellipse that encompasses the text
+            center_x = bg_x + bg_width // 2
+            center_y = bg_y + bg_height // 2
+            # Make it slightly wider to look more natural
+            ellipse_width = int(bg_width * 1.2)
+            ellipse_height = bg_height
+            
+            draw.ellipse([center_x - ellipse_width // 2, center_y - ellipse_height // 2,
+                         center_x + ellipse_width // 2, center_y + ellipse_height // 2],
+                        fill=bg_color)
+            
+        elif self.text_bg_style == 'wrap':
+            # Individual background for each line
+            for i, line in enumerate(lines):
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+                
+                line_bg_width = int((line_width + padding) * self.text_bg_reduction)
+                line_bg_x = x + (w - line_bg_width) // 2
+                line_bg_y = int(start_y + i * line_height - padding // 2)
+                line_bg_height = int(line_height + padding // 2)
+                
+                # Draw rounded rectangle for each line
+                radius = min(10, line_bg_width // 10, line_bg_height // 10)
+                self._draw_rounded_rectangle(draw, line_bg_x, line_bg_y, 
+                                           line_bg_x + line_bg_width,
+                                           line_bg_y + line_bg_height, radius, bg_color)
+    
+    def _draw_text_shadow(self, draw: ImageDraw, x: int, y: int, text: str, font: ImageFont):
+        """Draw text shadow with optional blur effect"""
+        if self.shadow_blur == 0:
+            # Simple sharp shadow
+            shadow_x = x + self.shadow_offset_x
+            shadow_y = y + self.shadow_offset_y
+            draw.text((shadow_x, shadow_y), text, font=font, fill=self.shadow_color)
+        else:
+            # Blurred shadow (simulated with multiple layers)
+            blur_range = self.shadow_blur
+            opacity_step = 80 // (blur_range + 1)  # Distribute opacity across blur layers
+            
+            for blur_offset in range(blur_range, 0, -1):
+                layer_opacity = opacity_step * (blur_range - blur_offset + 1)
+                shadow_color_with_opacity = self.shadow_color + (layer_opacity,)
+                
+                # Draw shadow at multiple positions for blur effect
+                for dx in range(-blur_offset, blur_offset + 1):
+                    for dy in range(-blur_offset, blur_offset + 1):
+                        if dx*dx + dy*dy <= blur_offset*blur_offset:  # Circular blur
+                            shadow_x = x + self.shadow_offset_x + dx
+                            shadow_y = y + self.shadow_offset_y + dy
+                            draw.text((shadow_x, shadow_y), text, font=font, 
+                                    fill=shadow_color_with_opacity)
+    
+    def _draw_rounded_rectangle(self, draw: ImageDraw, x1: int, y1: int, 
+                               x2: int, y2: int, radius: int, fill):
+        """Draw a rounded rectangle"""
+        # Draw the main rectangle
+        draw.rectangle([x1 + radius, y1, x2 - radius, y2], fill=fill)
+        draw.rectangle([x1, y1 + radius, x2, y2 - radius], fill=fill)
+        
+        # Draw the corners
+        draw.pieslice([x1, y1, x1 + 2 * radius, y1 + 2 * radius], 180, 270, fill=fill)
+        draw.pieslice([x2 - 2 * radius, y1, x2, y1 + 2 * radius], 270, 360, fill=fill)
+        draw.pieslice([x1, y2 - 2 * radius, x1 + 2 * radius, y2], 90, 180, fill=fill)
+        draw.pieslice([x2 - 2 * radius, y2 - 2 * radius, x2, y2], 0, 90, fill=fill)
+    
+    def _get_font(self, font_size: int) -> ImageFont:
+        """Get font with specified size, using selected style if available"""
+        font_path = self.selected_font_style or self.font_path
+        
+        if font_path:
+            try:
+                return ImageFont.truetype(font_path, font_size)
+            except:
+                pass
+        
+        return ImageFont.load_default()
+     
+    def get_safe_text_area(self, region: TextRegion) -> Tuple[int, int, int, int]:
+        """Get safe text area with less conservative margins for readability"""
+        if not hasattr(region, 'vertices') or not region.vertices:
+            x, y, w, h = region.bounding_box
+            margin_factor = 0.85  # Less conservative default
+            safe_width = int(w * margin_factor)
+            safe_height = int(h * margin_factor)
+            safe_x = x + (w - safe_width) // 2
+            safe_y = y + (h - safe_height) // 2
+            return safe_x, safe_y, safe_width, safe_height
+        
+        try:
+            # Convert vertices to numpy array with correct dtype
+            vertices = np.array(region.vertices, dtype=np.int32)
+            hull = cv2.convexHull(vertices)
+            hull_area = cv2.contourArea(hull)
+            poly_area = cv2.contourArea(vertices)
+            
+            if poly_area > 0:
+                convexity = hull_area / poly_area
+            else:
+                convexity = 1.0
+            
+            # LESS CONSERVATIVE margins for better readability
+            if convexity < 0.85:  # Speech bubble with tail
+                margin_factor = 0.75
+                self._log(f"  Speech bubble detected, using 75% of area", "info")
+            elif convexity > 0.98:  # Rectangular
+                margin_factor = 0.9
+                self._log(f"  Rectangular bubble, using 90% of area", "info")
+            else:  # Regular bubble
+                margin_factor = 0.8
+                self._log(f"  Regular bubble, using 80% of area", "info")
+        except:
+            margin_factor = 0.8  # Safe default
+        
+        # Convert vertices to numpy array for boundingRect
+        vertices_np = np.array(region.vertices, dtype=np.int32)
+        x, y, w, h = cv2.boundingRect(vertices_np)
+        
+        safe_width = int(w * margin_factor)
+        safe_height = int(h * margin_factor)
+        safe_x = x + (w - safe_width) // 2
+        safe_y = y + (h - safe_height) // 2
+        
+        return safe_x, safe_y, safe_width, safe_height
+    
+    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
+        """Find optimal font size with better algorithm"""
+        
+        # Get usable area
+        if region and hasattr(region, 'vertices') and region.vertices:
+            safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
+            usable_width = safe_width
+            usable_height = safe_height
+        else:
+            # Use 85% of bubble area
+            margin = 0.85
+            usable_width = int(max_width * margin)
+            usable_height = int(max_height * margin)
+        
+        # Font size limits
+        MIN_FONT = max(10, self.min_readable_size)
+        MAX_FONT = min(40, self.max_font_size_limit)  # Cap at reasonable max
+        
+        # Quick estimate based on bubble size
+        # Smaller bubbles need smaller fonts
+        bubble_area = usable_width * usable_height
+        if bubble_area < 5000:  # Very small bubble
+            MAX_FONT = min(MAX_FONT, 18)
+        elif bubble_area < 10000:  # Small bubble
+            MAX_FONT = min(MAX_FONT, 22)
+        elif bubble_area < 20000:  # Medium bubble
+            MAX_FONT = min(MAX_FONT, 28)
+        
+        # Start with a reasonable guess based on text length
+        text_length = len(text.strip())
+        chars_per_line = max(1, usable_width // 20)  # Estimate ~20 pixels per character
+        estimated_lines = max(1, text_length // chars_per_line)
+        
+        # Initial size estimate based on height available per line
+        if estimated_lines > 0:
+            initial_size = int(usable_height / (estimated_lines * 1.5))  # 1.5 for line spacing
+            initial_size = max(MIN_FONT, min(initial_size, MAX_FONT))
+        else:
+            initial_size = (MIN_FONT + MAX_FONT) // 2
+        
+        # Binary search for optimal size
+        low = MIN_FONT
+        high = min(initial_size + 10, MAX_FONT)  # Start searching from initial estimate
+        best_size = MIN_FONT
+        best_lines = []
+        
+        # Track attempts to avoid infinite loops
+        attempts = 0
+        max_attempts = 15
+        
+        while low <= high and attempts < max_attempts:
+            attempts += 1
+            mid = (low + high) // 2
+            
+            font = self._get_font(mid)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            
+            if not lines:  # Safety check
+                low = mid + 1
+                continue
+            
+            # Calculate actual height needed
+            line_height = mid * 1.3  # Standard line spacing
+            total_height = len(lines) * line_height
+            
+            # Check if it fits
+            if total_height <= usable_height:
+                # It fits, try larger
+                best_size = mid
+                best_lines = lines
+                
+                # But don't go too large - check readability
+                if len(lines) == 1 and mid >= MAX_FONT * 0.8:
+                    # Single line at large size, good enough
+                    break
+                elif len(lines) <= 3 and mid >= MAX_FONT * 0.7:
+                    # Few lines at good size, good enough
+                    break
+                
+                low = mid + 1
+            else:
+                # Doesn't fit, go smaller
+                high = mid - 1
+        
+        # Fallback if no good size found
+        if not best_lines:
+            font = self._get_font(MIN_FONT)
+            best_lines = self._wrap_text(text, font, usable_width, draw)
+            best_size = MIN_FONT
+        
+        # Apply multiplier if in multiplier mode
+        if self.font_size_mode == 'multiplier':
+            target_size = int(best_size * self.font_size_multiplier)
+            
+            # Check if multiplied size still fits (if constrained)
+            if self.constrain_to_bubble:
+                font = self._get_font(target_size)
+                test_lines = self._wrap_text(text, font, usable_width, draw)
+                test_height = len(test_lines) * target_size * 1.3
+                
+                if test_height <= usable_height:
+                    best_size = target_size
+                    best_lines = test_lines
+                else:
+                    # Multiplied size doesn't fit, use original
+                    self._log(f"  Multiplier {self.font_size_multiplier}x would exceed bubble", "debug")
+            else:
+                # Not constrained, use multiplied size
+                best_size = target_size
+                font = self._get_font(best_size)
+                best_lines = self._wrap_text(text, font, usable_width, draw)
+        
+        self._log(f"  Font sizing: text_len={text_length}, size={best_size}, lines={len(best_lines)}", "debug")
+        
+        return best_size, best_lines
+
+    def _fit_text_simple_topdown(self, text: str, usable_width: int, usable_height: int, 
+                                 draw: ImageDraw, min_size: int, max_size: int) -> Tuple[int, List[str]]:
+        """Simple top-down approach - start large and shrink only if needed"""
+        # Start from a reasonable large size
+        start_size = int(max_size * 0.8)
+        
+        for font_size in range(start_size, min_size - 1, -2):  # Step by 2 for speed
+            font = self._get_font(font_size)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            
+            line_height = font_size * 1.2  # Tighter for overlaps
+            total_height = len(lines) * line_height
+            
+            if total_height <= usable_height:
+                return font_size, lines
+        
+        # If nothing fits, use minimum
+        font = self._get_font(min_size)
+        lines = self._wrap_text(text, font, usable_width, draw)
+        return min_size, lines
+
+    def _check_potential_overlap(self, region: TextRegion) -> bool:
+        """Check if this region might overlap with others based on position"""
+        if not region or not hasattr(region, 'bounding_box'):
+            return False
+        
+        x, y, w, h = region.bounding_box
+        
+        # Simple heuristic: small regions or regions at edges might overlap
+        # You can make this smarter based on your needs
+        if w < 100 or h < 50:  # Small bubbles often overlap
+            return True
+        
+        # Add more overlap detection logic here if needed
+        # For now, default to no overlap for larger bubbles
+        return False
+    
+    def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
+        """Wrap text to fit within max_width with optional strict wrapping"""
+        # Handle empty text
+        if not text.strip():
+            return []
+        
+        # Only enforce width check if constrain_to_bubble is enabled
+        if self.constrain_to_bubble and max_width <= 0:
+            self._log(f"  ⚠️ Invalid max_width: {max_width}, using fallback", "warning")
+            return [text[:20] + "..."] if len(text) > 20 else [text]
+        
+        words = text.split()
+        lines = []
+        current_line = []
+        
+        for word in words:
+            # Check if word alone is too long
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            word_width = word_bbox[2] - word_bbox[0]
+            
+            if word_width > max_width and len(word) > 1:
+                # Word is too long for the bubble
+                if current_line:
+                    # Save current line first
+                    lines.append(' '.join(current_line))
+                    current_line = []
+                
+                if self.strict_text_wrapping:
+                    # STRICT MODE: Force break the word to fit within bubble
+                    # This is the original behavior that ensures text stays within bounds
+                    broken_parts = self._force_break_word(word, font, max_width, draw)
+                    lines.extend(broken_parts)
+                else:
+                    # RELAXED MODE: Keep word whole (may exceed bubble)
+                    lines.append(word)
+                    # self._log(f"  ⚠️ Word '{word}' exceeds bubble width, keeping whole", "warning")
+            else:
+                # Normal word processing
+                if current_line:
+                    test_line = ' '.join(current_line + [word])
+                else:
+                    test_line = word
+                
+                text_bbox = draw.textbbox((0, 0), test_line, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                
+                if text_width <= max_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word that fits
+                        lines.append(word)
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return lines
+
+    # Keep the existing _force_break_word method as is (the complete version from earlier):
+    def _force_break_word(self, word: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
+        """Force break a word that's too long to fit"""
+        lines = []
+        
+        # Binary search to find how many characters fit
+        low = 1
+        high = len(word)
+        chars_that_fit = 1
+        
+        while low <= high:
+            mid = (low + high) // 2
+            test_text = word[:mid]
+            bbox = draw.textbbox((0, 0), test_text, font=font)
+            width = bbox[2] - bbox[0]
+            
+            if width <= max_width:
+                chars_that_fit = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        
+        # Break the word into pieces
+        remaining = word
+        while remaining:
+            if len(remaining) <= chars_that_fit:
+                # Last piece
+                lines.append(remaining)
+                break
+            else:
+                # Find the best break point
+                break_at = chars_that_fit
+                
+                # Try to break at a more natural point if possible
+                # Look for vowel-consonant boundaries for better hyphenation
+                for i in range(min(chars_that_fit, len(remaining) - 1), max(1, chars_that_fit - 5), -1):
+                    if i < len(remaining) - 1:
+                        current_char = remaining[i].lower()
+                        next_char = remaining[i + 1].lower()
+                        
+                        # Good hyphenation points:
+                        # - Between consonant and vowel
+                        # - After prefix (un-, re-, pre-, etc.)
+                        # - Before suffix (-ing, -ed, -er, etc.)
+                        if (current_char in 'bcdfghjklmnpqrstvwxyz' and next_char in 'aeiou') or \
+                           (current_char in 'aeiou' and next_char in 'bcdfghjklmnpqrstvwxyz'):
+                            break_at = i + 1
+                            break
+                
+                # Add hyphen if we're breaking in the middle of a word
+                if break_at < len(remaining):
+                    # Check if adding hyphen still fits
+                    test_with_hyphen = remaining[:break_at] + '-'
+                    bbox = draw.textbbox((0, 0), test_with_hyphen, font=font)
+                    width = bbox[2] - bbox[0]
+                    
+                    if width <= max_width:
+                        lines.append(remaining[:break_at] + '-')
+                    else:
+                        # Hyphen doesn't fit, break without it
+                        lines.append(remaining[:break_at])
+                else:
+                    lines.append(remaining[:break_at])
+                
+                remaining = remaining[break_at:]
+        
+        return lines
+    
+    def _estimate_font_size_for_region(self, region: TextRegion) -> int:
+        """Estimate the likely font size for a text region based on its dimensions and text content"""
+        x, y, w, h = region.bounding_box
+        text_length = len(region.text.strip())
+        
+        if text_length == 0:
+            return self.max_font_size // 2  # Default middle size
+        
+        # Calculate area per character
+        area = w * h
+        area_per_char = area / text_length
+        
+        # Estimate font size based on area per character
+        # These ratios are approximate and based on typical manga text
+        if area_per_char > 800:
+            estimated_size = int(self.max_font_size * 0.8)
+        elif area_per_char > 400:
+            estimated_size = int(self.max_font_size * 0.6)
+        elif area_per_char > 200:
+            estimated_size = int(self.max_font_size * 0.4)
+        elif area_per_char > 100:
+            estimated_size = int(self.max_font_size * 0.3)
+        else:
+            estimated_size = int(self.max_font_size * 0.2)
+        
+        # Clamp to reasonable bounds
+        return max(self.min_font_size, min(estimated_size, self.max_font_size))
+
+
+    def _likely_different_bubbles(self, region1: TextRegion, region2: TextRegion) -> bool:
+        """Detect if regions are likely in different speech bubbles based on spatial patterns"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate gaps and positions
+        horizontal_gap = 0
+        if x1 + w1 < x2:
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:
+            vertical_gap = y1 - (y2 + h2)
+        
+        # Calculate relative positions
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        center_y1 = y1 + h1 / 2
+        center_y2 = y2 + h2 / 2
+        
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        avg_width = (w1 + w2) / 2
+        
+        # FIRST CHECK: Very small gaps always indicate same bubble
+        if horizontal_gap < 15 and vertical_gap < 15:
+            return False  # Definitely same bubble
+        
+        # STRICTER CHECK: For regions that are horizontally far apart
+        # Even if they pass the gap threshold, check if they're likely different bubbles
+        if horizontal_gap > 40:  # Significant horizontal gap
+            # Unless they're VERY well aligned vertically, they're different bubbles
+            vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+            min_height = min(h1, h2)
+            
+            if vertical_overlap < min_height * 0.8:  # Need 80% overlap to be same bubble
+                return True
+        
+        # SPECIFIC FIX: Check for multi-line text pattern
+        # If regions are well-aligned horizontally, they're likely in the same bubble
+        if horizontal_center_diff < avg_width * 0.35:  # Relaxed from 0.2 to 0.35
+            # Additional checks for multi-line text:
+            # 1. Similar widths (common in speech bubbles)
+            width_ratio = max(w1, w2) / min(w1, w2) if min(w1, w2) > 0 else 999
+            
+            # 2. Reasonable vertical spacing (not too far apart)
+            avg_height = (h1 + h2) / 2
+            
+            if width_ratio < 2.0 and vertical_gap < avg_height * 1.5:
+                # This is very likely multi-line text in the same bubble
+                return False
+        
+        # Pattern 1: Side-by-side bubbles (common in manga)
+        # Characteristics: Significant horizontal gap, similar vertical position
+        if horizontal_gap > 50:  # Increased from 25 to avoid false positives
+            vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+            min_height = min(h1, h2)
+            
+            # If they have good vertical overlap, they're likely side-by-side bubbles
+            if vertical_overlap > min_height * 0.5:
+                return True
+        
+        # Pattern 2: Stacked bubbles
+        # Characteristics: Significant vertical gap, similar horizontal position
+        if vertical_gap > 25:  # Back to original threshold
+            horizontal_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
+            min_width = min(w1, w2)
+            
+            # If they have good horizontal overlap, they're likely stacked bubbles
+            if horizontal_overlap > min_width * 0.5:
+                return True
+        
+        # Pattern 3: Diagonal arrangement (different speakers)
+        # If regions are separated both horizontally and vertically
+        if horizontal_gap > 20 and vertical_gap > 20:
+            return True
+        
+        # Pattern 4: Large gap relative to region size
+        avg_height = (h1 + h2) / 2
+        
+        if horizontal_gap > avg_width * 0.6 or vertical_gap > avg_height * 0.6:
+            return True
+        
+        return False
+
+    def _regions_should_merge(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
+        """Determine if two regions should be merged - with bubble detection"""
+        
+        # First check if they're close enough spatially
+        if not self._regions_are_nearby(region1, region2, threshold):
+            return False
+        
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # ONLY apply special handling if regions are from Azure
+        if hasattr(region1, 'from_azure') and region1.from_azure:
+            # Azure lines are typically small - be more lenient
+            avg_height = (h1 + h2) / 2
+            if avg_height < 50:  # Likely single lines
+                self._log(f"   Azure lines detected, using lenient merge criteria", "info")
+                
+                center_x1 = x1 + w1 / 2
+                center_x2 = x2 + w2 / 2
+                horizontal_center_diff = abs(center_x1 - center_x2)
+                avg_width = (w1 + w2) / 2
+                
+                # If horizontally aligned and nearby, merge them
+                if horizontal_center_diff < avg_width * 0.7:
+                    return True
+        
+        # GOOGLE LOGIC - unchanged from your original
+        # SPECIAL CASE: If one region is very small, bypass strict checks
+        area1 = w1 * h1
+        area2 = w2 * h2
+        if area1 < 500 or area2 < 500:
+            self._log(f"   Small text region (area: {min(area1, area2)}), bypassing strict alignment checks", "info")
+            return True
+        
+        # Calculate actual gaps between regions
+        horizontal_gap = 0
+        if x1 + w1 < x2:
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:
+            vertical_gap = y1 - (y2 + h2)
+        
+        # Calculate centers for alignment checks
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        center_y1 = y1 + h1 / 2
+        center_y2 = y2 + h2 / 2
+        
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        vertical_center_diff = abs(center_y1 - center_y2)
+        
+        avg_width = (w1 + w2) / 2
+        avg_height = (h1 + h2) / 2
+        
+        # Determine text orientation and layout
+        is_horizontal_text = horizontal_gap > vertical_gap or (horizontal_center_diff < avg_width * 0.5)
+        is_vertical_text = vertical_gap > horizontal_gap or (vertical_center_diff < avg_height * 0.5)
+        
+        # PRELIMINARY CHECK: If regions overlap or are extremely close, merge them
+        # This handles text that's clearly in the same bubble
+        
+        # Check for overlap
+        overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+        overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+        has_overlap = overlap_x > 0 and overlap_y > 0
+        
+        if has_overlap:
+            self._log(f"   Regions overlap - definitely same bubble, merging", "info")
+            return True
+        
+        # If gaps are tiny (< 10 pixels), merge regardless of other factors
+        if horizontal_gap < 10 and vertical_gap < 10:
+            self._log(f"   Very small gaps ({horizontal_gap}, {vertical_gap}) - merging", "info")
+            return True
+        
+        # BUBBLE BOUNDARY CHECK: Use spatial patterns to detect different bubbles
+        # But be less aggressive if gaps are small
+        if horizontal_gap < 20 and vertical_gap < 20:
+            # Very close regions are almost certainly in the same bubble
+            self._log(f"   Regions very close, skipping bubble boundary check", "info")
+        elif self._likely_different_bubbles(region1, region2):
+            self._log(f"   Regions likely in different speech bubbles", "info")
+            return False
+        
+        # CHECK 1: For well-aligned text with small gaps, merge immediately
+        # This catches multi-line text in the same bubble
+        if is_horizontal_text and vertical_center_diff < avg_height * 0.4:
+            # Horizontal text that's well-aligned vertically
+            if horizontal_gap <= threshold and vertical_gap <= threshold * 0.5:
+                self._log(f"   Well-aligned horizontal text with acceptable gaps, merging", "info")
+                return True
+        
+        if is_vertical_text and horizontal_center_diff < avg_width * 0.4:
+            # Vertical text that's well-aligned horizontally
+            if vertical_gap <= threshold and horizontal_gap <= threshold * 0.5:
+                self._log(f"   Well-aligned vertical text with acceptable gaps, merging", "info")
+                return True
+        
+        # ADDITIONAL CHECK: Multi-line text in speech bubbles
+        # Even if not perfectly aligned, check for typical multi-line patterns
+        if horizontal_center_diff < avg_width * 0.5 and vertical_gap <= threshold:
+            # Lines that are reasonably centered and within threshold should merge
+            self._log(f"   Multi-line text pattern detected, merging", "info")
+            return True
+        
+        # CHECK 2: Check alignment quality
+        # Poor alignment often indicates different bubbles
+        if is_horizontal_text:
+            # For horizontal text, check vertical alignment
+            if vertical_center_diff > avg_height * 0.6:
+                self._log(f"   Poor vertical alignment for horizontal text", "info")
+                return False
+        elif is_vertical_text:
+            # For vertical text, check horizontal alignment
+            if horizontal_center_diff > avg_width * 0.6:
+                self._log(f"   Poor horizontal alignment for vertical text", "info")
+                return False
+        
+        # CHECK 3: Font size check (but be reasonable)
+        font_size1 = self._estimate_font_size_for_region(region1)
+        font_size2 = self._estimate_font_size_for_region(region2)
+        size_ratio = max(font_size1, font_size2) / max(min(font_size1, font_size2), 1)
+        
+        # Allow some variation for emphasis or stylistic choices
+        if size_ratio > 2.0:
+            self._log(f"   Font sizes too different ({font_size1} vs {font_size2})", "info")
+            return False
+        
+        # CHECK 4: Final sanity check on merged area
+        merged_width = max(x1 + w1, x2 + w2) - min(x1, x2)
+        merged_height = max(y1 + h1, y2 + h2) - min(y1, y2)
+        merged_area = merged_width * merged_height
+        combined_area = (w1 * h1) + (w2 * h2)
+        
+        # If merged area is way larger than combined areas, they're probably far apart
+        if merged_area > combined_area * 2.5:
+            self._log(f"   Merged area indicates regions are too far apart", "info")
+            return False
+        
+        # If we get here, apply standard threshold checks
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            self._log(f"   Standard threshold check passed, merging", "info")
+            return True
+        
+        self._log(f"   No merge conditions met", "info")
+        return False
+
+    def _merge_nearby_regions(self, regions: List[TextRegion], threshold: int = 50) -> List[TextRegion]:
+        """Merge text regions that are likely part of the same speech bubble - with debug logging"""
+        if len(regions) <= 1:
+            return regions
+        
+        self._log(f"\n=== MERGE DEBUG: Starting merge analysis ===", "info")
+        self._log(f"  Total regions: {len(regions)}", "info")
+        self._log(f"  Threshold: {threshold}px", "info")
+        
+        # First, let's log what regions we have
+        for i, region in enumerate(regions):
+            x, y, w, h = region.bounding_box
+            self._log(f"  Region {i}: pos({x},{y}) size({w}x{h}) text='{region.text[:20]}...'", "info")
+        
+        # Sort regions by area (largest first) to handle contained regions properly
+        sorted_indices = sorted(range(len(regions)), 
+                              key=lambda i: regions[i].bounding_box[2] * regions[i].bounding_box[3], 
+                              reverse=True)
+        
+        merged = []
+        used = set()
+        
+        # Process each region in order of size (largest first)
+        for idx in sorted_indices:
+            i = idx
+            if i in used:
+                continue
+            
+            region1 = regions[i]
+            
+            # Start with this region
+            merged_text = region1.text
+            merged_vertices = list(region1.vertices) if hasattr(region1, 'vertices') else []
+            regions_merged = [i]  # Track which regions were merged
+            
+            self._log(f"\n  Checking region {i} for merges:", "info")
+            
+            # Check against all other unused regions
+            for j in range(len(regions)):
+                if j == i or j in used:
+                    continue
+                
+                region2 = regions[j]
+                self._log(f"    Testing merge with region {j}:", "info")
+                
+                # Check if region2 is contained within region1
+                x1, y1, w1, h1 = region1.bounding_box
+                x2, y2, w2, h2 = region2.bounding_box
+                
+                # Check if region2 is fully contained within region1
+                if (x2 >= x1 and y2 >= y1 and 
+                    x2 + w2 <= x1 + w1 and y2 + h2 <= y1 + h1):
+                    self._log(f"      ✓ Region {j} is INSIDE region {i} - merging!", "success")
+                    merged_text += " " + region2.text
+                    if hasattr(region2, 'vertices'):
+                        merged_vertices.extend(region2.vertices)
+                    used.add(j)
+                    regions_merged.append(j)
+                    continue
+                
+                # Check if region1 is contained within region2 (shouldn't happen due to sorting, but be safe)
+                if (x1 >= x2 and y1 >= y2 and 
+                    x1 + w1 <= x2 + w2 and y1 + h1 <= y2 + h2):
+                    self._log(f"      ✓ Region {i} is INSIDE region {j} - merging!", "success")
+                    merged_text += " " + region2.text
+                    if hasattr(region2, 'vertices'):
+                        merged_vertices.extend(region2.vertices)
+                    used.add(j)
+                    regions_merged.append(j)
+                    # Update region1's bounding box to the larger region
+                    region1 = TextRegion(
+                        text=merged_text,
+                        vertices=merged_vertices,
+                        bounding_box=region2.bounding_box,
+                        confidence=region1.confidence,
+                        region_type='temp_merge'
+                    )
+                    continue
+                
+                # FIX: Always check proximity against ORIGINAL regions, not the expanded one
+                # This prevents cascade merging across bubble boundaries
+                if self._regions_are_nearby(regions[i], region2, threshold):  # Use regions[i] not region1
+                    #self._log(f"      ✓ Regions are nearby", "info")
+                    
+                    # Then check if they should merge (also use original region)
+                    if self._regions_should_merge(regions[i], region2, threshold):  # Use regions[i] not region1
+                        #self._log(f"      ✓ Regions should merge!", "success")
+                        
+                        # Actually perform the merge
+                        merged_text += " " + region2.text
+                        if hasattr(region2, 'vertices'):
+                            merged_vertices.extend(region2.vertices)
+                        used.add(j)
+                        regions_merged.append(j)
+                        
+                        # DON'T update region1 for proximity checks - keep using original regions
+                    else:
+                        self._log(f"      ✗ Regions should not merge", "warning")
+                else:
+                    self._log(f"      ✗ Regions not nearby", "warning")
+            
+            # Log if we merged multiple regions
+            if len(regions_merged) > 1:
+                self._log(f"  ✅ MERGED regions {regions_merged} into one bubble", "success")
+            else:
+                self._log(f"  ℹ️ Region {i} not merged with any other", "info")
+            
+            # Create final merged region with all the merged vertices
+            if merged_vertices:
+                xs = [v[0] for v in merged_vertices]
+                ys = [v[1] for v in merged_vertices]
+            else:
+                # Fallback: calculate from all merged regions
+                all_xs = []
+                all_ys = []
+                for idx in regions_merged:
+                    x, y, w, h = regions[idx].bounding_box
+                    all_xs.extend([x, x + w])
+                    all_ys.extend([y, y + h])
+                xs = all_xs
+                ys = all_ys
+            
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            merged_bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
+            
+            merged_region = TextRegion(
+                text=merged_text,
+                vertices=merged_vertices,
+                bounding_box=merged_bbox,
+                confidence=regions[i].confidence,
+                region_type='merged_text_block' if len(regions_merged) > 1 else regions[i].region_type
             )
             
-        except Exception as e:
-            self._log(f"\n❌ Translation error: {str(e)}", "error")
-            self._log(traceback.format_exc(), "error")
+            # Copy over any additional attributes
+            if hasattr(regions[i], 'translated_text'):
+                merged_region.translated_text = regions[i].translated_text
+            
+            merged.append(merged_region)
+            used.add(i)
         
-        finally:
-            # Reset UI state
-            self.parent_frame.after(0, self._reset_ui_state)
+        self._log(f"\n=== MERGE DEBUG: Complete ===", "info")
+        self._log(f"  Final region count: {len(merged)} (was {len(regions)})", "info")
+        
+        # Verify the merge worked
+        if len(merged) == len(regions):
+            self._log(f"  ⚠️ WARNING: No regions were actually merged!", "warning")
+        
+        return merged
     
-    def _stop_translation(self):
-        """Stop the translation process"""
-        if self.is_running:
-            self.stop_flag.set()
-            self.stop_button.config(state=tk.DISABLED)
-            self._log("\n⏸️ Stopping translation...", "warning")
+    def _regions_are_nearby(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
+        """Check if two regions are close enough to be in the same bubble - WITH DEBUG"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        #self._log(f"\n    === NEARBY CHECK DEBUG ===", "info")
+        #self._log(f"    Region 1: pos({x1},{y1}) size({w1}x{h1})", "info")
+        #self._log(f"    Region 2: pos({x2},{y2}) size({w2}x{h2})", "info")
+        #self._log(f"    Threshold: {threshold}", "info")
+        
+        # Calculate gaps between closest edges
+        horizontal_gap = 0
+        if x1 + w1 < x2:  # region1 is to the left
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:  # region2 is to the left
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:  # region1 is above
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:  # region2 is above
+            vertical_gap = y1 - (y2 + h2)
+        
+        #self._log(f"    Horizontal gap: {horizontal_gap}", "info")
+        #self._log(f"    Vertical gap: {vertical_gap}", "info")
+        
+        # Detect if regions are likely vertical text based on aspect ratio
+        aspect1 = w1 / max(h1, 1)
+        aspect2 = w2 / max(h2, 1)
+        
+        # More permissive vertical text detection
+        # Vertical text typically has aspect ratio < 1.0 (taller than wide)
+        is_vertical_text = (aspect1 < 1.0 and aspect2 < 1.0) or (aspect1 < 0.5 or aspect2 < 0.5)
+        
+        # Also check if text is arranged vertically (one above the other with minimal horizontal offset)
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        avg_width = (w1 + w2) / 2
+        
+        # If regions are vertically stacked with aligned centers, treat as vertical text
+        is_vertically_stacked = (horizontal_center_diff < avg_width * 1.5) and (vertical_gap >= 0)
+        
+        #self._log(f"    Is vertical text: {is_vertical_text}", "info")
+        #self._log(f"    Is vertically stacked: {is_vertically_stacked}", "info")
+        #self._log(f"    Horizontal center diff: {horizontal_center_diff:.1f}", "info")
+        
+        # SIMPLE APPROACH: Just check if gaps are within threshold
+        # Don't overthink it
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            #self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
+            return True
+        
+        # SPECIAL CASE: Vertically stacked text with good alignment
+        # This is specifically for multi-line text in bubbles
+        if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
+            #self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
+            return True
+        
+        # If one gap is small and the other is slightly over, still consider nearby
+        if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
+           (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
+            #self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
+            return True
+        
+        # Special case: Wide bubbles with text on sides
+        # If regions are at nearly the same vertical position, they might be in a wide bubble
+        if abs(y1 - y2) < 10:  # Nearly same vertical position
+            # Check if this could be a wide bubble spanning both regions
+            if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
+                #self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
+                return True
+        
+        #self._log(f"    ❌ NOT NEARBY: Gaps exceed threshold", "warning")
+        return False
     
-    def _reset_ui_state(self):
-        """Reset UI to ready state - with widget existence checks"""
+    def _find_font(self) -> str:
+        """Find a suitable font for text rendering"""
+        font_candidates = [
+            "C:/Windows/Fonts/comicbd.ttf",  # Comic Sans MS Bold as first choice
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibri.ttf", 
+            "C:/Windows/Fonts/tahoma.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        ]
+        
+        for font_path in font_candidates:
+            if os.path.exists(font_path):
+                return font_path
+        
+        return None  # Will use default font
+    
+    def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
+        """Translate all text regions with API delay"""
+        self._log(f"\n📝 Translating {len(regions)} text regions...")
+        
+        # Check stop before even starting
+        if self._check_stop():
+            self._log(f"\n⏹️ Translation stopped before processing any regions", "warning")
+            return regions
+        
+        # Check if parallel processing is enabled
+        parallel_enabled = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
+        max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+        if parallel_enabled and len(regions) > 1:
+            self._log(f"🚀 Using PARALLEL processing with {max_workers} workers")
+            return self._translate_regions_parallel(regions, image_path, max_workers)
+        else:
+            # SEQUENTIAL CODE
+            for i, region in enumerate(regions):
+                if self._check_stop():
+                    self._log(f"\n⏹️ Translation stopped by user after {i}/{len(regions)} regions", "warning")
+                    break            
+                if region.text.strip():
+                    self._log(f"\n[{i+1}/{len(regions)}] Original: {region.text}")
+                    
+                    # Get context for translation
+                    context = self.translation_context[-5:] if self.contextual_enabled else None
+                    
+                    # Translate with image context
+                    translated = self.translate_text(
+                        region.text, 
+                        context,
+                        image_path=image_path,
+                        region=region
+                    )
+                    region.translated_text = translated
+                    
+                    self._log(f"Translated: {translated}")
+                    
+                    # SAVE TO HISTORY HERE
+                    if self.history_manager and self.contextual_enabled and translated:
+                        try:
+                            self.history_manager.append_to_history(
+                                user_content=region.text,
+                                assistant_content=translated,
+                                hist_limit=self.translation_history_limit,
+                                reset_on_limit=not self.rolling_history_enabled,
+                                rolling_window=self.rolling_history_enabled
+                            )
+                            self._log(f"📚 Saved to history (exchange {i+1})")
+                        except Exception as e:
+                            self._log(f"⚠️ Failed to save history: {e}", "warning")
+                    
+                    # Apply API delay
+                    if i < len(regions) - 1:  # Don't delay after last translation
+                        self._log(f"⏳ Waiting {self.api_delay}s before next translation...")
+                        # Check stop flag every 0.1 seconds during delay
+                        for _ in range(int(self.api_delay * 10)):
+                            if self._check_stop():
+                                self._log(f"\n⏹️ Translation stopped during delay", "warning")
+                                return regions
+                            time.sleep(0.1)
+            
+            return regions
+
+    #  parallel processing:
+    def _translate_regions_parallel(self, regions: List[TextRegion], image_path: str, max_workers: int = None) -> List[TextRegion]:
+        """Translate regions using parallel processing"""
+        # Get max_workers from settings if not provided
+        if max_workers is None:
+            max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+        # Thread-safe storage for results
+        results_lock = threading.Lock()
+        translated_regions = {}
+        failed_indices = []
+        
+        # Filter out empty regions
+        valid_regions = [(i, region) for i, region in enumerate(regions) if region.text.strip()]
+        
+        if not valid_regions:
+            return regions
+        
+        # Create a thread pool
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all translation tasks
+            future_to_data = {}
+            
+            for i, region in valid_regions:
+                # Check for stop signal before submitting
+                if self._check_stop():
+                    self._log(f"\n⏹️ Translation stopped before submitting region {i+1}", "warning")
+                    break
+                
+                # Submit translation task
+                future = executor.submit(
+                    self._translate_single_region_parallel, 
+                    region, 
+                    i, 
+                    len(valid_regions),
+                    image_path
+                )
+                future_to_data[future] = (i, region)
+            
+            # Process completed translations
+            completed = 0
+            for future in as_completed(future_to_data):
+                i, region = future_to_data[future]
+                
+                # Check for stop signal
+                if self._check_stop():
+                    self._log(f"\n⏹️ Translation stopped at {completed}/{len(valid_regions)} completed", "warning")
+                    # Cancel remaining futures
+                    for f in future_to_data:
+                        f.cancel()
+                    break
+                
+                try:
+                    translated_text = future.result()
+                    if translated_text:
+                        with results_lock:
+                            translated_regions[i] = translated_text
+                        completed += 1
+                        self._log(f"✅ [{completed}/{len(valid_regions)}] Completed region {i+1}")
+                    else:
+                        with results_lock:
+                            failed_indices.append(i)
+                        self._log(f"❌ [{completed}/{len(valid_regions)}] Failed region {i+1}", "error")
+                
+                except Exception as e:
+                    with results_lock:
+                        failed_indices.append(i)
+                    self._log(f"❌ Error in region {i+1}: {str(e)}", "error")
+        
+        # Apply translations back to regions
+        for i, region in enumerate(regions):
+            if i in translated_regions:
+                region.translated_text = translated_regions[i]
+        
+        # Report summary
+        success_count = len(translated_regions)
+        fail_count = len(failed_indices)
+        self._log(f"\n📊 Parallel translation complete: {success_count} succeeded, {fail_count} failed")
+        
+        return regions
+
+    def reset_for_new_image(self):
+        """Reset internal state for processing a new image"""
+        # Clear any cached detection results
+        if hasattr(self, 'last_detection_results'):
+            del self.last_detection_results
+        
+        # Clear OCR manager cache if it exists
+        if hasattr(self, 'ocr_manager') and self.ocr_manager:
+            if hasattr(self.ocr_manager, 'last_results'):
+                self.ocr_manager.last_results = None
+            if hasattr(self.ocr_manager, 'cache'):
+                self.ocr_manager.cache = {}
+        
+        # Don't clear translation context if using rolling history
+        if not self.rolling_history_enabled:
+            self.translation_context = []
+        
+        # Clear any cached regions
+        if hasattr(self, '_cached_regions'):
+            del self._cached_regions
+        
+        self._log("🔄 Reset translator state for new image", "debug")
+
+    def _translate_single_region_parallel(self, region: TextRegion, index: int, total: int, image_path: str) -> Optional[str]:
+        """Translate a single region for parallel processing"""
         try:
-            # Check if the dialog still exists
-            if not hasattr(self, 'dialog') or not self.dialog or not self.dialog.winfo_exists():
-                return
+            thread_name = threading.current_thread().name
+            self._log(f"\n[{thread_name}] [{index+1}/{total}] Original: {region.text}")
+            
+            # Note: Context is not used in parallel mode to avoid race conditions
+            # Pass None for context to maintain compatibility with your translate_text method
+            translated = self.translate_text(
+                region.text,
+                None,  # No context in parallel mode
+                image_path=image_path,
+                region=region
+            )
+            
+            if translated:
+                self._log(f"[{thread_name}] Translated: {translated}")
                 
-            # Reset running flag
-            self.is_running = False
-            
-            # Check and update start_button if it exists
-            if hasattr(self, 'start_button') and self.start_button and self.start_button.winfo_exists():
-                self.start_button.config(state=tk.NORMAL)
-            
-            # Check and update stop_button if it exists
-            if hasattr(self, 'stop_button') and self.stop_button and self.stop_button.winfo_exists():
-                self.stop_button.config(state=tk.DISABLED)
-            
-            # Re-enable file modification - check if listbox exists
-            if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.winfo_exists():
-                self.file_listbox.config(state=tk.NORMAL)
+                # Add random delay to prevent API rate limiting
+                import random
+                delay = self.api_delay + random.uniform(0, 0.5)
+                time.sleep(delay)
                 
-        except tk.TclError:
-            # Widget has been destroyed, nothing to do
-            pass
+                return translated
+            else:
+                self._log(f"[{thread_name}] Translation failed", "error")
+                return None
+                
         except Exception as e:
-            # Log the error but don't crash
-            if hasattr(self, '_log'):
-                self._log(f"Error resetting UI state: {str(e)}", "warning")
+            self._log(f"[{thread_name}] Error: {str(e)}", "error")
+            return None
+
+
+    def process_image(self, image_path: str, output_path: Optional[str] = None, 
+                     batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
+        """Process a single manga image through the full pipeline"""
+        
+        # Set batch tracking if provided
+        if batch_index is not None and batch_total is not None:
+            self.batch_current = batch_index
+            self.batch_size = batch_total
+            self.batch_mode = True
+        
+        # Simplified header for batch mode
+        if not self.batch_mode:
+            self._log(f"\n{'='*60}")
+            self._log(f"🖼️ STARTING MANGA TRANSLATION PIPELINE")
+            self._log(f"📁 Input: {image_path}")
+            self._log(f"📁 Output: {output_path or 'Auto-generated'}")
+            self._log(f"{'='*60}\n")
+        else:
+            self._log(f"\n[{batch_index}/{batch_total}] Processing: {os.path.basename(image_path)}")
+        
+        result = {
+            'success': False,
+            'input_path': image_path,
+            'output_path': output_path,
+            'regions': [],
+            'errors': [],
+            'interrupted': False,
+            'format_info': {}
+        }
+        
+        try:
+            # Determine the output directory from output_path
+            if output_path:
+                output_dir = os.path.dirname(output_path)
+            else:
+                # If no output path specified, use default
+                output_dir = os.path.join(os.path.dirname(image_path), "translated_images")
+            
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Initialize HistoryManager with the output directory
+            if self.contextual_enabled and not self.history_manager_initialized:
+                # Only initialize if we're in a new output directory
+                if output_dir != getattr(self, 'history_output_dir', None):
+                    try:
+                        self.history_manager = HistoryManager(output_dir)
+                        self.history_manager_initialized = True
+                        self.history_output_dir = output_dir
+                        self._log(f"📚 Initialized HistoryManager in output directory: {output_dir}")
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to initialize history manager: {str(e)}", "warning")
+                        self.history_manager = None
+            
+            # Check for stop signal
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before processing", "warning")
+                return result
+            
+            # Format detection if enabled
+            if self.manga_settings.get('advanced', {}).get('format_detection', False):
+                self._log("🔍 Analyzing image format...")
+                img = Image.open(image_path)
+                width, height = img.size
+                aspect_ratio = height / width
+                
+                # Detect format type
+                format_info = {
+                    'width': width,
+                    'height': height,
+                    'aspect_ratio': aspect_ratio,
+                    'is_webtoon': aspect_ratio > 3.0,
+                    'is_spread': width > height * 1.3,
+                    'format': 'unknown'
+                }
+                
+                if format_info['is_webtoon']:
+                    format_info['format'] = 'webtoon'
+                    self._log("📱 Detected WEBTOON format - vertical scroll manga")
+                elif format_info['is_spread']:
+                    format_info['format'] = 'spread'
+                    self._log("📖 Detected SPREAD format - two-page layout")
+                else:
+                    format_info['format'] = 'single_page'
+                    self._log("📄 Detected SINGLE PAGE format")
+                
+                result['format_info'] = format_info
+                
+                # Handle webtoon mode if detected and enabled
+                webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')
+                if format_info['is_webtoon'] and webtoon_mode != 'disabled':
+                    if webtoon_mode == 'auto' or webtoon_mode == 'force':
+                        self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
+                        # Process webtoon in chunks
+                        return self._process_webtoon_chunks(image_path, output_path, result)
+            
+            # Step 1: Detect text regions using Google Cloud Vision
+            self._log(f"📍 [STEP 1] Text Detection Phase")
+            regions = self.detect_text_regions(image_path)
+            
+            if not regions:
+                error_msg = "No text regions detected by Cloud Vision"
+                self._log(f"⚠️ {error_msg}", "warning")
+                result['errors'].append(error_msg)
+                # Still save the original image as "translated" if no text found
+                if output_path:
+                    import shutil
+                    shutil.copy2(image_path, output_path)
+                    result['output_path'] = output_path
+                result['success'] = True
+                return result
+            
+            self._log(f"\n✅ Detection complete: {len(regions)} regions found")
+            
+            # Save debug image if debug mode is enabled
+            if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                self._save_debug_image(image_path, regions)
+            
+            # Step 2: Translate regions
+            self._log(f"\n📍 [STEP 2] Translation Phase")
+            
+            if self.full_page_context_enabled:
+                # Full page context translation mode
+                self._log(f"\n📄 Using FULL PAGE CONTEXT mode")
+                self._log("   This mode sends all text together for more consistent translations", "info")
+                
+                if self._check_stop():
+                    result['interrupted'] = True
+                    self._log("\n⏹️ Translation stopped before processing", "warning")
+                    return result
+                
+                translations = self.translate_full_page_context(regions, image_path)
+                
+                if translations:
+                    translated_count = 0
+                    for region in regions:
+                        if region.text in translations:
+                            region.translated_text = translations[region.text]
+                            translated_count += 1
+                            self._log(f"   ✅ Applied translation for: '{region.text[:30]}...'")
+                        else:
+                            self._log(f"   ⚠️ No translation found for: '{region.text[:30]}...'", "warning")
+                    
+                    self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions)} regions translated")
+                else:
+                    self._log("❌ Full page context translation failed", "error")
+                    result['errors'].append("Full page context translation failed")
+                    
+            else:
+                # Individual translation mode with parallel processing support
+                self._log(f"\n📝 Using INDIVIDUAL translation mode")
+                
+                if self.manga_settings.get('advanced', {}).get('parallel_processing', False):
+                    self._log("⚡ Parallel processing ENABLED")
+                    regions = self._translate_regions_parallel(regions, image_path)
+                else:
+                    regions = self.translate_regions(regions, image_path)
+
+            # Check if we should continue after translation
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation cancelled before image processing", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+
+            if not any(region.translated_text for region in regions):
+                result['interrupted'] = True
+                self._log("⏹️ No regions were translated - translation was interrupted", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
+            # Step 3: Render translated text
+            self._log(f"\n📍 [STEP 3] Image Processing Phase")
+            
+            # Load image with OpenCV
+            import cv2
+            self._log(f"🖼️ Loading image with OpenCV...")
+            try:
+                image = cv2.imread(image_path)
+                
+                if image is None:
+                    self._log(f"   Using PIL to handle Unicode path...", "info")
+                    from PIL import Image as PILImage
+                    import numpy as np
+                    
+                    pil_image = PILImage.open(image_path)
+                    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                    self._log(f"   ✅ Successfully loaded with PIL", "info")
+                    
+            except Exception as e:
+                error_msg = f"Failed to load image: {image_path} - {str(e)}"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                return result
+
+            self._log(f"   Image dimensions: {image.shape[1]}x{image.shape[0]}")
+            
+            # Save intermediate preprocessing image if enabled
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                self._save_intermediate_image(image_path, image, "original")
+            
+            # Check if we should skip inpainting
+            if self.skip_inpainting:
+                # User wants to preserve original art
+                self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
+                self._log(f"   Background opacity: {int(self.text_bg_opacity/255*100)}%", "info")
+                inpainted = image.copy()
+            else:
+                self._log(f"🎭 Creating text mask...")
+                mask = self.create_text_mask(image, regions)
+                
+                # Debug save mask
+                try:
+                    mask_path = image_path.replace('.', '_mask.')
+                    cv2.imwrite(mask_path, mask)
+                    mask_percentage = ((mask > 0).sum() / mask.size) * 100
+                    self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
+                    self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                    
+                    # Save mask overlay visualization
+                    mask_viz = image.copy()
+                    mask_viz[mask > 0] = [0, 0, 255]  # Simple red overlay
+                    viz_path = image_path.replace('.', '_mask_overlay.')
+                    cv2.imwrite(viz_path, mask_viz)
+                    self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
+                    
+                    if mask_percentage > 50:
+                        self._log(f"   ⚠️ WARNING: Mask covers {mask_percentage:.1f}% - this might be too much!", "warning")
+                except Exception as e:
+                    self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
+                
+                if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                    self._save_intermediate_image(image_path, mask, "mask")
+                
+                self._log(f"🎨 Inpainting to remove original text")
+                inpainted = self.inpaint_regions(image, mask)
+                
+                if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                    self._save_intermediate_image(image_path, inpainted, "inpainted")
+            
+            # Render translated text
+            self._log(f"✍️ Rendering translated text...")
+            self._log(f"   Using enhanced renderer with custom settings", "info")
+            final_image = self.render_translated_text(inpainted, regions)
+            
+            # Save output
+            try:
+                if not output_path:
+                    base, ext = os.path.splitext(image_path)
+                    output_path = f"{base}_translated{ext}"
+                
+                success = cv2.imwrite(output_path, final_image)
+                
+                if not success:
+                    self._log(f"   Using PIL to save with Unicode path...", "info")
+                    from PIL import Image as PILImage
+                    
+                    rgb_image = cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB)
+                    pil_image = PILImage.fromarray(rgb_image)
+                    pil_image.save(output_path)
+                    self._log(f"   ✅ Successfully saved with PIL", "info")
+                
+                result['output_path'] = output_path
+                self._log(f"\n💾 Saved output to: {output_path}")
+                
+            except Exception as e:
+                error_msg = f"Failed to save output image: {str(e)}"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                result['success'] = False
+                return result
+            
+            # Update result
+            result['regions'] = [r.to_dict() for r in regions]
+            if not result.get('interrupted', False):
+                result['success'] = True
+                self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")
+            else:
+                self._log(f"\n⚠️ TRANSLATION INTERRUPTED - Partial output saved", "warning")
+            
+            self._log(f"{'='*60}\n")
+            
+        except Exception as e:
+            error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
+            self._log(f"\n❌ PIPELINE ERROR:", "error")
+            self._log(f"   {str(e)}", "error")
+            self._log(f"   Type: {type(e).__name__}", "error")
+            self._log(traceback.format_exc(), "error")
+            result['errors'].append(error_msg)
+        
+        return result
+
+    def reset_history_manager(self):
+        """Reset history manager for new translation batch"""
+        self.history_manager = None
+        self.history_manager_initialized = False
+        self.history_output_dir = None
+        self.translation_context = []
+        self._log("📚 Reset history manager for new batch", "debug")
+    
+    def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
+        """Process webtoon in chunks for better OCR"""
+        import cv2
+        import numpy as np
+        from PIL import Image as PILImage
+        
+        try:
+            self._log("📱 Processing webtoon in chunks for better OCR", "info")
+            
+            # Load the image
+            image = cv2.imread(image_path)
+            if image is None:
+                pil_image = PILImage.open(image_path)
+                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            
+            height, width = image.shape[:2]
+            
+            # Get chunk settings from config
+            chunk_height = self.manga_settings.get('preprocessing', {}).get('chunk_height', 1000)
+            chunk_overlap = self.manga_settings.get('preprocessing', {}).get('chunk_overlap', 100)
+            
+            self._log(f"   Image dimensions: {width}x{height}", "info")
+            self._log(f"   Chunk height: {chunk_height}px, Overlap: {chunk_overlap}px", "info")
+            
+            # Calculate number of chunks needed
+            effective_chunk_height = chunk_height - chunk_overlap
+            num_chunks = max(1, (height - chunk_overlap) // effective_chunk_height + 1)
+            
+            self._log(f"   Will process in {num_chunks} chunks", "info")
+            
+            # Process each chunk
+            all_regions = []
+            chunk_offsets = []
+            
+            for i in range(num_chunks):
+                # Calculate chunk boundaries
+                start_y = i * effective_chunk_height
+                end_y = min(start_y + chunk_height, height)
+                
+                # Make sure we don't miss the bottom part
+                if i == num_chunks - 1:
+                    end_y = height
+                
+                self._log(f"\n   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})", "info")
+                
+                # Extract chunk
+                chunk = image[start_y:end_y, 0:width]
+                
+                # Save chunk temporarily for OCR
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    chunk_path = tmp.name
+                    cv2.imwrite(chunk_path, chunk)
+                
+                try:
+                    # Detect text in this chunk
+                    chunk_regions = self.detect_text_regions(chunk_path)
+                    
+                    # Adjust region coordinates to full image space
+                    for region in chunk_regions:
+                        # Adjust bounding box
+                        x, y, w, h = region.bounding_box
+                        region.bounding_box = (x, y + start_y, w, h)
+                        
+                        # Adjust vertices if present
+                        if hasattr(region, 'vertices') and region.vertices:
+                            adjusted_vertices = []
+                            for vx, vy in region.vertices:
+                                adjusted_vertices.append((vx, vy + start_y))
+                            region.vertices = adjusted_vertices
+                        
+                        # Mark which chunk this came from (for deduplication)
+                        region.chunk_index = i
+                        region.chunk_y_range = (start_y, end_y)
+                    
+                    all_regions.extend(chunk_regions)
+                    chunk_offsets.append(start_y)
+                    
+                    self._log(f"   Found {len(chunk_regions)} text regions in chunk {i+1}", "info")
+                    
+                finally:
+                    # Clean up temp file
+                    import os
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+            
+            # Remove duplicate regions from overlapping areas
+            self._log(f"\n   🔍 Deduplicating regions from overlaps...", "info")
+            unique_regions = self._deduplicate_chunk_regions(all_regions, chunk_overlap)
+            
+            self._log(f"   Total regions: {len(all_regions)} → {len(unique_regions)} after deduplication", "info")
+            
+            if not unique_regions:
+                self._log("⚠️ No text regions detected in webtoon", "warning")
+                result['errors'].append("No text regions detected")
+                return result
+            
+            # Now process the regions as normal
+            self._log(f"\n📍 Translating {len(unique_regions)} unique regions", "info")
+            
+            # Translate regions
+            if self.full_page_context_enabled:
+                translations = self.translate_full_page_context(unique_regions, image_path)
+                for region in unique_regions:
+                    if region.text in translations:
+                        region.translated_text = translations[region.text]
+            else:
+                unique_regions = self.translate_regions(unique_regions, image_path)
+            
+            # Create mask and inpaint
+            self._log(f"\n🎨 Creating mask and inpainting...", "info")
+            mask = self.create_text_mask(image, unique_regions)
+            
+            if self.skip_inpainting:
+                inpainted = image.copy()
+            else:
+                inpainted = self.inpaint_regions(image, mask)
+            
+            # Render translated text
+            self._log(f"✍️ Rendering translated text...", "info")
+            final_image = self.render_translated_text(inpainted, unique_regions)
+            
+            # Save output
+            if not output_path:
+                base, ext = os.path.splitext(image_path)
+                output_path = f"{base}_translated{ext}"
+            
+            cv2.imwrite(output_path, final_image)
+            
+            result['output_path'] = output_path
+            result['regions'] = [r.to_dict() for r in unique_regions]
+            result['success'] = True
+            result['format_info']['chunks_processed'] = num_chunks
+            
+            self._log(f"\n✅ Webtoon processing complete: {output_path}", "success")
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error processing webtoon chunks: {str(e)}"
+            self._log(f"❌ {error_msg}", "error")
+            result['errors'].append(error_msg)
+            return result
+
+    def _deduplicate_chunk_regions(self, regions: List, overlap_height: int) -> List:
+        """Remove duplicate regions from overlapping chunk areas"""
+        if not regions:
+            return regions
+        
+        # Sort regions by y position
+        regions.sort(key=lambda r: r.bounding_box[1])
+        
+        unique_regions = []
+        used_indices = set()
+        
+        for i, region1 in enumerate(regions):
+            if i in used_indices:
+                continue
+            
+            # Check if this region is in an overlap zone
+            x1, y1, w1, h1 = region1.bounding_box
+            chunk_idx = region1.chunk_index if hasattr(region1, 'chunk_index') else 0
+            chunk_y_start, chunk_y_end = region1.chunk_y_range if hasattr(region1, 'chunk_y_range') else (0, float('inf'))
+            
+            # Check if region is near chunk boundary (in overlap zone)
+            in_overlap_zone = (y1 < chunk_y_start + overlap_height) and chunk_idx > 0
+            
+            if in_overlap_zone:
+                # Look for duplicate in previous chunk's regions
+                found_duplicate = False
+                
+                for j, region2 in enumerate(regions):
+                    if j >= i or j in used_indices:
+                        continue
+                    
+                    if hasattr(region2, 'chunk_index') and region2.chunk_index == chunk_idx - 1:
+                        x2, y2, w2, h2 = region2.bounding_box
+                        
+                        # Check if regions are the same (similar position and size)
+                        if (abs(x1 - x2) < 20 and 
+                            abs(y1 - y2) < 20 and 
+                            abs(w1 - w2) < 20 and 
+                            abs(h1 - h2) < 20):
+                            
+                            # Check text similarity
+                            if region1.text == region2.text:
+                                # This is a duplicate
+                                found_duplicate = True
+                                used_indices.add(i)
+                                self._log(f"   Removed duplicate: '{region1.text[:30]}...'", "debug")
+                                break
+                
+                if not found_duplicate:
+                    unique_regions.append(region1)
+                    used_indices.add(i)
+            else:
+                # Not in overlap zone, keep it
+                unique_regions.append(region1)
+                used_indices.add(i)
+        
+        return unique_regions
+
+    def _save_intermediate_image(self, original_path: str, image, stage: str):
+        """Save intermediate processing stages"""
+        debug_dir = os.path.join(os.path.dirname(original_path), 'debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        base_name = os.path.splitext(os.path.basename(original_path))[0]
+        output_path = os.path.join(debug_dir, f"{base_name}_{stage}.png")
+        
+        cv2.imwrite(output_path, image)
+        self._log(f"   💾 Saved {stage} image: {output_path}")
