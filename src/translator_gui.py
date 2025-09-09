@@ -7967,6 +7967,24 @@ Provide translations in the same numbered format."""
                 self.append_log("❌ Error: Please enter your API key.")
                 return False
 
+            # Determine output directory and save source EPUB path
+            if file_path.lower().endswith('.epub'):
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                output_dir = base_name  # This is how your code determines the output dir
+                
+                # Save source EPUB path for EPUB converter
+                source_epub_file = os.path.join(output_dir, 'source_epub.txt')
+                try:
+                    os.makedirs(output_dir, exist_ok=True)  # Ensure output dir exists
+                    with open(source_epub_file, 'w', encoding='utf-8') as f:
+                        f.write(file_path)
+                    self.append_log(f"📚 Saved source EPUB reference for chapter ordering")
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not save source EPUB reference: {e}")
+                
+                # Set EPUB_PATH in environment for immediate use
+                os.environ['EPUB_PATH'] = file_path
+                
             old_argv = sys.argv
             old_env = dict(os.environ)
             
@@ -9298,6 +9316,22 @@ Important rules:
             
             # Set environment variables for EPUB converter
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
+
+            source_epub_file = os.path.join(folder, 'source_epub.txt')
+            if os.path.exists(source_epub_file):
+                try:
+                    with open(source_epub_file, 'r', encoding='utf-8') as f:
+                        source_epub_path = f.read().strip()
+                        
+                    if source_epub_path and os.path.exists(source_epub_path):
+                        os.environ['EPUB_PATH'] = source_epub_path
+                        self.append_log(f"✅ Using source EPUB for proper chapter ordering: {os.path.basename(source_epub_path)}")
+                    else:
+                        self.append_log(f"⚠️ Source EPUB file not found: {source_epub_path}")
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not read source EPUB reference: {e}")
+            else:
+                self.append_log("ℹ️ No source EPUB reference found - using filename-based ordering")
             
             # Set API credentials and model
             api_key = self.api_key_entry.get()
