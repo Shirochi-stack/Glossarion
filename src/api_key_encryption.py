@@ -126,21 +126,6 @@ class APIKeyEncryption:
             decrypted['fallback_keys'] = self.decrypt_multi_keys(decrypted['fallback_keys'])
         
         return decrypted
-    
-    def decrypt_config(self, config):
-        """Decrypt specific API key fields including multi-key support"""
-        decrypted = config.copy()
-        
-        # Decrypt regular API key fields
-        for field in self.api_key_fields:
-            if field in decrypted and decrypted[field]:
-                decrypted[field] = self.decrypt_value(decrypted[field])
-        
-        # Decrypt multi_api_keys if present
-        if 'multi_api_keys' in decrypted:
-            decrypted['multi_api_keys'] = self.decrypt_multi_keys(decrypted['multi_api_keys'])
-        
-        return decrypted
 
 
 # Simple interface functions
