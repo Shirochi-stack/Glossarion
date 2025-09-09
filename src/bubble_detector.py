@@ -140,7 +140,7 @@ class BubbleDetector:
     Backward compatible with existing code while adding RT-DETR support.
     """
     
-    def __init__(self, config_path: str = "bubble_detector_config.json"):
+    def __init__(self, config_path: str = "config.json"):
         """
         Initialize the bubble detector.
         
