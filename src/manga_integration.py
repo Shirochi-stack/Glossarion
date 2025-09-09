@@ -654,7 +654,21 @@ class MangaTranslationTab:
             # Show Configure button
             self.provider_setup_btn.config(text="Configure", bootstyle="info")
             self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+     
+        elif provider == 'Qwen2-VL':
+            # Load saved model size if available
+            if hasattr(self, 'qwen2vl_model_size'):
+                saved_model_size = self.qwen2vl_model_size
+            else:
+                saved_model_size = self.main_gui.config.get('qwen2vl_model_size', '1')
             
+            # When displaying status for loaded model
+            if status['loaded']:
+                # Map the saved size to display name
+                size_names = {'1': '2B', '2': '7B', '3': '72B', '4': 'custom'}
+                display_size = size_names.get(saved_model_size, saved_model_size)
+                self.provider_status_label.config(text=f"✅ {display_size} model loaded", fg="green")
+ 
         else:
             # Local OCR providers
             if not hasattr(self, 'ocr_manager'):
@@ -956,6 +970,14 @@ class MangaTranslationTab:
                 
                 # Special handling for Qwen2-VL - pass model_size
                 if provider == 'Qwen2-VL':
+                    if success and model_size:
+                        # Save the model size to config
+                        self.qwen2vl_model_size = model_size
+                        self.main_gui.config['qwen2vl_model_size'] = model_size
+                        
+                        # Save config immediately
+                        if hasattr(self.main_gui, 'save_config'):
+                            self.main_gui.save_config(show_message=False)
                     self._log(f"DEBUG: In thread, about to load with model_size={model_size}")
                     if model_size:
                         success = self.ocr_manager.load_provider(provider, model_size=model_size)
