@@ -732,6 +732,61 @@ class MangaTranslator:
             return True
         
         return False
+
+    def _load_bubble_detector(self, ocr_settings, image_path):
+        """Load bubble detector with appropriate model based on settings
+        
+        Returns:
+            dict: Detection results or None if failed
+        """
+        detector_type = ocr_settings.get('detector_type', 'rtdetr')
+        model_path = ocr_settings.get('bubble_model_path', '')
+        confidence = ocr_settings.get('bubble_confidence', 0.5)
+        
+        if detector_type == 'rtdetr' or 'RT-DETR' in detector_type:
+            # Load RT-DETR model
+            if self.bubble_detector.load_rtdetr_model(model_id=model_path):
+                return self.bubble_detector.detect_with_rtdetr(
+                    image_path=image_path,
+                    confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                    return_all_bubbles=False
+                )
+        elif detector_type == 'custom':
+            # Custom model - try to determine type from path
+            custom_path = ocr_settings.get('custom_model_path', model_path)
+            if 'rtdetr' in custom_path.lower():
+                # Custom RT-DETR model
+                if self.bubble_detector.load_rtdetr_model(model_id=custom_path):
+                    return self.bubble_detector.detect_with_rtdetr(
+                        image_path=image_path,
+                        confidence=confidence,
+                        return_all_bubbles=False
+                    )
+            else:
+                # Assume YOLO format for other custom models
+                if custom_path and self.bubble_detector.load_model(custom_path):
+                    detections = self.bubble_detector.detect_bubbles(
+                        image_path,
+                        confidence=confidence
+                    )
+                    return {
+                        'text_bubbles': detections if detections else [],
+                        'text_free': [],
+                        'bubbles': []
+                    }
+        else:
+            # Standard YOLO model
+            if model_path and self.bubble_detector.load_model(model_path):
+                detections = self.bubble_detector.detect_bubbles(
+                    image_path,
+                    confidence=confidence
+                )
+                return {
+                    'text_bubbles': detections if detections else [],
+                    'text_free': [],
+                    'bubbles': []
+                }
+        return None
             
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
         """Detect text regions using configured OCR provider"""
@@ -1167,14 +1222,9 @@ class MangaTranslator:
                             from bubble_detector import BubbleDetector
                             self.bubble_detector = BubbleDetector()
                         
-                        # Get regions from bubble detector - ensure fresh detection
-                        if self.bubble_detector.load_rtdetr_model():
-                            # IMPORTANT: Get fresh detections for this specific image
-                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
-                                image_path=image_path,
-                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
-                                return_all_bubbles=False
-                            )
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
                             
                             # Process detections immediately and don't store
                             all_regions = []
@@ -1231,12 +1281,8 @@ class MangaTranslator:
                             self.bubble_detector = BubbleDetector()
                         
                         # Get regions from bubble detector
-                        if self.bubble_detector.load_rtdetr_model():
-                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
-                                image_path=image_path,
-                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
-                                return_all_bubbles=False
-                            )
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -1278,12 +1324,8 @@ class MangaTranslator:
                             self.bubble_detector = BubbleDetector()
                         
                         # Get regions from bubble detector
-                        if self.bubble_detector.load_rtdetr_model():
-                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
-                                image_path=image_path,
-                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
-                                return_all_bubbles=False
-                            )
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -1349,12 +1391,8 @@ class MangaTranslator:
                             self.bubble_detector = BubbleDetector()
                         
                         # Get regions from bubble detector
-                        if self.bubble_detector.load_rtdetr_model():
-                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
-                                image_path=image_path,
-                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
-                                return_all_bubbles=False
-                            )
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -1411,12 +1449,8 @@ class MangaTranslator:
                             self.bubble_detector = BubbleDetector()
                         
                         # Get regions from bubble detector
-                        if self.bubble_detector.load_rtdetr_model():
-                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
-                                image_path=image_path,
-                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
-                                return_all_bubbles=False
-                            )
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -1457,12 +1491,8 @@ class MangaTranslator:
                             self.bubble_detector = BubbleDetector()
                         
                         # Get regions from bubble detector
-                        if self.bubble_detector.load_rtdetr_model():
-                            rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
-                                image_path=image_path,
-                                confidence=ocr_settings.get('rtdetr_confidence', 0.3),
-                                return_all_bubbles=False
-                            )
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
                             
                             # Process only text-containing regions
                             all_regions = []
