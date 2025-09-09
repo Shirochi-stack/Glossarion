@@ -302,7 +302,7 @@ class LocalInpainter:
         'lama_official': ('Official LaMa', FFCInpaintModel),
     }
     
-    def __init__(self, config_path="inpainter_config.json"):
+    def __init__(self, config_path="config.json"):
         self.config_path = config_path
         self.config = self._load_config()
         self.model = None
