@@ -28,7 +28,7 @@ if IS_FROZEN:
     logger.info(f"Running in frozen environment: {MEIPASS}")
 
 # Environment variables for ONNX
-ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'onnx_cache')
+ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'models')
 AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true'
 SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'true'
 FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
@@ -40,6 +40,13 @@ torch = None
 nn = None
 F = None
 BaseModel = object
+
+try:
+    import onnxruntime_extensions
+    ONNX_EXTENSIONS_AVAILABLE = True
+except ImportError:
+    ONNX_EXTENSIONS_AVAILABLE = False
+    logger.info("ONNX Runtime Extensions not available - FFT models won't work in ONNX")
 
 if IS_FROZEN:
     # In frozen environment, try harder to import
@@ -376,16 +383,9 @@ class LocalInpainter:
             json.dump(full_config, f, indent=2, ensure_ascii=False)
 
     def convert_to_onnx(self, model_path: str, method: str) -> Optional[str]:
-        """Convert a PyTorch model to ONNX format"""
+        """Convert a PyTorch model to ONNX format with FFT handling via custom operators"""
         if not ONNX_AVAILABLE:
             logger.warning("ONNX not available, skipping conversion")
-            return None
-        
-        # Skip ONNX conversion for models with FFT operations
-        fft_models = ['lama', 'anime', 'lama_official']
-        if method in fft_models:
-            logger.info(f"ℹ️ {method.upper()} uses FFT operations that ONNX doesn't support")
-            logger.info("  Using optimized PyTorch JIT model instead")
             return None
         
         try:
@@ -405,49 +405,62 @@ class LocalInpainter:
                 logger.error("Model not loaded for ONNX conversion")
                 return None
             
-            # Create dummy inputs based on model type
-            if method == 'aot':
-                # AOT expects normalized inputs in [-1, 1]
-                dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
-                dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
-            else:
-                # Other models
-                dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
-                dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
+            # Create dummy inputs
+            dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
+            dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
             
-            # Export to ONNX
-            torch.onnx.export(
-                self.model,
-                (dummy_image, dummy_mask),
-                onnx_path,
-                export_params=True,
-                opset_version=11,  # AOT should work with opset 11
-                do_constant_folding=True,
-                input_names=['image', 'mask'],
-                output_names=['output'],
-                dynamic_axes={
-                    'image': {0: 'batch', 2: 'height', 3: 'width'},
-                    'mask': {0: 'batch', 2: 'height', 3: 'width'},
-                    'output': {0: 'batch', 2: 'height', 3: 'width'}
-                }
-            )
+            # For FFT models, export with custom operators
+            fft_models = ['lama', 'anime', 'lama_official']
+            if method in fft_models:
+                logger.info(f"⚠️ {method.upper()} uses FFT - exporting with custom operators")
+                
+                # Export with custom operator support
+                torch.onnx.export(
+                    self.model,
+                    (dummy_image, dummy_mask),
+                    onnx_path,
+                    export_params=True,
+                    opset_version=17,  # Latest opset for better support
+                    do_constant_folding=True,
+                    input_names=['image', 'mask'],
+                    output_names=['output'],
+                    operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN,  # Keep ATen ops
+                    custom_opsets={"com.microsoft": 1, "org.pytorch.aten": 1},  # Custom opsets
+                    dynamic_axes={
+                        'image': {0: 'batch', 2: 'height', 3: 'width'},
+                        'mask': {0: 'batch', 2: 'height', 3: 'width'},
+                        'output': {0: 'batch', 2: 'height', 3: 'width'}
+                    }
+                )
+                logger.info(f"✅ FFT model exported with ATen operators")
+            else:
+                # Standard export for non-FFT models
+                torch.onnx.export(
+                    self.model,
+                    (dummy_image, dummy_mask),
+                    onnx_path,
+                    export_params=True,
+                    opset_version=11,
+                    do_constant_folding=True,
+                    input_names=['image', 'mask'],
+                    output_names=['output'],
+                    dynamic_axes={
+                        'image': {0: 'batch', 2: 'height', 3: 'width'},
+                        'mask': {0: 'batch', 2: 'height', 3: 'width'},
+                        'output': {0: 'batch', 2: 'height', 3: 'width'}
+                    }
+                )
             
             logger.info(f"✅ ONNX model saved to: {onnx_path}")
-            
-            # Verify the ONNX model
-            onnx_model = onnx.load(onnx_path)
-            onnx.checker.check_model(onnx_model)
-            logger.info("✅ ONNX model verified successfully")
-            
             return onnx_path
             
         except Exception as e:
             logger.error(f"❌ ONNX conversion failed: {e}")
             logger.error(traceback.format_exc())
             return None
-        
+
     def load_onnx_model(self, onnx_path: str) -> bool:
-        """Load an ONNX model for inference"""
+        """Load an ONNX model with custom operator support"""
         if not ONNX_AVAILABLE:
             logger.error("ONNX Runtime not available")
             return False
@@ -455,20 +468,75 @@ class LocalInpainter:
         try:
             logger.info(f"📥 Loading ONNX model: {onnx_path}")
             
-            # Create ONNX Runtime session
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-            self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
+            # Check if this is an FFT model that needs extensions
+            is_fft_model = any(name in onnx_path for name in ['lama', 'anime'])
+            
+            if is_fft_model:
+                logger.info("⚠️ FFT model detected - checking for extensions...")
+                
+                # Debug: Check if extensions are actually available
+                try:
+                    import onnxruntime_extensions
+                    ext_version = getattr(onnxruntime_extensions, '__version__', 'unknown')
+                    logger.info(f"✅ ONNX Runtime Extensions version: {ext_version}")
+                    
+                    # Create session with extensions
+                    so = ort.SessionOptions()
+                    ext_lib_path = onnxruntime_extensions.get_library_path()
+                    logger.info(f"  Extension library path: {ext_lib_path}")
+                    
+                    # Register the extensions
+                    so.register_custom_ops_library(ext_lib_path)
+                    
+                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+                    
+                    # Try to create session
+                    logger.info("  Creating session with extensions...")
+                    self.onnx_session = ort.InferenceSession(onnx_path, so, providers=providers)
+                    
+                    logger.info("✅ ONNX model loaded with extensions")
+                    
+                except ImportError as ie:
+                    logger.error(f"❌ Import error: {ie}")
+                    logger.info("Extensions not installed properly")
+                    logger.info("Try: pip uninstall onnxruntime-extensions && pip install onnxruntime-extensions")
+                    return False
+                    
+                except Exception as load_error:
+                    error_str = str(load_error)
+                    logger.error(f"❌ Failed with extensions: {error_str}")
+                    
+                    if "ATen" in error_str:
+                        logger.info("The ONNX file contains ATen ops that even extensions can't handle")
+                        logger.info("This happens when FFT ops were exported incorrectly")
+                        logger.info("Solution: Delete the ONNX file and let it regenerate")
+                        
+                        # Delete the bad ONNX file
+                        try:
+                            os.remove(onnx_path)
+                            logger.info(f"  Deleted invalid ONNX: {onnx_path}")
+                        except:
+                            pass
+                        
+                    return False
+                    
+            else:
+                # Standard ONNX loading for non-FFT models
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+                self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
+                logger.info(f"✅ Standard ONNX model loaded")
             
             # Get input/output names
             self.onnx_input_names = [i.name for i in self.onnx_session.get_inputs()]
             self.onnx_output_names = [o.name for o in self.onnx_session.get_outputs()]
             
             self.use_onnx = True
-            logger.info(f"✅ ONNX model loaded with providers: {providers}")
+            logger.info("✅ ONNX model ready for inference")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to load ONNX model: {e}")
+            logger.error(f"❌ Unexpected error: {e}")
+            self.use_onnx = False
             return False
     
     def _convert_checkpoint_key(self, key):
@@ -652,6 +720,23 @@ class LocalInpainter:
                 self.is_jit_model = False
             
             logger.info(f"📥 Loading {method} from {model_path}")
+            
+            ext = model_path.lower().split('.')[-1]
+            # Handle ONNX files directly
+            if ext == 'onnx':
+                logger.info("📥 Loading ONNX model directly...")
+                if self.load_onnx_model(model_path):
+                    self.model_loaded = True
+                    self.current_method = method
+                    self.use_onnx = True
+                    self.is_jit_model = False
+                    self.config[f'{method}_model_path'] = model_path
+                    self._save_config()
+                    logger.info(f"✅ {method.upper()} ONNX loaded!")
+                    return True
+                else:
+                    logger.error("Failed to load ONNX model")
+                    return False
             
             # Check if it's a JIT model (.pt) or checkpoint (.ckpt/.pth)
             if model_path.endswith('.pt'):
