@@ -114,6 +114,12 @@ LAMA_JIT_MODELS = {
         'url': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
         'md5': '5ecdac562c1d56267468fc4fbf80db27',
         'name': 'AOT GAN'
+    },
+    'lama_onnx': {
+        'url': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',
+        'md5': None,  # Add MD5 if you want to verify
+        'name': 'LaMa ONNX (Carve)',
+        'is_onnx': True  # Flag to indicate this is ONNX, not JIT
     }
 }
 
@@ -328,6 +334,8 @@ class LocalInpainter:
         os.makedirs(ONNX_CACHE_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
         logger.info(f"📁 ONNX cache directory: {ONNX_CACHE_DIR}")
+        logger.info(f"   Contents: {os.listdir(ONNX_CACHE_DIR) if os.path.exists(ONNX_CACHE_DIR) else 'Directory does not exist'}")
+
         
         # Check GPU availability safely
         self.use_gpu = False
@@ -409,32 +417,14 @@ class LocalInpainter:
             dummy_image = torch.randn(1, 3, 512, 512).to(self.device)
             dummy_mask = torch.randn(1, 1, 512, 512).to(self.device)
             
-            # For FFT models, export with custom operators
+            # For FFT models, we can't convert directly
             fft_models = ['lama', 'anime', 'lama_official']
             if method in fft_models:
-                logger.info(f"⚠️ {method.upper()} uses FFT - exporting with custom operators")
-                
-                # Export with custom operator support
-                torch.onnx.export(
-                    self.model,
-                    (dummy_image, dummy_mask),
-                    onnx_path,
-                    export_params=True,
-                    opset_version=17,  # Latest opset for better support
-                    do_constant_folding=True,
-                    input_names=['image', 'mask'],
-                    output_names=['output'],
-                    operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN,  # Keep ATen ops
-                    custom_opsets={"com.microsoft": 1, "org.pytorch.aten": 1},  # Custom opsets
-                    dynamic_axes={
-                        'image': {0: 'batch', 2: 'height', 3: 'width'},
-                        'mask': {0: 'batch', 2: 'height', 3: 'width'},
-                        'output': {0: 'batch', 2: 'height', 3: 'width'}
-                    }
-                )
-                logger.info(f"✅ FFT model exported with ATen operators")
-            else:
-                # Standard export for non-FFT models
+                logger.warning(f"⚠️ {method.upper()} uses FFT operations that cannot be exported")
+                return None  # Just return None, don't suggest Carve
+            
+            # Standard export for non-FFT models
+            try:
                 torch.onnx.export(
                     self.model,
                     (dummy_image, dummy_mask),
@@ -450,9 +440,12 @@ class LocalInpainter:
                         'output': {0: 'batch', 2: 'height', 3: 'width'}
                     }
                 )
-            
-            logger.info(f"✅ ONNX model saved to: {onnx_path}")
-            return onnx_path
+                logger.info(f"✅ ONNX model saved to: {onnx_path}")
+                return onnx_path
+                
+            except torch.onnx.errors.UnsupportedOperatorError as e:
+                logger.error(f"❌ Unsupported operator: {e}")
+                return None
             
         except Exception as e:
             logger.error(f"❌ ONNX conversion failed: {e}")
@@ -468,77 +461,43 @@ class LocalInpainter:
         try:
             logger.info(f"📥 Loading ONNX model: {onnx_path}")
             
-            # Check if this is an FFT model that needs extensions
-            is_fft_model = any(name in onnx_path for name in ['lama', 'anime'])
-            
-            if is_fft_model:
-                logger.info("⚠️ FFT model detected - checking for extensions...")
-                
-                # Debug: Check if extensions are actually available
-                try:
-                    import onnxruntime_extensions
-                    ext_version = getattr(onnxruntime_extensions, '__version__', 'unknown')
-                    logger.info(f"✅ ONNX Runtime Extensions version: {ext_version}")
-                    
-                    # Create session with extensions
-                    so = ort.SessionOptions()
-                    ext_lib_path = onnxruntime_extensions.get_library_path()
-                    logger.info(f"  Extension library path: {ext_lib_path}")
-                    
-                    # Register the extensions
-                    so.register_custom_ops_library(ext_lib_path)
-                    
-                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-                    
-                    # Try to create session
-                    logger.info("  Creating session with extensions...")
-                    self.onnx_session = ort.InferenceSession(onnx_path, so, providers=providers)
-                    
-                    logger.info("✅ ONNX model loaded with extensions")
-                    
-                except ImportError as ie:
-                    logger.error(f"❌ Import error: {ie}")
-                    logger.info("Extensions not installed properly")
-                    logger.info("Try: pip uninstall onnxruntime-extensions && pip install onnxruntime-extensions")
-                    return False
-                    
-                except Exception as load_error:
-                    error_str = str(load_error)
-                    logger.error(f"❌ Failed with extensions: {error_str}")
-                    
-                    if "ATen" in error_str:
-                        logger.info("The ONNX file contains ATen ops that even extensions can't handle")
-                        logger.info("This happens when FFT ops were exported incorrectly")
-                        logger.info("Solution: Delete the ONNX file and let it regenerate")
-                        
-                        # Delete the bad ONNX file
-                        try:
-                            os.remove(onnx_path)
-                            logger.info(f"  Deleted invalid ONNX: {onnx_path}")
-                        except:
-                            pass
-                        
-                    return False
-                    
+            # Store the path for later checking
+            self.current_onnx_path = onnx_path
+
+            # Check if this is a Carve model (fixed 512x512)
+            is_carve_model = "lama_fp32" in onnx_path or "carve" in onnx_path.lower()
+            if is_carve_model:
+                logger.info("📦 Detected Carve ONNX model (fixed 512x512 input)")
+                self.onnx_fixed_size = (512, 512)
             else:
-                # Standard ONNX loading for non-FFT models
-                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-                self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
-                logger.info(f"✅ Standard ONNX model loaded")
+                self.onnx_fixed_size = None
+            
+            # Standard ONNX loading
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+            self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
             
             # Get input/output names
             self.onnx_input_names = [i.name for i in self.onnx_session.get_inputs()]
             self.onnx_output_names = [o.name for o in self.onnx_session.get_outputs()]
             
+            # Check input shapes to detect fixed-size models
+            input_shape = self.onnx_session.get_inputs()[0].shape
+            if len(input_shape) == 4 and input_shape[2] == 512 and input_shape[3] == 512:
+                self.onnx_fixed_size = (512, 512)
+                logger.info(f"  Model expects fixed size: 512x512")
+            
+            logger.info(f"✅ ONNX model loaded")
+            logger.info(f"  Inputs: {self.onnx_input_names}")
+            logger.info(f"  Outputs: {self.onnx_output_names}")
+            
             self.use_onnx = True
-            logger.info("✅ ONNX model ready for inference")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Unexpected error: {e}")
+            logger.error(f"❌ Failed to load ONNX: {e}")
             self.use_onnx = False
             return False
-    
+        
     def _convert_checkpoint_key(self, key):
         """Convert checkpoint key format to model format"""
         # model.24.weight -> model_24.weight
@@ -911,7 +870,7 @@ class LocalInpainter:
                 # Convert BGR to RGB
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 
-                # Pad images
+                # Always use padding - NO RESIZING
                 image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
                 mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
                 
@@ -922,22 +881,16 @@ class LocalInpainter:
                     mask_np = mask_padded.astype(np.float32) / 255.0
                     mask_np[mask_np < 0.5] = 0
                     mask_np[mask_np >= 0.5] = 1
-                    
-                    # Apply mask to input for AOT
                     img_np = img_np * (1 - mask_np[:, :, np.newaxis])
-                    
-                    # Convert to NCHW format
-                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
-                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
                 else:
-                    # LaMa normalization
+                    # Standard normalization
                     img_np = image_padded.astype(np.float32) / 255.0
                     mask_np = mask_padded.astype(np.float32) / 255.0
                     mask_np = (mask_np > 0) * 1.0
-                    
-                    # Convert to NCHW format
-                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
-                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                
+                # Convert to NCHW format
+                img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                mask_np = mask_np[np.newaxis, np.newaxis, ...]
                 
                 # Run ONNX inference
                 ort_inputs = {
@@ -950,15 +903,11 @@ class LocalInpainter:
                 
                 # Post-process output
                 if self.current_method == 'aot':
-                    # Denormalize from [-1, 1] to [0, 255]
                     result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
                 else:
-                    # Denormalize from [0, 1] to [0, 255]
                     result = output[0].transpose(1, 2, 0) * 255
                 
                 result = np.clip(np.round(result), 0, 255).astype(np.uint8)
-                
-                # Convert RGB to BGR
                 result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
                 
                 # Remove padding
