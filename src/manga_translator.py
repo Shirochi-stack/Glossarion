@@ -1546,10 +1546,36 @@ class MangaTranslator:
                         self._log("📝 Processing full image with DocTR")
                         ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
 
+                elif self.ocr_provider == 'rapidocr':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    # Get RapidOCR settings
+                    use_recognition = self.main_gui.config.get('rapidocr_use_recognition', True)
+                    language = self.main_gui.config.get('rapidocr_language', 'auto')
+                    detection_mode = self.main_gui.config.get('rapidocr_detection_mode', 'document')
+                    
+                    self._log(f"⚡ RapidOCR - Recognition: {'Full' if use_recognition else 'Detection Only'}")
+                    
+                    # ALWAYS process full image with RapidOCR for best results
+                    self._log("📊 Processing full image with RapidOCR")
+                    ocr_results = self.ocr_manager.detect_text(
+                        image, 
+                        'rapidocr',
+                        confidence=confidence_threshold,
+                        use_recognition=use_recognition,
+                        language=language,
+                        detection_mode=detection_mode
+                    )
+                    
+                    # RT-DETR detection only affects merging, not OCR
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("🤖 RT-DETR will be used for bubble-based merging")
+
                 else:
                     # Default processing for any other providers
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
-                
+
                 # Convert OCR results to TextRegion format
                 for result in ocr_results:
                     # Apply filtering
