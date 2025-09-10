@@ -3,7 +3,6 @@
 EPUB Converter - Compiles translated HTML files into EPUB format
 Supports extraction of translated titles from chapter content
 """
-
 import os
 import sys
 import io
@@ -3011,13 +3010,14 @@ img {
     
     def _create_gallery_page(self, book: epub.EpubBook, images: List[str],
                             css_items: List[epub.EpubItem], metadata: dict) -> epub.EpubHtml:
-        """Create image gallery page"""
+        """Create image gallery page - FIXED to avoid escaping HTML tags"""
         gallery_page = epub.EpubHtml(
             title="Gallery",
             file_name="gallery.xhtml",
             lang=metadata.get("language", "en")
         )
         
+        # Build the gallery body content
         gallery_body_parts = ['<h1>Image Gallery</h1>']
         for img in images:
             gallery_body_parts.append(
@@ -3026,15 +3026,36 @@ img {
                 f'</div>'
             )
         
+        gallery_body_content = '\n'.join(gallery_body_parts)
+        
+        # Build XHTML directly without going through ensure_compliance
+        # which might escape our HTML tags
         css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
         
-        gallery_page.content = FileUtils.ensure_bytes(
-            XHTMLConverter.validate(
-                XHTMLConverter.ensure_compliance(
-                    '\n'.join(gallery_body_parts), "Gallery", css_links
-                )
-            )
-        )
+        # Build the complete XHTML document manually
+        xhtml_content = f'''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+    <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Gallery</title>'''
+        
+        # Add CSS links
+        for css_link in css_links:
+            xhtml_content += f'\n<link rel="stylesheet" type="text/css" href="{css_link}" />'
+        
+        xhtml_content += f'''
+    </head>
+    <body>
+    {gallery_body_content}
+    </body>
+    </html>'''
+        
+        # Validate the XHTML
+        validated_content = XHTMLConverter.validate(xhtml_content)
+        
+        # Set the content
+        gallery_page.content = FileUtils.ensure_bytes(validated_content)
         
         # Associate CSS with gallery page
         if self.attach_css_to_chapters:
