@@ -4034,7 +4034,7 @@ class MangaTranslationTab:
         # Check if already exists
         if os.path.exists(save_path):
             self.local_model_path_var.set(save_path)
-            self.local_model_status.config(text="✅ Model already downloaded")
+            self.local_model_status_label.config(text="✅ Model already downloaded")
             messagebox.showinfo("Model Ready", f"Model already exists at:\n{save_path}")
             return
         
