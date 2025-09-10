@@ -173,7 +173,7 @@ class BubbleDetector:
         self.default_max_detections = 100
         
         # Cache directory for ONNX conversions
-        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'bubble_model_cache')
+        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'models')
         os.makedirs(self.cache_dir, exist_ok=True)
         
         # GPU availability
@@ -199,7 +199,7 @@ class BubbleDetector:
     def _save_config(self):
         """Save configuration to file."""
         try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
@@ -402,6 +402,16 @@ class BubbleDetector:
             
             logger.info("✅ RT-DETR model loaded successfully")
             logger.info("   Classes: Empty bubbles, Text bubbles, Free text")
+            
+            # Auto-convert to ONNX if environment variable is set
+            if os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true':
+                onnx_path = os.path.join(self.cache_dir, 'rtdetr_comic.onnx')
+                if self.convert_to_onnx('rtdetr', onnx_path):
+                    logger.info("🚀 RT-DETR converted to ONNX for faster inference")
+                    # Store ONNX path for later use
+                    self.config['rtdetr_onnx_path'] = onnx_path
+                    self._save_config()
+            
             return True
             
         except Exception as e:
@@ -819,38 +829,109 @@ class BubbleDetector:
     
     def convert_to_onnx(self, model_path: str, output_path: str = None) -> bool:
         """
-        Convert a YOLOv8 model to ONNX format.
+        Convert a YOLOv8 or RT-DETR model to ONNX format.
         
         Args:
-            model_path: Path to YOLOv8 .pt model
+            model_path: Path to model file or 'rtdetr' for loaded RT-DETR
             output_path: Path for ONNX output (auto-generated if None)
             
         Returns:
             True if conversion successful, False otherwise
         """
-        if not YOLO_AVAILABLE:
-            logger.error("Ultralytics package required for conversion")
-            return False
-        
         try:
             logger.info(f"🔄 Converting {model_path} to ONNX...")
             
-            # Load model
-            model = YOLO(model_path)
-            
             # Generate output path if not provided
             if output_path is None:
-                base_name = Path(model_path).stem
+                if model_path == 'rtdetr' and self.rtdetr_loaded:
+                    base_name = 'rtdetr_comic'
+                else:
+                    base_name = Path(model_path).stem
                 output_path = os.path.join(self.cache_dir, f"{base_name}.onnx")
             
-            # Export to ONNX
-            model.export(format='onnx', imgsz=640, simplify=True)
+            # Check if already exists
+            if os.path.exists(output_path) and not os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true':
+                logger.info(f"✅ ONNX model already exists: {output_path}")
+                return True
             
-            logger.info(f"✅ ONNX model saved to: {output_path}")
-            return True
+            # Handle RT-DETR conversion
+            if model_path == 'rtdetr' and self.rtdetr_loaded:
+                if not TORCH_AVAILABLE:
+                    logger.error("PyTorch required for RT-DETR ONNX conversion")
+                    return False
+                
+                # RT-DETR specific conversion
+                self.rtdetr_model.eval()
+                
+                # Create dummy input
+                dummy_input = torch.randn(1, 3, 640, 640)
+                if self.device == 'cuda':
+                    dummy_input = dummy_input.to('cuda')
+                
+                # Export with RT-DETR specific settings
+                torch.onnx.export(
+                    self.rtdetr_model,
+                    dummy_input,
+                    output_path,
+                    export_params=True,
+                    opset_version=16,  # RT-DETR needs higher opset
+                    do_constant_folding=True,
+                    input_names=['images'],
+                    output_names=['logits', 'boxes'],
+                    dynamic_axes={
+                        'images': {0: 'batch'},
+                        'logits': {0: 'batch'},
+                        'boxes': {0: 'batch'}
+                    }
+                )
+                
+                logger.info(f"✅ RT-DETR ONNX saved to: {output_path}")
+                return True
             
+            # Handle YOLOv8 conversion - FIXED
+            elif YOLO_AVAILABLE and os.path.exists(model_path):
+                logger.info(f"Loading YOLOv8 model from: {model_path}")
+                
+                # Load model
+                model = YOLO(model_path)
+                
+                # Export to ONNX - this returns the path to the exported model
+                logger.info("Exporting to ONNX format...")
+                exported_path = model.export(format='onnx', imgsz=640, simplify=True)
+                
+                # exported_path could be a string or Path object
+                exported_path = str(exported_path) if exported_path else None
+                
+                if exported_path and os.path.exists(exported_path):
+                    # Move to desired location if different
+                    if exported_path != output_path:
+                        import shutil
+                        logger.info(f"Moving ONNX from {exported_path} to {output_path}")
+                        shutil.move(exported_path, output_path)
+                    
+                    logger.info(f"✅ YOLOv8 ONNX saved to: {output_path}")
+                    return True
+                else:
+                    # Fallback: check if it was created with expected name
+                    expected_onnx = model_path.replace('.pt', '.onnx')
+                    if os.path.exists(expected_onnx):
+                        if expected_onnx != output_path:
+                            import shutil
+                            shutil.move(expected_onnx, output_path)
+                        logger.info(f"✅ YOLOv8 ONNX saved to: {output_path}")
+                        return True
+                    else:
+                        logger.error(f"ONNX export failed - no output file found")
+                        return False
+            
+            else:
+                logger.error(f"Cannot convert {model_path}: Model not found or dependencies missing")
+                return False
+                
         except Exception as e:
             logger.error(f"Conversion failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def batch_detect(self, image_paths: List[str], **kwargs) -> Dict[str, List[Tuple[int, int, int, int]]]:
