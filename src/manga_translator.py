@@ -1255,7 +1255,9 @@ class MangaTranslator:
                             else:
                                 # Process each region with manga-ocr
                                 for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = image[y:y+h, x:x+w]
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
                                     result = self.ocr_manager.detect_text(cropped, 'manga-ocr', confidence=confidence_threshold)
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
@@ -1308,7 +1310,9 @@ class MangaTranslator:
                             else:
                                 # Process each region with Qwen2-VL
                                 for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = image[y:y+h, x:x+w]
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
                                     result = self.ocr_manager.detect_text(cropped, 'Qwen2-VL', confidence=confidence_threshold)
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
@@ -1359,7 +1363,9 @@ class MangaTranslator:
                             else:
                                 # Original sequential processing
                                 for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = image[y:y+h, x:x+w]
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
                                     result = self.ocr_manager.detect_text(
                                         cropped, 
                                         'custom-api', 
@@ -1427,7 +1433,9 @@ class MangaTranslator:
                             else:
                                 # Process each region with EasyOCR
                                 for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = image[y:y+h, x:x+w]
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
                                     result = self.ocr_manager.detect_text(cropped, 'easyocr', confidence=confidence_threshold)
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
@@ -1490,7 +1498,9 @@ class MangaTranslator:
                             else:
                                 # Process each region with PaddleOCR
                                 for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = image[y:y+h, x:x+w]
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
                                     result = self.ocr_manager.detect_text(cropped, 'paddleocr', confidence=confidence_threshold)
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
@@ -1537,7 +1547,9 @@ class MangaTranslator:
                             else:
                                 # Process each region with DocTR
                                 for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = image[y:y+h, x:x+w]
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
                                     result = self.ocr_manager.detect_text(cropped, 'doctr', confidence=confidence_threshold)
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
@@ -1688,8 +1700,13 @@ class MangaTranslator:
             """Process a single region with OCR"""
             x, y, w, h = bbox
             try:
-                # Crop the region
-                cropped = image[y:y+h, x:x+w]
+                # Use the safe crop method
+                cropped = self._safe_crop_region(image, x, y, w, h)
+                
+                # Skip if crop failed
+                if cropped is None:
+                    self._log(f"⚠️ Skipping region {index} - invalid crop", "warning")
+                    return
                 
                 # Run OCR on this region
                 result = self.ocr_manager.detect_text(
@@ -1816,6 +1833,34 @@ class MangaTranslator:
         
         self._log(f"   Azure pre-grouping: {len(lines)} lines → {len(pregrouped)} blocks")
         return pregrouped
+
+    def _safe_crop_region(self, image, x, y, w, h):
+        """Safely crop a region from image with validation"""
+        img_h, img_w = image.shape[:2]
+        
+        # Validate and clamp coordinates
+        x = max(0, min(x, img_w - 1))
+        y = max(0, min(y, img_h - 1))
+        x2 = min(x + w, img_w)
+        y2 = min(y + h, img_h)
+        
+        # Ensure valid region
+        if x2 <= x or y2 <= y:
+            self._log(f"⚠️ Invalid crop region: ({x},{y},{w},{h}) for image {img_w}x{img_h}", "warning")
+            return None
+        
+        # Minimum size check
+        if (x2 - x) < 5 or (y2 - y) < 5:
+            self._log(f"⚠️ Region too small: {x2-x}x{y2-y} pixels", "warning")
+            return None
+        
+        cropped = image[y:y2, x:x2]
+        
+        if cropped.size == 0:
+            self._log(f"⚠️ Empty crop result", "warning")
+            return None
+        
+        return cropped
 
     def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
         """Detect text using Azure Computer Vision"""
@@ -2624,6 +2669,10 @@ class MangaTranslator:
         try:
             import time
             import traceback
+            import json
+            
+            # Initialize response_text at the start
+            response_text = ""
             
             self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
             
@@ -2802,7 +2851,6 @@ class MangaTranslator:
                     estimated_tokens = text_tokens + image_tokens
                     self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
             
-            # [Rest of the method remains the same - API call, response handling, etc.]
             # Make API call using the client's send method (matching translate_text)
             self._log(f"🌐 Sending full page context to API...")
             self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
@@ -2821,6 +2869,12 @@ class MangaTranslator:
                     stop_check_fn=self._check_stop
                 )
                 api_time = time.time() - start_time
+
+                # Extract content from response
+                if hasattr(response, 'content'):
+                    response_text = response.content.strip()
+                else:
+                    response_text = str(response).strip()
                 
                 # CHECK 6: Immediately after API response
                 if self._check_stop():
@@ -2828,6 +2882,7 @@ class MangaTranslator:
                     return {}
                 
                 self._log(f"✅ API responded in {api_time:.2f} seconds")
+                self._log(f"📥 Received response ({len(response_text)} chars)")
                 
             except Exception as api_error:
                 api_time = time.time() - start_time
@@ -2882,93 +2937,48 @@ class MangaTranslator:
                     self._log(traceback.format_exc(), "error")
                     raise
             
-            # Extract content from response (matching translate_text method)
-            if hasattr(response, 'content'):
-                response_text = response.content.strip()
-            else:
-                response_text = str(response).strip()
-            
-            self._log(f"📥 Received response ({len(response_text)} chars)")
-            
             # CHECK 8: Before parsing response
             if self._check_stop():
                 self._log("⏹️ Translation stopped before parsing response", "warning")
                 return {}
             
-            self._log(f"🔍 Raw response type: {type(response)}")
+            # Check if we got a response
+            if not response_text:
+                self._log("❌ Empty response from API", "error")
+                return {}
+            
+            self._log(f"🔍 Raw response type: {type(response_text)}")
             self._log(f"🔍 Raw response preview: '{response_text[:100]}...'")
             
-            # Check if the response looks like a Python literal (tuple/string representation)
+            # Clean up response_text (handle Python literals, escapes, etc.)
             if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
                 self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
-                original_response = response_text
                 try:
-                    # Try to evaluate it as a Python literal
                     import ast
                     evaluated = ast.literal_eval(response_text)
-                    self._log(f"📦 Evaluated type: {type(evaluated)}")
-                    
                     if isinstance(evaluated, tuple):
-                        # Take the first element of the tuple
                         response_text = str(evaluated[0])
-                        self._log(f"📦 Extracted from tuple: '{response_text[:50]}...'")
                     elif isinstance(evaluated, str):
                         response_text = evaluated
-                        self._log(f"📦 Extracted string: '{response_text[:50]}...'")
-                    else:
-                        self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
-                        
                 except Exception as e:
                     self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
-                    self._log(f"⚠️ Original content: {original_response[:200]}", "warning")
-                    
-                    # Try regex as fallback
-                    import re
-                    match = re.search(r"^\(['\"](.+)['\"]\)$", response_text, re.DOTALL)
-                    if match:
-                        response_text = match.group(1)
-                        self._log(f"📦 Regex extracted: '{response_text[:50]}...'")
             
-            # Additional check for escaped content
+            # Handle escaped content
             if '\\\\' in response_text or '\\n' in response_text or "\\'" in response_text or '\\"' in response_text:
                 self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
-                try:
-                    # DON'T use unicode_escape for Korean text - it corrupts it
-                    # Instead, just replace the escape sequences manually
-                    
-                    # Handle quotes and apostrophes
-                    response_text = response_text.replace("\\'", "'")  # Escaped apostrophe
-                    response_text = response_text.replace('\\"', '"')  # Escaped quote
-                    response_text = response_text.replace("\\`", "`")  # Escaped backtick
-                    response_text = response_text.replace("\\u2019", "'")  # Unicode right single quote
-                    response_text = response_text.replace("\\u2018", "'")  # Unicode left single quote
-                    response_text = response_text.replace("\\u201c", '"')  # Unicode left double quote
-                    response_text = response_text.replace("\\u201d", '"')  # Unicode right double quote
-                    
-                    # Handle newlines and other escapes
-                    response_text = response_text.replace('\\n', '\n')
-                    response_text = response_text.replace('\\\\', '\\')
-                    response_text = response_text.replace('\\/', '/')
-                    response_text = response_text.replace('\\t', '\t')
-                    response_text = response_text.replace('\\r', '\r')
-                    
-                    # Clean up smart quotes using Unicode escape codes
-                    response_text = response_text.replace('\u2018', "'")  # Left single quotation mark
-                    response_text = response_text.replace('\u2019', "'")  # Right single quotation mark
-                    response_text = response_text.replace('\u201c', '"')  # Left double quotation mark
-                    response_text = response_text.replace('\u201d', '"')  # Right double quotation mark
-                    
-                    self._log(f"📦 Unescaped content safely")
-                except Exception as e:
-                    self._log(f"⚠️ Failed to unescape: {e}", "warning")
+                response_text = response_text.replace("\\'", "'")
+                response_text = response_text.replace('\\"', '"')
+                response_text = response_text.replace('\\n', '\n')
+                response_text = response_text.replace('\\\\', '\\')
+                response_text = response_text.replace('\\/', '/')
+                response_text = response_text.replace('\\t', '\t')
+                response_text = response_text.replace('\\r', '\r')
             
-            # Clean up unwanted trailing apostrophes/quotes
+            # Clean up quotes
             import re
-            
-            # Define response_text to match translated (since it was being used incorrectly)
-            response_text = re.sub(r"['''\"`]$", "", response_text.strip())  # Remove trailing
-            response_text = re.sub(r"^['''\"`]", "", response_text.strip())   # Remove leading
-            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
+            response_text = re.sub(r"['''\"`]$", "", response_text.strip())
+            response_text = re.sub(r"^['''\"`]", "", response_text.strip())
+            response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)
             
             # Try to parse as JSON
             translations = {}
@@ -2976,79 +2986,50 @@ class MangaTranslator:
                 # Fix any JSON formatting issues first
                 response_text = self._fix_json_response(response_text)
                 
-                # Clean up response if needed
+                # Clean up markdown code blocks if present
                 if "```json" in response_text:
-                    import re
                     match = re.search(r'```json\s*(.*?)```', response_text, re.DOTALL)
                     if match:
                         response_text = match.group(1)
                 elif "```" in response_text:
-                    import re
                     match = re.search(r'```\s*(.*?)```', response_text, re.DOTALL)
                     if match:
                         response_text = match.group(1)
                 
                 # Parse JSON
-                import json
-                translations = json.loads(response_text)
+                parsed = json.loads(response_text)
+                
+                if isinstance(parsed, list):
+                    # Array of translations only - map by position
+                    translations = {}
+                    for i, region in enumerate(regions):
+                        if i < len(parsed):
+                            translations[region.text] = parsed[i]
+                elif isinstance(parsed, dict):
+                    translations = parsed
+                
                 self._log(f"✅ Successfully parsed {len(translations)} translations")
                 
             except json.JSONDecodeError as e:
                 self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
                 self._log(f"Response preview: {response_text[:200]}...", "warning")
                 
-                # Fix encoding issues first
-                response_text = self._fix_encoding_issues(response_text)
-                
-                # Try parsing JSON again after fixing encoding
+                # Try fallback regex extraction
                 try:
-                    translations = json.loads(response_text)
-                    self._log(f"✅ Successfully parsed {len(translations)} translations after encoding fix", "success")
-                except json.JSONDecodeError:
-                    # If it still fails, continue with the existing fallback
-                    # Fallback: try to fix common JSON issues
-                    try:
-                        self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
-                        
-                        # Method 1: Use json.dumps to properly escape the string, then parse it
-                        import re
-                        
-                        # First, try to extract key-value pairs manually
-                        translations = {}
-                        
-                        # Pattern to match "key": "value" pairs, handling quotes and newlines
-                        pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
-                        matches = re.findall(pattern, response_text)
-                        
-                        for key, value in matches:
-                            # Unescape the value
-                            try:
-                                # Replace literal \n with actual newlines
-                                value = value.replace('\\n', '\n')
-                                value = value.replace('\\"', '"')
-                                value = value.replace('\\\\', '\\')
-                                translations[key] = value
-                                self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
-                            except Exception as ex:
-                                self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
-                        
-                        if translations:
-                            self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
-                        else:
-                            # Method 2: Try to clean and re-parse
-                            cleaned = response_text
-                            # Remove any actual newlines within string values
-                            cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
-                            cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
-                            cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
-                            
-                            translations = json.loads(cleaned)
-                            self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
-                            
-                    except Exception as e2:
-                        self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
-                        self._log(f"   Returning empty translations", "error")
-                        return {}
+                    import re
+                    translations = {}
+                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                    matches = re.findall(pattern, response_text)
+                    
+                    for key, value in matches:
+                        value = value.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                        translations[key] = value
+                    
+                    if translations:
+                        self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
+                except Exception as e2:
+                    self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
+                    return {}
             
             # Map translations back to regions
             result = {}
@@ -3061,81 +3042,55 @@ class MangaTranslator:
             # Clean all translation values to remove quotes
             translation_values = [self._clean_translation_text(t) for t in translation_values]
 
-            # Determine which mapping method to use
-            use_position_based = len(translation_values) >= len(regions) - 1  # Allow 1 missing
-
-            if use_position_based:
-                # Position-based mapping
-                self._log(f"📊 Using position-based mapping ({len(translation_values)} translations for {len(regions)} regions)")
-                
-                for i, region in enumerate(regions):
-                    # CHECK 9: During mapping
-                    if i % 10 == 0 and self._check_stop():
-                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
-                        return result
-                    
-                    # Use position-based translation
-                    if i < len(translation_values):
-                        translated = translation_values[i]
-                    else:
-                        translated = region.text  # Fallback
-                    
-                    # Apply glossary
-                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
-                        for entry in self.main_gui.manual_glossary:
-                            if 'source' in entry and 'target' in entry:
-                                if entry['source'] in translated:
-                                    translated = translated.replace(entry['source'], entry['target'])
-                    
-                    result[region.text] = translated
-                    region.translated_text = translated
-                    self._log(f"  ✅ Applied translation for: '{region.text[:40]}...'", "info")
-                    
-                    if translated != region.text:
-                        all_originals.append(f"[{i+1}] {region.text}")
-                        all_translations.append(f"[{i+1}] {translated}")
+            # Position-based mapping
+            self._log(f"📊 Mapping {len(translation_values)} translations to {len(regions)} regions")
             
-            else:
-                # Key-based matching
-                self._log(f"📊 Using key-based mapping")
+            for i, region in enumerate(regions):
+                if i % 10 == 0 and self._check_stop():
+                    self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                    return result
                 
-                for i, region in enumerate(regions):
-                    if i % 10 == 0 and self._check_stop():
-                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
-                        return result
-                    
+                # Get translation by position or key
+                translated = ""
+                
+                # Try position-based first
+                if i < len(translation_values):
+                    translated = translation_values[i]
+                # Try key-based fallback
+                elif region.text in translations:
+                    translated = self._clean_translation_text(translations[region.text])
+                # Try indexed key
+                else:
                     key = f"[{i}] {region.text}"
-                    
                     if key in translations:
                         translated = self._clean_translation_text(translations[key])
-                    elif region.text in translations:
-                        translated = self._clean_translation_text(translations[region.text])
-                    else:
-                        translated = region.text
-                    
-                    # Apply glossary
-                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
-                        for entry in self.main_gui.manual_glossary:
-                            if 'source' in entry and 'target' in entry:
-                                if entry['source'] in translated:
-                                    translated = translated.replace(entry['source'], entry['target'])
-                    
-                    result[region.text] = translated
-                    region.translated_text = translated
-                    
-                    if translated != region.text:
-                        self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'", "info")
-                        all_originals.append(f"[{i+1}] {region.text}")
-                        all_translations.append(f"[{i+1}] {translated}")
-          
-            # Save as ONE combined history entry for the entire page
+                
+                # Don't use original Japanese text if no translation found
+                if not translated or translated == region.text:
+                    self._log(f"  ⚠️ No translation for region {i}, leaving empty", "warning")
+                    translated = ""
+                
+                # Apply glossary if we have a translation
+                if translated and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                    for entry in self.main_gui.manual_glossary:
+                        if 'source' in entry and 'target' in entry:
+                            if entry['source'] in translated:
+                                translated = translated.replace(entry['source'], entry['target'])
+                
+                result[region.text] = translated
+                region.translated_text = translated
+                
+                if translated:
+                    all_originals.append(f"[{i+1}] {region.text}")
+                    all_translations.append(f"[{i+1}] {translated}")
+                    self._log(f"  ✅ Translated: '{region.text[:30]}...' → '{translated[:30]}...'", "debug")
+            
+            # Save history if enabled
             if self.history_manager and self.contextual_enabled and all_originals:
                 try:
-                    # Combine all text from this page into a single exchange
                     combined_original = "\n".join(all_originals)
                     combined_translation = "\n".join(all_translations)
                     
-                    # Save as a single history entry
                     self.history_manager.append_to_history(
                         user_content=combined_original,
                         assistant_content=combined_translation,
@@ -3145,30 +3100,15 @@ class MangaTranslator:
                     )
                     
                     self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
-                    
-                    # Check current history status
-                    current_history = self.history_manager.load_history()
-                    current_exchanges = len(current_history) // 2
-                    self._log(f"📚 History now contains {current_exchanges} exchanges (pages)", "info")
-                    
-                    if self.history_manager.will_reset_on_next_append(
-                        self.translation_history_limit, 
-                        self.rolling_history_enabled
-                    ):
-                        mode = "roll over" if self.rolling_history_enabled else "reset"
-                        self._log(f"📚 History will {mode} on next page (at limit: {self.translation_history_limit})", "info")
-                    
                 except Exception as e:
                     self._log(f"⚠️ Failed to save page to history: {str(e)}", "warning")
             
             return result
             
         except Exception as e:
-            
-            # CHECK 10: In exception handler
             if self._check_stop():
                 self._log("⏹️ Translation stopped due to user request", "warning")
-                return {}  
+                return {}
                 
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
@@ -3252,6 +3192,13 @@ class MangaTranslator:
         # Method 2: Extract key-value pairs more aggressively
         # Look for patterns like: text_without_quotes: translation
         extracted = {}
+
+        if extracted:
+            # DON'T rebuild as key-value JSON - just return the values as an array
+            values_only = list(extracted.values())
+            rebuilt = json.dumps(values_only, ensure_ascii=False)
+            self._log(f"✅ Extracted {len(values_only)} translations (values only)", "info")
+            return rebuilt
         
         # Split by lines and look for key-value patterns
         lines = response_text.split('\n')
@@ -3304,40 +3251,39 @@ class MangaTranslator:
         
         if extracted:
             # Rebuild as valid JSON
-            rebuilt = json.dumps(translations, ensure_ascii=False)
+            rebuilt = json.dumps(extracted, ensure_ascii=False)
             self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
             return rebuilt
         
         # Method 3: Try regex extraction as last resort
-        # Pattern for both quoted and unquoted keys
-        patterns = [
-            # Pattern 1: Quoted keys
-            r'"([^"]+)"\s*:\s*"([^"]*(?:\\"[^"]*)*)"',
-            # Pattern 2: Unquoted keys (for CJK text)
-            r'([^:"\s][^:"]*[^:"\s])\s*:\s*"([^"]*)"',
-            # Pattern 3: More flexible
-            r'([^:"{}\s][^:"{}\n]*?)\s*:\s*([^,}\n]+)'
-        ]
-        
         extracted = {}
-        for pattern in patterns:
-            matches = re.finditer(pattern, response_text, re.MULTILINE | re.DOTALL)
-            for match in matches:
-                key = match.group(1).strip()
-                value = match.group(2).strip()
-                
-                # Clean up key and value
-                key = key.replace('\\n', '\n').strip()
-                if value.startswith('"') and value.endswith('"'):
-                    value = value[1:-1]
-                value = value.replace('\\n', '\n').replace('\\"', '"')
-                
-                if key and value:
-                    extracted[key] = value
+
+        if extracted:
+            # Return only the values, not the key-value pairs
+            values_only = list(extracted.values())
+            rebuilt = json.dumps(values_only, ensure_ascii=False)
+            self._log(f"✅ Extracted {len(values_only)} translations from regex", "info")
+            return rebuilt
+        
+        # Pattern to match "key": "value" pairs
+        pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+        matches = re.findall(pattern, response_text)
+        
+        for key, value in matches:
+            # Unescape the value
+            try:
+                value = value.replace('\\n', '\n')
+                value = value.replace('\\"', '"')
+                value = value.replace('\\\\', '\\')
+                extracted[key] = value  # Store in extracted dict
+                self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
+            except Exception as ex:
+                self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
         
         if extracted:
+            # Rebuild as valid JSON using extracted (not translations)
             rebuilt = json.dumps(extracted, ensure_ascii=False)
-            self._log(f"✅ Extracted {len(extracted)} translations with regex", "info")
+            self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
             return rebuilt
         
         # If all else fails, return original
