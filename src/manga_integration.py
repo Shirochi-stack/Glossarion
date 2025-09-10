@@ -4,7 +4,7 @@ Enhanced GUI Integration module for Manga Translation with text visibility contr
 Integrates with TranslatorGUI using WindowManager and existing infrastructure
 Now includes full page context mode with customizable prompt
 """
-
+import sys
 import os
 import json
 import threading
@@ -312,6 +312,10 @@ class MangaTranslationTab:
             selected_model_key = model_confirmed['model_key']
             model_id = model_confirmed['model_id']
             total_size_mb = model_sizes['Qwen2-VL'][selected_model_key]
+        elif provider == 'rapidocr':
+            total_size_mb = 50  # Approximate size for display
+            model_id = None
+            selected_model_key = None
         else:
             total_size_mb = model_sizes.get(provider, 500)
             model_id = None
@@ -572,8 +576,27 @@ class MangaTranslationTab:
                     
                     self.dialog.after(0, self._check_provider_status)
                     
+                elif provider == 'rapidocr':
+                    progress_label.config(text="📦 RapidOCR Installation Instructions")
+                    add_log("RapidOCR requires manual pip installation")
+                    progress_var.set(20)
+                    
+                    add_log("Command to run:")
+                    add_log("pip install rapidocr-onnxruntime")
+                    progress_var.set(50)
+                    
+                    add_log("")
+                    add_log("After installation:")
+                    add_log("1. Close this dialog")
+                    add_log("2. Click 'Load Model' to initialize RapidOCR")
+                    add_log("3. Status should show '✅ Model loaded'")
+                    progress_var.set(100)
+                    
+                    progress_label.config(text="📦 Installation instructions shown")
+                    status_label.config(text="Manual pip install required")
+                    
                     download_btn.config(state=tk.DISABLED)
-                    cancel_btn.config(text="Close", bootstyle="success")
+                    cancel_btn.config(text="Close")                        
                         
             except Exception as e:
                 progress_label.config(text="❌ Download failed")
@@ -719,18 +742,34 @@ class MangaTranslationTab:
                 self.provider_status_label.config(text="❌ Not installed", fg="red")
                 
                 # Categorize providers
-                huggingface_providers = ['manga-ocr', 'Qwen2-VL']
-                pip_providers = ['easyocr', 'paddleocr', 'doctr']
-                
+                huggingface_providers = ['manga-ocr', 'Qwen2-VL', 'rapidocr']  # Move rapidocr here
+                pip_providers = ['easyocr', 'paddleocr', 'doctr']  # Remove rapidocr from here
+
                 if provider in huggingface_providers:
                     # For HuggingFace models, show BOTH buttons
-                    # Load Model button (will fail if dependencies missing and tell user to install)
                     self.provider_setup_btn.config(text="Load Model", bootstyle="primary")
                     self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
                     
                     # Download button
-                    self.download_model_btn.config(text=f"📥 Download {provider}")
+                    if provider == 'rapidocr':
+                        self.download_model_btn.config(text="📥 Install RapidOCR")
+                    else:
+                        self.download_model_btn.config(text=f"📥 Download {provider}")
                     self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
+
+                elif provider in pip_providers:
+                    # Check if running as .exe
+                    if getattr(sys, 'frozen', False):
+                        # Running as .exe - can't pip install
+                        self.provider_status_label.config(
+                            text="❌ Not available in .exe", 
+                            fg="red"
+                        )
+                        self._log(f"⚠️ {provider} cannot be installed in standalone .exe version", "warning")
+                    else:
+                        # Running from Python - can pip install
+                        self.provider_setup_btn.config(text="Install", bootstyle="success")
+                        self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
                     
                 elif provider in pip_providers:
                     # Check if running as .exe
@@ -1042,6 +1081,7 @@ class MangaTranslationTab:
             'custom-api': "OCR: Custom API | Translation: API Key",
             'google': "OCR: Google Cloud Vision | Translation: API Key",
             'azure': "OCR: Azure Computer Vision | Translation: API Key",
+            'rapidocr': "OCR: RapidOCR (Local) | Translation: API Key", 
             'manga-ocr': "OCR: Manga OCR (Japanese) | Translation: API Key",
             'Qwen2-VL': "OCR: Qwen2-VL (Korean) | Translation: API Key",
             'easyocr': "OCR: EasyOCR (Multi-lang) | Translation: API Key",
@@ -1080,6 +1120,7 @@ class MangaTranslationTab:
             'google': "Google Cloud Vision (requires credentials)",
             'azure': "Azure Computer Vision (requires API key)",
             'manga-ocr': "Manga OCR - optimized for Japanese manga",
+            'rapidocr': "RapidOCR - fast local OCR with region detection",
             'Qwen2-VL': "Qwen2-VL - a big model", 
             'easyocr': "EasyOCR - multi-language support",
             'paddleocr': "PaddleOCR - CJK language support",
@@ -1247,10 +1288,11 @@ class MangaTranslationTab:
             ('custom-api', 'Your Own key'),
             ('google', 'Google Cloud Vision'),
             ('azure', 'Azure Computer Vision'),
+            ('rapidocr', '⚡ RapidOCR (Fast & Local)'),
             ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
             ('Qwen2-VL', '🇰🇷 Qwen2-VL (Korean)'),
             ('easyocr', '🌏 EasyOCR (Multi-lang)'),
-            ('paddleocr', '🐼 PaddleOCR'),
+            #('paddleocr', '🐼 PaddleOCR'),
             ('doctr', '📄 DocTR'),
         ]
 
@@ -1774,7 +1816,7 @@ class MangaTranslationTab:
         local_model_combo = ttk.Combobox(
             local_model_frame,
             textvariable=self.local_model_type_var,
-            values=['lama', 'aot', 'mat', 'sd_local', 'anime'],
+            values= ['aot', 'lama', 'anime', 'mat', 'ollama', 'sd_local'],
             state='readonly',
             width=15
         )
@@ -2585,7 +2627,7 @@ class MangaTranslationTab:
         self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'lama'))
         
         # Load model paths
-        for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
+        for model_type in  ['aot', 'lama', 'anime', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             if model_type == self.local_model_type_var.get():
                 self.local_model_path_var = tk.StringVar(value=path)
@@ -2719,6 +2761,17 @@ class MangaTranslationTab:
         self.visual_context_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
         self.qwen2vl_model_size = config.get('qwen2vl_model_size', '1')  # Default to '1' (2B)
         
+        # Initialize RapidOCR settings
+        self.rapidocr_use_recognition_var = tk.BooleanVar(
+            value=self.main_gui.config.get('rapidocr_use_recognition', True)
+        )
+        self.rapidocr_language_var = tk.StringVar(
+            value=self.main_gui.config.get('rapidocr_language', 'auto')
+        )
+        self.rapidocr_detection_mode_var = tk.StringVar(
+            value=self.main_gui.config.get('rapidocr_detection_mode', 'document')
+        )
+
         # Output settings
         self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
         self.create_subfolder_var.trace('w', lambda *args: self._save_rendering_settings())
@@ -2754,7 +2807,7 @@ class MangaTranslationTab:
                 self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
             
             # Save model paths for each type
-            for model_type in ['lama', 'aot', 'mat', 'sd_local','anime']:
+            for model_type in  ['aot', 'lama', 'anime', 'mat', 'ollama', 'sd_local']:
                 if hasattr(self, 'local_model_type_var'):
                     if model_type == self.local_model_type_var.get():
                         if hasattr(self, 'local_model_path_var'):
@@ -2861,7 +2914,15 @@ class MangaTranslationTab:
             # Qwen and custom models             
             if hasattr(self, 'qwen2vl_model_size'):
                 self.main_gui.config['qwen2vl_model_size'] = self.qwen2vl_model_size
-            
+
+            # RapidOCR specific settings
+            if hasattr(self, 'rapidocr_use_recognition_var'):
+                self.main_gui.config['rapidocr_use_recognition'] = self.rapidocr_use_recognition_var.get()
+            if hasattr(self, 'rapidocr_detection_mode_var'):
+                self.main_gui.config['rapidocr_detection_mode'] = self.rapidocr_detection_mode_var.get()
+            if hasattr(self, 'rapidocr_language_var'):
+                self.main_gui.config['rapidocr_language'] = self.rapidocr_language_var.get()
+
             # Call main GUI's save_config to persist to file
             if hasattr(self.main_gui, 'save_config'):
                 self.main_gui.save_config(show_message=False)
@@ -3907,7 +3968,7 @@ class MangaTranslationTab:
         
         # Check for ONNX cache
         if path.endswith(('.pt', '.pth', '.safetensors')):
-            onnx_dir = os.path.join(os.path.dirname(path), 'onnx_cache')
+            onnx_dir = os.path.join(os.path.dirname(path), 'models')
             if os.path.exists(onnx_dir):
                 # Check if ONNX file exists for this model
                 model_hash = hashlib.md5(path.encode()).hexdigest()[:8]
@@ -3937,11 +3998,12 @@ class MangaTranslationTab:
         """Actually download the model for the selected type"""
         model_type = self.local_model_type_var.get()
         
-        # Define URLs for each model type (matching manga_settings_dialog)
+        # Define URLs for each model type
         model_urls = {
             'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
-            'lama': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'lama': 'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt',
             'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'cv2_onnx': 'https://github.com/opencv/opencv_zoo/raw/main/models/image_inpainting_lama/lama_fp32.onnx',  # OpenCV's LAMA ONNX
             'mat': '',  # User must provide
             'ollama': '',  # Not applicable
             'sd_local': ''  # User must provide
@@ -3950,33 +4012,30 @@ class MangaTranslationTab:
         url = model_urls.get(model_type, '')
         
         if not url:
-            if model_type == 'ollama':
-                messagebox.showinfo("Ollama", "Ollama doesn't require a download. Run 'ollama pull llava' in terminal.")
-                return
-            else:
-                # Ask user for URL
-                from tkinter import simpledialog
-                url = simpledialog.askstring(
-                    f"{model_type.upper()} Model URL",
-                    f"Enter the download URL for {model_type.upper()} model:",
-                    parent=self.dialog
-                )
-                if not url:
-                    return
+            messagebox.showinfo("Manual Download", 
+                f"Please manually download and browse for {model_type} model")
+            return
         
-        # Select download location
-        default_filename = f"{model_type}_model.pt"
-        save_path = filedialog.asksaveasfilename(
-            title=f"Save {model_type.upper()} Model",
-            defaultextension=".pt",
-            initialfile=default_filename,
-            filetypes=[
-                ("Model files", "*.pt *.pth *.ckpt *.safetensors *.onnx"),
-                ("All files", "*.*")
-            ]
-        )
+        # Determine filename
+        filename_map = {
+            'aot': 'aot_traced.pt',
+            'lama': 'big-lama.pt',
+            'anime': 'anime-manga-big-lama.pt',
+            'fcf_onnx': 'fcf.onnx',
+            'sd_inpaint_onnx': 'sd_inpaint_unet.onnx'
+        }
         
-        if not save_path:
+        filename = filename_map.get(model_type, f'{model_type}.pt')
+        save_path = os.path.join('models', filename)
+        
+        # Create models directory
+        os.makedirs('models', exist_ok=True)
+        
+        # Check if already exists
+        if os.path.exists(save_path):
+            self.local_model_path_var.set(save_path)
+            self.local_model_status.config(text="✅ Model already downloaded")
+            messagebox.showinfo("Model Ready", f"Model already exists at:\n{save_path}")
             return
         
         # Download the model
@@ -4067,15 +4126,17 @@ class MangaTranslationTab:
             except requests.exceptions.RequestException as e:
                 # Error - update UI in main thread
                 if not cancel_download['value']:
+                    error_msg = str(e)  # Capture error before lambda
                     progress_dialog.after(0, lambda: [
                         progress_dialog.destroy(),
-                        self._download_failed(str(e))
+                        self._download_failed(error_msg)
                     ])
             except Exception as e:
                 if not cancel_download['value']:
+                    error_msg = str(e)  # Capture error before lambda
                     progress_dialog.after(0, lambda: [
                         progress_dialog.destroy(),
-                        self._download_failed(str(e))
+                        self._download_failed(error_msg)
                     ])
         
         # Start download in background thread
