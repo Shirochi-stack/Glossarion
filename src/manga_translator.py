@@ -20,6 +20,7 @@ import threading
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from bubble_detector import BubbleDetector
+from TransateKRtoEN import send_with_interrupt
 
 # Google Cloud Vision imports
 try:
@@ -304,10 +305,12 @@ class MangaTranslator:
     def set_stop_flag(self, stop_flag):
         """Set the stop flag for checking interruptions"""
         self.stop_flag = stop_flag
+        self.cancel_requested = False
 
     def _check_stop(self):
         """Check if stop has been requested"""
         if self.stop_flag and self.stop_flag.is_set():
+            self.cancel_requested = True
             return True
         return False
 
@@ -2377,10 +2380,13 @@ class MangaTranslator:
             api_time = 0  # Initialize to avoid NameError
             
             try:
-                response = self.client.send(
+                response = send_with_interrupt(
                     messages=messages,
+                    client=self.client,
                     temperature=self.temperature,
-                    max_tokens=self.max_tokens
+                    max_tokens=self.max_tokens,
+                    stop_check_fn=self._check_stop
+
                 )
                 api_time = time.time() - start_time
                 self._log(f"✅ API responded in {api_time:.2f} seconds")
@@ -2438,6 +2444,21 @@ class MangaTranslator:
             else:
                 # If response is a string or other format
                 translated = str(response).strip()
+
+            # ADD THIS DEBUG CODE:
+            self._log(f"🔍 RAW API RESPONSE DEBUG:", "debug")
+            self._log(f"  Type: {type(response)}", "debug")
+            self._log(f"  Raw content length: {len(translated)}", "debug")
+            self._log(f"  First 200 chars: {translated[:200]}", "debug")
+            self._log(f"  Last 200 chars: {translated[-200:]}", "debug")
+
+            # Check if both Japanese and English are present
+            has_japanese = any('\u3040' <= c <= '\u9fff' or '\uac00' <= c <= '\ud7af' for c in translated)
+            has_english = any('a' <= c.lower() <= 'z' for c in translated)
+
+            if has_japanese and has_english:
+                self._log(f"  ⚠️ WARNING: Response contains BOTH Japanese AND English!", "warning")
+                self._log(f"  This might be causing the duplicate text issue", "warning")
 
             # Check if response looks like JSON (contains both { and } and : characters)
             if '{' in translated and '}' in translated and ':' in translated:
@@ -2792,10 +2813,12 @@ class MangaTranslator:
             api_time = 0  # Initialize to avoid NameError
             
             try:
-                response = self.client.send(
+                response = send_with_interrupt(
                     messages=messages,
+                    client=self.client,
                     temperature=self.temperature,
-                    max_tokens=self.max_tokens  # Use the configured max tokens without multiplication
+                    max_tokens=self.max_tokens,
+                    stop_check_fn=self._check_stop
                 )
                 api_time = time.time() - start_time
                 
@@ -3031,15 +3054,18 @@ class MangaTranslator:
             result = {}
             all_originals = []
             all_translations = []
-            
+
             # Extract translation values in order
             translation_values = list(translations.values()) if translations else []
 
             # Clean all translation values to remove quotes
             translation_values = [self._clean_translation_text(t) for t in translation_values]
-            
-            # Use position-based mapping if counts match
-            if len(translation_values) >= len(regions) - 1:  # Allow 1 missing
+
+            # Determine which mapping method to use
+            use_position_based = len(translation_values) >= len(regions) - 1  # Allow 1 missing
+
+            if use_position_based:
+                # Position-based mapping
                 self._log(f"📊 Using position-based mapping ({len(translation_values)} translations for {len(regions)} regions)")
                 
                 for i, region in enumerate(regions):
@@ -3068,8 +3094,11 @@ class MangaTranslator:
                     if translated != region.text:
                         all_originals.append(f"[{i+1}] {region.text}")
                         all_translations.append(f"[{i+1}] {translated}")
+            
             else:
-                # Fallback to key-based matching
+                # Key-based matching
+                self._log(f"📊 Using key-based mapping")
+                
                 for i, region in enumerate(regions):
                     if i % 10 == 0 and self._check_stop():
                         self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
@@ -3078,9 +3107,9 @@ class MangaTranslator:
                     key = f"[{i}] {region.text}"
                     
                     if key in translations:
-                        translated = self._clean_translation_text(translations[key])  # Clean here
+                        translated = self._clean_translation_text(translations[key])
                     elif region.text in translations:
-                        translated = self._clean_translation_text(translations[region.text])  # Clean here
+                        translated = self._clean_translation_text(translations[region.text])
                     else:
                         translated = region.text
                     
@@ -3095,10 +3124,10 @@ class MangaTranslator:
                     region.translated_text = translated
                     
                     if translated != region.text:
-                        self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
+                        self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'", "info")
                         all_originals.append(f"[{i+1}] {region.text}")
                         all_translations.append(f"[{i+1}] {translated}")
-            
+          
             # Save as ONE combined history entry for the entire page
             if self.history_manager and self.contextual_enabled and all_originals:
                 try:
@@ -3275,7 +3304,7 @@ class MangaTranslator:
         
         if extracted:
             # Rebuild as valid JSON
-            rebuilt = json.dumps(extracted, ensure_ascii=False)
+            rebuilt = json.dumps(translations, ensure_ascii=False)
             self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
             return rebuilt
         
@@ -4070,6 +4099,9 @@ class MangaTranslator:
                 if not region.translated_text:
                     continue
                 
+                self._log(f"DEBUG: Rendering - Original: '{region.text[:30]}...' -> Translated: '{region.translated_text[:30]}...'", "debug")
+
+                
                 # APPLY CAPS LOCK TRANSFORMATION HERE (First location)
                 if self.force_caps_lock:
                     region.translated_text = region.translated_text.upper()
@@ -4158,6 +4190,9 @@ class MangaTranslator:
             for region in adjusted_regions:
                 if not region.translated_text:
                     continue
+                    
+                self._log(f"DEBUG: Rendering - Original: '{region.text[:30]}...' -> Translated: '{region.translated_text[:30]}...'", "debug")
+
                 
                 # APPLY CAPS LOCK TRANSFORMATION HERE
                 if self.force_caps_lock:
@@ -5513,15 +5548,8 @@ class MangaTranslator:
                 translations = self.translate_full_page_context(regions, image_path)
                 
                 if translations:
-                    translated_count = 0
-                    for region in regions:
-                        if region.text in translations:
-                            region.translated_text = translations[region.text]
-                            translated_count += 1
-                            self._log(f"   ✅ Applied translation for: '{region.text[:30]}...'")
-                        else:
-                            self._log(f"   ⚠️ No translation found for: '{region.text[:30]}...'", "warning")
-                    
+                    # Count how many were translated (they're already applied in translate_full_page_context)
+                    translated_count = sum(1 for r in regions if hasattr(r, 'translated_text') and r.translated_text and r.translated_text != r.text)
                     self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions)} regions translated")
                 else:
                     self._log("❌ Full page context translation failed", "error")
