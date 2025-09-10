@@ -1816,7 +1816,7 @@ class MangaTranslationTab:
         local_model_combo = ttk.Combobox(
             local_model_frame,
             textvariable=self.local_model_type_var,
-            values= ['aot', 'lama', 'anime', 'mat', 'ollama', 'sd_local'],
+            values= ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local'],
             state='readonly',
             width=15
         )
@@ -2627,7 +2627,7 @@ class MangaTranslationTab:
         self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'lama'))
         
         # Load model paths
-        for model_type in  ['aot', 'lama', 'anime', 'mat', 'ollama', 'sd_local']:
+        for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             if model_type == self.local_model_type_var.get():
                 self.local_model_path_var = tk.StringVar(value=path)
@@ -2807,7 +2807,7 @@ class MangaTranslationTab:
                 self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
             
             # Save model paths for each type
-            for model_type in  ['aot', 'lama', 'anime', 'mat', 'ollama', 'sd_local']:
+            for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local']:
                 if hasattr(self, 'local_model_type_var'):
                     if model_type == self.local_model_type_var.get():
                         if hasattr(self, 'local_model_path_var'):
@@ -4002,8 +4002,8 @@ class MangaTranslationTab:
         model_urls = {
             'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
             'lama': 'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt',
+            'lama_onnx': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',  
             'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
-            'cv2_onnx': 'https://github.com/opencv/opencv_zoo/raw/main/models/image_inpainting_lama/lama_fp32.onnx',  # OpenCV's LAMA ONNX
             'mat': '',  # User must provide
             'ollama': '',  # Not applicable
             'sd_local': ''  # User must provide
