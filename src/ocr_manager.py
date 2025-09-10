@@ -4,9 +4,9 @@ OCR Manager for handling multiple OCR providers
 Handles installation, model downloading, and OCR processing
 Updated with HuggingFace donut model and proper bubble detection integration
 """
-
 import os
 import sys
+import cv2
 import json
 import subprocess
 import threading
@@ -982,7 +982,7 @@ class EasyOCRProvider(OCRProvider):
 
 
 class PaddleOCRProvider(OCRProvider):
-    """PaddleOCR provider"""
+    """PaddleOCR provider with memory safety measures"""
     
     def check_installation(self) -> bool:
         """Check if paddleocr is installed"""
@@ -997,51 +997,83 @@ class PaddleOCRProvider(OCRProvider):
         """Install paddleocr"""
         pass
     
-    def load_model(self) -> bool:
-        """Load paddleocr model"""
+    def load_model(self, **kwargs) -> bool:
+        """Load paddleocr model with memory-safe configurations"""
         try:
             if not self.is_installed and not self.check_installation():
                 self._log("❌ paddleocr not installed", "error")
                 return False
             
             self._log("🔥 Loading PaddleOCR model...")
+            
+            # Set memory-safe environment variables BEFORE importing
+            import os
+            os.environ['OMP_NUM_THREADS'] = '1'  # Prevent OpenMP conflicts
+            os.environ['MKL_NUM_THREADS'] = '1'  # Prevent MKL conflicts
+            os.environ['OPENBLAS_NUM_THREADS'] = '1'  # Prevent OpenBLAS conflicts
+            os.environ['FLAGS_use_mkldnn'] = '0'  # Disable MKL-DNN
+            
             from paddleocr import PaddleOCR
             
-            # Updated API - minimal parameters only
-            self.model = PaddleOCR(
-                use_angle_cls=True,
-                lang='ch'  # Supports japan, korean, ch, en
-                # Removed use_gpu and show_log - not supported anymore
-            )
-            self.is_loaded = True
+            # Try memory-safe configurations
+            configs_to_try = [
+                # Config 1: Most memory-safe configuration
+                {
+                    'use_angle_cls': False,  # Disable angle to save memory
+                    'lang': 'ch',
+                    'rec_batch_num': 1,  # Process one at a time
+                    'max_text_length': 100,  # Limit text length
+                    'drop_score': 0.5,  # Higher threshold to reduce detections
+                    'cpu_threads': 1,  # Single thread to avoid conflicts
+                },
+                # Config 2: Minimal memory footprint
+                {
+                    'lang': 'ch',
+                    'rec_batch_num': 1,
+                    'cpu_threads': 1,
+                },
+                # Config 3: Absolute minimal
+                {
+                    'lang': 'ch'
+                },
+                # Config 4: Empty config
+                {}
+            ]
             
-            self._log("✅ PaddleOCR model loaded successfully")
-            return True
+            for i, config in enumerate(configs_to_try):
+                try:
+                    self._log(f"   Trying configuration {i+1}/{len(configs_to_try)}: {config}")
+                    
+                    # Force garbage collection before loading
+                    import gc
+                    gc.collect()
+                    
+                    self.model = PaddleOCR(**config)
+                    self.is_loaded = True
+                    self.current_config = config
+                    self._log(f"✅ PaddleOCR loaded successfully with config: {config}")
+                    return True
+                except Exception as e:
+                    error_str = str(e)
+                    self._log(f"   Config {i+1} failed: {error_str}", "debug")
+                    
+                    # Clean up on failure
+                    if hasattr(self, 'model'):
+                        del self.model
+                    gc.collect()
+                    continue
+            
+            self._log(f"❌ PaddleOCR failed to load with any configuration", "error")
+            return False
             
         except Exception as e:
             self._log(f"❌ Failed to load paddleocr: {str(e)}", "error")
-            
-            # Try with even fewer parameters
-            try:
-                from paddleocr import PaddleOCR
-                self.model = PaddleOCR(lang='japan')  # Just language
-                self.is_loaded = True
-                self._log("✅ PaddleOCR loaded with minimal config")
-                return True
-            except:
-                # Final fallback - absolute minimal
-                try:
-                    from paddleocr import PaddleOCR
-                    self.model = PaddleOCR()  # Default everything
-                    self.is_loaded = True
-                    self._log("✅ PaddleOCR loaded with defaults")
-                    return True
-                except Exception as e:
-                    self._log(f"❌ PaddleOCR completely failed: {str(e)}", "error")
-                    return False
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+            return False
     
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
-        """Detect text using paddleocr with better error handling"""
+        """Detect text with memory safety measures"""
         results = []
         
         try:
@@ -1049,112 +1081,172 @@ class PaddleOCRProvider(OCRProvider):
                 if not self.load_model():
                     return results
             
-            # Ensure image is in the correct format for PaddleOCR
             import cv2
+            import numpy as np
+            import gc
+            
+            # Memory safety: Ensure image isn't too large
+            h, w = image.shape[:2] if len(image.shape) >= 2 else (0, 0)
+            
+            # Limit image size to prevent memory issues
+            MAX_DIMENSION = 1500
+            if h > MAX_DIMENSION or w > MAX_DIMENSION:
+                scale = min(MAX_DIMENSION/h, MAX_DIMENSION/w)
+                new_h, new_w = int(h*scale), int(w*scale)
+                self._log(f"⚠️ Resizing large image from {w}x{h} to {new_w}x{new_h} for memory safety", "warning")
+                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                scale_factor = 1/scale
+            else:
+                scale_factor = 1.0
+            
+            # Ensure correct format
             if len(image.shape) == 2:  # Grayscale
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 4:  # Batch
+                image = image[0]
             
-            # Run OCR
-            try:
-                ocr_results = self.model.ocr(image)
-            except Exception as ocr_error:
-                self._log(f"PaddleOCR failed on image: {ocr_error}", "error")
-                return results
-            
-            # Debug: Check what PaddleOCR actually returned
-            self._log(f"PaddleOCR returned type: {type(ocr_results)}", "debug")
-            
-            # Handle various return types from PaddleOCR
-            if ocr_results is None:
-                self._log("PaddleOCR returned None", "debug")
-                return results
-            
-            if isinstance(ocr_results, int):
-                # Sometimes returns status code
-                if ocr_results == 0:
-                    self._log("PaddleOCR returned status 0 (no text found)", "debug")
+            # Ensure uint8 type
+            if image.dtype != np.uint8:
+                if image.max() <= 1.0:
+                    image = (image * 255).astype(np.uint8)
                 else:
-                    self._log(f"PaddleOCR returned status code: {ocr_results}", "debug")
+                    image = image.astype(np.uint8)
+            
+            # Make a copy to avoid memory corruption
+            image_copy = image.copy()
+            
+            # Force garbage collection before OCR
+            gc.collect()
+            
+            # Process with timeout protection
+            import signal
+            import threading
+            
+            ocr_results = None
+            ocr_error = None
+            
+            def run_ocr():
+                nonlocal ocr_results, ocr_error
+                try:
+                    ocr_results = self.model.ocr(image_copy)
+                except Exception as e:
+                    ocr_error = e
+            
+            # Run OCR in a separate thread with timeout
+            ocr_thread = threading.Thread(target=run_ocr)
+            ocr_thread.daemon = True
+            ocr_thread.start()
+            ocr_thread.join(timeout=30)  # 30 second timeout
+            
+            if ocr_thread.is_alive():
+                self._log("❌ PaddleOCR timeout - taking too long", "error")
                 return results
             
-            if not isinstance(ocr_results, list):
-                self._log(f"Unexpected PaddleOCR result type: {type(ocr_results)}", "warning")
-                return results
+            if ocr_error:
+                raise ocr_error
             
-            # Handle empty list
-            if len(ocr_results) == 0:
-                self._log("No text detected by PaddleOCR", "debug")
-                return results
+            # Parse results
+            results = self._parse_ocr_results(ocr_results)
             
-            # Check first element to determine format
-            first_element = ocr_results[0] if ocr_results else None
-            
-            # If first element is None or empty, skip
-            if first_element is None or (isinstance(first_element, list) and len(first_element) == 0):
-                self._log("PaddleOCR returned empty results", "debug")
-                return results
-            
-            # Process results based on format
-            if isinstance(first_element, list):
-                # Standard format: list of detection results
-                for item in ocr_results:
-                    if not item:  # Skip None or empty
-                        continue
-                        
-                    # Each item should be a list of detections for this image
-                    if isinstance(item, list):
-                        for detection in item:
-                            if not detection or len(detection) < 2:
-                                continue
-                            
-                            try:
-                                # detection[0] = bbox points
-                                # detection[1] = (text, confidence)
-                                bbox_points = detection[0]
-                                text_data = detection[1]
-                                
-                                if not isinstance(text_data, tuple) or len(text_data) < 2:
-                                    continue
-                                
-                                text = str(text_data[0])  # Ensure it's a string
-                                confidence = float(text_data[1])  # Ensure it's a float
-                                
-                                if not text.strip():
-                                    continue
-                                
-                                # Calculate bounding box
-                                xs = [float(p[0]) for p in bbox_points]
-                                ys = [float(p[1]) for p in bbox_points]
-                                x_min, x_max = min(xs), max(xs)
-                                y_min, y_max = min(ys), max(ys)
-                                
-                                results.append(OCRResult(
-                                    text=text,
-                                    bbox=(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)),
-                                    confidence=confidence,
-                                    vertices=[(int(p[0]), int(p[1])) for p in bbox_points]
-                                ))
-                                
-                            except Exception as e:
-                                self._log(f"Failed to parse detection: {e}", "debug")
-                                continue
-            else:
-                self._log(f"Unknown PaddleOCR result format: {type(first_element)}", "warning")
+            # Scale coordinates back if image was resized
+            if scale_factor != 1.0 and results:
+                for r in results:
+                    x, y, width, height = r.bbox
+                    r.bbox = (int(x*scale_factor), int(y*scale_factor), 
+                            int(width*scale_factor), int(height*scale_factor))
+                    r.vertices = [(int(v[0]*scale_factor), int(v[1]*scale_factor)) 
+                                for v in r.vertices]
             
             if results:
                 self._log(f"✅ Detected {len(results)} text regions", "info")
             else:
-                self._log("No valid text regions found", "debug")
+                self._log("No text regions found", "debug")
+            
+            # Clean up
+            del image_copy
+            gc.collect()
             
         except Exception as e:
-            # Better error message
             error_msg = str(e) if str(e) else type(e).__name__
-            self._log(f"❌ Error in paddleocr detection: {error_msg}", "error")
+            
+            if "memory" in error_msg.lower() or "0x" in error_msg:
+                self._log("❌ Memory access violation in PaddleOCR", "error")
+                self._log("   This is a known Windows issue with PaddleOCR", "info")
+                self._log("   Please switch to EasyOCR or manga-ocr instead", "warning")
+            elif "trace_order.size()" in error_msg:
+                self._log("❌ PaddleOCR internal error", "error")
+                self._log("   Please switch to EasyOCR or manga-ocr", "warning")
+            else:
+                self._log(f"❌ Error in paddleocr detection: {error_msg}", "error")
+            
             import traceback
             self._log(traceback.format_exc(), "debug")
         
         return results
-
+    
+    def _parse_ocr_results(self, ocr_results) -> List[OCRResult]:
+        """Parse OCR results safely"""
+        results = []
+        
+        if isinstance(ocr_results, bool) and ocr_results == False:
+            return results
+        
+        if ocr_results is None or not isinstance(ocr_results, list):
+            return results
+        
+        if len(ocr_results) == 0:
+            return results
+        
+        # Handle batch format
+        if isinstance(ocr_results[0], list) and len(ocr_results[0]) > 0:
+            first_item = ocr_results[0][0]
+            if isinstance(first_item, list) and len(first_item) > 0:
+                if isinstance(first_item[0], (list, tuple)) and len(first_item[0]) == 2:
+                    ocr_results = ocr_results[0]
+        
+        # Parse detections
+        for detection in ocr_results:
+            if not detection or isinstance(detection, bool):
+                continue
+            
+            if not isinstance(detection, (list, tuple)) or len(detection) < 2:
+                continue
+            
+            try:
+                bbox_points = detection[0]
+                text_data = detection[1]
+                
+                if not isinstance(bbox_points, (list, tuple)) or len(bbox_points) != 4:
+                    continue
+                
+                if not isinstance(text_data, (tuple, list)) or len(text_data) < 2:
+                    continue
+                
+                text = str(text_data[0]).strip()
+                confidence = float(text_data[1])
+                
+                if not text or confidence < 0.3:
+                    continue
+                
+                xs = [float(p[0]) for p in bbox_points]
+                ys = [float(p[1]) for p in bbox_points]
+                x_min, x_max = min(xs), max(xs)
+                y_min, y_max = min(ys), max(ys)
+                
+                if (x_max - x_min) < 5 or (y_max - y_min) < 5:
+                    continue
+                
+                results.append(OCRResult(
+                    text=text,
+                    bbox=(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)),
+                    confidence=confidence,
+                    vertices=[(int(p[0]), int(p[1])) for p in bbox_points]
+                ))
+                
+            except Exception:
+                continue
+        
+        return results
 
 class DocTROCRProvider(OCRProvider):
     """DocTR OCR provider"""
@@ -1262,6 +1354,95 @@ class DocTROCRProvider(OCRProvider):
         return results
 
 
+class RapidOCRProvider(OCRProvider):
+    """RapidOCR provider for fast local OCR"""
+    
+    def check_installation(self) -> bool:
+        """Check if rapidocr is installed"""
+        try:
+            import rapidocr_onnxruntime
+            self.is_installed = True
+            return True
+        except ImportError:
+            return False
+    
+    def install(self, progress_callback=None) -> bool:
+        """Install rapidocr (requires manual pip install)"""
+        # RapidOCR requires manual installation
+        if progress_callback:
+            progress_callback("RapidOCR requires manual pip installation")
+        self._log("Run: pip install rapidocr-onnxruntime", "info")
+        return False  # Always return False since we can't auto-install
+    
+    def load_model(self) -> bool:
+        """Load RapidOCR model"""
+        try:
+            if not self.is_installed and not self.check_installation():
+                self._log("RapidOCR not installed", "error")
+                return False
+            
+            self._log("Loading RapidOCR...")
+            from rapidocr_onnxruntime import RapidOCR
+            
+            self.model = RapidOCR()
+            self.is_loaded = True
+            
+            self._log("RapidOCR model loaded successfully")
+            return True
+            
+        except Exception as e:
+            self._log(f"Failed to load RapidOCR: {str(e)}", "error")
+            return False
+    
+    def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
+        """Detect text using RapidOCR"""
+        if not self.is_loaded:
+            self._log("RapidOCR model not loaded", "error")
+            return []
+        
+        results = []
+        
+        try:
+            # Convert numpy array to PIL Image for RapidOCR
+            if len(image.shape) == 3:
+                # BGR to RGB
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                image_rgb = image
+            
+            # RapidOCR expects PIL Image or numpy array
+            ocr_results, _ = self.model(image_rgb)
+            
+            if ocr_results:
+                for result in ocr_results:
+                    # RapidOCR returns [bbox, text, confidence]
+                    bbox_points = result[0]  # 4 corner points
+                    text = result[1]
+                    confidence = float(result[2])
+                    
+                    if not text or not text.strip():
+                        continue
+                    
+                    # Convert 4-point bbox to x,y,w,h format
+                    xs = [point[0] for point in bbox_points]
+                    ys = [point[1] for point in bbox_points]
+                    x_min, x_max = min(xs), max(xs)
+                    y_min, y_max = min(ys), max(ys)
+                    
+                    results.append(OCRResult(
+                        text=text.strip(),
+                        bbox=(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)),
+                        confidence=confidence,
+                        vertices=[(int(p[0]), int(p[1])) for p in bbox_points]
+                    ))
+            
+            self._log(f"Detected {len(results)} text regions")
+            
+        except Exception as e:
+            self._log(f"Error in RapidOCR detection: {str(e)}", "error")
+        
+        return results
+
 class OCRManager:
     """Manager for multiple OCR providers"""
     
@@ -1273,6 +1454,7 @@ class OCRManager:
             'easyocr': EasyOCRProvider(log_callback),
             'paddleocr': PaddleOCRProvider(log_callback),
             'doctr': DocTROCRProvider(log_callback),
+            'rapidocr': RapidOCRProvider(log_callback),
             'Qwen2-VL': Qwen2VL(log_callback)
         }
         self.current_provider = None
