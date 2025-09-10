@@ -1815,6 +1815,7 @@ class MangaSettingsDialog:
             self.dialog.update_idletasks()
             
             if 'RT-DETR' in detector:
+                # RT-DETR handling (works fine)
                 from bubble_detector import BubbleDetector
                 bd = BubbleDetector()
                 
@@ -1825,9 +1826,15 @@ class MangaSettingsDialog:
                     self.rtdetr_status_label.config(text="❌ Failed", fg='red')
                     messagebox.showerror("Error", f"Failed to download RT-DETR model")
             else:
-                # Download YOLOv8 model
+                # FIX FOR YOLO: Download to a simpler local path
                 from huggingface_hub import hf_hub_download
+                import os
                 
+                # Create models directory
+                models_dir = "models"
+                os.makedirs(models_dir, exist_ok=True)
+                
+                # Define simple local filenames
                 filename_map = {
                     'ogkalu/comic-speech-bubble-detector-yolov8m': 'comic-speech-bubble-detector.pt',
                     'ogkalu/comic-text-segmenter-yolov8m': 'comic-text-segmenter.pt',
@@ -1835,8 +1842,16 @@ class MangaSettingsDialog:
                 }
                 
                 filename = filename_map.get(model_url, 'model.pt')
-                local_path = hf_hub_download(repo_id=model_url, filename=filename)
                 
+                # Download to cache first
+                cached_path = hf_hub_download(repo_id=model_url, filename=filename)
+                
+                # Copy to local models directory with simple path
+                import shutil
+                local_path = os.path.join(models_dir, filename)
+                shutil.copy2(cached_path, local_path)
+                
+                # Set the simple local path instead of the cache path
                 self.bubble_model_path.set(local_path)
                 self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
                 messagebox.showinfo("Success", f"Model downloaded to:\n{local_path}")
@@ -1886,26 +1901,64 @@ class MangaSettingsDialog:
             model_path = self.bubble_model_path.get()
             
             if 'RT-DETR' in detector:
+                # RT-DETR uses model_id directly
                 if bd.load_rtdetr_model(model_id=model_path):
                     self.rtdetr_status_label.config(text="✅ Ready", fg='green')
                     messagebox.showinfo("Success", f"RT-DETR model loaded successfully!")
                 else:
                     self.rtdetr_status_label.config(text="❌ Failed", fg='red')
             else:
-                # Load YOLOv8 model
+                # YOLOv8 - CHECK LOCAL MODELS FOLDER FIRST
+                if model_path.startswith('ogkalu/'):
+                    # It's a HuggingFace ID - check if already downloaded
+                    filename_map = {
+                        'ogkalu/comic-speech-bubble-detector-yolov8m': 'comic-speech-bubble-detector.pt',
+                        'ogkalu/comic-text-segmenter-yolov8m': 'comic-text-segmenter.pt',
+                        'ogkalu/manga-text-detector-yolov8s': 'manga-text-detector.pt'
+                    }
+                    
+                    filename = filename_map.get(model_path, 'model.pt')
+                    local_path = os.path.join('models', filename)
+                    
+                    # Check if it exists locally
+                    if os.path.exists(local_path):
+                        # Use the local file
+                        model_path = local_path
+                        self.bubble_model_path.set(local_path)  # Update the field
+                    else:
+                        # Not downloaded yet
+                        messagebox.showwarning("Download Required", 
+                            f"Model not found locally.\nPlease download it first using the Download button.")
+                        self.rtdetr_status_label.config(text="❌ Not downloaded", fg='orange')
+                        return
+                
+                # Now model_path should be a local file
+                if not os.path.exists(model_path):
+                    messagebox.showerror("Error", f"Model file not found: {model_path}")
+                    self.rtdetr_status_label.config(text="❌ File not found", fg='red')
+                    return
+                
+                # Load the YOLOv8 model from local file
                 if bd.load_model(model_path):
                     self.rtdetr_status_label.config(text="✅ Ready", fg='green')
                     messagebox.showinfo("Success", f"YOLOv8 model loaded successfully!")
+                    
+                    # Auto-convert to ONNX if enabled
+                    if os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true':
+                        onnx_path = model_path.replace('.pt', '.onnx')
+                        if not os.path.exists(onnx_path):
+                            if bd.convert_to_onnx(model_path, onnx_path):
+                                logger.info(f"✅ Converted to ONNX: {onnx_path}")
                 else:
                     self.rtdetr_status_label.config(text="❌ Failed", fg='red')
-            
+                
         except ImportError:
             self.rtdetr_status_label.config(text="❌ Missing deps", fg='red')
             messagebox.showerror("Error", "Install transformers: pip install transformers")
         except Exception as e:
             self.rtdetr_status_label.config(text="❌ Error", fg='red')
             messagebox.showerror("Error", f"Failed to load: {e}")
-
+        
     def _toggle_bubble_controls(self):
         """Enable/disable bubble detection controls"""
         enabled = self.bubble_detection_enabled.get()
