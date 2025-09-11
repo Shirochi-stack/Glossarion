@@ -2435,6 +2435,16 @@ class MangaTranslator:
                 )
                 api_time = time.time() - start_time
                 self._log(f"✅ API responded in {api_time:.2f} seconds")
+
+                # Extract content from response
+                if hasattr(response, 'content'):
+                    response_text = response.content
+                else:
+                    response_text = str(response)
+
+                self._log(f"📥 Received response ({len(response_text)} chars)")
+                self._log(f"🔍 Raw response type: {type(response_text)}")
+                self._log(f"🔍 Raw response preview: {response_text[:500]}...")
                 
             except Exception as api_error:
                 api_time = time.time() - start_time
@@ -3025,41 +3035,79 @@ class MangaTranslator:
             # Try to parse as JSON
             translations = {}
             try:
-                # Fix any JSON formatting issues first
-                response_text = self._fix_json_response(response_text)
+                # Strip markdown blocks more aggressively
+                import re
+                import json
                 
-                # Clean up markdown code blocks if present
-                if "```json" in response_text:
-                    match = re.search(r'```json\s*(.*?)```', response_text, re.DOTALL)
-                    if match:
-                        response_text = match.group(1)
-                elif "```" in response_text:
-                    match = re.search(r'```\s*(.*?)```', response_text, re.DOTALL)
-                    if match:
-                        response_text = match.group(1)
+                # Method 1: Find JSON object directly (most reliable)
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    json_text = json_match.group(0)
+                    try:
+                        translations = json.loads(json_text)
+                        self._log(f"✅ Successfully parsed {len(translations)} translations (direct extraction)")
+                    except json.JSONDecodeError:
+                        # Try to fix the extracted JSON
+                        json_text = self._fix_json_response(json_text)
+                        translations = json.loads(json_text)
+                        self._log(f"✅ Successfully parsed {len(translations)} translations (after fix)")
+                else:
+                    # Method 2: Try stripping markdown if no JSON found
+                    cleaned = response_text
+                    
+                    # Remove markdown code blocks
+                    if '```' in cleaned:
+                        # This pattern handles ```json, ``json, ``` or ``
+                        patterns = [
+                            r'```json\s*\n?(.*?)```',
+                            r'``json\s*\n?(.*?)``',
+                            r'```\s*\n?(.*?)```',
+                            r'``\s*\n?(.*?)``'
+                        ]
+                        
+                        for pattern in patterns:
+                            match = re.search(pattern, cleaned, re.DOTALL)
+                            if match:
+                                cleaned = match.group(1).strip()
+                                break
+                    
+                    # Try to parse the cleaned text
+                    translations = json.loads(cleaned)
+                    self._log(f"✅ Successfully parsed {len(translations)} translations (after markdown strip)")
                 
-                # Parse JSON
-                parsed = json.loads(response_text)
-                
-                if isinstance(parsed, list):
+                # Handle different response formats
+                if isinstance(translations, list):
                     # Array of translations only - map by position
-                    translations = {}
+                    temp = {}
                     for i, region in enumerate(regions):
-                        if i < len(parsed):
-                            translations[region.text] = parsed[i]
-                elif isinstance(parsed, dict):
-                    translations = parsed
+                        if i < len(translations):
+                            temp[region.text] = translations[i]
+                    translations = temp
                 
-                self._log(f"✅ Successfully parsed {len(translations)} translations")
+                self._log(f"📊 Total translations: {len(translations)}")
                 
-                self._log(f"🔍 DEBUG: Full translations dict:", "debug")
-                for key, value in translations.items():
-                    self._log(f"  Key: [{key}]", "debug")
-                    self._log(f"  Value: [{value}]", "debug")
+            except Exception as e:
+                self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
+                self._log(f"Response preview: {response_text[:500]}...", "warning")
                 
-            except json.JSONDecodeError as e:
-                self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
-                self._log(f"Response preview: {response_text[:2000]}...", "warning")
+                # Fallback: try regex extraction
+                try:
+                    import re
+                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                    matches = re.findall(pattern, response_text)
+                    
+                    for key, value in matches:
+                        # Unescape the value
+                        value = value.replace('\\n', '\n')
+                        value = value.replace('\\"', '"')
+                        value = value.replace('\\\\', '\\')
+                        translations[key] = value
+                    
+                    if translations:
+                        self._log(f"✅ Recovered {len(translations)} translations using regex")
+                except:
+                    self._log("❌ All parsing attempts failed", "error")
+                    return {}
                 
                 # Try fallback regex extraction
                 try:
