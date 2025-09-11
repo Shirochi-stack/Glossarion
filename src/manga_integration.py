@@ -3919,13 +3919,13 @@ class MangaTranslationTab:
                 
                 # Update the translator's inpainter if it exists
                 if hasattr(self, 'translator') and self.translator:
-                    # Force reinitialize with new model
+                    # Force reinitialize with new model - DELETE the attributes completely
                     if hasattr(self.translator, 'local_inpainter'):
-                        self.translator.local_inpainter = None
+                        delattr(self.translator, 'local_inpainter')
                     if hasattr(self.translator, '_last_local_method'):
-                        self.translator._last_local_method = None
+                        delattr(self.translator, '_last_local_method')
                     if hasattr(self.translator, '_last_local_model_path'):
-                        self.translator._last_local_model_path = None
+                        delattr(self.translator, '_last_local_model_path')
                 
                 # After 3 seconds, revert to normal status display
                 self.dialog.after(3000, self._update_local_model_status)
