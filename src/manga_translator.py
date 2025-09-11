@@ -3482,12 +3482,28 @@ class MangaTranslator:
         try:
             from local_inpainter import LocalInpainter, HybridInpainter, AnimeMangaInpaintModel
             
+            # LOAD THE SETTINGS FROM CONFIG FIRST
+            # The dialog saves it as 'manga_local_inpaint_model' at root level
+            saved_local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
+            saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
+            
+            # Update manga_settings with the saved values
+            if 'inpainting' not in self.manga_settings:
+                self.manga_settings['inpainting'] = {}
+            self.manga_settings['inpainting']['method'] = saved_inpaint_method
+            self.manga_settings['inpainting']['local_method'] = saved_local_method
+            
+            # Now get the values (they'll be correct now)
             inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
             
             if inpaint_method == 'local':
-                # Get current settings
+                # This will now get the correct saved value
                 local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
-                model_path = self.manga_settings.get('inpainting', {}).get(f'{local_method}_model_path', '')
+                
+                # Model path is saved with manga_ prefix
+                model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                
+                self._log(f"Using local method: {local_method} (loaded from config)", "info")
                 
                 # Initialize tracking attributes if they don't exist
                 if not hasattr(self, '_last_local_method'):
