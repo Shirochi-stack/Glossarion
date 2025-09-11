@@ -383,6 +383,9 @@ class MangaSettingsDialog:
     
     def show_dialog(self):
         """Display the settings dialog using WindowManager"""
+        # Set initialization flag to prevent auto-saves during setup
+        self._initializing = True
+        
         # Use WindowManager to create scrollable dialog
         if self.main_gui.wm._force_safe_ratios:
             max_width_ratio = 0.5
@@ -420,7 +423,10 @@ class MangaSettingsDialog:
         self._create_cloud_api_tab(self.cloud_tab)
         
         # DISABLE SCROLL WHEEL ON ALL SPINBOXES
-        self.dialog.after(10, lambda: self._disable_all_spinbox_scrolling(self.dialog))       
+        self.dialog.after(10, lambda: self._disable_all_spinbox_scrolling(self.dialog))
+        
+        # Clear initialization flag after setup is complete
+        self._initializing = False
         
         # Button frame at bottom (inside scrollable frame for proper scrolling)
         button_frame = tk.Frame(scrollable_frame)
@@ -2364,128 +2370,205 @@ class MangaSettingsDialog:
             self.line_spacing_var.set(1.4)
             self.max_lines_var.set(12)
     
+
+    def _save_rendering_settings(self, *args):
+        """Auto-save font and rendering settings when controls change"""
+        # Don't save during initialization
+        if hasattr(self, '_initializing') and self._initializing:
+            return
+        
+        try:
+            # Ensure rendering section exists in settings
+            if 'rendering' not in self.settings:
+                self.settings['rendering'] = {}
+            
+            # Save font size controls if they exist
+            if hasattr(self, 'font_size_mode_var'):
+                self.settings['rendering']['font_size_mode'] = self.font_size_mode_var.get()
+                self.settings['rendering']['fixed_font_size'] = self.fixed_font_size_var.get()
+                self.settings['rendering']['font_scale'] = self.font_scale_var.get()
+                self.settings['rendering']['auto_fit_style'] = self.auto_fit_style_var.get()
+                
+                # Save min/max for auto mode
+                if hasattr(self, 'min_font_size_var'):
+                    self.settings['rendering']['auto_min_size'] = self.min_font_size_var.get()
+                if hasattr(self, 'max_font_size_var'):
+                    self.settings['rendering']['auto_max_size'] = self.max_font_size_var.get()
+            
+            # Update config
+            self.config['manga_settings'] = self.settings
+            
+            # Save to file immediately
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config()
+                print(f"Auto-saved rendering settings")
+            
+        except Exception as e:
+            print(f"Error auto-saving rendering settings: {e}")
+
     def _save_settings(self):
         """Save all settings including expanded iteration controls"""
-        # Collect all settings
-        self.settings['preprocessing']['enabled'] = self.preprocess_enabled.get()
-        self.settings['preprocessing']['auto_detect_quality'] = self.auto_detect.get()
-        self.settings['preprocessing']['contrast_threshold'] = self.contrast_threshold.get()
-        self.settings['preprocessing']['sharpness_threshold'] = self.sharpness_threshold.get()
-        self.settings['preprocessing']['enhancement_strength'] = self.enhancement_strength.get()
-        self.settings['preprocessing']['max_image_dimension'] = self.max_dimension.get()
-        self.settings['preprocessing']['max_image_pixels'] = self.max_pixels.get()
-        self.settings['preprocessing']['chunk_height'] = self.chunk_height.get()
-        self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap.get()
-        
-        # OCR settings
-        self.settings['ocr']['language_hints'] = [code for code, var in self.lang_vars.items() if var.get()]
-        self.settings['ocr']['confidence_threshold'] = self.confidence_threshold.get()
-        self.settings['ocr']['text_detection_mode'] = self.detection_mode.get()
-        self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold.get()
-        self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation.get()
-        self.settings['ocr']['azure_merge_multiplier'] = self.azure_merge_multiplier.get()
-        self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled.get()
-        self.settings['ocr']['bubble_model_path'] = self.bubble_model_path.get()
-        self.settings['ocr']['bubble_confidence'] = self.bubble_confidence.get()
-        self.settings['ocr']['detector_type'] = self.detector_type.get()
-        self.settings['ocr']['rtdetr_confidence'] = self.rtdetr_confidence.get()
-        self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles.get()
-        self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
-        self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
-        self.settings['ocr']['rtdetr_model_url'] = self.rtdetr_model_url.get()
-        self.settings['ocr']['azure_reading_order'] = self.azure_reading_order.get()
-        self.settings['ocr']['azure_model_version'] = self.azure_model_version.get()
-        self.settings['ocr']['azure_max_wait'] = self.azure_max_wait.get()
-        self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
-        self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
-        self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
-        
-        # Save the detector type as the backend expects - NO AUTO MODE
-        if hasattr(self, 'detector_type'):
-            detector_display = self.detector_type.get()
-            if 'RT-DETR' in detector_display:
-                self.settings['ocr']['detector_type'] = 'rtdetr'
-            elif 'YOLOv8' in detector_display:
-                self.settings['ocr']['detector_type'] = 'yolo'
-            elif detector_display == 'Custom Model':
-                self.settings['ocr']['detector_type'] = 'custom'
-                # Save the custom model path separately
-                self.settings['ocr']['custom_model_path'] = self.bubble_model_path.get()
-            # NO else clause - if nothing matches, don't change the setting
-        
-        # Inpainting settings - EXPANDED SECTION
-        if hasattr(self, 'inpaint_batch_size'):
-            if 'inpainting' not in self.settings:
-                self.settings['inpainting'] = {}
-            self.settings['inpainting']['batch_size'] = self.inpaint_batch_size.get()
-            self.settings['inpainting']['enable_cache'] = self.enable_cache_var.get()
+        try:
+            # Collect all preprocessing settings
+            self.settings['preprocessing']['enabled'] = self.preprocess_enabled.get()
+            self.settings['preprocessing']['auto_detect_quality'] = self.auto_detect.get()
+            self.settings['preprocessing']['contrast_threshold'] = self.contrast_threshold.get()
+            self.settings['preprocessing']['sharpness_threshold'] = self.sharpness_threshold.get()
+            self.settings['preprocessing']['enhancement_strength'] = self.enhancement_strength.get()
+            self.settings['preprocessing']['noise_threshold'] = self.noise_threshold.get()
+            self.settings['preprocessing']['denoise_strength'] = self.denoise_strength.get()
+            self.settings['preprocessing']['max_image_dimension'] = self.max_dimension.get()
+            self.settings['preprocessing']['max_image_pixels'] = self.max_pixels.get()
+            self.settings['preprocessing']['chunk_height'] = self.chunk_height.get()
+            self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap.get()
             
-            # Save all dilation settings - EXPANDED
-            self.settings['mask_dilation'] = self.mask_dilation_var.get()
+            # OCR settings
+            self.settings['ocr']['language_hints'] = [code for code, var in self.lang_vars.items() if var.get()]
+            self.settings['ocr']['confidence_threshold'] = self.confidence_threshold.get()
+            self.settings['ocr']['text_detection_mode'] = self.detection_mode.get()
+            self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold.get()
+            self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation.get()
+            self.settings['ocr']['azure_merge_multiplier'] = self.azure_merge_multiplier.get()
+            self.settings['ocr']['azure_reading_order'] = self.azure_reading_order.get()
+            self.settings['ocr']['azure_model_version'] = self.azure_model_version.get()
+            self.settings['ocr']['azure_max_wait'] = self.azure_max_wait.get()
+            self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
+            self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
+            self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
             
-            # Save master control settings
-            self.settings['use_all_iterations'] = self.use_all_iterations_var.get()
-            self.settings['all_iterations'] = self.all_iterations_var.get()
+            # Bubble detection settings
+            self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled.get()
+            self.settings['ocr']['bubble_model_path'] = self.bubble_model_path.get()
+            self.settings['ocr']['bubble_confidence'] = self.bubble_confidence.get()
+            self.settings['ocr']['rtdetr_confidence'] = self.bubble_confidence.get()
+            self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles.get()
+            self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
+            self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
+            self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_path.get()
             
-            # Save individual iteration settings
-            self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
-            self.settings['empty_bubble_dilation_iterations'] = self.empty_bubble_iterations_var.get()
-            self.settings['free_text_dilation_iterations'] = self.free_text_iterations_var.get()
+            # Save the detector type properly
+            if hasattr(self, 'detector_type'):
+                detector_display = self.detector_type.get()
+                if 'RT-DETR' in detector_display:
+                    self.settings['ocr']['detector_type'] = 'rtdetr'
+                elif 'YOLOv8' in detector_display:
+                    self.settings['ocr']['detector_type'] = 'yolo'
+                elif detector_display == 'Custom Model':
+                    self.settings['ocr']['detector_type'] = 'custom'
+                    self.settings['ocr']['custom_model_path'] = self.bubble_model_path.get()
+                else:
+                    self.settings['ocr']['detector_type'] = 'rtdetr'
             
-            # Legacy support - map old names to new ones
-            self.settings['bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
-            self.settings['dilation_iterations'] = self.text_bubble_iterations_var.get()
-        
-        # Advanced settings
-        self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
-        self.settings['advanced']['webtoon_mode'] = self.webtoon_mode.get()
-        self.settings['advanced']['debug_mode'] = bool(self.debug_mode.get())
-        self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
-        self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
-        self.settings['advanced']['max_workers'] = self.max_workers.get()
-        
-        # Cloud API settings (only save if the tab was created)
-        if hasattr(self, 'cloud_model_var'):
-            self.settings['cloud_inpaint_model'] = self.cloud_model_var.get()
-            self.settings['cloud_custom_version'] = self.custom_version_var.get()
-            self.settings['cloud_inpaint_prompt'] = self.cloud_prompt_var.get()
-            self.settings['cloud_negative_prompt'] = self.cloud_negative_prompt_var.get()
-            self.settings['cloud_inference_steps'] = self.cloud_steps_var.get()
-            self.settings['cloud_timeout'] = self.cloud_timeout_var.get()
-            
-        # Font sizing settings
-        if hasattr(self, 'font_algorithm_var'):
-            if 'font_sizing' not in self.settings:
-                self.settings['font_sizing'] = {}
-            self.settings['font_sizing']['algorithm'] = self.font_algorithm_var.get()
-            self.settings['font_sizing']['min_size'] = self.min_font_size_var.get()
-            self.settings['font_sizing']['max_size'] = self.max_font_size_var.get()
-            self.settings['font_sizing']['min_readable'] = self.min_readable_var.get()
-            self.settings['font_sizing']['prefer_larger'] = self.prefer_larger_var.get()
-            self.settings['font_sizing']['bubble_size_factor'] = self.bubble_size_factor_var.get()
-            self.settings['font_sizing']['line_spacing'] = self.line_spacing_var.get()
-            self.settings['font_sizing']['max_lines'] = self.max_lines_var.get()
-            
-        # Clear bubble detector cache to force reload with new settings
-        if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, 'translator'):
-            if hasattr(self.main_gui.manga_tab.translator, 'bubble_detector'):
-                self.main_gui.manga_tab.translator.bubble_detector = None
+            # Inpainting settings
+            if hasattr(self, 'inpaint_batch_size'):
+                if 'inpainting' not in self.settings:
+                    self.settings['inpainting'] = {}
+                self.settings['inpainting']['batch_size'] = self.inpaint_batch_size.get()
+                self.settings['inpainting']['enable_cache'] = self.enable_cache_var.get()
                 
-        # Save to config
-        self.config['manga_settings'] = self.settings
-        
-        # Save to file
-        if hasattr(self.main_gui, 'save_configuration'):
-            self.main_gui.save_configuration()
-        
-        # Call callback if provided
-        if self.callback:
-            self.callback(self.settings)
-        
-        # Close dialog with cleanup
-        if hasattr(self.dialog, '_cleanup_scrolling'):
-            self.dialog._cleanup_scrolling()
-        self.dialog.destroy()
+                # Save all dilation settings
+                self.settings['mask_dilation'] = self.mask_dilation_var.get()
+                self.settings['use_all_iterations'] = self.use_all_iterations_var.get()
+                self.settings['all_iterations'] = self.all_iterations_var.get()
+                self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
+                self.settings['empty_bubble_dilation_iterations'] = self.empty_bubble_iterations_var.get()
+                self.settings['free_text_dilation_iterations'] = self.free_text_iterations_var.get()
+                
+                # Legacy support
+                self.settings['bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
+                self.settings['dilation_iterations'] = self.text_bubble_iterations_var.get()
+            
+            # Advanced settings
+            self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
+            self.settings['advanced']['webtoon_mode'] = self.webtoon_mode.get()
+            self.settings['advanced']['debug_mode'] = bool(self.debug_mode.get())
+            self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
+            self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
+            self.settings['advanced']['max_workers'] = self.max_workers.get()
+            
+            # Cloud API settings
+            if hasattr(self, 'cloud_model_var'):
+                self.settings['cloud_inpaint_model'] = self.cloud_model_var.get()
+                self.settings['cloud_custom_version'] = self.custom_version_var.get()
+                self.settings['cloud_inpaint_prompt'] = self.cloud_prompt_var.get()
+                self.settings['cloud_negative_prompt'] = self.cloud_negative_prompt_var.get()
+                self.settings['cloud_inference_steps'] = self.cloud_steps_var.get()
+                self.settings['cloud_timeout'] = self.cloud_timeout_var.get()
+            
+            # Font sizing settings from Font Sizing tab
+            if hasattr(self, 'font_algorithm_var'):
+                if 'font_sizing' not in self.settings:
+                    self.settings['font_sizing'] = {}
+                self.settings['font_sizing']['algorithm'] = self.font_algorithm_var.get()
+                self.settings['font_sizing']['min_size'] = self.min_font_size_var.get()
+                self.settings['font_sizing']['max_size'] = self.max_font_size_var.get()
+                self.settings['font_sizing']['min_readable'] = self.min_readable_var.get()
+                self.settings['font_sizing']['prefer_larger'] = self.prefer_larger_var.get()
+                self.settings['font_sizing']['bubble_size_factor'] = self.bubble_size_factor_var.get()
+                self.settings['font_sizing']['line_spacing'] = self.line_spacing_var.get()
+                self.settings['font_sizing']['max_lines'] = self.max_lines_var.get()
+            
+            # SAVE FONT SIZE CONTROLS FROM RENDERING (if they exist)
+            if hasattr(self, 'font_size_mode_var'):
+                if 'rendering' not in self.settings:
+                    self.settings['rendering'] = {}
+                
+                self.settings['rendering']['font_size_mode'] = self.font_size_mode_var.get()
+                self.settings['rendering']['fixed_font_size'] = self.fixed_font_size_var.get()
+                self.settings['rendering']['font_scale'] = self.font_scale_var.get()
+                self.settings['rendering']['auto_min_size'] = self.min_font_size_var.get() if hasattr(self, 'min_font_size_var') else 10
+                self.settings['rendering']['auto_max_size'] = self.max_font_size_var.get() if hasattr(self, 'max_font_size_var') else 28
+                self.settings['rendering']['auto_fit_style'] = self.auto_fit_style_var.get()
+            
+            # Clear bubble detector cache to force reload with new settings
+            if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, 'translator'):
+                if hasattr(self.main_gui.manga_tab.translator, 'bubble_detector'):
+                    self.main_gui.manga_tab.translator.bubble_detector = None
+            
+            # Save to config
+            self.config['manga_settings'] = self.settings
+            
+            # Save to file - using the correct method name
+            try:
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config()
+                    print("Settings saved successfully via save_config")
+                elif hasattr(self.main_gui, 'save_configuration'):
+                    self.main_gui.save_configuration()
+                    print("Settings saved successfully via save_configuration")
+                else:
+                    print("Warning: No save method found on main_gui")
+                    # Try direct save as fallback
+                    if hasattr(self.main_gui, 'config_file'):
+                        import json
+                        with open(self.main_gui.config_file, 'w') as f:
+                            json.dump(self.config, f, indent=2)
+                        print("Settings saved directly to config file")
+            except Exception as e:
+                print(f"Error saving configuration: {e}")
+                from tkinter import messagebox
+                messagebox.showerror("Save Error", f"Failed to save settings: {e}")
+            
+            # Call callback if provided
+            if self.callback:
+                try:
+                    self.callback(self.settings)
+                except Exception as e:
+                    print(f"Error in callback: {e}")
+            
+            # Close dialog with cleanup
+            try:
+                if hasattr(self.dialog, '_cleanup_scrolling'):
+                    self.dialog._cleanup_scrolling()
+                self.dialog.destroy()
+            except Exception as e:
+                print(f"Error closing dialog: {e}")
+                self.dialog.destroy()
+                
+        except Exception as e:
+            print(f"Critical error in _save_settings: {e}")
+            from tkinter import messagebox
+            messagebox.showerror("Save Error", f"Failed to save settings: {e}")
 
     def _cancel(self):
         """Cancel without saving"""
