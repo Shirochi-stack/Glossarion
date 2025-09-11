@@ -3521,6 +3521,14 @@ class MangaTranslator:
                 if not hasattr(self, 'local_inpainter') or self.local_inpainter is None:
                     self.local_inpainter = LocalInpainter()
                     need_reload = True  # First time, definitely need to load
+                    
+                    # Set tiling from tiling section
+                    tiling_settings = self.manga_settings.get('tiling', {})
+                    self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                    self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                    self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                    
+                    self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
                 
                 # If no model path or doesn't exist, try to find or download one
                 if not model_path or not os.path.exists(model_path):
@@ -3554,7 +3562,15 @@ class MangaTranslator:
                 # Track hybrid settings changes
                 if not hasattr(self, '_last_hybrid_config'):
                     self._last_hybrid_config = None
-                
+                    
+                    # Set tiling from tiling section
+                    tiling_settings = self.manga_settings.get('tiling', {})
+                    self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                    self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                    self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                    
+                    self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
+                        
                 current_hybrid_config = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
                 
                 # Check if hybrid config changed
@@ -3567,6 +3583,7 @@ class MangaTranslator:
                 
                 if self.hybrid_inpainter is None:
                     self.hybrid_inpainter = HybridInpainter()
+                    # REMOVED: No longer override tiling settings for HybridInpainter
                 
                 # Load multiple methods
                 methods = self.manga_settings.get('inpainting', {}).get('hybrid_methods', [])
