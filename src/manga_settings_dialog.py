@@ -43,7 +43,10 @@ class MangaSettingsDialog:
                 'max_image_dimension': 2000,
                 'max_image_pixels': 2000000,
                 'chunk_height': 1000,
-                'chunk_overlap': 100
+                'chunk_overlap': 100,
+                'inpaint_tiling_enabled': False,  # Off by default
+                'inpaint_tile_size': 512,  # Default tile size
+                'inpaint_tile_overlap': 64  # Overlap to avoid seams
             },
             'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
@@ -713,6 +716,59 @@ class MangaSettingsDialog:
         
         tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
 
+        # Inpainting Tiling section (add after the "Large Image Processing" section)
+        tiling_frame = tk.LabelFrame(content_frame, text="Inpainting Tiling", padx=15, pady=10)
+        tiling_frame.pack(fill='x', padx=20, pady=(10, 0))
+        self.preprocessing_controls.append(tiling_frame)
+
+        # Enable tiling
+        self.inpaint_tiling_enabled = tk.BooleanVar(value=self.settings['preprocessing'].get('inpaint_tiling_enabled', False))
+        tiling_enable_cb = tb.Checkbutton(
+            tiling_frame,
+            text="Enable automatic tiling for inpainting (processes large images in tiles)",
+            variable=self.inpaint_tiling_enabled,
+            bootstyle="round-toggle"
+        )
+        tiling_enable_cb.pack(anchor='w', pady=(5, 10))
+
+        # Tile size
+        tile_size_frame = tk.Frame(tiling_frame)
+        tile_size_frame.pack(fill='x', pady=5)
+        tile_size_label = tk.Label(tile_size_frame, text="Tile Size:", width=20, anchor='w')
+        tile_size_label.pack(side='left')
+
+        self.inpaint_tile_size = tk.IntVar(value=self.settings['preprocessing'].get('inpaint_tile_size', 512))
+        self.tile_size_spinbox = tb.Spinbox(
+            tile_size_frame,
+            from_=256,
+            to=2048,
+            textvariable=self.inpaint_tile_size,
+            increment=128,
+            width=10
+        )
+        self.tile_size_spinbox.pack(side='left', padx=10)
+
+        tk.Label(tile_size_frame, text="pixels").pack(side='left')
+
+        # Tile overlap
+        tile_overlap_frame = tk.Frame(tiling_frame)
+        tile_overlap_frame.pack(fill='x', pady=5)
+        tile_overlap_label = tk.Label(tile_overlap_frame, text="Tile Overlap:", width=20, anchor='w')
+        tile_overlap_label.pack(side='left')
+
+        self.inpaint_tile_overlap = tk.IntVar(value=self.settings['preprocessing'].get('inpaint_tile_overlap', 64))
+        self.tile_overlap_spinbox = tb.Spinbox(
+            tile_overlap_frame,
+            from_=0,
+            to=256,
+            textvariable=self.inpaint_tile_overlap,
+            increment=16,
+            width=10
+        )
+        self.tile_overlap_spinbox.pack(side='left', padx=10)
+
+        tk.Label(tile_overlap_frame, text="pixels").pack(side='left')
+
     def _create_inpainting_tab(self, notebook):
         """Create inpainting settings tab with comprehensive per-text-type dilation controls"""
         frame = ttk.Frame(notebook)
@@ -1148,17 +1204,47 @@ class MangaSettingsDialog:
         """Enable/disable preprocessing controls based on main toggle"""
         enabled = self.preprocess_enabled.get()
         
+        # Store tiling controls to keep them always enabled
+        tiling_controls_to_skip = [
+            self.inpaint_tiling_enabled,
+            self.tile_size_spinbox,
+            self.tile_overlap_spinbox,
+            self.inpaint_tile_size,
+            self.inpaint_tile_overlap
+        ]
+        
         for control in self.preprocessing_controls:
+            # Skip tiling controls - they should always be enabled
+            if hasattr(control, 'winfo_class'):
+                # Check if this is one of the tiling controls
+                try:
+                    if any(control is tc for tc in tiling_controls_to_skip if hasattr(self, tc.__name__ if hasattr(tc, '__name__') else '')):
+                        continue
+                except:
+                    pass
+            
+            # Check if control is the tiling frame itself
+            if hasattr(control, 'winfo_children'):
+                # Check if this is the tiling frame by looking at its text
+                if isinstance(control, tk.LabelFrame):
+                    try:
+                        if 'Tiling' in control.cget('text'):
+                            # Keep tiling frame always enabled
+                            control.config(fg='white')
+                            # Enable all children of tiling frame
+                            self._toggle_frame_children(control, True)
+                            continue
+                    except:
+                        pass
+            
+            # Normal enable/disable logic for non-tiling controls
             if isinstance(control, (tk.Scale, tb.Spinbox, tb.Checkbutton)):
                 control.config(state='normal' if enabled else 'disabled')
             elif isinstance(control, tk.LabelFrame):
-                # For LabelFrame, change the foreground color
                 control.config(fg='white' if enabled else 'gray')
             elif isinstance(control, tk.Label):
-                # For labels, change the foreground color
                 control.config(fg='white' if enabled else 'gray')
             elif isinstance(control, tk.Frame):
-                # For frames, recursively disable children
                 self._toggle_frame_children(control, enabled)
 
     def _toggle_frame_children(self, frame, enabled):
@@ -2421,6 +2507,13 @@ class MangaSettingsDialog:
             self.settings['preprocessing']['max_image_pixels'] = self.max_pixels.get()
             self.settings['preprocessing']['chunk_height'] = self.chunk_height.get()
             self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap.get()
+            
+            # TILING SETTINGS - SEPARATE SECTION
+            if 'tiling' not in self.settings:
+                self.settings['tiling'] = {}
+            self.settings['tiling']['enabled'] = self.inpaint_tiling_enabled.get()
+            self.settings['tiling']['tile_size'] = self.inpaint_tile_size.get()
+            self.settings['tiling']['tile_overlap'] = self.inpaint_tile_overlap.get()
             
             # OCR settings
             self.settings['ocr']['language_hints'] = [code for code, var in self.lang_vars.items() if var.get()]
