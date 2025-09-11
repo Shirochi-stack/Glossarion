@@ -688,7 +688,27 @@ class LocalInpainter:
                 self.is_jit_model = False
             
             logger.info(f"📥 Loading {method} from {model_path}")
+  
+            # Check file signature to detect ONNX files with wrong extension
+            with open(model_path, 'rb') as f:
+                file_header = f.read(8)
             
+            # Check for ONNX signature (starts with \x08\x01)
+            if file_header.startswith(b'\x08'):
+                logger.info("📦 Detected ONNX file signature (regardless of extension)")
+                if self.load_onnx_model(model_path):
+                    self.model_loaded = True
+                    self.current_method = method
+                    self.use_onnx = True
+                    self.is_jit_model = False
+                    self.config[f'{method}_model_path'] = model_path
+                    self._save_config()
+                    logger.info(f"✅ {method.upper()} ONNX loaded!")
+                    return True
+                else:
+                    logger.error("Failed to load ONNX model")
+                    return False
+  
             ext = model_path.lower().split('.')[-1]
             # Handle ONNX files directly
             if ext == 'onnx':
