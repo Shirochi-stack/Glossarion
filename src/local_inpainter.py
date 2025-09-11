@@ -984,49 +984,124 @@ class LocalInpainter:
                 # Convert BGR to RGB
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 
-                # Always use padding - NO RESIZING
-                image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
-                mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                # Check if this is a Carve model
+                is_carve_model = False
+                if hasattr(self, 'current_onnx_path'):
+                    is_carve_model = "lama_fp32" in self.current_onnx_path or "carve" in self.current_onnx_path.lower()
                 
-                # Prepare inputs based on model type
-                if self.current_method == 'aot':
-                    # AOT normalization
-                    img_np = image_padded.astype(np.float32) / 127.5 - 1.0
-                    mask_np = mask_padded.astype(np.float32) / 255.0
-                    mask_np[mask_np < 0.5] = 0
-                    mask_np[mask_np >= 0.5] = 1
-                    img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                # Handle fixed-size models (resize instead of padding)
+                if hasattr(self, 'onnx_fixed_size') and self.onnx_fixed_size:
+                    fixed_h, fixed_w = self.onnx_fixed_size
+                    # Resize to fixed size
+                    image_resized = cv2.resize(image_rgb, (fixed_w, fixed_h), interpolation=cv2.INTER_LANCZOS4)
+                    mask_resized = cv2.resize(mask, (fixed_w, fixed_h), interpolation=cv2.INTER_NEAREST)
+                    
+                    # Prepare inputs based on model type
+                    if is_carve_model:
+                        # Carve model expects normalized input [0, 1] but NOT [-1, 1]
+                        logger.debug("Using Carve model normalization [0, 1]")
+                        img_np = image_resized.astype(np.float32) / 255.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                    elif self.current_method == 'aot':
+                        # AOT normalization: [-1, 1] range
+                        img_np = image_resized.astype(np.float32) / 127.5 - 1.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np[mask_np < 0.5] = 0
+                        mask_np[mask_np >= 0.5] = 1
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                    else:
+                        # Standard normalization: [0, 1] range
+                        img_np = image_resized.astype(np.float32) / 255.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0) * 1.0
+                    
+                    # Convert to NCHW format
+                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                    
+                    # Run ONNX inference
+                    ort_inputs = {
+                        self.onnx_input_names[0]: img_np.astype(np.float32),
+                        self.onnx_input_names[1]: mask_np.astype(np.float32)
+                    }
+                    
+                    ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
+                    output = ort_outputs[0]
+                    
+                    # Post-process output based on model type
+                    if is_carve_model:
+                        # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
+                        # DO NOT multiply by 255 or apply any scaling
+                        logger.debug("Carve model output is already in [0, 255] range")
+                        result = output[0].transpose(1, 2, 0)  # Just transpose, no scaling
+                    elif self.current_method == 'aot':
+                        # AOT: [-1, 1] to [0, 255]
+                        result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
+                    else:
+                        # Standard: [0, 1] to [0, 255]
+                        result = output[0].transpose(1, 2, 0) * 255
+                    
+                    result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    # Resize back to original size
+                    result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+                    
                 else:
-                    # Standard normalization
-                    img_np = image_padded.astype(np.float32) / 255.0
-                    mask_np = mask_padded.astype(np.float32) / 255.0
-                    mask_np = (mask_np > 0) * 1.0
-                
-                # Convert to NCHW format
-                img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
-                mask_np = mask_np[np.newaxis, np.newaxis, ...]
-                
-                # Run ONNX inference
-                ort_inputs = {
-                    self.onnx_input_names[0]: img_np.astype(np.float32),
-                    self.onnx_input_names[1]: mask_np.astype(np.float32)
-                }
-                
-                ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
-                output = ort_outputs[0]
-                
-                # Post-process output
-                if self.current_method == 'aot':
-                    result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
-                else:
-                    result = output[0].transpose(1, 2, 0) * 255
-                
-                result = np.clip(np.round(result), 0, 255).astype(np.uint8)
-                result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-                
-                # Remove padding
-                result = self.remove_padding(result, padding)
-            
+                    # Variable-size models (use padding)
+                    image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                    mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                    
+                    # Prepare inputs based on model type
+                    if is_carve_model:
+                        # Carve model normalization [0, 1]
+                        logger.debug("Using Carve model normalization [0, 1]")
+                        img_np = image_padded.astype(np.float32) / 255.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0
+                    elif self.current_method == 'aot':
+                        # AOT normalization
+                        img_np = image_padded.astype(np.float32) / 127.5 - 1.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np[mask_np < 0.5] = 0
+                        mask_np[mask_np >= 0.5] = 1
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                    else:
+                        # Standard normalization
+                        img_np = image_padded.astype(np.float32) / 255.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0) * 1.0
+                    
+                    # Convert to NCHW format
+                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                    
+                    # Run ONNX inference
+                    ort_inputs = {
+                        self.onnx_input_names[0]: img_np.astype(np.float32),
+                        self.onnx_input_names[1]: mask_np.astype(np.float32)
+                    }
+                    
+                    ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
+                    output = ort_outputs[0]
+                    
+                    # Post-process output
+                    if is_carve_model:
+                        # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
+                        logger.debug("Carve model output is already in [0, 255] range")
+                        result = output[0].transpose(1, 2, 0)  # Just transpose, no scaling
+                    elif self.current_method == 'aot':
+                        result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
+                    else:
+                        result = output[0].transpose(1, 2, 0) * 255
+                    
+                    result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    # Remove padding
+                    result = self.remove_padding(result, padding)    
+                    
             elif self.is_jit_model:
                 # JIT model processing
                 if self.current_method == 'aot':
