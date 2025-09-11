@@ -4313,7 +4313,7 @@ class MangaTranslator:
                 margin_factor = 0.8
                 self._log(f"  Regular bubble, using 80% of area", "info")
         except:
-            margin_factor = 0.8  # Safe default
+            margin_factor = 0.95
         
         # Convert vertices to numpy array for boundingRect
         vertices_np = np.array(region.vertices, dtype=np.int32)
