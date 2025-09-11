@@ -2485,10 +2485,36 @@ class MangaTranslator:
             
             # Extract content from response
             if hasattr(response, 'content'):
-                translated = response.content.strip()
+                response_text = response.content
+                # Check if it's a tuple representation
+                if isinstance(response_text, tuple):
+                    response_text = response_text[0]  # Get first element of tuple
+                response_text = response_text.strip()
             else:
                 # If response is a string or other format
-                translated = str(response).strip()
+                response_text = str(response).strip()
+                
+                # Check if it's a stringified tuple
+                if response_text.startswith("('") or response_text.startswith('("'):
+                    # It's a tuple converted to string, extract the JSON part
+                    import ast
+                    try:
+                        parsed_tuple = ast.literal_eval(response_text)
+                        if isinstance(parsed_tuple, tuple):
+                            response_text = parsed_tuple[0]  # Get first element
+                            self._log("📦 Extracted response from tuple format", "debug")
+                    except:
+                        # If literal_eval fails, try regex
+                        import re
+                        match = re.match(r"^\('(.+)', '.*'\)$", response_text, re.DOTALL)
+                        if match:
+                            response_text = match.group(1)
+                            # Unescape the string
+                            response_text = response_text.replace('\\n', '\n')
+                            response_text = response_text.replace("\\'", "'")
+                            response_text = response_text.replace('\\"', '"')
+                            response_text = response_text.replace('\\\\', '\\')
+                            self._log("📦 Extracted response using regex from tuple string", "debug")
 
             # ADD THIS DEBUG CODE:
             self._log(f"🔍 RAW API RESPONSE DEBUG:", "debug")
@@ -2872,9 +2898,36 @@ class MangaTranslator:
 
                 # Extract content from response
                 if hasattr(response, 'content'):
-                    response_text = response.content.strip()
+                    response_text = response.content
+                    # Check if it's a tuple representation
+                    if isinstance(response_text, tuple):
+                        response_text = response_text[0]  # Get first element of tuple
+                    response_text = response_text.strip()
                 else:
+                    # If response is a string or other format
                     response_text = str(response).strip()
+                    
+                    # Check if it's a stringified tuple
+                    if response_text.startswith("('") or response_text.startswith('("'):
+                        # It's a tuple converted to string, extract the JSON part
+                        import ast
+                        try:
+                            parsed_tuple = ast.literal_eval(response_text)
+                            if isinstance(parsed_tuple, tuple):
+                                response_text = parsed_tuple[0]  # Get first element
+                                self._log("📦 Extracted response from tuple format", "debug")
+                        except:
+                            # If literal_eval fails, try regex
+                            import re
+                            match = re.match(r"^\('(.+)', '.*'\)$", response_text, re.DOTALL)
+                            if match:
+                                response_text = match.group(1)
+                                # Unescape the string
+                                response_text = response_text.replace('\\n', '\n')
+                                response_text = response_text.replace("\\'", "'")
+                                response_text = response_text.replace('\\"', '"')
+                                response_text = response_text.replace('\\\\', '\\')
+                                self._log("📦 Extracted response using regex from tuple string", "debug")
                 
                 # CHECK 6: Immediately after API response
                 if self._check_stop():
@@ -3010,6 +3063,11 @@ class MangaTranslator:
                 
                 self._log(f"✅ Successfully parsed {len(translations)} translations")
                 
+                self._log(f"🔍 DEBUG: Full translations dict:", "debug")
+                for key, value in translations.items():
+                    self._log(f"  Key: [{key}]", "debug")
+                    self._log(f"  Value: [{value}]", "debug")
+                
             except json.JSONDecodeError as e:
                 self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
                 self._log(f"Response preview: {response_text[:200]}...", "warning")
@@ -3039,8 +3097,17 @@ class MangaTranslator:
             # Extract translation values in order
             translation_values = list(translations.values()) if translations else []
 
+            # DEBUG: Log what we extracted
+            self._log(f"📊 Extracted {len(translation_values)} translation values", "debug")
+            for i, val in enumerate(translation_values[:1000]):  # First 3 for debugging
+                self._log(f"  Translation {i}: '{val[:1000]}...'", "debug")
+
             # Clean all translation values to remove quotes
             translation_values = [self._clean_translation_text(t) for t in translation_values]
+
+            self._log(f"🔍 DEBUG: translation_values after cleaning:", "debug")
+            for i, val in enumerate(translation_values):
+                self._log(f"  [{i}]: {repr(val)}", "debug")
 
             # Position-based mapping
             self._log(f"📊 Mapping {len(translation_values)} translations to {len(regions)} regions")
@@ -4047,6 +4114,10 @@ class MangaTranslator:
             for region in adjusted_regions:
                 if not region.translated_text:
                     continue
+                    # ADD THIS DETAILED DEBUG
+                self._log(f"🔍 RENDER DEBUG for region:", "debug")
+                self._log(f"   Original text: '{region.text}'", "debug")
+                self._log(f"   Translated text: '{region.translated_text}'", "debug")
                 
                 self._log(f"DEBUG: Rendering - Original: '{region.text[:30]}...' -> Translated: '{region.translated_text[:30]}...'", "debug")
 
@@ -4056,7 +4127,7 @@ class MangaTranslator:
                     region.translated_text = region.translated_text.upper()
                 
                 region_count += 1
-                self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
+                self._log(f"  Rendering region {region_count}: '{region.translated_text}'", "info") 
                 
                 # Create a separate layer for this region only
                 region_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
