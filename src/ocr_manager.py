@@ -43,11 +43,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OCRResult:
-    """Unified OCR result format"""
+    """Unified OCR result format with built-in sanitization to prevent data corruption."""
     text: str
     bbox: Tuple[int, int, int, int]  # x, y, w, h
     confidence: float
     vertices: Optional[List[Tuple[int, int]]] = None
+
+    def __post_init__(self):
+        """
+        This special method is called automatically after the object is created.
+        It acts as a final safeguard to ensure the 'text' attribute is ALWAYS a clean string.
+        """
+        # --- THIS IS THE DEFINITIVE FIX ---
+        # If the text we received is a tuple, we extract the first element.
+        # This makes it impossible for a tuple to exist in a finished object.
+        if isinstance(self.text, tuple):
+            # Log that we are fixing a critical data error.
+            print(f"CRITICAL WARNING: Corrupted tuple detected in OCRResult. Sanitizing '{self.text}' to '{self.text[0]}'.")
+            self.text = self.text[0]
+        
+        # Ensure the final result is always a stripped string.
+        self.text = str(self.text).strip()
     
 class OCRProvider:
     """Base class for OCR providers"""
@@ -410,12 +426,7 @@ class CustomAPIProvider(OCRProvider):
             )
 
             # Extract content from response object
-            if hasattr(response, 'content'):
-                content = response.content
-                finish_reason = response.finish_reason if hasattr(response, 'finish_reason') else None
-            else:
-                content = str(response)
-                finish_reason = None
+            content, finish_reason = response
             
             # Check the content directly
             if content and content.strip():
