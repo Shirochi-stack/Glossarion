@@ -326,6 +326,15 @@ class LocalInpainter:
         self.is_jit_model = False
         self.pad_mod = 8
         
+        # Default tiling settings - OFF by default for most models
+        self.tiling_enabled = False
+        self.tile_size = 512
+        self.tile_overlap = 64
+        
+        # ONNX-specific settings
+        self.onnx_model_loaded = False
+        self.onnx_input_size = None  # Will be detected from model
+        
         # Bubble detection
         self.bubble_detector = None
         self.bubble_model_loaded = False
@@ -845,6 +854,83 @@ class LocalInpainter:
         else:
             return img[pad_top:img.shape[0]-pad_bottom, pad_left:img.shape[1]-pad_right, :]
 
+    def _inpaint_tiled(self, image, mask, tile_size, overlap, refinement='normal'):
+        """Process image in tiles"""
+        orig_h, orig_w = image.shape[:2]
+        result = image.copy()
+        
+        # Calculate tile positions
+        for y in range(0, orig_h, tile_size - overlap):
+            for x in range(0, orig_w, tile_size - overlap):
+                # Calculate tile boundaries
+                x_end = min(x + tile_size, orig_w)
+                y_end = min(y + tile_size, orig_h)
+                
+                # Adjust start to ensure full tile size if possible
+                if x_end - x < tile_size and x > 0:
+                    x = max(0, x_end - tile_size)
+                if y_end - y < tile_size and y > 0:
+                    y = max(0, y_end - tile_size)
+                
+                # Extract tile
+                tile_img = image[y:y_end, x:x_end]
+                tile_mask = mask[y:y_end, x:x_end]
+                
+                # Skip if no inpainting needed
+                if np.sum(tile_mask) == 0:
+                    continue
+                
+                # Process this tile with the actual model
+                processed_tile = self._process_single_tile(tile_img, tile_mask, tile_size, refinement)
+                
+                # Blend tile back into result
+                if overlap > 0 and (x > 0 or y > 0):
+                    result[y:y_end, x:x_end] = self._blend_tile(
+                        result[y:y_end, x:x_end],
+                        processed_tile,
+                        x > 0,
+                        y > 0,
+                        overlap
+                    )
+                else:
+                    result[y:y_end, x:x_end] = processed_tile
+        
+        logger.info(f"✅ Tiled inpainting complete ({orig_w}x{orig_h} in {tile_size}x{tile_size} tiles)")
+        return result
+
+    def _process_single_tile(self, tile_img, tile_mask, tile_size, refinement):
+        """Process a single tile without tiling"""
+        # Temporarily disable tiling
+        old_tiling = self.tiling_enabled
+        self.tiling_enabled = False
+        result = self.inpaint(tile_img, tile_mask, refinement)
+        self.tiling_enabled = old_tiling
+        return result
+
+    def _blend_tile(self, existing, new_tile, blend_x, blend_y, overlap):
+        """Blend a tile with existing result"""
+        if not blend_x and not blend_y:
+            # No blending needed for first tile
+            return new_tile
+        
+        h, w = new_tile.shape[:2]
+        result = new_tile.copy()
+        
+        # Create blend weights
+        if blend_x and overlap > 0 and w > overlap:
+            # Horizontal blend on left edge
+            for i in range(overlap):
+                alpha = i / overlap
+                result[:, i] = existing[:, i] * (1 - alpha) + new_tile[:, i] * alpha
+        
+        if blend_y and overlap > 0 and h > overlap:
+            # Vertical blend on top edge
+            for i in range(overlap):
+                alpha = i / overlap
+                result[i, :] = existing[i, :] * (1 - alpha) + new_tile[i, :] * alpha
+        
+        return result
+
     def inpaint(self, image, mask, refinement='normal'):
         """Inpaint - compatible with JIT, checkpoint, and ONNX models"""
         if not self.model_loaded:
@@ -862,7 +948,15 @@ class LocalInpainter:
             if self.current_method == 'anime':
                 kernel = np.ones((7, 7), np.uint8)
                 mask = cv2.dilate(mask, kernel, iterations=1)
-            
+
+            # Use instance tiling settings for ALL models
+            logger.info(f"🔍 Tiling check: enabled={self.tiling_enabled}, tile_size={self.tile_size}, image_size={orig_h}x{orig_w}")
+
+            # If tiling is enabled and image is larger than tile size
+            if self.tiling_enabled and (orig_h > self.tile_size or orig_w > self.tile_size):
+                logger.info(f"🔲 Using tiled inpainting: {self.tile_size}x{self.tile_size} tiles with {self.tile_overlap}px overlap")
+                return self._inpaint_tiled(image, mask, self.tile_size, self.tile_overlap, refinement)
+                
             # ONNX inference path
             if self.use_onnx and self.onnx_session:
                 logger.debug("Using ONNX inference")
