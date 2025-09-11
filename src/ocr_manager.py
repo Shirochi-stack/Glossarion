@@ -116,7 +116,7 @@ class CustomAPIProvider(OCRProvider):
             ))
         
         # Use existing temperature and token settings
-        self.temperature = float(os.environ.get('OCR_TEMPERATURE', os.environ.get('TRANSLATION_TEMPERATURE', '0.01')))
+        self.temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.01'))
         self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
         
         # Image settings from existing compression variables
@@ -348,6 +348,7 @@ class CustomAPIProvider(OCRProvider):
         results = []
         
         try:
+            max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
             if not self.is_loaded:
                 if not self.load_model():
                     return results
@@ -405,7 +406,7 @@ class CustomAPIProvider(OCRProvider):
             response = self.client.send(
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens
+                max_tokens=max_tokens
             )
 
             # Extract content from response object
