@@ -2590,40 +2590,29 @@ class MangaTranslator:
                         else:
                             break
                     translated = temp
-            
+
             # Additional check for escaped content
-            if '\\\\' in translated or '\\n' in translated or "\\'" in translated or '\\"' in translated:
-                self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
-                try:
-                    # DON'T use unicode_escape for Korean text - it corrupts it
-                    # Instead, just replace the escape sequences manually
-                    before = translated
+            #if '\\\\' in translated or '\\n' in translated or "\\'" in translated or '\\"' in translated:
+            #    self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+            #    try:
+            #        before = translated
+            #        
+            #        # Handle quotes and apostrophes
+            #        translated = translated.replace("\\'", "'")
+            #        translated = translated.replace('\\"', '"')
+            #        translated = translated.replace("\\`", "`")
                     
-                    # Handle quotes and apostrophes
-                    translated = translated.replace("\\'", "'")  # Escaped apostrophe
-                    translated = translated.replace('\\"', '"')  # Escaped quote
-                    translated = translated.replace("\\`", "`")  # Escaped backtick
-                    translated = translated.replace("\\u2019", "'")  # Unicode right single quote
-                    translated = translated.replace("\\u2018", "'")  # Unicode left single quote
-                    translated = translated.replace("\\u201c", '"')  # Unicode left double quote
-                    translated = translated.replace("\\u201d", '"')  # Unicode right double quote
+                    # DON'T UNESCAPE NEWLINES BEFORE JSON PARSING!
+                    # translated = translated.replace('\\n', '\n')  # COMMENT THIS OUT
                     
-                    # Handle newlines and other escapes
-                    translated = translated.replace('\\n', '\n')
-                    translated = translated.replace('\\\\', '\\')
-                    translated = translated.replace('\\/', '/')
-                    translated = translated.replace('\\t', '\t')
-                    translated = translated.replace('\\r', '\r')
+            #        translated = translated.replace('\\\\', '\\')
+            #        translated = translated.replace('\\/', '/')
+                    # translated = translated.replace('\\t', '\t')  # COMMENT THIS OUT TOO
+                    # translated = translated.replace('\\r', '\r')  # AND THIS
                     
-                    # Clean up smart quotes using Unicode escape codes
-                    translated = translated.replace('\u2018', "'")  # Left single quotation mark
-                    translated = translated.replace('\u2019', "'")  # Right single quotation mark
-                    translated = translated.replace('\u201c', '"')  # Left double quotation mark
-                    translated = translated.replace('\u201d', '"')  # Right double quotation mark
-                    
-                    self._log(f"📦 Unescaped safely: '{before[:50]}...' -> '{translated[:50]}...'")
-                except Exception as e:
-                    self._log(f"⚠️ Failed to unescape: {e}", "warning")
+            #        self._log(f"📦 Unescaped safely: '{before[:50]}...' -> '{translated[:50]}...'")
+            #    except Exception as e:
+            #        self._log(f"⚠️ Failed to unescape: {e}", "warning")
             
             # Clean up unwanted trailing apostrophes/quotes
             import re
@@ -3017,15 +3006,15 @@ class MangaTranslator:
                     self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
             
             # Handle escaped content
-            if '\\\\' in response_text or '\\n' in response_text or "\\'" in response_text or '\\"' in response_text:
-                self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
-                response_text = response_text.replace("\\'", "'")
-                response_text = response_text.replace('\\"', '"')
-                response_text = response_text.replace('\\n', '\n')
-                response_text = response_text.replace('\\\\', '\\')
-                response_text = response_text.replace('\\/', '/')
-                response_text = response_text.replace('\\t', '\t')
-                response_text = response_text.replace('\\r', '\r')
+            #if '\\\\' in response_text or '\\n' in response_text or "\\'" in response_text or '\\"' in response_text:
+            #    self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+            #    response_text = response_text.replace("\\'", "'")
+            #    response_text = response_text.replace('\\"', '"')
+            #    response_text = response_text.replace('\\n', '\n')
+            #    response_text = response_text.replace('\\\\', '\\')
+            #    response_text = response_text.replace('\\/', '/')
+            #    response_text = response_text.replace('\\t', '\t')
+            #    response_text = response_text.replace('\\r', '\r')
             
             # Clean up quotes
             import re
@@ -3070,7 +3059,7 @@ class MangaTranslator:
                 
             except json.JSONDecodeError as e:
                 self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
-                self._log(f"Response preview: {response_text[:200]}...", "warning")
+                self._log(f"Response preview: {response_text[:2000]}...", "warning")
                 
                 # Try fallback regex extraction
                 try:
@@ -3182,180 +3171,31 @@ class MangaTranslator:
             return {}
 
     def _fix_json_response(self, response_text: str) -> str:
-        """Fix JSON response with unescaped newlines, unquoted keys, and other issues"""
         import re
         import json
         
-        # First, try to parse as-is
-        try:
-            json.loads(response_text)
-            return response_text  # Already valid
-        except json.JSONDecodeError:
-            pass
+        # Debug: Show what we received
+        self._log(f"DEBUG: Original length: {len(response_text)}", "debug")
+        self._log(f"DEBUG: First 50 chars: [{response_text[:50]}]", "debug")
         
-        # Method 1: Fix unquoted keys and newlines
-        # This handles cases where keys don't have quotes
-        def fix_unquoted_json(text):
-            # First, escape newlines that are within values
-            lines = text.split('\n')
-            fixed_lines = []
-            in_value = False
-            current_object = []
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Check if this line contains a colon (key-value separator)
-                if ':' in line and not in_value:
-                    # This is likely a key-value pair
-                    colon_pos = line.rfind(':')
-                    key_part = line[:colon_pos].strip()
-                    value_part = line[colon_pos+1:].strip()
-                    
-                    # Add quotes around the key if not present
-                    if not (key_part.startswith('"') and key_part.endswith('"')):
-                        # Escape the key content
-                        key_part = key_part.replace('\\', '\\\\').replace('"', '\\"')
-                        key_part = f'"{key_part}"'
-                    
-                    # Check if value starts properly
-                    if value_part and not value_part.startswith('"'):
-                        # Value needs quotes too
-                        value_part = f'"{value_part}'
-                        in_value = True
-                    
-                    current_object.append(f'  {key_part}: {value_part}')
-                elif in_value:
-                    # This is a continuation of a value
-                    if line.endswith(','):
-                        # End of this value
-                        current_object[-1] += '\\n' + line[:-1] + '",'
-                        in_value = False
-                    else:
-                        # Still in value
-                        current_object[-1] += '\\n' + line
-            
-            # Close any open value
-            if in_value and current_object:
-                current_object[-1] += '"'
-            
-            # Reconstruct the JSON
-            if current_object:
-                return '{\n' + '\n'.join(current_object) + '\n}'
-            
-            return text
-        
-        # Try fixing unquoted keys
-        try:
-            fixed = fix_unquoted_json(response_text)
-            json.loads(fixed)
-            self._log("✅ Fixed JSON by adding quotes to keys", "info")
-            return fixed
-        except:
-            pass
-        
-        # Method 2: Extract key-value pairs more aggressively
-        # Look for patterns like: text_without_quotes: translation
-        extracted = {}
-
-        if extracted:
-            # DON'T rebuild as key-value JSON - just return the values as an array
-            values_only = list(extracted.values())
-            rebuilt = json.dumps(values_only, ensure_ascii=False)
-            self._log(f"✅ Extracted {len(values_only)} translations (values only)", "info")
-            return rebuilt
-        
-        # Split by lines and look for key-value patterns
-        lines = response_text.split('\n')
-        current_key = None
-        current_value = []
-        
-        for line in lines:
-            line = line.strip()
-            if not line or line in ['{', '}']:
-                continue
-            
-            # Remove trailing comma if present
-            if line.endswith(','):
-                line = line[:-1]
-            
-            # Check if this line has a colon
-            if ':' in line:
-                # Save previous key-value if exists
-                if current_key and current_value:
-                    value_text = ' '.join(current_value).strip()
-                    if value_text.startswith('"') and value_text.endswith('"'):
-                        value_text = value_text[1:-1]
-                    extracted[current_key] = value_text
-                
-                # Split by the last colon (in case key contains colons)
-                colon_pos = line.rfind(':')
-                key_part = line[:colon_pos].strip()
-                value_part = line[colon_pos+1:].strip()
-                
-                # Clean the key
-                if key_part.startswith('"') and key_part.endswith('"'):
-                    key_part = key_part[1:-1]
-                
-                # Unescape the key
-                key_part = key_part.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
-                
-                current_key = key_part
-                current_value = [value_part] if value_part else []
+        cleaned = response_text
+        if "```json" in cleaned:
+            match = re.search(r'```json\s*(.*?)```', cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(1).strip()
+                self._log(f"DEBUG: Extracted {len(cleaned)} chars from markdown", "debug")
             else:
-                # This is a continuation of the current value
-                if current_key:
-                    current_value.append(line)
+                self._log("DEBUG: Regex didn't match!", "warning")
         
-        # Don't forget the last key-value pair
-        if current_key and current_value:
-            value_text = ' '.join(current_value).strip()
-            if value_text.startswith('"') and value_text.endswith('"'):
-                value_text = value_text[1:-1]
-            extracted[current_key] = value_text
-        
-        if extracted:
-            # Rebuild as valid JSON
-            rebuilt = json.dumps(extracted, ensure_ascii=False)
-            self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
-            return rebuilt
-        
-        # Method 3: Try regex extraction as last resort
-        extracted = {}
-
-        if extracted:
-            # Return only the values, not the key-value pairs
-            values_only = list(extracted.values())
-            rebuilt = json.dumps(values_only, ensure_ascii=False)
-            self._log(f"✅ Extracted {len(values_only)} translations from regex", "info")
-            return rebuilt
-        
-        # Pattern to match "key": "value" pairs
-        pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
-        matches = re.findall(pattern, response_text)
-        
-        for key, value in matches:
-            # Unescape the value
-            try:
-                value = value.replace('\\n', '\n')
-                value = value.replace('\\"', '"')
-                value = value.replace('\\\\', '\\')
-                extracted[key] = value  # Store in extracted dict
-                self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
-            except Exception as ex:
-                self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
-        
-        if extracted:
-            # Rebuild as valid JSON using extracted (not translations)
-            rebuilt = json.dumps(extracted, ensure_ascii=False)
-            self._log(f"✅ Rebuilt JSON from {len(extracted)} extracted pairs", "info")
-            return rebuilt
-        
-        # If all else fails, return original
-        self._log("⚠️ Could not fix JSON, returning original", "warning")
-        return response_text
+        # Try to parse
+        try:
+            result = json.loads(cleaned)
+            self._log(f"✅ Parsed JSON with {len(result)} entries", "info")
+            return cleaned
+        except json.JSONDecodeError as e:
+            self._log(f"⚠️ JSON invalid: {str(e)}", "warning")
+            self._log(f"DEBUG: Cleaned text starts with: [{cleaned[:20]}]", "debug")
+            return cleaned
 
     def _clean_translation_text(self, text: str) -> str:
         """Remove unnecessary quotation marks and dots from translated text"""
@@ -4127,7 +3967,9 @@ class MangaTranslator:
                     region.translated_text = region.translated_text.upper()
                 
                 region_count += 1
-                self._log(f"  Rendering region {region_count}: '{region.translated_text}'", "info") 
+                self._log(f"  Rendering region {region_count}:", "info")
+                self._log(f"    ACTUAL TEXT: [{region.translated_text}]", "info")
+                self._log(f"    TEXT LENGTH: {len(region.translated_text)}", "info")
                 
                 # Create a separate layer for this region only
                 region_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
