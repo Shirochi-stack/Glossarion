@@ -2948,7 +2948,7 @@ class MangaTranslator:
                 return {}
             
             self._log(f"🔍 Raw response type: {type(response_text)}")
-            self._log(f"🔍 Raw response preview: '{response_text[:100]}...'")
+            self._log(f"🔍 Raw response preview: '{response_text[:2000]}...'")
             
             # Clean up response_text (handle Python literals, escapes, etc.)
             if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
@@ -3534,15 +3534,13 @@ class MangaTranslator:
                 local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
                 model_path = self.manga_settings.get('inpainting', {}).get(f'{local_method}_model_path', '')
                 
-                # Check if we need to reinitialize due to changes
-                need_reload = False
-                
                 # Initialize tracking attributes if they don't exist
                 if not hasattr(self, '_last_local_method'):
                     self._last_local_method = None
                     self._last_local_model_path = None
                 
                 # Check for changes
+                need_reload = False
                 if self._last_local_method != local_method:
                     self._log(f"🔄 Local method changed from {self._last_local_method} to {local_method}", "info")
                     need_reload = True
@@ -3555,12 +3553,17 @@ class MangaTranslator:
                         self._log(f"   New: {os.path.basename(model_path)}", "debug")
                     need_reload = True
                 
+                # Force complete reinit when model changes - FIX: use getattr
+                if need_reload and hasattr(self, 'local_inpainter') and getattr(self, 'local_inpainter', None) is not None:
+                    self._log("🔄 Forcing complete reinit due to model change", "info")
+                    self.local_inpainter = None
+                
                 # Store current settings
                 self._last_local_method = local_method
                 self._last_local_model_path = model_path
                 
-                # Initialize inpainter if needed
-                if self.local_inpainter is None:
+                # Initialize inpainter if needed - FIX: use getattr or hasattr check
+                if not hasattr(self, 'local_inpainter') or self.local_inpainter is None:
                     self.local_inpainter = LocalInpainter()
                     need_reload = True  # First time, definitely need to load
                 
