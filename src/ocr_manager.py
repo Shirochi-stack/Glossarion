@@ -116,7 +116,7 @@ class CustomAPIProvider(OCRProvider):
             ))
         
         # Use existing temperature and token settings
-        self.temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.01'))
+        self.temperature = float(os.environ.get('OCR_TEMPERATURE', os.environ.get('TRANSLATION_TEMPERATURE', '0.01')))
         self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
         
         # Image settings from existing compression variables
@@ -402,12 +402,19 @@ class CustomAPIProvider(OCRProvider):
             # Now send this properly formatted message
             # The UnifiedClient should handle this correctly
             # But we're NOT using send_image, we're using regular send
-            content, finish_reason = self.client.send(
+            response = self.client.send(
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                context='ocr'  # Set context to 'ocr'
+                max_tokens=self.max_tokens
             )
+
+            # Extract content from response object
+            if hasattr(response, 'content'):
+                content = response.content
+                finish_reason = response.finish_reason if hasattr(response, 'finish_reason') else None
+            else:
+                content = str(response)
+                finish_reason = None
             
             # Check the content directly
             if content and content.strip():
