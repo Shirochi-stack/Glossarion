@@ -2529,9 +2529,9 @@ class MangaTranslator:
             # ADD THIS DEBUG CODE:
             self._log(f"🔍 RAW API RESPONSE DEBUG:", "debug")
             self._log(f"  Type: {type(response)}", "debug")
-            self._log(f"  Raw content length: {len(translated)}", "debug")
-            self._log(f"  First 200 chars: {translated[:200]}", "debug")
-            self._log(f"  Last 200 chars: {translated[-200:]}", "debug")
+            #self._log(f"  Raw content length: {len(translated)}", "debug")
+            #self._log(f"  First 200 chars: {translated[:200]}", "debug")
+            #self._log(f"  Last 200 chars: {translated[-200:]}", "debug")
 
             # Check if both Japanese and English are present
             has_japanese = any('\u3040' <= c <= '\u9fff' or '\uac00' <= c <= '\ud7af' for c in translated)
