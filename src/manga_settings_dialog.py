@@ -72,12 +72,14 @@ class MangaSettingsDialog:
                 'exclude_english_text': False
             },
             'advanced': {
-                'format_detection': True,
-                'webtoon_mode': 'auto',
-                'debug_mode': False,
-                'save_intermediate': False,
-                'parallel_processing': False,
-                'max_workers': 4
+            'format_detection': True,
+            'webtoon_mode': 'auto',
+            'debug_mode': False,
+            'save_intermediate': False,
+            'parallel_processing': False,
+            'max_workers': 4,
+            'auto_convert_to_onnx': True,
+            'auto_convert_to_onnx_background': True
             },
             'inpainting': {
                 'batch_size': 1,
@@ -722,7 +724,11 @@ class MangaSettingsDialog:
         self.preprocessing_controls.append(tiling_frame)
 
         # Enable tiling
-        self.inpaint_tiling_enabled = tk.BooleanVar(value=self.settings['preprocessing'].get('inpaint_tiling_enabled', False))
+        # Prefer values from legacy 'tiling' section if present, otherwise use 'preprocessing'
+        tiling_enabled_value = self.settings['preprocessing'].get('inpaint_tiling_enabled', False)
+        if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'enabled' in self.settings['tiling']:
+            tiling_enabled_value = self.settings['tiling']['enabled']
+        self.inpaint_tiling_enabled = tk.BooleanVar(value=tiling_enabled_value)
         tiling_enable_cb = tb.Checkbutton(
             tiling_frame,
             text="Enable automatic tiling for inpainting (processes large images in tiles)",
@@ -737,7 +743,10 @@ class MangaSettingsDialog:
         tile_size_label = tk.Label(tile_size_frame, text="Tile Size:", width=20, anchor='w')
         tile_size_label.pack(side='left')
 
-        self.inpaint_tile_size = tk.IntVar(value=self.settings['preprocessing'].get('inpaint_tile_size', 512))
+        tile_size_value = self.settings['preprocessing'].get('inpaint_tile_size', 512)
+        if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'tile_size' in self.settings['tiling']:
+            tile_size_value = self.settings['tiling']['tile_size']
+        self.inpaint_tile_size = tk.IntVar(value=tile_size_value)
         self.tile_size_spinbox = tb.Spinbox(
             tile_size_frame,
             from_=256,
@@ -756,7 +765,10 @@ class MangaSettingsDialog:
         tile_overlap_label = tk.Label(tile_overlap_frame, text="Tile Overlap:", width=20, anchor='w')
         tile_overlap_label.pack(side='left')
 
-        self.inpaint_tile_overlap = tk.IntVar(value=self.settings['preprocessing'].get('inpaint_tile_overlap', 64))
+        tile_overlap_value = self.settings['preprocessing'].get('inpaint_tile_overlap', 64)
+        if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'tile_overlap' in self.settings['tiling']:
+            tile_overlap_value = self.settings['tiling']['tile_overlap']
+        self.inpaint_tile_overlap = tk.IntVar(value=tile_overlap_value)
         self.tile_overlap_spinbox = tb.Spinbox(
             tile_overlap_frame,
             from_=0,
@@ -2218,6 +2230,40 @@ class MangaSettingsDialog:
         
         # Initialize workers state
         self._toggle_workers()
+
+        # ONNX conversion settings
+        onnx_frame = tk.LabelFrame(content_frame, text="ONNX Conversion", padx=15, pady=10)
+        onnx_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        self.auto_convert_onnx_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx', True))
+        self.auto_convert_onnx_bg_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx_background', True))
+        
+        def _toggle_onnx_controls():
+            # If auto-convert is off, background toggle should be disabled
+            state = 'normal' if self.auto_convert_onnx_var.get() else 'disabled'
+            try:
+                bg_cb.config(state=state)
+            except Exception:
+                pass
+        
+        auto_cb = tb.Checkbutton(
+            onnx_frame,
+            text="Auto-convert local models to ONNX for faster inference (recommended)",
+            variable=self.auto_convert_onnx_var,
+            bootstyle="round-toggle",
+            command=_toggle_onnx_controls
+        )
+        auto_cb.pack(anchor='w')
+        
+        bg_cb = tb.Checkbutton(
+            onnx_frame,
+            text="Convert in background (non-blocking; switches to ONNX when ready)",
+            variable=self.auto_convert_onnx_bg_var,
+            bootstyle="round-toggle"
+        )
+        bg_cb.pack(anchor='w', pady=(5, 0))
+        
+        _toggle_onnx_controls()
     
     def _toggle_workers(self):
         """Enable/disable worker settings based on parallel processing toggle"""
@@ -2508,12 +2554,16 @@ class MangaSettingsDialog:
             self.settings['preprocessing']['chunk_height'] = self.chunk_height.get()
             self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap.get()
             
-            # TILING SETTINGS - SEPARATE SECTION
-            if 'tiling' not in self.settings:
-                self.settings['tiling'] = {}
-            self.settings['tiling']['enabled'] = self.inpaint_tiling_enabled.get()
-            self.settings['tiling']['tile_size'] = self.inpaint_tile_size.get()
-            self.settings['tiling']['tile_overlap'] = self.inpaint_tile_overlap.get()
+            # TILING SETTINGS - save under preprocessing (primary) and mirror under 'tiling' for backward compatibility
+            self.settings['preprocessing']['inpaint_tiling_enabled'] = self.inpaint_tiling_enabled.get()
+            self.settings['preprocessing']['inpaint_tile_size'] = self.inpaint_tile_size.get()
+            self.settings['preprocessing']['inpaint_tile_overlap'] = self.inpaint_tile_overlap.get()
+            # Back-compat mirror
+            self.settings['tiling'] = {
+                'enabled': self.inpaint_tiling_enabled.get(),
+                'tile_size': self.inpaint_tile_size.get(),
+                'tile_overlap': self.inpaint_tile_overlap.get()
+            }
             
             # OCR settings
             self.settings['ocr']['language_hints'] = [code for code, var in self.lang_vars.items() if var.get()]
@@ -2578,6 +2628,14 @@ class MangaSettingsDialog:
             self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
             self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
             self.settings['advanced']['max_workers'] = self.max_workers.get()
+            
+            # ONNX auto-convert settings (persist and apply to environment)
+            if hasattr(self, 'auto_convert_onnx_var'):
+                self.settings['advanced']['auto_convert_to_onnx'] = bool(self.auto_convert_onnx_var.get())
+                os.environ['AUTO_CONVERT_TO_ONNX'] = 'true' if self.auto_convert_onnx_var.get() else 'false'
+            if hasattr(self, 'auto_convert_onnx_bg_var'):
+                self.settings['advanced']['auto_convert_to_onnx_background'] = bool(self.auto_convert_onnx_bg_var.get())
+                os.environ['AUTO_CONVERT_TO_ONNX_BACKGROUND'] = 'true' if self.auto_convert_onnx_bg_var.get() else 'false'
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_var'):
