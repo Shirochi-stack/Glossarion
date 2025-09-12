@@ -14,6 +14,7 @@ import re
 import hashlib
 import urllib.request
 from pathlib import Path
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -749,20 +750,25 @@ class LocalInpainter:
                     self.config[f'{method}_model_path'] = model_path
                     self._save_config()
                     
-                    # ONNX CONVERSION (but handle failures gracefully)
+                    # ONNX CONVERSION (optionally in background)
                     if AUTO_CONVERT_TO_ONNX and self.model_loaded:
-                        try:
-                            onnx_path = self.convert_to_onnx(model_path, method)
-                            if onnx_path and self.load_onnx_model(onnx_path):
-                                logger.info("🚀 Using ONNX model for inference")
-                            else:
+                        def _convert_and_switch():
+                            try:
+                                onnx_path = self.convert_to_onnx(model_path, method)
+                                if onnx_path and self.load_onnx_model(onnx_path):
+                                    logger.info("🚀 Using ONNX model for inference")
+                                else:
+                                    logger.info("📦 Using PyTorch JIT model for inference")
+                            except Exception as onnx_error:
+                                logger.warning(f"ONNX conversion failed: {onnx_error}")
                                 logger.info("📦 Using PyTorch JIT model for inference")
-                        except Exception as onnx_error:
-                            logger.warning(f"ONNX conversion failed: {onnx_error}")
-                            logger.info("📦 Using PyTorch JIT model for inference")
+                        
+                        if os.environ.get('AUTO_CONVERT_TO_ONNX_BACKGROUND', 'true').lower() == 'true':
+                            threading.Thread(target=_convert_and_switch, daemon=True).start()
+                        else:
+                            _convert_and_switch()
                     
                     return True
-                    
                 except Exception as jit_error:
                     logger.info(f"   Not a JIT model, trying as regular checkpoint... ({jit_error})")
                     try:
@@ -823,15 +829,21 @@ class LocalInpainter:
             
             logger.info(f"✅ {method.upper()} loaded!")
             
-            # ONNX CONVERSION
+            # ONNX CONVERSION (optionally in background)
             if AUTO_CONVERT_TO_ONNX and model_path.endswith('.pt') and self.model_loaded:
-                try:
-                    onnx_path = self.convert_to_onnx(model_path, method)
-                    if onnx_path and self.load_onnx_model(onnx_path):
-                        logger.info("🚀 Using ONNX model for inference")
-                except Exception as onnx_error:
-                    logger.warning(f"ONNX conversion failed: {onnx_error}")
-                    logger.info("📦 Continuing with PyTorch model")
+                def _convert_and_switch():
+                    try:
+                        onnx_path = self.convert_to_onnx(model_path, method)
+                        if onnx_path and self.load_onnx_model(onnx_path):
+                            logger.info("🚀 Using ONNX model for inference")
+                    except Exception as onnx_error:
+                        logger.warning(f"ONNX conversion failed: {onnx_error}")
+                        logger.info("📦 Continuing with PyTorch model")
+                
+                if os.environ.get('AUTO_CONVERT_TO_ONNX_BACKGROUND', 'true').lower() == 'true':
+                    threading.Thread(target=_convert_and_switch, daemon=True).start()
+                else:
+                    _convert_and_switch()
 
             return True
             
