@@ -553,60 +553,186 @@ class MangaOCRProvider(OCRProvider):
         """Install transformers and torch"""
         pass
     
+    def _is_valid_local_model_dir(self, path: str) -> bool:
+        """Check that a local HF model directory has required files."""
+        try:
+            if not path or not os.path.isdir(path):
+                return False
+            needed_any_weights = any(
+                os.path.exists(os.path.join(path, name)) for name in (
+                    'pytorch_model.bin',
+                    'model.safetensors'
+                )
+            )
+            has_config = os.path.exists(os.path.join(path, 'config.json'))
+            has_processor = (
+                os.path.exists(os.path.join(path, 'preprocessor_config.json')) or
+                os.path.exists(os.path.join(path, 'processor_config.json'))
+            )
+            has_tokenizer = (
+                os.path.exists(os.path.join(path, 'tokenizer.json')) or
+                os.path.exists(os.path.join(path, 'tokenizer_config.json'))
+            )
+            return has_config and needed_any_weights and has_processor and has_tokenizer
+        except Exception:
+            return False
+    
     def load_model(self) -> bool:
-        """Load the manga-ocr model from HuggingFace"""
+        """Load the manga-ocr model, preferring a local directory to avoid re-downloading"""
         try:
             if not self.is_installed and not self.check_installation():
                 self._log("❌ Transformers not installed", "error")
                 return False
-            
-            self._log("🔥 Loading manga-ocr model from HuggingFace...")
-            
+
+            # Always disable progress bars to avoid tqdm issues in some environments
+            import os
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
             from transformers import VisionEncoderDecoderModel, AutoTokenizer, AutoImageProcessor
             import torch
-            
-            # Load the model directly from HuggingFace
-            model_name = "kha-white/manga-ocr-base"
-            
-            self._log(f"   Loading tokenizer...")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            
-            self._log(f"   Loading image processor...")
-            self.processor = AutoImageProcessor.from_pretrained(model_name)
-            
-            self._log(f"   Loading model...")
-            self.model = VisionEncoderDecoderModel.from_pretrained(model_name)
-            
-            # Set to eval mode
-            self.model.eval()
-            
-            # Move to GPU if available
-            if torch.cuda.is_available():
-                self.model = self.model.cuda()
-                self._log("   ✅ Model loaded on GPU")
+
+            # Prefer a local model directory if present to avoid any Hub access
+            candidates = []
+            env_local = os.environ.get("MANGA_OCR_LOCAL_DIR")
+            if env_local:
+                candidates.append(env_local)
+
+            # Project root one level up from this file
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            candidates.append(os.path.join(root_dir, 'models', 'manga-ocr-base'))
+            candidates.append(os.path.join(root_dir, 'models', 'kha-white', 'manga-ocr-base'))
+
+            model_source = None
+            local_only = False
+            # Find a valid local dir
+            for cand in candidates:
+                if self._is_valid_local_model_dir(cand):
+                    model_source = cand
+                    local_only = True
+                    break
+
+            # If no valid local dir, use Hub
+            if not model_source:
+                model_source = "kha-white/manga-ocr-base"
+                # Make sure we are not forcing offline mode
+                if os.environ.get("HF_HUB_OFFLINE") == "1":
+                    try:
+                        del os.environ["HF_HUB_OFFLINE"]
+                    except Exception:
+                        pass
+                self._log("🔥 Loading manga-ocr model from Hugging Face Hub")
+                self._log(f"   Repo: {model_source}")
             else:
-                self._log("   ✅ Model loaded on CPU")
-            
+                # Only set offline when local dir is fully valid
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
+                self._log("🔥 Loading manga-ocr model from local directory")
+                self._log(f"   Local path: {model_source}")
+
+            # Decide target device once; we will move after full CPU load to avoid meta tensors
+            use_cuda = torch.cuda.is_available()
+
+            # Try loading components, falling back to Hub if local-only fails
+            def _load_components(source: str, local_flag: bool):
+                self._log("   Loading tokenizer...")
+                tok = AutoTokenizer.from_pretrained(source, local_files_only=local_flag)
+
+                self._log("   Loading image processor...")
+                try:
+                    from transformers import AutoProcessor
+                except Exception:
+                    AutoProcessor = None
+                try:
+                    proc = AutoImageProcessor.from_pretrained(source, local_files_only=local_flag)
+                except Exception as e_proc:
+                    if AutoProcessor is not None:
+                        self._log(f"   ⚠️ AutoImageProcessor failed: {e_proc}. Trying AutoProcessor...", "warning")
+                        proc = AutoProcessor.from_pretrained(source, local_files_only=local_flag)
+                    else:
+                        raise
+
+                self._log("   Loading model...")
+                # Prevent meta tensors by forcing full materialization on CPU at load time
+                os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
+                mdl = VisionEncoderDecoderModel.from_pretrained(
+                    source,
+                    local_files_only=local_flag,
+                    low_cpu_mem_usage=False,
+                    torch_dtype=torch.float32,
+                    device_map=None
+                )
+                return tok, proc, mdl
+
+            try:
+                self.tokenizer, self.processor, self.model = _load_components(model_source, local_only)
+            except Exception as e_local:
+                if local_only:
+                    # Fallback to Hub once if local fails
+                    self._log(f"   ⚠️ Local model load failed: {e_local}", "warning")
+                    try:
+                        if os.environ.get("HF_HUB_OFFLINE") == "1":
+                            del os.environ["HF_HUB_OFFLINE"]
+                    except Exception:
+                        pass
+                    model_source = "kha-white/manga-ocr-base"
+                    local_only = False
+                    self._log("   Retrying from Hugging Face Hub...")
+                    self.tokenizer, self.processor, self.model = _load_components(model_source, local_only)
+                else:
+                    raise
+
+            # Move to CUDA only after full CPU materialization
+            target_device = 'cpu'
+            if use_cuda:
+                try:
+                    self.model = self.model.to('cuda')
+                    target_device = 'cuda'
+                except Exception as move_err:
+                    self._log(f"   ⚠️ Could not move model to CUDA: {move_err}", "warning")
+                    target_device = 'cpu'
+
+            # Finalize eval mode
+            self.model.eval()
+
+            # Sanity-check: ensure no parameter remains on 'meta' device
+            try:
+                for n, p in self.model.named_parameters():
+                    dev = getattr(p, 'device', None)
+                    if dev is not None and getattr(dev, 'type', '') == 'meta':
+                        raise RuntimeError(f"Parameter {n} is on 'meta' after load")
+            except Exception as sanity_err:
+                self._log(f"❌ Manga-OCR model load sanity check failed: {sanity_err}", "error")
+                return False
+
+            self._log(f"   ✅ Model loaded on {target_device.upper()}")
             self.is_loaded = True
             self._log("✅ Manga OCR model ready")
             return True
-            
+
         except Exception as e:
             self._log(f"❌ Failed to load manga-ocr model: {str(e)}", "error")
             import traceback
             self._log(traceback.format_exc(), "error")
+            try:
+                if 'local_only' in locals() and local_only:
+                    self._log("Hint: Local load failed. Ensure your models/manga-ocr-base contains required files (config.json, preprocessor_config.json, tokenizer.json or tokenizer_config.json, and model weights).", "warning")
+            except Exception:
+                pass
             return False
     
     def _run_ocr(self, pil_image):
         """Run OCR on a PIL image using the HuggingFace model"""
         import torch
         
-        # Process image
-        pixel_values = self.processor(pil_image, return_tensors="pt").pixel_values
+        # Process image (keyword arg for broader compatibility across transformers versions)
+        inputs = self.processor(images=pil_image, return_tensors="pt")
+        pixel_values = inputs["pixel_values"]
         
         # Move to same device as model
-        if next(self.model.parameters()).is_cuda:
-            pixel_values = pixel_values.cuda()
+        try:
+            model_device = next(self.model.parameters()).device
+        except StopIteration:
+            model_device = torch.device('cpu')
+        pixel_values = pixel_values.to(model_device)
         
         # Generate text
         with torch.no_grad():
