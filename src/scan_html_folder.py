@@ -967,35 +967,125 @@ def fuzzy_match_chapter_numbers(text1, text2, num1, num2):
     return False
 
 def detect_split_chapters(results):
-    """Detect chapters that might have been split into multiple files"""
+    """Detect chapters that might have been split into multiple files
+    Now with better detection to avoid false positives from intentional author formatting
+    """
     split_candidates = []
     
+    # Common scene break patterns that authors use intentionally
+    scene_break_patterns = [
+        r'[\*\s]{3,}',           # *** or * * *
+        r'[─━－—\-]{3,}',        # Various dashes/lines
+        r'[_]{3,}',              # ___
+        r'[~～]{3,}',            # ~~~
+        r'[=]{3,}',              # ===
+        r'[\#]{3,}',             # ###
+        r'[\.]{3,}',             # ...
+        r'(?:Chapter|Scene|Part)\s+Break', # Explicit break text
+        r'(?:Meanwhile|Later|Earlier)',    # Time transition words
+        r'\d+\s*(?:hours?|days?|weeks?|months?|years?)\s+(?:later|earlier|ago)', # Time skips
+    ]
+    
     for i, result in enumerate(results):
-        # Check for continuation indicators
         text = result.get('raw_text', '')
-        artifacts = detect_translation_artifacts(text)
+        filename = result.get('filename', '')
         
+        # Skip if empty
+        if not text.strip():
+            continue
+            
+        # Check for continuation indicators from AI
+        artifacts = detect_translation_artifacts(text)
         has_continuation = any(a['type'] in ['chapter_continuation', 'split_indicators'] 
                              for a in artifacts)
+        
+        # Check file naming patterns that suggest systematic splits
+        is_systematic_split = False
+        split_patterns = [
+            r'chunk[\-_]?\d+',          # chunk1, chunk_2
+            r'part[\-_]?\d+[\-_]?\d+',   # part1_2 (part 1 of chapter 2)
+            r'response_\d+_\d+',         # response_42_3
+            r'_\d+of\d+',                # _1of3
+            r'_split\d+',                # _split1
+            r'_continuation',            # _continuation
+        ]
+        for pattern in split_patterns:
+            if re.search(pattern, filename, re.IGNORECASE):
+                is_systematic_split = True
+                break
         
         # Check if file is unusually short
         is_short = len(text) < 2000
         
-        # Check if starts mid-sentence (no capital letter at beginning)
-        starts_mid = text.strip() and not text.strip()[0].isupper()
+        # Check for scene break indicators at start or end
+        text_start = text[:500].strip()
+        text_end = text[-500:].strip()
         
-        # Check if ends mid-sentence (no punctuation at end)
-        ends_mid = text.strip() and text.strip()[-1] not in '.!?"」』'
+        has_scene_break_start = False
+        has_scene_break_end = False
         
-        if has_continuation or (is_short and (starts_mid or ends_mid)):
+        for pattern in scene_break_patterns:
+            if re.search(pattern, text_start[:100], re.IGNORECASE):
+                has_scene_break_start = True
+            if re.search(pattern, text_end[-100:], re.IGNORECASE):
+                has_scene_break_end = True
+        
+        # Check if starts mid-sentence (but not after scene break)
+        starts_mid = False
+        if text.strip() and not has_scene_break_start:
+            first_line = text.strip().split('\n')[0].strip()
+            # Skip if line starts with dialogue quotes or chapter markers
+            if first_line and not re.match(r'^["「『\(\[]', first_line):
+                # Check if starts with lowercase (excluding certain words that commonly start sections)
+                first_word = first_line.split()[0] if first_line.split() else ''
+                transition_words = ['meanwhile', 'however', 'suddenly', 'later', 'earlier', 
+                                  'elsewhere', 'afterward', 'afterwards', 'then']
+                if first_word.lower() not in transition_words:
+                    starts_mid = first_line[0].islower()
+        
+        # Check if ends mid-sentence (but not with scene break)
+        ends_mid = False
+        if text.strip() and not has_scene_break_end:
+            last_line = text.strip().split('\n')[-1].strip()
+            if last_line:
+                # Check last character, ignoring quotes
+                last_char = last_line.rstrip('」』"\'').rstrip()
+                if last_char:
+                    ends_mid = last_char[-1] not in '.!?。！？…'
+        
+        # Determine if this is likely a real split vs intentional formatting
+        is_likely_real_split = False
+        
+        if is_systematic_split:
+            # File naming strongly suggests a split
+            is_likely_real_split = True
+        elif has_continuation:
+            # AI detected continuation markers
+            is_likely_real_split = True
+        elif is_short and starts_mid and ends_mid and not (has_scene_break_start or has_scene_break_end):
+            # Short, starts and ends mid-sentence, no scene breaks
+            is_likely_real_split = True
+        elif is_short and ends_mid and not has_scene_break_end:
+            # Might be a split if it's short and ends abruptly
+            # Check if it ends with incomplete dialogue or mid-word
+            if text.strip():
+                # Check for incomplete quotes or mid-word breaks
+                if (text.count('"') % 2 != 0 or text.count('「') != text.count('」') or
+                    re.search(r'[a-zA-Z]-$', text.strip())):  # Ends with hyphen (mid-word)
+                    is_likely_real_split = True
+        
+        if is_likely_real_split:
             split_candidates.append({
                 'index': i,
-                'filename': result['filename'],
+                'filename': filename,
                 'indicators': {
                     'has_continuation': has_continuation,
+                    'is_systematic_split': is_systematic_split,
                     'is_short': is_short,
                     'starts_mid': starts_mid,
-                    'ends_mid': ends_mid
+                    'ends_mid': ends_mid,
+                    'has_scene_break_start': has_scene_break_start,
+                    'has_scene_break_end': has_scene_break_end
                 }
             })
     
@@ -2592,32 +2682,131 @@ def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, 
                     log(f"   └─ Same-titled chapters {current['chapter_num']} & {next_chapter['chapter_num']} "
                         f"({int(similarity*100)}% similar)")
 
+
 def check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log, should_stop=None):
-    """Check if split chapters are parts of the same content"""
+    """Check if split chapters are parts of the same content
+    Enhanced to reduce false positives from intentional author formatting
+    """
     for i, candidate in enumerate(split_candidates):
         if should_stop and should_stop():
             log("⛔ Split chapter check interrupted by user.")
             return
+        
         idx = candidate['index']
+        indicators = candidate['indicators']
         
         # Check next few files
         for j in range(1, 4):  # Check up to 3 files ahead
             if idx + j < len(results):
                 next_result = results[idx + j]
+                next_text = next_result.get('raw_text', '')
                 
-                # Check if they might be connected
-                if candidate['indicators']['ends_mid'] and not next_result['raw_text'].strip()[0].isupper():
-                    # Likely continuation
-                    text1_end = results[idx]['raw_text'][-500:]
-                    text2_start = next_result['raw_text'][:500]
+                # Skip if next file is empty
+                if not next_text.strip():
+                    continue
+                
+                # Extract chapter numbers if present
+                current_chapter_num = results[idx].get('chapter_num')
+                next_chapter_num = next_result.get('chapter_num')
+                
+                # Strong indicator: same chapter number
+                same_chapter_number = (current_chapter_num is not None and 
+                                      next_chapter_num is not None and 
+                                      current_chapter_num == next_chapter_num)
+                
+                # Check file naming pattern similarity
+                current_filename = results[idx]['filename']
+                next_filename = next_result['filename']
+                
+                # Look for systematic naming (e.g., file_1.html, file_2.html)
+                naming_pattern_match = False
+                if re.sub(r'\d+', 'X', current_filename) == re.sub(r'\d+', 'X', next_filename):
+                    # Files have same pattern with different numbers
+                    naming_pattern_match = True
+                
+                # Check if content flows naturally
+                should_check_flow = False
+                confidence_score = 0.0
+                
+                if indicators['is_systematic_split'] or naming_pattern_match:
+                    # Strong file naming evidence
+                    should_check_flow = True
+                    confidence_score = 0.85
+                elif same_chapter_number:
+                    # Same chapter number is strong evidence
+                    should_check_flow = True
+                    confidence_score = 0.9
+                elif indicators['ends_mid']:
+                    # Only check flow if current ends mid-sentence
+                    next_text_stripped = next_text.strip()
+                    if next_text_stripped:
+                        # Check if next starts without capital (excluding common transition words)
+                        first_line = next_text_stripped.split('\n')[0].strip()
+                        if first_line and not re.match(r'^["「『\(\[]', first_line):
+                            first_word = first_line.split()[0] if first_line.split() else ''
+                            transition_words = ['meanwhile', 'however', 'suddenly', 'later', 
+                                              'earlier', 'elsewhere', 'afterward', 'afterwards', 'then']
+                            if (first_word.lower() not in transition_words and 
+                                first_line[0].islower()):
+                                should_check_flow = True
+                                confidence_score = 0.75
+                
+                if should_check_flow:
+                    # Get text samples for flow checking
+                    text1_end = results[idx].get('raw_text', '')[-500:]
+                    text2_start = next_text[:500]
+                    
+                    # Remove any scene break markers for flow check
+                    scene_breaks = [r'[\*\s]{3,}', r'[─━－—\-]{3,}', r'[_]{3,}', 
+                                   r'[~～]{3,}', r'[=]{3,}', r'[\#]{3,}']
+                    for pattern in scene_breaks:
+                        text1_end = re.sub(pattern, '', text1_end)
+                        text2_start = re.sub(pattern, '', text2_start)
                     
                     # Check if content flows
-                    combined = text1_end + " " + text2_start
-                    if len(re.findall(r'[.!?]', combined)) < 2:  # Few sentence endings
-                        merge_duplicate_groups(duplicate_groups, results[idx]['filename'], next_result['filename'])
-                        pair = tuple(sorted([results[idx]['filename'], next_result['filename']]))
-                        duplicate_confidence[pair] = 0.9  # High confidence for split chapters
-                        log(f"   └─ Split chapter detected: {results[idx]['filename']} continues in {next_result['filename']}")
+                    combined = text1_end.strip() + " " + text2_start.strip()
+                    
+                    # Count sentence endings in combined text
+                    sentence_endings = len(re.findall(r'[.!?。！？]', combined))
+                    
+                    # Check for incomplete dialogue
+                    incomplete_dialogue = (text1_end.count('"') + text2_start.count('"')) % 2 != 0
+                    incomplete_dialogue_jp = (text1_end.count('「') + text2_start.count('「') != 
+                                             text1_end.count('」') + text2_start.count('」'))
+                    
+                    # Determine if this is a real split
+                    is_real_split = False
+                    
+                    if sentence_endings < 2:  # Very few sentence endings suggests continuous text
+                        is_real_split = True
+                        confidence_score = max(confidence_score, 0.85)
+                    elif incomplete_dialogue or incomplete_dialogue_jp:
+                        is_real_split = True
+                        confidence_score = max(confidence_score, 0.8)
+                    elif same_chapter_number or indicators['is_systematic_split']:
+                        # With strong other evidence, be more lenient
+                        is_real_split = True
+                    
+                    if is_real_split:
+                        merge_duplicate_groups(duplicate_groups, current_filename, next_filename)
+                        pair = tuple(sorted([current_filename, next_filename]))
+                        duplicate_confidence[pair] = confidence_score
+                        
+                        reason = []
+                        if same_chapter_number:
+                            reason.append(f"same chapter #{current_chapter_num}")
+                        if indicators['is_systematic_split']:
+                            reason.append("systematic file naming")
+                        if naming_pattern_match:
+                            reason.append("matching name pattern")
+                        if sentence_endings < 2:
+                            reason.append("continuous text flow")
+                        if incomplete_dialogue or incomplete_dialogue_jp:
+                            reason.append("incomplete dialogue")
+                        
+                        reason_str = ", ".join(reason) if reason else "content flow analysis"
+                        log(f"   └─ Split chapter detected ({reason_str}): {current_filename} → {next_filename} "
+                            f"(confidence: {int(confidence_score*100)}%)")
 
 def check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop=None):
     """Check for specific known duplicate patterns"""
