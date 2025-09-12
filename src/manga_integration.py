@@ -2402,12 +2402,20 @@ class MangaTranslationTab:
         
         self.log_text = tk.Text(
             log_scroll_frame,
-            height=15,
+            height=24,
             wrap=tk.WORD,
             yscrollcommand=log_scrollbar.set
         )
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scrollbar.config(command=self.log_text.yview)
+
+        # Make log read-only (programmatic inserts will toggle state)
+        self.log_text.config(state='disabled', cursor='arrow')
+        try:
+            # Prevent focus via Tab key
+            self.log_text.configure(takefocus=0)
+        except Exception:
+            pass
         
         # Configure text tags for colored output
         self.log_text.tag_config('info', foreground='white')
@@ -4473,8 +4481,12 @@ class MangaTranslationTab:
             # Thread-safe logging to GUI
             if threading.current_thread() == threading.main_thread():
                 # We're in the main thread, update directly
-                self.log_text.insert(tk.END, message + '\n', level)
-                self.log_text.see(tk.END)
+                try:
+                    self.log_text.config(state='normal')
+                    self.log_text.insert(tk.END, message + '\n', level)
+                    self.log_text.see(tk.END)
+                finally:
+                    self.log_text.config(state='disabled')
             else:
                 # We're in a background thread, use queue
                 self.update_queue.put(('log', message, level))
@@ -4498,8 +4510,12 @@ class MangaTranslationTab:
                 
                 if update[0] == 'log':
                     _, message, level = update
-                    self.log_text.insert(tk.END, message + '\n', level)
-                    self.log_text.see(tk.END)
+                    try:
+                        self.log_text.config(state='normal')
+                        self.log_text.insert(tk.END, message + '\n', level)
+                        self.log_text.see(tk.END)
+                    finally:
+                        self.log_text.config(state='disabled')
                     
                 elif update[0] == 'progress':
                     _, current, total, status = update
@@ -4942,60 +4958,189 @@ class MangaTranslationTab:
         try:
             self.translator.set_stop_flag(self.stop_flag)
             
-            for index, filepath in enumerate(self.selected_files):
-                if self.stop_flag.is_set():
-                    self._log("\n⏹️ Translation stopped by user", "warning")
-                    break
+            # Panel-level parallelization setting
+            advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+            panel_parallel = bool(advanced.get('parallel_panel_translation', False))
+            panel_workers = int(advanced.get('panel_max_workers', 2))
+            
+            if panel_parallel and len(self.selected_files) > 1:
+                self._log(f"🚀 Parallel PANEL translation ENABLED ({panel_workers} workers)", "info")
                 
-                # IMPORTANT: Reset translator state for each new image
-                if hasattr(self.translator, 'reset_for_new_image'):
-                    self.translator.reset_for_new_image()
+                import concurrent.futures
+                import threading as _threading
+                progress_lock = _threading.Lock()
+                counters = {
+                    'started': 0,
+                    'done': 0,
+                    'failed': 0
+                }
+                total = self.total_files
                 
-                self.current_file_index = index
-                filename = os.path.basename(filepath)
-                
-                self._update_current_file(filename)
-                self._update_progress(
-                    index,
-                    self.total_files,
-                    f"Processing {index + 1}/{self.total_files}: {filename}"
-                )
-                
-                try:
-                    # Determine output path
-                    if self.create_subfolder_var.get():
-                        output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                        os.makedirs(output_dir, exist_ok=True)
-                        output_path = os.path.join(output_dir, filename)
-                    else:
-                        base, ext = os.path.splitext(filepath)
-                        output_path = f"{base}_translated{ext}"
+                def process_single(idx, filepath):
+                    if self.stop_flag.is_set():
+                        return False
                     
-                    # Process the image
-                    result = self.translator.process_image(filepath, output_path)
-                    
-                    # Check if translation was interrupted
-                    if result.get('interrupted', False):
-                        self._log(f"⏸️ Translation of {filename} was interrupted", "warning")
-                        self.failed_files += 1
+                    # Create an isolated translator instance per panel
+                    try:
+                        from manga_translator import MangaTranslator
+                        ocr_config = {'provider': self.ocr_provider_var.get()}
+                        translator = MangaTranslator(ocr_config, self.main_gui.client, self.main_gui, log_callback=self._log)
+                        translator.set_stop_flag(self.stop_flag)
+                        
+                        # Apply inpainting and rendering options roughly matching current translator
+                        try:
+                            translator.constrain_to_bubble = getattr(self, 'constrain_to_bubble_var').get() if hasattr(self, 'constrain_to_bubble_var') else True
+                        except Exception:
+                            pass
+                        
+                        # Set full page context based on UI
+                        try:
+                            translator.set_full_page_context(
+                                enabled=self.full_page_context_var.get(),
+                                custom_prompt=self.full_page_context_prompt
+                            )
+                        except Exception:
+                            pass
+                        
+                        # Determine output path
+                        filename = os.path.basename(filepath)
+                        if self.create_subfolder_var.get():
+                            output_dir = os.path.join(os.path.dirname(filepath), 'translated')
+                            os.makedirs(output_dir, exist_ok=True)
+                            output_path = os.path.join(output_dir, filename)
+                        else:
+                            base, ext = os.path.splitext(filepath)
+                            output_path = f"{base}_translated{ext}"
+                        
+                        # Announce start
+                        self._update_current_file(filename)
+                        with progress_lock:
+                            counters['started'] += 1
+                            self._update_progress(counters['done'], total, f"Processing {counters['started']}/{total}: {filename}")
+                        
+                        # Process image
+                        result = translator.process_image(filepath, output_path, batch_index=idx+1, batch_total=total)
+                        
+                        # Update counters
+                        with progress_lock:
+                            if result.get('interrupted', False) or not result.get('success', False):
+                                self.failed_files += 1
+                                counters['failed'] += 1
+                            else:
+                                self.completed_files += 1
+                            counters['done'] += 1
+                            self._update_progress(counters['done'], total, f"Completed {counters['done']}/{total}")
+                        
+                        return result.get('success', False)
+                    except Exception as e:
+                        with progress_lock:
+                            self.failed_files += 1
+                            counters['failed'] += 1
+                            counters['done'] += 1
+                        self._log(f"❌ Error in panel task: {str(e)}", "error")
+                        self._log(traceback.format_exc(), "error")
+                        return False
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=panel_workers) as executor:
+                    futures = []
+                    stagger_ms = int(advanced.get('panel_start_stagger_ms', 0))
+                    for idx, filepath in enumerate(self.selected_files):
                         if self.stop_flag.is_set():
                             break
-                    elif result['success']:
-                        self.completed_files += 1
-                        self._log(f"✅ Successfully translated: {filename}", "success")
-                    else:
-                        self.failed_files += 1
-                        errors = '\n'.join(result['errors'])
-                        self._log(f"❌ Failed to translate {filename}:\n{errors}", "error")
+                        futures.append(executor.submit(process_single, idx, filepath))
+                        if stagger_ms > 0:
+                            time.sleep(stagger_ms / 1000.0)
+                    
+                    # Handle completion and stop behavior
+                    for f in concurrent.futures.as_completed(futures):
+                        if self.stop_flag.is_set():
+                            # Best-effort cancellation (running tasks cannot be forcibly stopped)
+                            for rem in futures:
+                                rem.cancel()
+                            break
+                
+                # After parallel processing, skip sequential loop
+                
+            else:
+                # Sequential processing
+                for index, filepath in enumerate(self.selected_files):
+                    if self.stop_flag.is_set():
+                        self._log("\n⏹️ Translation stopped by user", "warning")
+                        break
+                    
+                    # IMPORTANT: Reset translator state for each new image
+                    if hasattr(self.translator, 'reset_for_new_image'):
+                        self.translator.reset_for_new_image()
+                    
+                    self.current_file_index = index
+                    filename = os.path.basename(filepath)
+                    
+                    self._update_current_file(filename)
+                    self._update_progress(
+                        index,
+                        self.total_files,
+                        f"Processing {index + 1}/{self.total_files}: {filename}"
+                    )
+                    
+                    try:
+                        # Determine output path
+                        if self.create_subfolder_var.get():
+                            output_dir = os.path.join(os.path.dirname(filepath), 'translated')
+                            os.makedirs(output_dir, exist_ok=True)
+                            output_path = os.path.join(output_dir, filename)
+                        else:
+                            base, ext = os.path.splitext(filepath)
+                            output_path = f"{base}_translated{ext}"
                         
-                        # Check for specific error types in the error messages
-                        errors_lower = errors.lower()
-                        if '429' in errors or 'rate limit' in errors_lower:
-                            self._log(f"⚠️ RATE LIMIT DETECTED - Please wait before continuing", "error")
-                            self._log(f"   The API provider is limiting your requests", "error")
-                            self._log(f"   Consider increasing delay between requests in settings", "error")
+                        # Process the image
+                        result = self.translator.process_image(filepath, output_path)
+                        
+                        # Check if translation was interrupted
+                        if result.get('interrupted', False):
+                            self._log(f"⏸️ Translation of {filename} was interrupted", "warning")
+                            self.failed_files += 1
+                            if self.stop_flag.is_set():
+                                break
+                        elif result['success']:
+                            self.completed_files += 1
+                            self._log(f"✅ Successfully translated: {filename}", "success")
+                        else:
+                            self.failed_files += 1
+                            errors = '\n'.join(result['errors'])
+                            self._log(f"❌ Failed to translate {filename}:\n{errors}", "error")
                             
-                            # Optionally pause for a bit
+                            # Check for specific error types in the error messages
+                            errors_lower = errors.lower()
+                            if '429' in errors or 'rate limit' in errors_lower:
+                                self._log(f"⚠️ RATE LIMIT DETECTED - Please wait before continuing", "error")
+                                self._log(f"   The API provider is limiting your requests", "error")
+                                self._log(f"   Consider increasing delay between requests in settings", "error")
+                                
+                                # Optionally pause for a bit
+                                self._log(f"   Pausing for 60 seconds...", "warning")
+                                for sec in range(60):
+                                    if self.stop_flag.is_set():
+                                        break
+                                    time.sleep(1)
+                                    if sec % 10 == 0:
+                                        self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
+                        
+                    except Exception as e:
+                        self.failed_files += 1
+                        error_str = str(e)
+                        error_type = type(e).__name__
+                        
+                        self._log(f"❌ Error processing {filename}:", "error")
+                        self._log(f"   Error type: {error_type}", "error")
+                        self._log(f"   Details: {error_str}", "error")
+                        
+                        # Check for specific API errors
+                        if "429" in error_str or "rate limit" in error_str.lower():
+                            self._log(f"⚠️ RATE LIMIT ERROR (429) - API is throttling requests", "error")
+                            self._log(f"   Please wait before continuing or reduce request frequency", "error")
+                            self._log(f"   Consider increasing the API delay in settings", "error")
+                            
+                            # Pause for rate limit
                             self._log(f"   Pausing for 60 seconds...", "warning")
                             for sec in range(60):
                                 if self.stop_flag.is_set():
@@ -5003,47 +5148,24 @@ class MangaTranslationTab:
                                 time.sleep(1)
                                 if sec % 10 == 0:
                                     self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
-                    
-                except Exception as e:
-                    self.failed_files += 1
-                    error_str = str(e)
-                    error_type = type(e).__name__
-                    
-                    self._log(f"❌ Error processing {filename}:", "error")
-                    self._log(f"   Error type: {error_type}", "error")
-                    self._log(f"   Details: {error_str}", "error")
-                    
-                    # Check for specific API errors
-                    if "429" in error_str or "rate limit" in error_str.lower():
-                        self._log(f"⚠️ RATE LIMIT ERROR (429) - API is throttling requests", "error")
-                        self._log(f"   Please wait before continuing or reduce request frequency", "error")
-                        self._log(f"   Consider increasing the API delay in settings", "error")
+                            
+                        elif "401" in error_str or "unauthorized" in error_str.lower():
+                            self._log(f"❌ AUTHENTICATION ERROR (401) - Check your API key", "error")
+                            self._log(f"   The API key appears to be invalid or expired", "error")
+                            
+                        elif "403" in error_str or "forbidden" in error_str.lower():
+                            self._log(f"❌ FORBIDDEN ERROR (403) - Access denied", "error")
+                            self._log(f"   Check your API subscription and permissions", "error")
+                            
+                        elif "timeout" in error_str.lower():
+                            self._log(f"⏱️ TIMEOUT ERROR - Request took too long", "error")
+                            self._log(f"   Consider increasing timeout settings", "error")
+                            
+                        else:
+                            # Generic error with full traceback
+                            self._log(f"   Full traceback:", "error")
+                            self._log(traceback.format_exc(), "error")
                         
-                        # Pause for rate limit
-                        self._log(f"   Pausing for 60 seconds...", "warning")
-                        for sec in range(60):
-                            if self.stop_flag.is_set():
-                                break
-                            time.sleep(1)
-                            if sec % 10 == 0:
-                                self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
-                        
-                    elif "401" in error_str or "unauthorized" in error_str.lower():
-                        self._log(f"❌ AUTHENTICATION ERROR (401) - Check your API key", "error")
-                        self._log(f"   The API key appears to be invalid or expired", "error")
-                        
-                    elif "403" in error_str or "forbidden" in error_str.lower():
-                        self._log(f"❌ FORBIDDEN ERROR (403) - Access denied", "error")
-                        self._log(f"   Check your API subscription and permissions", "error")
-                        
-                    elif "timeout" in error_str.lower():
-                        self._log(f"⏱️ TIMEOUT ERROR - Request took too long", "error")
-                        self._log(f"   Consider increasing timeout settings", "error")
-                        
-                    else:
-                        # Generic error with full traceback
-                        self._log(f"   Full traceback:", "error")
-                        self._log(traceback.format_exc(), "error")
             
             # Final summary
             self._log(f"\n{'='*60}", "info")
