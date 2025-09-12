@@ -4983,7 +4983,25 @@ class MangaTranslationTab:
                     # Create an isolated translator instance per panel
                     try:
                         from manga_translator import MangaTranslator
+                        import os
+                        # Build full OCR config for this thread (mirror _start_translation)
                         ocr_config = {'provider': self.ocr_provider_var.get()}
+                        if ocr_config['provider'] == 'google':
+                            google_creds = self.main_gui.config.get('google_vision_credentials', '') or \
+                                           self.main_gui.config.get('google_cloud_credentials', '')
+                            if google_creds and os.path.exists(google_creds):
+                                ocr_config['google_credentials_path'] = google_creds
+                            else:
+                                self._log("⚠️ Google Cloud Vision credentials not found for parallel task", "warning")
+                        elif ocr_config['provider'] == 'azure':
+                            azure_key = self.main_gui.config.get('azure_vision_key', '')
+                            azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '')
+                            if azure_key and azure_endpoint:
+                                ocr_config['azure_key'] = azure_key
+                                ocr_config['azure_endpoint'] = azure_endpoint
+                            else:
+                                self._log("⚠️ Azure credentials not found for parallel task", "warning")
+
                         translator = MangaTranslator(ocr_config, self.main_gui.client, self.main_gui, log_callback=self._log)
                         translator.set_stop_flag(self.stop_flag)
                         
