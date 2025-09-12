@@ -48,7 +48,7 @@ class MangaSettingsDialog:
                 'inpaint_tile_size': 512,  # Default tile size
                 'inpaint_tile_overlap': 64  # Overlap to avoid seams
             },
-            'ocr': {
+'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
                 'confidence_threshold': 0.7,
                 'merge_nearby_threshold': 20,
@@ -69,7 +69,10 @@ class MangaSettingsDialog:
                 'azure_max_wait': 60,
                 'azure_poll_interval': 0.5,
                 'min_text_length': 0,
-                'exclude_english_text': False
+                'exclude_english_text': False,
+                'english_exclude_threshold': 0.7,
+                'english_exclude_min_chars': 4,
+                'english_exclude_short_tokens': False
             },
             'advanced': {
             'format_detection': True,
@@ -1412,8 +1415,59 @@ class MangaSettingsDialog:
         
         tb.Checkbutton(
             exclude_english_frame,
-            text="Exclude primarily English text (>70% English characters)",
+            text="Exclude primarily English text (tunable threshold)",
             variable=self.exclude_english_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        
+        # Threshold slider
+        english_threshold_frame = tk.Frame(filter_frame)
+        english_threshold_frame.pack(fill='x', pady=5)
+        tk.Label(english_threshold_frame, text="English Exclude Threshold:", width=28, anchor='w').pack(side='left')
+        self.english_exclude_threshold = tk.DoubleVar(
+            value=self.settings['ocr'].get('english_exclude_threshold', 0.7)
+        )
+        threshold_scale = tk.Scale(
+            english_threshold_frame,
+            from_=0.6, to=0.99,
+            resolution=0.01,
+            orient='horizontal',
+            variable=self.english_exclude_threshold,
+            length=250,
+            command=lambda v: self.english_threshold_label.config(text=f"{float(v)*100:.0f}%")
+        )
+        threshold_scale.pack(side='left', padx=10)
+        self.english_threshold_label = tk.Label(english_threshold_frame, text=f"{int(self.english_exclude_threshold.get()*100)}%", width=5)
+        self.english_threshold_label.pack(side='left')
+        
+        # Minimum character count
+        min_chars_frame = tk.Frame(filter_frame)
+        min_chars_frame.pack(fill='x', pady=5)
+        tk.Label(min_chars_frame, text="Min chars to exclude as English:", width=28, anchor='w').pack(side='left')
+        self.english_exclude_min_chars = tk.IntVar(
+            value=self.settings['ocr'].get('english_exclude_min_chars', 4)
+        )
+        min_chars_spinbox = tb.Spinbox(
+            min_chars_frame,
+            from_=1,
+            to=10,
+            textvariable=self.english_exclude_min_chars,
+            increment=1,
+            width=10
+        )
+        min_chars_spinbox.pack(side='left', padx=10)
+        tk.Label(min_chars_frame, text="characters").pack(side='left')
+        
+        # Legacy aggressive short-token filter
+        exclude_short_frame = tk.Frame(filter_frame)
+        exclude_short_frame.pack(fill='x', pady=(5, 0))
+        self.english_exclude_short_tokens = tk.BooleanVar(
+            value=self.settings['ocr'].get('english_exclude_short_tokens', False)
+        )
+        tb.Checkbutton(
+            exclude_short_frame,
+            text="Aggressively drop very short ASCII tokens (legacy)",
+            variable=self.english_exclude_short_tokens,
             bootstyle="round-toggle"
         ).pack(anchor='w')
         
@@ -2578,6 +2632,9 @@ class MangaSettingsDialog:
             self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
             self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
             self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
+            self.settings['ocr']['english_exclude_threshold'] = self.english_exclude_threshold.get()
+            self.settings['ocr']['english_exclude_min_chars'] = self.english_exclude_min_chars.get()
+            self.settings['ocr']['english_exclude_short_tokens'] = self.english_exclude_short_tokens.get()
             
             # Bubble detection settings
             self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled.get()
