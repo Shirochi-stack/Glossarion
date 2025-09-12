@@ -74,13 +74,15 @@ class MangaSettingsDialog:
                 'english_exclude_min_chars': 4,
                 'english_exclude_short_tokens': False
             },
-            'advanced': {
+'advanced': {
             'format_detection': True,
             'webtoon_mode': 'auto',
             'debug_mode': False,
             'save_intermediate': False,
             'parallel_processing': False,
             'max_workers': 4,
+            'parallel_panel_translation': False,
+            'panel_max_workers': 2,
             'auto_convert_to_onnx': True,
             'auto_convert_to_onnx_background': True
             },
@@ -97,7 +99,7 @@ class MangaSettingsDialog:
             },
             
             # Mask dilation settings with new iteration controls
-            'mask_dilation': 15,
+            'mask_dilation': 0,
             'use_all_iterations': True,  # Master control - use same for all by default
             'all_iterations': 2,  # Value when using same for all
             'text_bubble_dilation_iterations': 2,  # Text-filled speech bubbles
@@ -1358,6 +1360,7 @@ class MangaSettingsDialog:
         # Text merging settings
         merge_frame = tk.LabelFrame(content_frame, text="Text Region Merging", padx=15, pady=10)
         merge_frame.pack(fill='x', padx=20, pady=(10, 0))
+
         
         # Merge nearby threshold
         nearby_frame = tk.Frame(merge_frame)
@@ -2285,6 +2288,50 @@ class MangaSettingsDialog:
         # Initialize workers state
         self._toggle_workers()
 
+        # Panel-level parallel translation
+        panel_frame = tk.LabelFrame(content_frame, text="Parallel Panel Translation", padx=15, pady=10)
+        panel_frame.pack(fill='x', padx=20, pady=(10, 0))
+
+        self.parallel_panel_var = tk.BooleanVar(
+            value=self.settings.get('advanced', {}).get('parallel_panel_translation', False)
+        )
+        tb.Checkbutton(
+            panel_frame,
+            text="Enable parallel panel translation (process multiple images concurrently)",
+            variable=self.parallel_panel_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+
+        panels_row = tk.Frame(panel_frame)
+        panels_row.pack(fill='x', pady=5)
+        tk.Label(panels_row, text="Max concurrent panels:", width=20, anchor='w').pack(side='left')
+        self.panel_max_workers_var = tk.IntVar(
+            value=self.settings.get('advanced', {}).get('panel_max_workers', 2)
+        )
+        tb.Spinbox(
+            panels_row,
+            from_=1,
+            to=12,
+            textvariable=self.panel_max_workers_var,
+            width=10
+        ).pack(side='left', padx=10)
+        
+        # Panel start stagger (ms)
+        stagger_row = tk.Frame(panel_frame)
+        stagger_row.pack(fill='x', pady=5)
+        tk.Label(stagger_row, text="Panel start stagger:", width=20, anchor='w').pack(side='left')
+        self.panel_stagger_ms_var = tk.IntVar(
+            value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 0)
+        )
+        tb.Spinbox(
+            stagger_row,
+            from_=0,
+            to=1000,
+            textvariable=self.panel_stagger_ms_var,
+            width=10
+        ).pack(side='left', padx=10)
+        tk.Label(stagger_row, text="ms").pack(side='left')
+
         # ONNX conversion settings
         onnx_frame = tk.LabelFrame(content_frame, text="ONNX Conversion", padx=15, pady=10)
         onnx_frame.pack(fill='x', padx=20, pady=(10, 0))
@@ -2685,6 +2732,10 @@ class MangaSettingsDialog:
             self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
             self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
             self.settings['advanced']['max_workers'] = self.max_workers.get()
+            # Panel-level parallel translation settings
+            self.settings['advanced']['parallel_panel_translation'] = bool(self.parallel_panel_var.get())
+            self.settings['advanced']['panel_max_workers'] = int(self.panel_max_workers_var.get())
+            self.settings['advanced']['panel_start_stagger_ms'] = int(self.panel_stagger_ms_var.get())
             
             # ONNX auto-convert settings (persist and apply to environment)
             if hasattr(self, 'auto_convert_onnx_var'):
