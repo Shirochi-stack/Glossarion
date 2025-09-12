@@ -12,6 +12,7 @@ import logging
 import traceback
 import hashlib
 from pathlib import Path
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -139,6 +140,13 @@ class BubbleDetector:
     Supports multiple model formats and provides configurable detection.
     Backward compatible with existing code while adding RT-DETR support.
     """
+    
+    # Process-wide shared RT-DETR to avoid concurrent meta-device loads
+    _rtdetr_init_lock = threading.Lock()
+    _rtdetr_shared_model = None
+    _rtdetr_shared_processor = None
+    _rtdetr_loaded = False
+    _rtdetr_repo_id = 'ogkalu/comic-text-and-bubble-detector'
     
     def __init__(self, config_path: str = "config.json"):
         """
@@ -368,31 +376,74 @@ class BubbleDetector:
             logger.info("RT-DETR model already loaded")
             return True
         
+        # Fast path: if shared already loaded and not forcing reload, attach
+        if BubbleDetector._rtdetr_loaded and not force_reload:
+            self.rtdetr_model = BubbleDetector._rtdetr_shared_model
+            self.rtdetr_processor = BubbleDetector._rtdetr_shared_processor
+            self.rtdetr_loaded = True
+            logger.info("RT-DETR model attached from shared cache")
+            return True
+        
         try:
             # Use custom model_id if provided, otherwise use default
             repo_id = model_id if model_id else self.rtdetr_repo
             
-            logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
+            # Serialize initialization across threads/process instances
+            with BubbleDetector._rtdetr_init_lock:
+                # Re-check after acquiring lock
+                if BubbleDetector._rtdetr_loaded and not force_reload:
+                    self.rtdetr_model = BubbleDetector._rtdetr_shared_model
+                    self.rtdetr_processor = BubbleDetector._rtdetr_shared_processor
+                    self.rtdetr_loaded = True
+                    logger.info("RT-DETR model attached from shared cache (post-lock)")
+                    return True
+                
+                logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
+
+            # Ensure TorchDynamo/compile doesn't interfere on some builds
+            try:
+                os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
+            except Exception:
+                pass
             
-            # Load processor
+            # Load processor (CPU-friendly settings)
             self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
                 repo_id,
                 size={"width": 640, "height": 640},
                 cache_dir=self.cache_dir if not model_path else None
             )
             
-            # Load model
+            # Load model with fully materialized weights to avoid 'meta' device tensors
             self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
                 model_path if model_path else repo_id,
-                cache_dir=self.cache_dir if not model_path else None
+                cache_dir=self.cache_dir if not model_path else None,
+                low_cpu_mem_usage=False,
+                torch_dtype=(torch.float32 if TORCH_AVAILABLE else None),
+                device_map=None
             )
             
-            # Move to device
-            if self.device == 'cuda':
-                self.rtdetr_model = self.rtdetr_model.to('cuda')
-                logger.info("   RT-DETR model moved to GPU")
+            # Always keep shared model on CPU for stability
+            self.rtdetr_model = self.rtdetr_model.to('cpu')
             
+            # Finalize
             self.rtdetr_model.eval()
+
+            # Sanity check: ensure no parameter is left on 'meta' device
+            try:
+                for n, p in self.rtdetr_model.named_parameters():
+                    if getattr(p, 'device', None) is not None and getattr(p.device, 'type', '') == 'meta':
+                        raise RuntimeError(f"Parameter {n} is on 'meta' device after load")
+            except Exception as e:
+                logger.error(f"RT-DETR load sanity check failed: {e}")
+                self.rtdetr_loaded = False
+                return False
+
+            # Publish shared cache
+            BubbleDetector._rtdetr_shared_model = self.rtdetr_model
+            BubbleDetector._rtdetr_shared_processor = self.rtdetr_processor
+            BubbleDetector._rtdetr_loaded = True
+            BubbleDetector._rtdetr_repo_id = repo_id
+
             self.rtdetr_loaded = True
             
             # Save the model ID that was used
@@ -400,7 +451,7 @@ class BubbleDetector:
             self.config['rtdetr_model_id'] = repo_id
             self._save_config()
             
-            logger.info("✅ RT-DETR model loaded successfully")
+            logger.info("✅ RT-DETR model loaded successfully (CPU)")
             logger.info("   Classes: Empty bubbles, Text bubbles, Free text")
             
             # Auto-convert to ONNX if environment variable is set
@@ -598,18 +649,19 @@ class BubbleDetector:
             # Prepare image for model
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
-            # Move to device
-            if self.device == "cuda":
-                inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            # Move inputs to the same device as the model (shared CPU model by default)
+            model_device = next(self.rtdetr_model.parameters()).device if self.rtdetr_model is not None else (torch.device('cpu') if TORCH_AVAILABLE else 'cpu')
+            if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
+                inputs = {k: v.to(model_device) for k, v in inputs.items()}
             
             # Run inference
             with torch.no_grad():
                 outputs = self.rtdetr_model(**inputs)
             
             # Post-process results
-            target_sizes = torch.tensor([pil_image.size[::-1]])
-            if self.device == "cuda":
-                target_sizes = target_sizes.to("cuda")
+            target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
+            if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
+                target_sizes = target_sizes.to(model_device)
             
             results = self.rtdetr_processor.post_process_object_detection(
                 outputs,
