@@ -1652,9 +1652,9 @@ class MangaTranslator:
             
             self._log(f"✅ Detected {len(regions)} text regions after merging")
             
-            # Save debug images if enabled
+            # Save debug images only if 'Save intermediate images' is enabled
             advanced_settings = manga_settings.get('advanced', {})
-            if advanced_settings.get('debug_mode', False) or advanced_settings.get('save_intermediate', False):
+            if advanced_settings.get('save_intermediate', False):
                 self._save_debug_image(image_path, regions)
             
             return regions
@@ -2011,15 +2011,24 @@ class MangaTranslator:
         
         return False
 
-    def _save_debug_image(self, image_path: str, regions: List[TextRegion]):
-        """Save debug image with detected regions highlighted"""
+    def _save_debug_image(self, image_path: str, regions: List[TextRegion], debug_base_dir: str = None):
+        """Save debug image with detected regions highlighted, respecting save_intermediate toggle.
+        All files are written under <translated_images>/debug (or provided debug_base_dir)."""
+        advanced_settings = self.manga_settings.get('advanced', {})
         # Skip debug images in batch mode unless explicitly requested
-        if self.batch_mode and not self.manga_settings.get('advanced', {}).get('force_debug_batch', False):
+        if self.batch_mode and not advanced_settings.get('force_debug_batch', False):
             return
-        
-        # Check if debug mode is enabled
-        if not self.manga_settings.get('advanced', {}).get('debug_mode', False):
+        # Respect the 'Save intermediate images' toggle only
+        if not advanced_settings.get('save_intermediate', False):
             return
+        # Compute debug directory under translated_images
+        if debug_base_dir is None:
+            translated_dir = os.path.join(os.path.dirname(image_path), 'translated_images')
+            debug_dir = os.path.join(translated_dir, 'debug')
+        else:
+            debug_dir = os.path.join(debug_base_dir, 'debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
         
         try:
             import cv2
@@ -2037,11 +2046,8 @@ class MangaTranslator:
                 self._log(f"   Failed to load image for debug: {str(e)}", "warning")
                 return
             
-            # Create debug directory if save_intermediate is enabled
-            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                debug_dir = os.path.join(os.path.dirname(image_path), 'debug')
-                os.makedirs(debug_dir, exist_ok=True)
-                base_name = os.path.splitext(os.path.basename(image_path))[0]
+            # Debug directory prepared earlier; compute base name
+            # base_name already computed above
             
             # Draw rectangles around detected text regions
             overlay = img.copy()
@@ -2095,12 +2101,8 @@ class MangaTranslator:
                 cv2.putText(overlay, text, (20, 35 + i*20), cv2.FONT_HERSHEY_SIMPLEX,
                            0.5, (255, 255, 255), 1, cv2.LINE_AA)
             
-            # Save main debug image
-            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                debug_path = os.path.join(debug_dir, f"{base_name}_debug_regions.png")
-            else:
-                debug_path = image_path.replace('.', '_debug.')
-            
+            # Save main debug image (always under translated_images/debug when enabled)
+            debug_path = os.path.join(debug_dir, f"{base_name}_debug_regions.png")
             cv2.imwrite(debug_path, overlay)
             self._log(f"   📸 Saved debug image: {debug_path}")
             
@@ -2436,15 +2438,48 @@ class MangaTranslator:
                 api_time = time.time() - start_time
                 self._log(f"✅ API responded in {api_time:.2f} seconds")
 
-                # Extract content from response
+                # Normalize response to plain text (handle tuples and bytes)
                 if hasattr(response, 'content'):
                     response_text = response.content
                 else:
-                    response_text = str(response)
+                    response_text = response
+
+                # Handle tuple response like (text, 'stop') from some clients
+                if isinstance(response_text, tuple):
+                    response_text = response_text[0]
+
+                # Decode bytes/bytearray
+                if isinstance(response_text, (bytes, bytearray)):
+                    try:
+                        response_text = response_text.decode('utf-8', errors='replace')
+                    except Exception:
+                        response_text = str(response_text)
+
+                # Ensure string
+                if not isinstance(response_text, str):
+                    response_text = str(response_text)
+
+                response_text = response_text.strip()
+
+                # If it's a stringified tuple like "('text', 'stop')", extract the first element
+                if response_text.startswith("('") or response_text.startswith('("'):
+                    import ast, re
+                    try:
+                        parsed_tuple = ast.literal_eval(response_text)
+                        if isinstance(parsed_tuple, tuple) and parsed_tuple:
+                            response_text = str(parsed_tuple[0])
+                            self._log("📦 Extracted response from tuple literal", "debug")
+                    except Exception:
+                        match = re.match(r"^\('(.+?)',\s*'.*'\)$", response_text, re.DOTALL)
+                        if match:
+                            tmp = match.group(1)
+                            tmp = tmp.replace('\\n', '\n').replace("\\'", "'").replace('\\\"', '"').replace('\\\\', '\\')
+                            response_text = tmp
+                            self._log("📦 Extracted response using regex from tuple literal", "debug")
 
                 self._log(f"📥 Received response ({len(response_text)} chars)")
                 self._log(f"🔍 Raw response type: {type(response_text)}")
-                self._log(f"🔍 Raw response preview: {response_text[:500]}...")
+                self._log(f"🔍 Raw response preview: {response_text[:5000]}...")
                 
             except Exception as api_error:
                 api_time = time.time() - start_time
@@ -2493,42 +2528,24 @@ class MangaTranslator:
                     self._log(traceback.format_exc(), "error")
                     raise
             
-            # Extract content from response
-            if hasattr(response, 'content'):
-                response_text = response.content
-                # Check if it's a tuple representation
-                if isinstance(response_text, tuple):
-                    response_text = response_text[0]  # Get first element of tuple
-                response_text = response_text.strip()
+            
+
+            # Initialize translated with extracted response text to avoid UnboundLocalError
+            if response_text is None:
+                translated = ""
+            elif isinstance(response_text, str):
+                translated = response_text
+            elif isinstance(response_text, (bytes, bytearray)):
+                try:
+                    translated = response_text.decode('utf-8', errors='replace')
+                except Exception:
+                    translated = str(response_text)
             else:
-                # If response is a string or other format
-                response_text = str(response).strip()
-                
-                # Check if it's a stringified tuple
-                if response_text.startswith("('") or response_text.startswith('("'):
-                    # It's a tuple converted to string, extract the JSON part
-                    import ast
-                    try:
-                        parsed_tuple = ast.literal_eval(response_text)
-                        if isinstance(parsed_tuple, tuple):
-                            response_text = parsed_tuple[0]  # Get first element
-                            self._log("📦 Extracted response from tuple format", "debug")
-                    except:
-                        # If literal_eval fails, try regex
-                        import re
-                        match = re.match(r"^\('(.+)', '.*'\)$", response_text, re.DOTALL)
-                        if match:
-                            response_text = match.group(1)
-                            # Unescape the string
-                            response_text = response_text.replace('\\n', '\n')
-                            response_text = response_text.replace("\\'", "'")
-                            response_text = response_text.replace('\\"', '"')
-                            response_text = response_text.replace('\\\\', '\\')
-                            self._log("📦 Extracted response using regex from tuple string", "debug")
+                translated = str(response_text)
 
             # ADD THIS DEBUG CODE:
             self._log(f"🔍 RAW API RESPONSE DEBUG:", "debug")
-            self._log(f"  Type: {type(response)}", "debug")
+            self._log(f"  Type: {type(translated)}", "debug")
             #self._log(f"  Raw content length: {len(translated)}", "debug")
             #self._log(f"  First 200 chars: {translated[:200]}", "debug")
             #self._log(f"  Last 200 chars: {translated[-200:]}", "debug")
@@ -2558,8 +2575,8 @@ class MangaTranslator:
                     # Not JSON or failed to parse, use as-is
                     pass
             
-            self._log(f"🔍 Raw response type: {type(response)}")
-            self._log(f"🔍 Raw response content: '{translated[:100]}...'")
+            self._log(f"🔍 Raw response type: {type(translated)}")
+            self._log(f"🔍 Raw response content: '{translated[:5000]}...'")
             
             # Check if the response looks like a Python literal (tuple/string representation)
             if translated.startswith("('") or translated.startswith('("') or translated.startswith("('''"):
@@ -5471,9 +5488,9 @@ class MangaTranslator:
             
             self._log(f"\n✅ Detection complete: {len(regions)} regions found")
             
-            # Save debug image if debug mode is enabled
-            if self.manga_settings.get('advanced', {}).get('debug_mode', False):
-                self._save_debug_image(image_path, regions)
+            # Save debug outputs only if 'Save intermediate images' is enabled
+            if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                self._save_debug_image(image_path, regions, debug_base_dir=output_dir)
             
             # Step 2: Translate regions
             self._log(f"\n📍 [STEP 2] Translation Phase")
@@ -5549,7 +5566,7 @@ class MangaTranslator:
             
             # Save intermediate preprocessing image if enabled
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                self._save_intermediate_image(image_path, image, "original")
+                self._save_intermediate_image(image_path, image, "original", debug_base_dir=output_dir)
             
             # Check if we should skip inpainting
             if self.skip_inpainting:
@@ -5561,34 +5578,38 @@ class MangaTranslator:
                 self._log(f"🎭 Creating text mask...")
                 mask = self.create_text_mask(image, regions)
                 
-                # Debug save mask
-                try:
-                    mask_path = image_path.replace('.', '_mask.')
-                    cv2.imwrite(mask_path, mask)
-                    mask_percentage = ((mask > 0).sum() / mask.size) * 100
-                    self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
-                    self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
-                    
-                    # Save mask overlay visualization
-                    mask_viz = image.copy()
-                    mask_viz[mask > 0] = [0, 0, 255]  # Simple red overlay
-                    viz_path = image_path.replace('.', '_mask_overlay.')
-                    cv2.imwrite(viz_path, mask_viz)
-                    self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
-                    
-                    if mask_percentage > 50:
-                        self._log(f"   ⚠️ WARNING: Mask covers {mask_percentage:.1f}% - this might be too much!", "warning")
-                except Exception as e:
-                    self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
-                
+                # Save mask and overlay only if 'Save intermediate images' is enabled
                 if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                    self._save_intermediate_image(image_path, mask, "mask")
+                    try:
+                        debug_dir = os.path.join(output_dir, 'debug')
+                        os.makedirs(debug_dir, exist_ok=True)
+                        base_name = os.path.splitext(os.path.basename(image_path))[0]
+                        mask_path = os.path.join(debug_dir, f"{base_name}_mask.png")
+                        cv2.imwrite(mask_path, mask)
+                        mask_percentage = ((mask > 0).sum() / mask.size) * 100
+                        self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
+                        self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                        
+                        # Save mask overlay visualization
+                        mask_viz = image.copy()
+                        mask_viz[mask > 0] = [0, 0, 255]  # Simple red overlay
+                        viz_path = os.path.join(debug_dir, f"{base_name}_mask_overlay.png")
+                        cv2.imwrite(viz_path, mask_viz)
+                        self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
+                        
+                        if mask_percentage > 50:
+                            self._log(f"   ⚠️ WARNING: Mask covers {mask_percentage:.1f}% - this might be too much!", "warning")
+                    except Exception as e:
+                        self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
+                    
+                    # Also save intermediate copies
+                    self._save_intermediate_image(image_path, mask, "mask", debug_base_dir=output_dir)
                 
                 self._log(f"🎨 Inpainting to remove original text")
                 inpainted = self.inpaint_regions(image, mask)
                 
                 if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                    self._save_intermediate_image(image_path, inpainted, "inpainted")
+                    self._save_intermediate_image(image_path, inpainted, "inpainted", debug_base_dir=output_dir)
             
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
@@ -5852,9 +5873,13 @@ class MangaTranslator:
         
         return unique_regions
 
-    def _save_intermediate_image(self, original_path: str, image, stage: str):
-        """Save intermediate processing stages"""
-        debug_dir = os.path.join(os.path.dirname(original_path), 'debug')
+    def _save_intermediate_image(self, original_path: str, image, stage: str, debug_base_dir: str = None):
+        """Save intermediate processing stages under translated_images/debug or provided base dir"""
+        if debug_base_dir is None:
+            translated_dir = os.path.join(os.path.dirname(original_path), 'translated_images')
+            debug_dir = os.path.join(translated_dir, 'debug')
+        else:
+            debug_dir = os.path.join(debug_base_dir, 'debug')
         os.makedirs(debug_dir, exist_ok=True)
         
         base_name = os.path.splitext(os.path.basename(original_path))[0]
