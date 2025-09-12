@@ -689,11 +689,27 @@ class MangaTranslator:
             print(message)
 
     def _is_primarily_english(self, text: str) -> bool:
-        """Check if text is primarily English/ASCII characters"""
+        """Heuristic: treat text as English if it has no CJK and a high ASCII ratio.
+        Conservative by default to avoid dropping legitimate content.
+        Tunable via manga_settings.ocr:
+          - english_exclude_threshold (float, default 0.70)
+          - english_exclude_min_chars (int, default 4)
+          - english_exclude_short_tokens (bool, default False)
+        """
         if not text:
             return False
         
-        # Check for CJK characters FIRST - if found, it's NOT English
+        # Pull tuning knobs from settings (with safe defaults)
+        ocr_settings = {}
+        try:
+            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
+        except Exception:
+            pass
+        threshold = float(ocr_settings.get('english_exclude_threshold', 0.70))
+        min_chars = int(ocr_settings.get('english_exclude_min_chars', 4))
+        exclude_short = bool(ocr_settings.get('english_exclude_short_tokens', False))
+        
+        # 1) If text contains any CJK or full-width characters, do NOT treat as English
         has_cjk = any(
             '\u4e00' <= char <= '\u9fff' or  # Chinese
             '\u3040' <= char <= '\u309f' or  # Hiragana  
@@ -702,38 +718,37 @@ class MangaTranslator:
             '\uff00' <= char <= '\uffef'     # Full-width characters
             for char in text
         )
-        
         if has_cjk:
-            return False  # Has Asian characters, NOT English
-        
-        # Only NOW check for English patterns
-        text_stripped = text.strip()
-        
-        # Single ASCII letters
-        if len(text_stripped) == 1 and text_stripped.isalpha() and ord(text_stripped) < 128:
-            self._log(f"   Excluding single English letter: '{text_stripped}'", "debug")
-            return True
-        
-        # Short English text
-        if len(text_stripped) <= 3:
-            ascii_letters = sum(1 for char in text_stripped if char.isalpha() and ord(char) < 128)
-            if ascii_letters >= len(text_stripped) * 0.5:
-                self._log(f"   Excluding short English text: '{text_stripped}'", "debug")
-                return True
-        
-        # Count ASCII (excluding spaces which manga-ocr adds)
-        ascii_chars = sum(1 for char in text if 33 <= ord(char) <= 126)
-        total_chars = sum(1 for char in text if not char.isspace())
-        
-        if total_chars == 0:
             return False
         
+        text_stripped = text.strip()
+        non_space_len = sum(1 for c in text_stripped if not c.isspace())
+        
+        # 2) By default, do not exclude very short tokens to avoid losing interjections like "Ah", "Eh?", etc.
+        if not exclude_short and non_space_len < max(1, min_chars):
+            return False
+        
+        # Optional legacy behavior: aggressively drop very short pure-ASCII tokens
+        if exclude_short:
+            if len(text_stripped) == 1 and text_stripped.isalpha() and ord(text_stripped) < 128:
+                self._log(f"   Excluding single English letter: '{text_stripped}'", "debug")
+                return True
+            if len(text_stripped) <= 3:
+                ascii_letters = sum(1 for char in text_stripped if char.isalpha() and ord(char) < 128)
+                if ascii_letters >= len(text_stripped) * 0.5:
+                    self._log(f"   Excluding short English text: '{text_stripped}'", "debug")
+                    return True
+        
+        # 3) Compute ASCII ratio (exclude spaces)
+        ascii_chars = sum(1 for char in text if 33 <= ord(char) <= 126)
+        total_chars = sum(1 for char in text if not char.isspace())
+        if total_chars == 0:
+            return False
         ratio = ascii_chars / total_chars
         
-        if ratio > 0.7:
-            self._log(f"   Excluding English text ({ratio:.0%} ASCII): '{text[:30]}...'", "debug")
+        if ratio > threshold:
+            self._log(f"   Excluding English text ({ratio:.0%} ASCII, threshold {threshold:.0%}, len={non_space_len}): '{text[:30]}...'", "debug")
             return True
-        
         return False
 
     def _load_bubble_detector(self, ocr_settings, image_path):
