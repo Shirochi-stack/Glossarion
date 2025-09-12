@@ -16,6 +16,8 @@ import numpy as np
 from dataclasses import dataclass
 from PIL import Image
 import logging
+import time
+import random
 
 try:
     import gptqmodel
@@ -142,6 +144,13 @@ class CustomAPIProvider(OCRProvider):
         # Simple defaults
         self.api_format = 'openai'  # Most custom endpoints are OpenAI-compatible
         self.timeout = int(os.environ.get('CHUNK_TIMEOUT', '30'))
+        
+        # Retry configuration for Custom API OCR calls
+        self.max_retries = int(os.environ.get('CUSTOM_OCR_MAX_RETRIES', '3'))
+        self.retry_initial_delay = float(os.environ.get('CUSTOM_OCR_RETRY_INITIAL_DELAY', '0.8'))
+        self.retry_backoff = float(os.environ.get('CUSTOM_OCR_RETRY_BACKOFF', '1.8'))
+        self.retry_jitter = float(os.environ.get('CUSTOM_OCR_RETRY_JITTER', '0.4'))
+        self.retry_on_empty = os.environ.get('CUSTOM_OCR_RETRY_ON_EMPTY', '1') == '1'
         
     def check_installation(self) -> bool:
         """Always installed - uses UnifiedClient"""
@@ -419,45 +428,100 @@ class CustomAPIProvider(OCRProvider):
             # Now send this properly formatted message
             # The UnifiedClient should handle this correctly
             # But we're NOT using send_image, we're using regular send
-            response = self.client.send(
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=max_tokens
-            )
 
-            # Extract content from response object
-            content, finish_reason = response
-            
-            # Check the content directly
-            if content and content.strip():
-                # Filter out error messages
-                if "[" in content and "FAILED]" in content:
-                    self._log(f"⚠️ API returned error: {content}", "warning")
-                    return results
-                
-                # Also filter out "I can't extract" responses
-                error_phrases = [
-                    "I can't extract", "I cannot extract", 
-                    "I'm sorry", "I am sorry",
-                    "I'm unable", "I am unable",
-                    "cannot process images"
-                ]
-                
-                if any(phrase in content for phrase in error_phrases):
-                    self._log(f"❌ Model refusing to extract: {content[:100]}", "error")
-                    self._log(f"Model might not have vision capabilities or image format issue", "warning")
-                    return results
-                    
-                text = content.strip()
-                results.append(OCRResult(
-                    text=text,
-                    bbox=(0, 0, w, h),
-                    confidence=kwargs.get('confidence', 0.85),
-                    vertices=[(0, 0), (w, 0), (w, h), (0, h)]
-                ))
-                self._log(f"✅ Detected: {text[:50]}...")
-            else:
-                self._log(f"⚠️ No text detected (finish_reason: {finish_reason})")
+            # Retry-aware call
+            from unified_api_client import UnifiedClientError  # local import to avoid hard dependency at module import time
+            max_attempts = max(1, self.max_retries)
+            attempt = 0
+            last_error = None
+
+            # Common refusal/error phrases that indicate a non-OCR response
+            refusal_phrases = [
+                "I can't extract", "I cannot extract",
+                "I'm sorry", "I am sorry",
+                "I'm unable", "I am unable",
+                "cannot process images",
+                "I can't help with that",
+                "cannot view images",
+                "no text in the image"
+            ]
+
+            while attempt < max_attempts:
+                try:
+                    response = self.client.send(
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=max_tokens
+                    )
+
+                    # Extract content from response object
+                    content, finish_reason = response
+
+                    # Validate content
+                    has_content = bool(content and str(content).strip())
+                    refused = False
+                    if has_content:
+                        # Filter out explicit failure markers
+                        if "[" in content and "FAILED]" in content:
+                            refused = True
+                        elif any(phrase.lower() in content.lower() for phrase in refusal_phrases):
+                            refused = True
+
+                    # Decide success or retry
+                    if has_content and not refused:
+                        text = str(content).strip()
+                        results.append(OCRResult(
+                            text=text,
+                            bbox=(0, 0, w, h),
+                            confidence=kwargs.get('confidence', 0.85),
+                            vertices=[(0, 0), (w, 0), (w, h), (0, h)]
+                        ))
+                        self._log(f"✅ Detected: {text[:50]}...")
+                        break  # success
+                    else:
+                        reason = "empty result" if not has_content else "refusal/non-OCR response"
+                        last_error = f"{reason} (finish_reason: {finish_reason})"
+                        # Check if we should retry on empty or refusal
+                        should_retry = (not has_content and self.retry_on_empty) or refused
+                        attempt += 1
+                        if attempt >= max_attempts or not should_retry:
+                            # No more retries or shouldn't retry
+                            if not has_content:
+                                self._log(f"⚠️ No text detected (finish_reason: {finish_reason})")
+                            else:
+                                self._log(f"❌ Model returned non-OCR response: {str(content)[:120]}", "warning")
+                            break
+                        # Backoff before retrying
+                        delay = self.retry_initial_delay * (self.retry_backoff ** (attempt - 1)) + random.uniform(0, self.retry_jitter)
+                        self._log(f"🔄 Retry {attempt}/{max_attempts - 1} after {delay:.1f}s due to {reason}...", "warning")
+                        time.sleep(delay)
+                        continue
+
+                except UnifiedClientError as ue:
+                    msg = str(ue)
+                    last_error = msg
+                    # Do not retry on explicit user cancellation
+                    if 'cancelled' in msg.lower() or 'stopped by user' in msg.lower():
+                        self._log(f"❌ OCR cancelled: {msg}", "error")
+                        break
+                    attempt += 1
+                    if attempt >= max_attempts:
+                        self._log(f"❌ OCR failed after {attempt} attempts: {msg}", "error")
+                        break
+                    delay = self.retry_initial_delay * (self.retry_backoff ** (attempt - 1)) + random.uniform(0, self.retry_jitter)
+                    self._log(f"🔄 API error, retry {attempt}/{max_attempts - 1} after {delay:.1f}s: {msg}", "warning")
+                    time.sleep(delay)
+                    continue
+                except Exception as e_inner:
+                    last_error = str(e_inner)
+                    attempt += 1
+                    if attempt >= max_attempts:
+                        self._log(f"❌ OCR exception after {attempt} attempts: {last_error}", "error")
+                        break
+                    delay = self.retry_initial_delay * (self.retry_backoff ** (attempt - 1)) + random.uniform(0, self.retry_jitter)
+                    self._log(f"🔄 Exception, retry {attempt}/{max_attempts - 1} after {delay:.1f}s: {last_error}", "warning")
+                    time.sleep(delay)
+                    continue
         
         except Exception as e:
             self._log(f"❌ Error: {str(e)}", "error")
