@@ -62,6 +62,11 @@ class TextRegion:
 class MangaTranslator:
     """Main class for manga translation pipeline using Google Cloud Vision + API Key"""
     
+    # Global, process-wide registry to make local inpainting init safe across threads
+    # Only dictionary operations are locked (microseconds); heavy work happens outside the lock.
+    _inpaint_pool_lock = threading.Lock()
+    _inpaint_pool = {}  # (method, model_path) -> {'inpainter': obj|None, 'loaded': bool, 'event': threading.Event()}
+    
     def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
         """Initialize with OCR configuration and API client from main GUI
         
@@ -397,10 +402,8 @@ class MangaTranslator:
                 self._log("📦 Bubble detection is disabled in settings", "info")
                 return self._merge_nearby_regions(regions)
             
-            # Initialize detector if needed
-            if self.bubble_detector is None:
-                from bubble_detector import BubbleDetector
-                self.bubble_detector = BubbleDetector()
+            # Initialize thread-local detector
+            bd = self._get_thread_bubble_detector()
             
             bubbles = None
             rtdetr_detections = None
@@ -411,12 +414,12 @@ class MangaTranslator:
                     self._log("🤖 Using RT-DETR for bubble detection", "info")
                 
                 # BATCH OPTIMIZATION: Don't reload if already loaded
-                if self.batch_mode and self.bubble_detector.rtdetr_loaded:
+                if self.batch_mode and bd.rtdetr_loaded:
                     # Model already loaded, skip the loading step entirely
                     pass
-                elif not self.bubble_detector.rtdetr_loaded:
+                elif not bd.rtdetr_loaded:
                     self._log("📥 Loading RT-DETR model...", "info")
-                    if not self.bubble_detector.load_rtdetr_model():
+                    if not bd.load_rtdetr_model():
                         self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                 
@@ -435,7 +438,7 @@ class MangaTranslator:
                     self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
 
                 # Get FULL RT-DETR detections (not just bubbles)
-                rtdetr_detections = self.bubble_detector.detect_with_rtdetr(
+                rtdetr_detections = bd.detect_with_rtdetr(
                     image_path=image_path,
                     confidence=rtdetr_confidence,
                     return_all_bubbles=False  # Get dict with all classes
@@ -465,24 +468,24 @@ class MangaTranslator:
                     self._log("⚠️ No YOLO model configured, falling back to traditional merging", "warning")
                     return self._merge_nearby_regions(regions)
                 
-                if not self.bubble_detector.model_loaded:
+                if not bd.model_loaded:
                     self._log(f"📥 Loading YOLO model: {os.path.basename(model_path)}")
-                    if not self.bubble_detector.load_model(model_path):
+                    if not bd.load_model(model_path):
                         self._log("⚠️ Failed to load YOLO model, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                 
                 confidence = ocr_settings.get('bubble_confidence', 0.5)
                 self._log(f"🎯 Detecting bubbles with YOLO (confidence >= {confidence:.2f})")
-                bubbles = self.bubble_detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
+                bubbles = bd.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
                 
             else:  # auto mode
                 self._log("🤖 Auto mode: using best available detector", "info")
                 
-                if not self.bubble_detector.rtdetr_loaded:
-                    self.bubble_detector.load_rtdetr_model()
+                if not bd.rtdetr_loaded:
+                    bd.load_rtdetr_model()
                 
                 confidence = ocr_settings.get('bubble_confidence', 0.5)
-                bubbles = self.bubble_detector.detect_bubbles(
+                bubbles = bd.detect_bubbles(
                     image_path, 
                     confidence=confidence,
                     use_rtdetr=None
@@ -761,10 +764,12 @@ class MangaTranslator:
         model_path = ocr_settings.get('bubble_model_path', '')
         confidence = ocr_settings.get('bubble_confidence', 0.5)
         
+        bd = self._get_thread_bubble_detector()
+        
         if detector_type == 'rtdetr' or 'RT-DETR' in detector_type:
             # Load RT-DETR model
-            if self.bubble_detector.load_rtdetr_model(model_id=model_path):
-                return self.bubble_detector.detect_with_rtdetr(
+            if bd.load_rtdetr_model(model_id=model_path):
+                return bd.detect_with_rtdetr(
                     image_path=image_path,
                     confidence=ocr_settings.get('rtdetr_confidence', confidence),
                     return_all_bubbles=False
@@ -774,16 +779,16 @@ class MangaTranslator:
             custom_path = ocr_settings.get('custom_model_path', model_path)
             if 'rtdetr' in custom_path.lower():
                 # Custom RT-DETR model
-                if self.bubble_detector.load_rtdetr_model(model_id=custom_path):
-                    return self.bubble_detector.detect_with_rtdetr(
+                if bd.load_rtdetr_model(model_id=custom_path):
+                    return bd.detect_with_rtdetr(
                         image_path=image_path,
                         confidence=confidence,
                         return_all_bubbles=False
                     )
             else:
                 # Assume YOLO format for other custom models
-                if custom_path and self.bubble_detector.load_model(custom_path):
-                    detections = self.bubble_detector.detect_bubbles(
+                if custom_path and bd.load_model(custom_path):
+                    detections = bd.detect_bubbles(
                         image_path,
                         confidence=confidence
                     )
@@ -794,8 +799,8 @@ class MangaTranslator:
                     }
         else:
             # Standard YOLO model
-            if model_path and self.bubble_detector.load_model(model_path):
-                detections = self.bubble_detector.detect_bubbles(
+            if model_path and bd.load_model(model_path):
+                detections = bd.detect_bubbles(
                     image_path,
                     confidence=confidence
                 )
@@ -1300,10 +1305,8 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for Qwen2-VL...")
                         
-                        # Run bubble detection to get regions
-                        if self.bubble_detector is None:
-                            from bubble_detector import BubbleDetector
-                            self.bubble_detector = BubbleDetector()
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
                         
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
@@ -1350,10 +1353,8 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for Custom API...")
                         
-                        # Run bubble detection to get regions
-                        if self.bubble_detector is None:
-                            from bubble_detector import BubbleDetector
-                            self.bubble_detector = BubbleDetector()
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
                         
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
@@ -1423,10 +1424,8 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for EasyOCR...")
                         
-                        # Run bubble detection to get regions
-                        if self.bubble_detector is None:
-                            from bubble_detector import BubbleDetector
-                            self.bubble_detector = BubbleDetector()
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
                         
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
@@ -1488,10 +1487,8 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for PaddleOCR...")
                         
-                        # Run bubble detection to get regions
-                        if self.bubble_detector is None:
-                            from bubble_detector import BubbleDetector
-                            self.bubble_detector = BubbleDetector()
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
                         
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
@@ -1537,10 +1534,8 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for DocTR...")
                         
-                        # Run bubble detection to get regions
-                        if self.bubble_detector is None:
-                            from bubble_detector import BubbleDetector
-                            self.bubble_detector = BubbleDetector()
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
                         
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
@@ -2263,7 +2258,22 @@ class MangaTranslator:
     def translate_text(self, text: str, context: Optional[List[Dict]] = None, image_path: str = None, region: TextRegion = None) -> str:
         """Translate text using API with GUI system prompt and full image context"""
         try:
-            self._log(f"\n🌐 Starting translation for text: '{text[:50]}...'")
+            # Build per-request log prefix for clearer parallel logs
+            try:
+                import threading
+                thread_name = threading.current_thread().name
+            except Exception:
+                thread_name = "MainThread"
+            bbox_info = ""
+            try:
+                if region and hasattr(region, 'bounding_box') and region.bounding_box:
+                    x, y, w, h = region.bounding_box
+                    bbox_info = f" [bbox={x},{y},{w}x{h}]"
+            except Exception:
+                pass
+            prefix = f"[{thread_name}]{bbox_info}"
+            
+            self._log(f"\n{prefix} 🌐 Starting translation for text: '{text[:50]}...'")
             # CHECK 1: Before starting
             if self._check_stop():
                 self._log("⏹️ Translation stopped before full page context processing", "warning")
@@ -2280,20 +2290,13 @@ class MangaTranslator:
             else:
                 self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
 
-            self._log(f"📝 System prompt: {system_prompt[:100]}..." if system_prompt else "📝 No system prompt configured")
+            self._log(f"{prefix} 📝 System prompt: {system_prompt[:100]}..." if system_prompt else f"{prefix} 📝 No system prompt configured")
 
             if system_prompt:
                 messages = [{"role": "system", "content": system_prompt}]
             else:
                 messages = []
             
-            self._log(f"📋 Using profile: {profile_name}")
-            if system_prompt:
-                self._log(f"📝 System prompt: {system_prompt[:100]}...")
-                messages = [{"role": "system", "content": system_prompt}]
-            else:
-                self._log(f"📝 No system prompt configured")
-                messages = []
             
             # Add contextual translations if enabled
             if self.contextual_enabled and self.history_manager:
@@ -2307,7 +2310,7 @@ class MangaTranslator:
                 else:
                     self._log(f"🔗 Contextual enabled but no history available yet")
             else:
-                self._log(f"🔗 Contextual: {'Disabled' if not self.contextual_enabled else 'No HistoryManager'}")
+                self._log(f"{prefix} 🔗 Contextual: {'Disabled' if not self.contextual_enabled else 'No HistoryManager'}")
             
             # Add full image context if available AND visual context is enabled
             if image_path and self.visual_context_enabled:
@@ -2315,7 +2318,7 @@ class MangaTranslator:
                     import base64
                     from PIL import Image as PILImage
                     
-                    self._log(f"📷 Adding full page visual context for translation")
+                    self._log(f"{prefix} 📷 Adding full page visual context for translation")
                     
                     # Read and encode the full image
                     with open(image_path, 'rb') as img_file:
@@ -2323,7 +2326,7 @@ class MangaTranslator:
                     
                     # Check image size
                     img_size_mb = len(img_data) / (1024 * 1024)
-                    self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                    self._log(f"{prefix} 📊 Image size: {img_size_mb:.2f} MB")
                     
                     # Optionally resize if too large (Gemini has limits)
                     if img_size_mb > 10:  # If larger than 10MB
@@ -2342,7 +2345,7 @@ class MangaTranslator:
                             buffered = BytesIO()
                             pil_image.save(buffered, format="PNG", optimize=True)
                             img_data = buffered.getvalue()
-                            self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                            self._log(f"{prefix} ✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
                     
                     # Encode to base64
                     img_base64 = base64.b64encode(img_data).decode('utf-8')
@@ -2379,7 +2382,7 @@ class MangaTranslator:
                         ]
                     })
                     
-                    self._log(f"✅ Added full page image as visual context")
+                    self._log(f"{prefix} ✅ Added full page image as visual context")
                     
                 except Exception as e:
                     self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
@@ -2390,7 +2393,7 @@ class MangaTranslator:
                     messages.append({"role": "user", "content": text})
             elif image_path and not self.visual_context_enabled:
                 # Visual context disabled - text-only mode
-                self._log(f"📝 Text-only mode (visual context disabled)")
+                self._log(f"{prefix} 📝 Text-only mode (visual context disabled)")
                 messages.append({"role": "user", "content": text})
             else:
                 # No image path provided - text-only translation
@@ -2418,9 +2421,9 @@ class MangaTranslator:
 
             # Check token limit only if it's enabled
             if self.input_token_limit is None:
-                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+                self._log(f"{prefix} 📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
             else:
-                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                self._log(f"{prefix} 📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
                 
                 if estimated_tokens > self.input_token_limit:
                     self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
@@ -2451,7 +2454,7 @@ class MangaTranslator:
 
                 )
                 api_time = time.time() - start_time
-                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                self._log(f"{prefix} ✅ API responded in {api_time:.2f} seconds")
 
                 # Normalize response to plain text (handle tuples and bytes)
                 if hasattr(response, 'content'):
@@ -2492,9 +2495,7 @@ class MangaTranslator:
                             response_text = tmp
                             self._log("📦 Extracted response using regex from tuple literal", "debug")
 
-                self._log(f"📥 Received response ({len(response_text)} chars)")
-                self._log(f"🔍 Raw response type: {type(response_text)}")
-                self._log(f"🔍 Raw response preview: {response_text[:5000]}...")
+                self._log(f"{prefix} 📥 Received response ({len(response_text)} chars)")
                 
             except Exception as api_error:
                 api_time = time.time() - start_time
@@ -2590,8 +2591,8 @@ class MangaTranslator:
                     # Not JSON or failed to parse, use as-is
                     pass
             
-            self._log(f"🔍 Raw response type: {type(translated)}")
-            self._log(f"🔍 Raw response content: '{translated[:5000]}...'")
+            self._log(f"{prefix} 🔍 Raw response type: {type(translated)}")
+            self._log(f"{prefix} 🔍 Raw response content: '{translated[:5000]}...'")
             
             # Check if the response looks like a Python literal (tuple/string representation)
             if translated.startswith("('") or translated.startswith('("') or translated.startswith("('''"):
@@ -2664,7 +2665,6 @@ class MangaTranslator:
             response_text = re.sub(r"\s+['''\"`]\s+", " ", response_text)     # Remove isolated
             translated = response_text
             translated = self._clean_translation_text(translated)
-            self._log(f"🎯 Final translation result: '{translated[:50]}...'")
             
             # Apply glossary if available
             if hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
@@ -3509,6 +3509,74 @@ class MangaTranslator:
         
         return mask
     
+    def _get_or_init_shared_local_inpainter(self, local_method: str, model_path: str):
+        """Return a shared LocalInpainter for (local_method, model_path) with minimal locking.
+        If another thread is loading the same model, wait on its event instead of competing.
+        """
+        from local_inpainter import LocalInpainter
+        key = (local_method, model_path or '')
+        # Fast path: check without lock
+        rec = MangaTranslator._inpaint_pool.get(key)
+        if rec and rec.get('loaded') and rec.get('inpainter'):
+            return rec['inpainter']
+        # Create or wait for loader
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if rec and rec.get('loaded') and rec.get('inpainter'):
+                return rec['inpainter']
+            if not rec:
+                # Register loading record
+                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event()}
+                MangaTranslator._inpaint_pool[key] = rec
+                is_loader = True
+            else:
+                is_loader = False
+            event = rec['event']
+        # Loader performs heavy work without holding the lock
+        if is_loader:
+            try:
+                inp = LocalInpainter()
+                # Apply tiling settings once to the shared instance
+                tiling_settings = self.manga_settings.get('tiling', {})
+                inp.tiling_enabled = tiling_settings.get('enabled', False)
+                inp.tile_size = tiling_settings.get('tile_size', 512)
+                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                # Ensure model path
+                if not model_path or not os.path.exists(model_path):
+                    try:
+                        model_path = inp.download_jit_model(local_method)
+                    except Exception as e:
+                        self._log(f"⚠️ JIT download failed: {e}", "warning")
+                        model_path = None
+                # Load model
+                loaded_ok = False
+                if model_path and os.path.exists(model_path):
+                    try:
+                        loaded_ok = inp.load_model(local_method, model_path, force_reload=True)
+                    except Exception as e:
+                        self._log(f"⚠️ Inpainter load failed: {e}", "warning")
+                        loaded_ok = False
+                # Publish result
+                with MangaTranslator._inpaint_pool_lock:
+                    rec = MangaTranslator._inpaint_pool.get(key) or rec
+                    rec['inpainter'] = inp
+                    rec['loaded'] = bool(loaded_ok)
+                    rec['event'].set()
+                return inp
+            except Exception as e:
+                with MangaTranslator._inpaint_pool_lock:
+                    rec = MangaTranslator._inpaint_pool.get(key) or rec
+                    rec['inpainter'] = None
+                    rec['loaded'] = False
+                    rec['event'].set()
+                self._log(f"⚠️ Shared inpainter setup failed: {e}", "warning")
+                return None
+        else:
+            # Wait for loader to finish (without holding the lock)
+            event.wait(timeout=120)
+            rec2 = MangaTranslator._inpaint_pool.get(key)
+            return rec2['inpainter'] if rec2 else None
+
     def _initialize_local_inpainter(self):
         """Initialize local inpainting if configured"""
         try:
@@ -3556,52 +3624,86 @@ class MangaTranslator:
                         self._log(f"   New: {os.path.basename(model_path)}", "debug")
                     need_reload = True
                 
-                # Force complete reinit when model changes - FIX: use getattr
-                if need_reload and hasattr(self, 'local_inpainter') and getattr(self, 'local_inpainter', None) is not None:
-                    self._log("🔄 Forcing complete reinit due to model change", "info")
-                    self.local_inpainter = None
-                
                 # Store current settings
                 self._last_local_method = local_method
                 self._last_local_model_path = model_path
                 
-                # Initialize inpainter if needed - FIX: use getattr or hasattr check
-                if not hasattr(self, 'local_inpainter') or self.local_inpainter is None:
-                    self.local_inpainter = LocalInpainter()
-                    need_reload = True  # First time, definitely need to load
+                # Obtain shared/local instance with microsecond-scale locking
+                # Use shared pool to avoid long locks during heavy I/O
+                inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                if inp_shared is not None:
+                    self.local_inpainter = inp_shared
+                    if getattr(self.local_inpainter, 'model_loaded', False):
+                        self._log(f"✅ Using shared {local_method.upper()} inpainting model", "info")
+                        return True
+                # Fall back to instance-level init (rare)
+                try:
+                    from local_inpainter import LocalInpainter
+                except Exception:
+                    self._log("❌ Local inpainter module not available", "error")
+                    return False
+                    # Reuse shared instance if compatible
+                    if (MangaTranslator._shared_local_inpainter is not None and
+                        MangaTranslator._shared_local_method == local_method and
+                        MangaTranslator._shared_local_model_path == model_path and
+                        getattr(MangaTranslator._shared_local_inpainter, 'model_loaded', False)):
+                        self.local_inpainter = MangaTranslator._shared_local_inpainter
+                        self._log(f"✅ Using shared {local_method.upper()} inpainting model", "info")
+                        return True
                     
-                    # Set tiling from tiling section
-                    tiling_settings = self.manga_settings.get('tiling', {})
-                    self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
-                    self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
-                    self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                    # Create local inpainter if needed
+                    if not hasattr(self, 'local_inpainter') or self.local_inpainter is None:
+                        self.local_inpainter = LocalInpainter()
+                        tiling_settings = self.manga_settings.get('tiling', {})
+                        self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                        self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                        self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                        self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
+                        MangaTranslator._shared_local_inpainter = LocalInpainter()
+                        # Set tiling from tiling section once
+                        tiling_settings = self.manga_settings.get('tiling', {})
+                        MangaTranslator._shared_local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                        MangaTranslator._shared_local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                        MangaTranslator._shared_local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                        self._log(f"✅ Set tiling: enabled={MangaTranslator._shared_local_inpainter.tiling_enabled}, size={MangaTranslator._shared_local_inpainter.tile_size}, overlap={MangaTranslator._shared_local_inpainter.tile_overlap}", "info")
                     
-                    self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
-                
-                # If no model path or doesn't exist, try to find or download one
-                if not model_path or not os.path.exists(model_path):
-                    self._log(f"⚠️ Model path not found: {model_path}", "warning")
+                    # If no model path or doesn't exist, try to find or download one (retry once)
+                    if not model_path or not os.path.exists(model_path):
+                        self._log(f"⚠️ Model path not found: {model_path}", "warning")
+                        self._log("📥 Attempting to download JIT model...", "info")
+                        try:
+                            downloaded_path = self.local_inpainter.download_jit_model(local_method)
+                        except Exception as e:
+                            self._log(f"⚠️ JIT download failed: {e}", "warning")
+                            downloaded_path = None
+                        if downloaded_path:
+                            model_path = downloaded_path
+                            self._log(f"✅ Downloaded JIT model to: {model_path}")
+                        else:
+                            self._log("⚠️ JIT model download did not return a path", "warning")
                     
-                    # Try to download JIT model automatically
-                    self._log("📥 Attempting to download JIT model...", "info")
-                    downloaded_path = self.local_inpainter.download_jit_model(local_method)
-                    if downloaded_path:
-                        model_path = downloaded_path
-                        self._log(f"✅ Downloaded JIT model to: {model_path}")
-                        need_reload = True  # Downloaded new model
-                
-                # Load or reload the model if needed
-                if model_path and os.path.exists(model_path):
-                    if need_reload or not self.local_inpainter.model_loaded:
-                        self._log(f"📥 Loading {local_method} model...", "info")
-                        if self.local_inpainter.load_model(local_method, model_path, force_reload=need_reload):
+                    # Load model with retry to avoid transient file/JSON issues under parallel init
+                    loaded_ok = False
+                    if model_path and os.path.exists(model_path):
+                        for attempt in range(2):
+                            try:
+                                self._log(f"📥 Loading {local_method} model... (attempt {attempt+1})", "info")
+                                if self.local_inpainter.load_model(local_method, model_path, force_reload=True):
+                                    loaded_ok = True
+                                    break
+                            except Exception as e:
+                                self._log(f"⚠️ Load attempt {attempt+1} failed: {e}", "warning")
+                                time.sleep(0.5)
+                        if loaded_ok:
                             self._log(f"✅ Local inpainter loaded with {local_method.upper()}")
+                            # no-op: instance-level fallback loaded successfully
                         else:
                             self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
                     else:
-                        self._log(f"✅ Using already loaded {local_method.upper()} model", "info")
-                else:
-                    self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
+                        self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
+                    
+                    # Done
+                    pass
                 
                 # Always return True so local_inpainter exists
                 return True
@@ -3672,30 +3774,17 @@ class MangaTranslator:
         inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
         
         if inpaint_method == 'local':
-            # Check if local_inpainter exists
-            if not hasattr(self, 'local_inpainter'):
-                self._log("   ⚠️ Local inpainter not initialized, attempting now...", "warning")
-                self._initialize_local_inpainter()
-            
-            if hasattr(self, 'local_inpainter') and self.local_inpainter:
-                # Check if model is loaded
-                if not self.local_inpainter.model_loaded:
-                    self._log("   ⚠️ No model loaded, attempting to load...", "warning")
-                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
-                    
-                    # Try to download JIT model
-                    model_path = self.local_inpainter.download_jit_model(local_method)
-                    if model_path:
-                        self.local_inpainter.load_model(local_method, model_path)
-                
-                if self.local_inpainter.model_loaded:
-                    self._log("   🖥️ Using local inpainting", "info")
-                    return self.local_inpainter.inpaint(image, mask)
-                else:
-                    self._log("   ❌ No model loaded, returning original", "error")
-                    return image.copy()
+            # Resolve method and model path from config
+            local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+
+            # Use a thread-local inpainter instance
+            inp = self._get_thread_local_inpainter(local_method, model_path)
+            if inp and getattr(inp, 'model_loaded', False):
+                self._log("   🧽 Using local inpainting", "info")
+                return inp.inpaint(image, mask)
             else:
-                self._log("   ❌ Local inpainter not available", "error")
+                self._log("   ⚠️ Local inpainting model not loaded for this thread, returning original image", "warning")
                 return image.copy()
         
         elif inpaint_method == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
@@ -5185,6 +5274,60 @@ class MangaTranslator:
                 return font_path
         
         return None  # Will use default font
+    
+    def _get_thread_bubble_detector(self):
+        """Get or create a BubbleDetector dedicated to the current thread."""
+        if not hasattr(self, '_thread_local'):
+            self._thread_local = threading.local()
+        if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
+            from bubble_detector import BubbleDetector
+            self._thread_local.bubble_detector = BubbleDetector()
+        return self._thread_local.bubble_detector
+    
+    def _get_thread_local_inpainter(self, local_method: str, model_path: str):
+        """Get or create a LocalInpainter dedicated to the current thread.
+        Loads the requested model for this thread if needed.
+        """
+        if not hasattr(self, '_thread_local'):
+            self._thread_local = threading.local()
+        if not hasattr(self._thread_local, 'local_inpainters'):
+            self._thread_local.local_inpainters = {}
+        key = (local_method or 'anime', model_path or '')
+        if key not in self._thread_local.local_inpainters or self._thread_local.local_inpainters[key] is None:
+            try:
+                from local_inpainter import LocalInpainter
+                inp = LocalInpainter()
+                # Apply tiling settings
+                tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
+                inp.tiling_enabled = tiling_settings.get('enabled', False)
+                inp.tile_size = tiling_settings.get('tile_size', 512)
+                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                
+                # Ensure model is available
+                resolved_model_path = model_path
+                if not resolved_model_path or not os.path.exists(resolved_model_path):
+                    try:
+                        resolved_model_path = inp.download_jit_model(local_method)
+                    except Exception as e:
+                        self._log(f"⚠️ JIT model download failed for {local_method}: {e}", "warning")
+                        resolved_model_path = None
+                
+                # Load model for this thread's instance
+                if resolved_model_path and os.path.exists(resolved_model_path):
+                    try:
+                        loaded_ok = inp.load_model(local_method, resolved_model_path, force_reload=True)
+                        if not loaded_ok:
+                            self._log(f"⚠️ Thread-local inpainter load returned False for {local_method}", "warning")
+                    except Exception as e:
+                        self._log(f"⚠️ Thread-local inpainter load failed: {e}", "warning")
+                else:
+                    self._log("⚠️ No model path available for thread-local inpainter", "warning")
+                
+                self._thread_local.local_inpainters[key] = inp
+            except Exception as e:
+                self._log(f"❌ Failed to create thread-local inpainter: {e}", "error")
+                self._thread_local.local_inpainters[key] = None
+        return self._thread_local.local_inpainters.get(key)
     
     def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
         """Translate all text regions with API delay"""
