@@ -914,6 +914,20 @@ class LocalInpainter:
                 
                 # Process this tile with the actual model
                 processed_tile = self._process_single_tile(tile_img, tile_mask, tile_size, refinement)
+
+                # Auto-retry for tile if no visible change
+                try:
+                    if self._is_noop(tile_img, processed_tile, tile_mask):
+                        kernel = np.ones((3, 3), np.uint8)
+                        expanded = cv2.dilate(tile_mask, kernel, iterations=1)
+                        processed_retry = self._process_single_tile(tile_img, expanded, tile_size, 'fast')
+                        if self._is_noop(tile_img, processed_retry, expanded):
+                            logger.warning("Tile remained unchanged after retry; proceeding without further fallback")
+                            processed_tile = processed_retry
+                        else:
+                            processed_tile = processed_retry
+                except Exception as e:
+                    logger.debug(f"Tiled no-op detection error: {e}")
                 
                 # Blend tile back into result
                 if overlap > 0 and (x > 0 or y > 0):
@@ -963,7 +977,38 @@ class LocalInpainter:
         
         return result
 
-    def inpaint(self, image, mask, refinement='normal'):
+    def _is_noop(self, original: np.ndarray, result: np.ndarray, mask: np.ndarray, threshold: float = 0.75) -> bool:
+        """Return True if inpainting produced negligible change within the masked area."""
+        try:
+            if original is None or result is None:
+                return True
+            if original.shape != result.shape:
+                return False
+            # Normalize mask to single channel boolean
+            if mask is None:
+                return False
+            if len(mask.shape) == 3:
+                mask_gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            else:
+                mask_gray = mask
+            m = mask_gray > 0
+            if not np.any(m):
+                return False
+            # Fast path
+            if np.array_equal(original, result):
+                return True
+            diff = cv2.absdiff(result, original)
+            if len(diff.shape) == 3:
+                diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            else:
+                diff_gray = diff
+            mean_diff = float(np.mean(diff_gray[m]))
+            return mean_diff < threshold
+        except Exception as e:
+            logger.debug(f"No-op detection failed: {e}")
+            return False
+
+    def inpaint(self, image, mask, refinement='normal', _retry_attempt: int = 0):
         """Inpaint - compatible with JIT, checkpoint, and ONNX models"""
         if not self.model_loaded:
             logger.error("No model loaded")
@@ -1307,6 +1352,24 @@ class LocalInpainter:
                 kernel = kernel @ kernel.T
                 mask_blur = cv2.filter2D(mask_3ch, -1, kernel)
                 result = (result * mask_blur + image * (1 - mask_blur)).astype(np.uint8)
+            
+            # No-op detection and auto-retry
+            try:
+                if self._is_noop(image, result, mask):
+                    if _retry_attempt == 0:
+                        logger.warning("⚠️ Inpainting produced no visible change; retrying with slight mask dilation and fast refinement")
+                        kernel = np.ones((3, 3), np.uint8)
+                        expanded_mask = cv2.dilate(mask, kernel, iterations=1)
+                        return self.inpaint(image, expanded_mask, refinement='fast', _retry_attempt=1)
+                    elif _retry_attempt == 1:
+                        logger.warning("⚠️ Still no visible change after retry; attempting a second dilation and fast refinement")
+                        kernel = np.ones((5, 5), np.uint8)
+                        expanded_mask2 = cv2.dilate(mask, kernel, iterations=1)
+                        return self.inpaint(image, expanded_mask2, refinement='fast', _retry_attempt=2)
+                    else:
+                        logger.warning("⚠️ No further retries; returning last result without fallback")
+            except Exception as e:
+                logger.debug(f"No-op detection step failed: {e}")
             
             logger.info("✅ Inpainted successfully!")
             return result
