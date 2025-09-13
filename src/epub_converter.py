@@ -224,8 +224,18 @@ class ContentProcessor:
     
     @staticmethod
     def safe_escape(text: str) -> str:
-        """Escape XML special characters"""
-        pass
+        """Escape XML special characters for use in XHTML titles/attributes"""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except Exception:
+                return ""
+        # Use html.escape to handle &, <, > and quotes; then escape single quotes
+        escaped = html_module.escape(text, quote=True)
+        escaped = escaped.replace("'", "&apos;")
+        return escaped
 
 
 class TitleExtractor:
@@ -472,10 +482,19 @@ class XHTMLConverter:
             log(f"[DEBUG] Processing chapter: {title}")
             log(f"[DEBUG] Input HTML length: {len(html_content)}")
             
-            # Unescape any HTML entities first if present
-            if '&lt;' in html_content or '&gt;' in html_content or '&quot;' in html_content:
-                log(f"[DEBUG] Unescaping HTML entities")
+            # Unescape HTML entities but PRESERVE &lt; and &gt; so fake angle brackets in narrative
+            # text don't become real tags (which breaks parsing across paragraphs like the sample).
+            if any(ent in html_content for ent in ['&amp;', '&quot;', '&#', '&lt;', '&gt;']):
+                log(f"[DEBUG] Unescaping HTML entities (preserving &lt; and &gt;)")
+                # Temporarily protect &lt; and &gt; (both cases) from unescaping
+                placeholder_lt = '\ue000'
+                placeholder_gt = '\ue001'
+                html_content = html_content.replace('&lt;', placeholder_lt).replace('&LT;', placeholder_lt)
+                html_content = html_content.replace('&gt;', placeholder_gt).replace('&GT;', placeholder_gt)
+                # Unescape remaining entities
                 html_content = html.unescape(html_content)
+                # Restore protected angle bracket entities
+                html_content = html_content.replace(placeholder_lt, '&lt;').replace(placeholder_gt, '&gt;')
             
             # Strip out ANY existing DOCTYPE, XML declaration, or html wrapper
             # We only want the body content
@@ -509,16 +528,29 @@ class XHTMLConverter:
                             return f'<{tag_name}>{content}</{tag_name}>'
                     return ''
                 
-                return html.escape(tag_content)
+                return tag_content
             
             html_content = re.sub(r'<[^>]*?=""[^>]*?>', fix_broken_attributes_only, html_content)
             
-            # Convert story tags to Chinese brackets
-            def escape_story_tags(match):
-                tag = match.group(0)
-                return tag.replace('<', '《').replace('>', '》')
-            
-            html_content = re.sub(r'<[^/>][^>]*?:[^>]*?>', escape_story_tags, html_content)
+            # Convert only "story tags" whose TAG NAME contains a colon (e.g., <System:Message>),
+            # but DO NOT touch valid HTML/SVG tags where colons appear in attributes (e.g., style="color:red" or xlink:href)
+            # and DO NOT touch namespaced tags like <svg:rect>.
+            allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns"}
+
+            def _escape_story_tag(match):
+                full_tag = match.group(0)   # Entire <...> or </...>
+                tag_name = match.group(1)   # The tag name possibly containing ':'
+                prefix = tag_name.split(':', 1)[0].lower()
+                # If this is a known namespace prefix (e.g., svg:rect), leave it alone
+                if prefix in allowed_ns_prefixes:
+                    return full_tag
+                # Otherwise, treat as a story/fake tag and replace angle brackets with Chinese brackets
+                return full_tag.replace('<', '《').replace('>', '》')
+
+            # Open tags with colon in the TAG NAME (not attributes)
+            html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]+)(?:\s[^>]*)?>', _escape_story_tag, html_content)
+            # Closing tags with colon in the TAG NAME
+            html_content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]+)\s*>', _escape_story_tag, html_content)
             
             # Parse with lxml
             from lxml import html as lxml_html, etree
@@ -531,10 +563,13 @@ class XHTMLConverter:
             # Remove the wrapper div we added
             body_xhtml = re.sub(r'^<div[^>]*>|</div>$', '', body_xhtml)
             
-            # Convert any remaining entities to Chinese brackets
+            # Optionally replace angle-bracket entities with Chinese brackets
+            # Default behavior: keep them as entities (&lt; &gt;) so the output preserves the original text
+            bracket_style = os.getenv('ANGLE_BRACKET_OUTPUT', 'entity').lower()
             if '&lt;' in body_xhtml or '&gt;' in body_xhtml:
-                body_xhtml = body_xhtml.replace('&lt;', '《')
-                body_xhtml = body_xhtml.replace('&gt;', '》')
+                if bracket_style in ('cjk', 'chinese', 'cjk_brackets'):
+                    body_xhtml = body_xhtml.replace('&lt;', '《').replace('&gt;', '》')
+                # else: keep as entities
             
             # Build our own clean XHTML document
             return XHTMLConverter._build_xhtml(title, body_xhtml, css_links)
@@ -838,6 +873,14 @@ class EPUBCompiler:
         self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
         self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
         self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
+        
+        # SVG rasterization settings
+        self.rasterize_svg = os.getenv('RASTERIZE_SVG_FALLBACK', '1') == '1'
+        try:
+            import cairosvg  # noqa: F401
+            self._cairosvg_available = True
+        except Exception:
+            self._cairosvg_available = False
         
         # Set global log callback
         set_global_log_callback(log_callback)
@@ -1834,25 +1877,45 @@ class EPUBCompiler:
         return html_files
 
     def _read_and_decode_html_file(self, file_path: str) -> str:
-        """Read HTML file and decode entities"""
+        """Read HTML file and decode entities, preserving &lt; and &gt; as text.
+        This prevents narrative angle-bracket text from becoming bogus tags."""
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
         if not content:
             return content
         
-        # Multiple passes to handle nested/double-encoded entities
+        import re
         import html
+        
+        # Placeholders for angle bracket entities
+        LT_PLACEHOLDER = "\ue000"
+        GT_PLACEHOLDER = "\ue001"
+        
+        # Patterns for common representations of < and >
+        _lt_entity_patterns = [r'&lt;', r'&LT;', r'&#0*60;', r'&#x0*3[cC];']
+        _gt_entity_patterns = [r'&gt;', r'&GT;', r'&#0*62;', r'&#x0*3[eE];']
+        
+        def protect_angle_entities(s: str) -> str:
+            # Replace all forms of &lt; and &gt; with placeholders so unescape won't turn them into real < >
+            for pat in _lt_entity_patterns:
+                s = re.sub(pat, LT_PLACEHOLDER, s)
+            for pat in _gt_entity_patterns:
+                s = re.sub(pat, GT_PLACEHOLDER, s)
+            return s
+        
         max_iterations = 5
-        for i in range(max_iterations):
+        for _ in range(max_iterations):
             prev_content = content
-            
-            # html.unescape handles all standard HTML entities
+            # Protect before each pass in case of double-encoded entities
+            content = protect_angle_entities(content)
+            # html.unescape handles all standard HTML entities (except our placeholders)
             content = html.unescape(content)
-            
-            # If nothing changed, we're done
             if content == prev_content:
                 break
+        
+        # Restore placeholders back to entities so they remain literal text in XHTML
+        content = content.replace(LT_PLACEHOLDER, '&lt;').replace(GT_PLACEHOLDER, '&gt;')
         
         return content
 
@@ -2742,6 +2805,23 @@ img {
                         elif ctype == 'image/png':
                             safe_name += '.png'
                     
+                    # Special handling for SVG: rasterize to PNG fallback for reader compatibility
+                    if ctype == 'image/svg+xml' and self.rasterize_svg and self._cairosvg_available:
+                        try:
+                            from cairosvg import svg2png
+                            png_name = os.path.splitext(safe_name)[0] + '.png'
+                            png_path = os.path.join(self.images_dir, png_name)
+                            # Generate PNG only if not already present
+                            if not os.path.exists(png_path):
+                                svg2png(url=path, write_to=png_path)
+                                self.log(f"  🖼️ Rasterized SVG → PNG: {img} -> {png_name}")
+                            # Return the PNG as the image to include
+                            return (png_name, png_name, 'image/png')
+                        except Exception as e:
+                            self.log(f"[WARNING] SVG rasterization failed for {img}: {e}")
+                            # Fall back to adding the raw SVG
+                            return (img, safe_name, ctype)
+                    
                     return (img, safe_name, ctype)
                 else:
                     return None
@@ -2942,7 +3022,10 @@ img {
             return None
     
     def _process_chapter_images(self, xhtml_content: str, processed_images: Dict[str, str]) -> str:
-        """Process image paths in chapter content"""
+        """Process image paths and inline SVG in chapter content.
+        - Rewrites <img src> to use images/ paths and prefers PNG fallback for SVGs.
+        - Converts inline <svg> elements to <img src="data:image/png;base64,..."> when CairoSVG is available.
+        """
         try:
             soup = BeautifulSoup(xhtml_content, 'lxml')
             changed = False
@@ -2950,6 +3033,7 @@ img {
             # Debug: Log what images we're looking for
             self.log(f"[DEBUG] Processing chapter images. Available images: {list(processed_images.keys())}")
             
+            # 1) Handle <img> tags that reference files
             for img in soup.find_all('img'):
                 src = img.get('src', '')
                 if not src:
@@ -2997,6 +3081,64 @@ img {
                 if not img.get('alt'):
                     img['alt'] = ''
                     changed = True
+            
+            # 2) Convert inline SVG wrappers that point to raster images into plain <img>
+            #    Example: <svg ...><image xlink:href="../images/00002.jpeg"/></svg>
+            for svg_tag in soup.find_all('svg'):
+                try:
+                    image_child = svg_tag.find('image')
+                    if image_child:
+                        href = (
+                            image_child.get('xlink:href') or
+                            image_child.get('href') or
+                            image_child.get('{http://www.w3.org/1999/xlink}href')
+                        )
+                        if href:
+                            clean_href = href.split('?')[0]
+                            basename = os.path.basename(clean_href)
+                            # Map to processed image name
+                            if basename in processed_images:
+                                safe_name = processed_images[basename]
+                            else:
+                                name_wo = os.path.splitext(basename)[0]
+                                safe_name = None
+                                for orig, safe in processed_images.items():
+                                    if os.path.splitext(orig)[0] == name_wo:
+                                        safe_name = safe
+                                        break
+                            new_src = f"images/{safe_name}" if safe_name else f"images/{basename}"
+                            new_img = soup.new_tag('img')
+                            new_img['src'] = new_src
+                            new_img['alt'] = svg_tag.get('aria-label') or svg_tag.get('title') or ''
+                            new_img['style'] = 'width:100%; height:auto; display:block;'
+                            svg_tag.replace_with(new_img)
+                            changed = True
+                            self.log(f"[DEBUG] Rewrote inline SVG<image> to <img src='{new_src}'>")
+                except Exception as e:
+                    self.log(f"[WARNING] Failed to rewrite inline SVG wrapper: {e}")
+            
+            # 3) Convert remaining inline <svg> (complex vector art) to PNG data URIs if possible
+            if self.rasterize_svg and self._cairosvg_available:
+                try:
+                    from cairosvg import svg2png
+                    import base64
+                    for svg_tag in soup.find_all('svg'):
+                        try:
+                            svg_markup = str(svg_tag)
+                            png_bytes = svg2png(bytestring=svg_markup.encode('utf-8'))
+                            b64 = base64.b64encode(png_bytes).decode('ascii')
+                            alt_text = svg_tag.get('aria-label') or svg_tag.get('title') or ''
+                            new_img = soup.new_tag('img')
+                            new_img['src'] = f'data:image/png;base64,{b64}'
+                            new_img['alt'] = alt_text
+                            new_img['style'] = 'width:100%; height:auto; display:block;'
+                            svg_tag.replace_with(new_img)
+                            changed = True
+                            self.log("[DEBUG] Converted inline <svg> to PNG data URI")
+                        except Exception as e:
+                            self.log(f"[WARNING] Failed to rasterize inline SVG: {e}")
+                except Exception:
+                    pass
             
             if changed:
                 # Return the modified content
