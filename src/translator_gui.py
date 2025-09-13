@@ -5,6 +5,9 @@ if __name__ == '__main__':
 
 # Standard Library
 import io, json, logging, math, os, shutil, sys, threading, time, re
+from logging.handlers import RotatingFileHandler
+import atexit
+import faulthandler
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
@@ -47,6 +50,84 @@ fallback_compile_epub = scan_html_folder = None
 
 CONFIG_FILE = "config.json"
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
+
+# --- Robust file logging and crash tracing setup ---
+_FAULT_LOG_FH = None
+
+def _setup_file_logging():
+    """Initialize rotating file logging and crash tracing (faulthandler).
+    Logs are written to <repo_root>/logs/run.log and crashes to crash.log.
+    This runs once at import time to capture early issues as well.
+    """
+    global _FAULT_LOG_FH
+    try:
+        # Determine logs directory in the same folder as the Python scripts (src)
+        base_dir = os.path.abspath(os.path.dirname(__file__))
+        logs_dir = os.path.join(base_dir, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+
+        # Rotating log handler
+        log_file = os.path.join(logs_dir, "run.log")
+        handler = RotatingFileHandler(
+            log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        )
+        formatter = logging.Formatter(
+            fmt="%(asctime)s %(levelname)s [%(process)d:%(threadName)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler.setFormatter(formatter)
+
+        root_logger = logging.getLogger()
+        # Avoid duplicate handlers on reload
+        if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
+            root_logger.addHandler(handler)
+        root_logger.setLevel(logging.INFO)
+
+        # Capture warnings via logging
+        logging.captureWarnings(True)
+
+        # Enable faulthandler to capture hard crashes (e.g., native OOM)
+        crash_file = os.path.join(logs_dir, "crash.log")
+        # Keep the file handle open for the lifetime of the process
+        _FAULT_LOG_FH = open(crash_file, "a", encoding="utf-8")
+        try:
+            faulthandler.enable(file=_FAULT_LOG_FH, all_threads=True)
+        except Exception:
+            # Best-effort: continue even if faulthandler cannot be enabled
+            pass
+
+        # Ensure the crash log handle is closed on exit
+        @atexit.register
+        def _close_fault_log():
+            try:
+                if _FAULT_LOG_FH and not _FAULT_LOG_FH.closed:
+                    _FAULT_LOG_FH.flush()
+                    _FAULT_LOG_FH.close()
+            except Exception:
+                pass
+
+        # Log uncaught exceptions as critical errors
+        def _log_excepthook(exc_type, exc_value, exc_tb):
+            try:
+                logging.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+            except Exception:
+                pass
+        sys.excepthook = _log_excepthook
+
+        logging.getLogger(__name__).info("File logging initialized at %s", log_file)
+    except Exception as e:
+        # Fallback to basicConfig if anything goes wrong
+        try:
+            logging.basicConfig(level=logging.INFO)
+        except Exception:
+            pass
+        try:
+            print(f"Logging setup failed: {e}")
+        except Exception:
+            pass
+
+# Initialize logging at import time to catch early failures
+_setup_file_logging()
 
 def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
@@ -1033,7 +1114,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.3.0"
+        __version__ = "4.3.1"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1920,7 +2001,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.3.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.3.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -15088,7 +15169,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v4.3.0...")
+    print("🚀 Starting Glossarion v4.3.1...")
     
     # Initialize splash screen
     splash_manager = None
