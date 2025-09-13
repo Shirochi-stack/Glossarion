@@ -673,7 +673,9 @@ class MangaTranslator:
         self._log("✅ Rendering settings updated", "info")
     
     def _log(self, message: str, level: str = "info"):
-        """Log message to GUI or console"""
+        """Log message to GUI or console, and also to file logger.
+        The file logger is configured in translator_gui._setup_file_logging().
+        """
         # In batch mode, only log important messages
         if self.batch_mode:
             # Skip verbose/debug messages in batch mode
@@ -686,10 +688,30 @@ class MangaTranslator:
             ]):
                 return
         
+        # Send to GUI if available
         if self.log_callback:
-            self.log_callback(message, level)
+            try:
+                self.log_callback(message, level)
+            except Exception:
+                # Fall back to print if GUI callback fails
+                print(message)
         else:
             print(message)
+        
+        # Always record to the Python logger (file)
+        try:
+            _logger = logging.getLogger(__name__)
+            if level == "error":
+                _logger.error(message)
+            elif level == "warning":
+                _logger.warning(message)
+            elif level == "debug":
+                _logger.debug(message)
+            else:
+                # Map custom levels like 'success' to INFO
+                _logger.info(message)
+        except Exception:
+            pass
 
     def _is_primarily_english(self, text: str) -> bool:
         """Heuristic: treat text as English if it has no CJK and a high ASCII ratio.
@@ -5534,7 +5556,15 @@ class MangaTranslator:
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
                      batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
         """Process a single manga image through the full pipeline"""
-        
+        # Ensure local references exist for cleanup in finally
+        image = None
+        inpainted = None
+        final_image = None
+        mask = None
+        mask_viz = None
+        pil_image = None
+        heatmap = None
+
         # Set batch tracking if provided
         if batch_index is not None and batch_total is not None:
             self.batch_current = batch_index
@@ -5818,6 +5848,64 @@ class MangaTranslator:
             self._log(f"   Type: {type(e).__name__}", "error")
             self._log(traceback.format_exc(), "error")
             result['errors'].append(error_msg)
+        finally:
+            # Per-image memory cleanup to reduce RAM growth across pages
+            try:
+                # Clear self-held large attributes
+                try:
+                    self.current_image = None
+                    self.current_mask = None
+                    self.final_image = None
+                    self.text_regions = []
+                    self.translated_regions = []
+                except Exception:
+                    pass
+
+                # Clear local large objects if present
+                locs = locals()
+                for name in [
+                    'image', 'inpainted', 'final_image', 'mask', 'mask_viz', 'pil_image', 'heatmap'
+                ]:
+                    try:
+                        if name in locs:
+                            # Explicitly delete reference from locals
+                            del locs[name]
+                    except Exception:
+                        pass
+
+                # Reset caches for the next image (non-destructive to loaded models)
+                try:
+                    self.reset_for_new_image()
+                except Exception:
+                    pass
+
+                # Encourage release of native resources
+                try:
+                    import cv2 as _cv2
+                    try:
+                        _cv2.destroyAllWindows()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                # Free CUDA memory if torch is available
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+                # Force a garbage collection cycle
+                try:
+                    import gc
+                    gc.collect()
+                except Exception:
+                    pass
+            except Exception:
+                # Never let cleanup fail the pipeline
+                pass
         
         return result
 
