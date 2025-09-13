@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion No Cuda v4.3.1 - PyInstaller Specification File
-Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
+Glossarion Lite v4.3.1 - PyInstaller Specification File
+Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
 import sys
@@ -12,9 +12,9 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'N_Glossarion_NoCuda v4.3.1'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_Lite v4.3.1'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
-ENABLE_CONSOLE = True  # Console disabled for production
+ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True         # Single executable vs folder distribution
 
@@ -79,11 +79,6 @@ app_files = [
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
     
-    # Manga Translation modules
-    ('manga_translator.py', '.'),
-    ('manga_integration.py', '.'),
-    ('manga_settings_dialog.py', '.'), 
-    
     # Update Manager
     ('update_manager.py', '.'),
 	
@@ -99,140 +94,10 @@ app_files = [
 	('enhanced_text_extractor.py', '.'),	
 	
 	('multi_api_key_manager.py', '.'),	
-	
-	('bubble_detector.py', '.'),
-
-	('local_inpainter.py', '.'),	
-	
-	('ocr_manager.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
 
-# ============================================================================
-# ADD WINDOWS RUNTIME DEPENDENCIES
-# ============================================================================
-
-# Add Windows Visual C++ Runtime DLLs that PyTorch needs
-import platform
-if platform.system() == 'Windows':
-    # Find and add Visual C++ runtime DLLs
-    import ctypes.util
-    
-    # List of runtime DLLs that PyTorch might need
-    runtime_dlls = [
-        'msvcp140.dll',
-        'msvcp140_1.dll',
-        'msvcp140_2.dll',
-        'vcruntime140.dll',
-        'vcruntime140_1.dll',
-        'vcomp140.dll',
-        'concrt140.dll',
-        'api-ms-win-crt-runtime-l1-1-0.dll',
-        'api-ms-win-crt-heap-l1-1-0.dll',
-        'api-ms-win-crt-math-l1-1-0.dll',
-        'api-ms-win-crt-stdio-l1-1-0.dll',
-        'api-ms-win-crt-locale-l1-1-0.dll',
-        'api-ms-win-crt-string-l1-1-0.dll',
-        'api-ms-win-crt-time-l1-1-0.dll',
-        'api-ms-win-crt-convert-l1-1-0.dll',
-        'api-ms-win-crt-environment-l1-1-0.dll',
-        'api-ms-win-crt-process-l1-1-0.dll',
-        'api-ms-win-crt-filesystem-l1-1-0.dll',
-        'api-ms-win-crt-utility-l1-1-0.dll',
-        'api-ms-win-core-console-l1-1-0.dll',
-        'api-ms-win-core-datetime-l1-1-0.dll',
-        'api-ms-win-core-debug-l1-1-0.dll',
-        'api-ms-win-core-errorhandling-l1-1-0.dll',
-        'api-ms-win-core-file-l1-1-0.dll',
-        'api-ms-win-core-file-l1-2-0.dll',
-        'api-ms-win-core-file-l2-1-0.dll',
-        'api-ms-win-core-handle-l1-1-0.dll',
-        'api-ms-win-core-heap-l1-1-0.dll',
-        'api-ms-win-core-interlocked-l1-1-0.dll',
-        'api-ms-win-core-libraryloader-l1-1-0.dll',
-        'api-ms-win-core-localization-l1-2-0.dll',
-        'api-ms-win-core-memory-l1-1-0.dll',
-        'api-ms-win-core-namedpipe-l1-1-0.dll',
-        'api-ms-win-core-processenvironment-l1-1-0.dll',
-        'api-ms-win-core-processthreads-l1-1-0.dll',
-        'api-ms-win-core-processthreads-l1-1-1.dll',
-        'api-ms-win-core-profile-l1-1-0.dll',
-        'api-ms-win-core-rtlsupport-l1-1-0.dll',
-        'api-ms-win-core-string-l1-1-0.dll',
-        'api-ms-win-core-synch-l1-1-0.dll',
-        'api-ms-win-core-synch-l1-2-0.dll',
-        'api-ms-win-core-sysinfo-l1-1-0.dll',
-        'api-ms-win-core-timezone-l1-1-0.dll',
-        'api-ms-win-core-util-l1-1-0.dll',
-        'ucrtbase.dll',
-    ]
-    
-    for dll_name in runtime_dlls:
-        dll_path = ctypes.util.find_library(dll_name)
-        if dll_path and os.path.exists(dll_path):
-            # Check if not already in binaries
-            if not any(b[0] == dll_path or os.path.basename(b[0]) == dll_name for b in binaries):
-                binaries.append((dll_path, '.'))
-                print(f"  Added runtime DLL: {dll_name}")
-    
-    # Also try to find Intel MKL and OpenMP libraries if they exist
-    mkl_dlls = ['mkl_core.dll', 'mkl_intel_thread.dll', 'mkl_rt.dll', 'libiomp5md.dll', 'libomp140.x86_64.dll']
-    
-    # CRITICAL: Find and add dependencies for shm.dll
-    # Search for OpenMP and other runtime libraries in multiple locations
-    search_paths = [
-        os.path.join(os.environ.get('CONDA_PREFIX', ''), 'Library', 'bin') if os.environ.get('CONDA_PREFIX') else None,
-        os.path.join(sys.prefix, 'Library', 'bin'),
-        os.path.join(sys.prefix, 'Lib', 'site-packages', 'torch', 'lib'),
-        os.path.dirname(sys.executable),  # Python installation directory
-        os.path.join(os.path.dirname(sys.executable), 'DLLs'),
-        os.path.join(os.path.dirname(sys.executable), 'Library', 'bin'),
-    ]
-    
-    # Add PATH directories
-    if 'PATH' in os.environ:
-        search_paths.extend(os.environ['PATH'].split(';'))
-    
-    for dll_name in mkl_dlls:
-        found = False
-        for search_path in search_paths:
-            if not search_path:
-                continue
-            if isinstance(search_path, list):
-                for p in search_path:
-                    dll_path = os.path.join(p, dll_name)
-                    if os.path.exists(dll_path):
-                        binaries.append((dll_path, '.'))
-                        print(f"  Added MKL/OpenMP DLL: {dll_name}")
-                        found = True
-                        break
-            else:
-                dll_path = os.path.join(search_path, dll_name)
-                if os.path.exists(dll_path):
-                    binaries.append((dll_path, '.'))
-                    print(f"  Added MKL/OpenMP DLL: {dll_name}")
-                    found = True
-                    break
-            if found:
-                break
-    
-    # CRITICAL FIX: Add dependencies for shm.dll
-    # These are often in the torch/lib directory itself
-    try:
-        import torch
-        torch_lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
-        
-        # Check for dependencies that shm.dll needs
-        shm_deps = ['fbgemm.dll', 'asmjit.dll', 'cpuinfo.dll', 'c10.dll']
-        for dep_dll in shm_deps:
-            dep_path = os.path.join(torch_lib, dep_dll)
-            if os.path.exists(dep_path):
-                if not any(dep_path == b[0] for b in binaries):
-                    binaries.append((dep_path, 'torch/lib'))
-                    print(f"  Added shm.dll dependency: {dep_dll}")
-    except:
-        pass
 # ============================================================================
 # HIDDEN IMPORTS (Organized by category)
 # ============================================================================
@@ -391,8 +256,6 @@ image_modules = [
     'PIL.FtexImagePlugin',
     
     'olefile',
-    'cv2',  # OpenCV for manga processing
-    'numpy',  # Required for OpenCV and image processing
 ]
 
 # AI/API Clients (Including Google Cloud Vision)
@@ -934,6 +797,7 @@ utility_modules = [
     'cryptography.hazmat.primitives.hashes',
     'cryptography.hazmat.backends',
     'cryptography.hazmat.backends.openssl',
+	'numpy',
 ]
 
 # Encoding support
@@ -974,42 +838,168 @@ hiddenimports.extend(encoding_modules)
 # Remove duplicates
 hiddenimports = list(set(hiddenimports))
 
+# ============================================================================
+# EXCLUSIONS (Packages to exclude to reduce size)
+# ============================================================================
+
 excludes = [
+    # ============================================================================
+    # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)
+    # ============================================================================
     
-    # CUDA-specific ONNX
+    # PyTorch ecosystem (~800MB)
+    'torch', 'torch.*','torch-*',
+    'torchvision', 'torchvision.*', 
+    'torchaudio', 'torchaudio.*',
+    'torch.nn', 'torch.nn.*',
+    'torch.cuda', 'torch.cuda.*',
+    'torch.jit', 'torch.onnx', 'torch.autograd',
+    'torch.optim', 'torch.utils', 'torch.distributed',
+    'torch.multiprocessing', 'torch.serialization',
+    'torch.nn.modules.*',
+    
+    # HuggingFace ecosystem (~400MB)
+    'transformers', 'transformers.*',
+    'tokenizers', 'tokenizers.*',
+    'huggingface_hub', 'huggingface_hub.*',
+    'safetensors', 'safetensors.*',
+    'accelerate', 'accelerate.*',
+    
+    # Computer Vision & YOLO (~200MB)
+    'ultralytics', 'ultralytics.*',
+    'ultralytics-thop',
+    
+    # ONNX Runtime (~300MB)
+    'onnx', 'onnx.*',
+    'onnxruntime', 'onnxruntime.*',
     'onnxruntime-gpu',
-    'onnxruntime_gpu',
-	'scipy',
+    'onnxruntime.capi', 'onnxruntime.capi.*',
+    'onnxruntime.tools', 'onnxruntime.transformers',
+    'onnxruntime.backend', 'onnxruntime.backend.*',
     
-    # Paddle GPU
-    'paddle.fluid.core_avx',
-    'paddle.fluid.core_noavx',
-    'paddlepaddle-gpu',
+    # OCR Libraries (~300MB) - MAJOR ADDITION
+    'easyocr', 'easyocr.*',
+    'manga-ocr', 'manga_ocr.*',
+    'paddleocr', 'paddleocr.*',
+    'paddlepaddle', 'paddlepaddle.*',
+    'paddlex', 'paddlex.*',
+    'python-doctr', 'python_doctr.*',
     
-    # Development & Testing (optional, for size)
-    'pytest', 'nose', 'doctest',
-    'IPython', 'jupyter', 'notebook',
-    'pylint', 'black', 'flake8', 'mypy',
+    # Multiple OpenCV versions (~150MB) - MAJOR ADDITION
+    'opencv-contrib-python',
+    'opencv-python',  # Keep opencv-python-headless only
+	'cv2',
+    'cv2.contrib',
+    
+    # Scientific Computing (Optional)
+    'matplotlib', 'matplotlib.*',
+    'pandas', 'pandas.*',
+    'scikit-image', 'skimage', 'skimage.*',
+    'sklearn', 'sklearn.*',
+    
+	# Remove AVIF support if not needed (7MB)
+    'PIL._avif',
+    'pillow.libs',
+    
+    # Remove PDF support if not needed (5MB)
+    'pypdfium2', 'pypdfium2.*',
+    'pypdfium2_raw',
+	
+	# Scientific/Data formats (15MB savings)
+    'h5py', 'h5py.*',
+    'tables', 'tables.*',
+    
+    # Geographic/Geometry (2MB)
+    'shapely', 'shapely.*',
+    'Shapely', 'Shapely.*',
+    
+    # Audio processing (2MB)
+    'soundfile', 'soundfile.*',
+    '_soundfile_data',
+    'librosa', 'librosa.*',
+	
+	# Fix numpy source directory issue
+    'numpy.f2py',
+    'numpy.f2py.*',
+    'numpy.testing',
+    'numpy.testing.*',
+    'numpy.tests',
+    'numpy.distutils',
+    'numpy.distutils.*',
+    'docstring_parser.numpydoc',  # This is pulling in numpy incorrectly
+    'numpy.doc',
+    'numpy.conftest',
+    # ============================================================================
+    # CUDA & GPU LIBRARIES
+    # ============================================================================
+    'nvidia', 'nvidia.*',
+    'cuda', 'cudart', 'cublas', 'curand', 'cusparse', 'cufft',
+    'cutlass', 'nccl', 'nvtx', 'cudnn',
+    
+    # ============================================================================
+    # OTHER ML FRAMEWORKS
+    # ============================================================================
+    'tensorflow', 'tensorflow.*',
+    'tensorflow_hub', 'tensorboard',
+    'keras', 'keras.*',
+    'jax', 'jax.*', 'flax', 'flax.*',
+    'xformers', 'triton',
+    
+    # ============================================================================
+    # DEVELOPMENT & TESTING TOOLS
+    # ============================================================================
+    'pytest', 'nose', 'unittest', 'doctest', 'test', 'tests',
+    'IPython', 'jupyter', 'notebook', 'ipykernel', 'ipywidgets',
+    'pylint', 'black', 'flake8', 'mypy', 'coverage',
     'sphinx', 'docutils',
     
-    # Alternative GUIs
+    # ============================================================================
+    # ALTERNATIVE GUI FRAMEWORKS
+    # ============================================================================
     'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
     'wx', 'kivy', 'pygame',
     
-    # Web frameworks
+    # ============================================================================
+    # WEB FRAMEWORKS
+    # ============================================================================
     'tornado', 'flask', 'django', 'fastapi', 'uvicorn',
+    
+    # ============================================================================
+    # OPTIONAL/RARELY USED PACKAGES
+    # ============================================================================
+    'dask', 'dask.*',
+    'cupy', 'sparse',
+    'colorama',  # Unless you need colored console output
+    'win32com', 'pythoncom',  # Unless you need Windows COM
+    
+    # ============================================================================
+    # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
+    # ============================================================================
+    'modelscope', 'modelscope.*',
+    'aistudio-sdk',
+    'bce-python-sdk',
+    'briefcase',
+    'cookiecutter',
+    'fugashi', 'unidic-lite', 'jaconv',  # Japanese text processing
+    'python-bidi',  # BiDi text
+	
+		
+	# MORE AGGRESSIVE EXCLUDES
+	'bitsandbytes', 'bitsandbytes.*',
+	'polars', 'polars.*',
+	'pyarrow', 'pyarrow.*',
+    'scipy', 'scipy.*',
+    'scipy.libs'
+	
+	# Force exclude ALL torch variants
+	'*torch*',
+	'torch*',
+	'_torch*',
 ]
 
 # ============================================================================
 # ANALYSIS
 # ============================================================================
-
-# Create hooks directory path
-import os
-hooks_dir = os.path.join(os.getcwd(), 'hooks')
-if not os.path.exists(hooks_dir):
-    os.makedirs(hooks_dir)
-    print(f"Created hooks directory: {hooks_dir}")
 
 a = Analysis(
     ['translator_gui.py'],
@@ -1017,7 +1007,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=['./hooks'],  # Add custom hooks directory
+    hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
@@ -1027,151 +1017,30 @@ a = Analysis(
     noarchive=False,
 )
 
-# ============================================================================
-# SURGICAL GPU/CUDA BINARY REMOVAL
-# ============================================================================
+# Simple cleanup after Analysis
+a.binaries = [b for b in a.binaries if not any([
+    b[0].endswith('opencv_videoio_ffmpeg490_64.dll'),
+    'scipy.libs' in b[0],
+    '_avif' in b[0],
+    'pypdfium' in b[0],
+    'metrics_cpp_avx2' in b[0],
+    'hdf5.dll' in b[0],
+    'libsndfile' in b[0],
+    'geos-' in b[0],
+])]
 
-# GPU/CUDA specific files to remove (keeping CPU versions)
-GPU_CUDA_DLLS = [
-    # CUDA Runtime & Libraries
-    'cudart64_',
-    'cudart32_',
-    'cudnn64_',
-    'cudnn32_',
-    'cudnn_ops',
-    'cudnn_adv',
-    'cudnn_cnn',
-    'cudnn_engines',
-    'cudnn_heuristic',
-    'cublas64_',
-    'cublasLt64_',
-    'cufft64_',
-    'curand64_',
-    'cusolver64_',
-    'cusolverMg64_',
-    'cusparse64_',
-    'nvrtc64_',
-    'nvrtc-builtins64_',
-    'nvJitLink_',
-    'nccl64_',
-    'nvToolsExt64_',
-    
-    # PyTorch CUDA specific
-    'torch_cuda.dll',
-    'torch_cuda_cu.dll',
-    'torch_cuda_cpp.dll',
-    'c10_cuda.dll',
-    'caffe2_nvrtx.dll',
-    
-    # ONNX GPU providers
-    'onnxruntime_providers_cuda.dll',
-    'onnxruntime_providers_tensorrt.dll',
-    'onnxruntime_providers_dml.dll',
-    
-    # Paddle GPU
-    'paddle_cuda',
-    'libpaddle_cuda',
-    
-    # Keep torch_cpu.dll! It's needed for CPU operations
-]
+# Remove torch only
+a.datas = [d for d in a.datas if not any([
+    'torch' in d[0].lower(),
+    'torch-' in d[0],
+    '.dist-info' in d[0] and 'torch' in d[0].lower(),
+])]
 
-# Additional patterns for files that are definitely GPU-only
-GPU_PATTERNS = [
-    'cuda',
-    'cudnn',
-    'cublas',
-    'cufft',
-    'curand',
-    'cusolver',
-    'cusparse',
-    'nvrtc',
-    'nvjitlink',
-    'nccl',
-    'nvtx',
-    'nvtools',
-]
-
-def is_gpu_related(filepath):
-    """Check if file is GPU/CUDA related"""
-    filename = os.path.basename(filepath).lower()
-    
-    # Check specific DLL names
-    for dll_pattern in GPU_CUDA_DLLS:
-        if dll_pattern.lower() in filename:
-            return True
-    
-    # Check if it's a CUDA library (but not torch_cpu!)
-    if 'cuda' in filename and 'torch_cpu' not in filename:
-        return True
-    
-    # Check patterns (but preserve CPU versions)
-    if filename.endswith('.dll') or filename.endswith('.pyd'):
-        # Don't remove torch_cpu, torch_python, or other CPU components
-        if 'torch_cpu' in filename or 'torch_python' in filename:
-            return False
-        
-        # Check GPU patterns
-        for pattern in GPU_PATTERNS:
-            if pattern in filename and 'cpu' not in filename:
-                return True
-    
-    return False
-
-# Clean binaries - ONLY GPU stuff
-print("\n" + "="*60)
-print("REMOVING GPU/CUDA BINARIES ONLY...")
-print("="*60)
-original_count = len(a.binaries)
-cleaned_binaries = []
-removed_size = 0
-
-for binary in a.binaries:
-    binary_path = binary[0]
-    if is_gpu_related(binary_path):
-        print(f"  ✗ Removing GPU/CUDA: {os.path.basename(binary_path)}")
-        # Try to estimate size if possible
-        try:
-            if os.path.exists(binary[1]):
-                size_mb = os.path.getsize(binary[1]) / (1024*1024)
-                removed_size += size_mb
-                print(f"    Size: {size_mb:.1f} MB")
-        except:
-            pass
-    else:
-        cleaned_binaries.append(binary)
-
-a.binaries = cleaned_binaries
-print(f"\nBinaries: {original_count} -> {len(a.binaries)} (removed {original_count - len(a.binaries)})")
-print(f"Estimated space saved: {removed_size:.1f} MB")
-
-# Clean data files - remove CUDA related data
-print("\n" + "="*60)
-print("REMOVING GPU/CUDA DATA FILES...")
-print("="*60)
-original_count = len(a.datas)
-cleaned_datas = []
-
-for data in a.datas:
-    data_path = data[0]
-    # Only remove CUDA specific data files
-    if any(x in data_path.lower() for x in ['cuda', 'cudnn', 'nvidia-cuda', 'nvidia-ml']):
-        if 'cpu' not in data_path.lower():  # Keep CPU variants
-            print(f"  ✗ Removing: {data_path}")
-            continue
-    cleaned_datas.append(data)
-
-a.datas = cleaned_datas
-print(f"\nData files: {original_count} -> {len(a.datas)} (removed {original_count - len(a.datas)})")
-
-# DON'T remove torch or transformers from pure modules - we want to keep them!
-print("\n" + "="*60)
-print("KEEPING CPU ML MODULES (torch, transformers, etc.)...")
-print("="*60)
-print("  ✓ torch CPU modules preserved")
-print("  ✓ Transformers preserved")
-print("  ✓ Ultralytics preserved")
-print("  ✓ ONNX Runtime CPU preserved")
-print("  ✓ All other ML libraries preserved")
+a.pure = [p for p in a.pure if not any([
+    'torch' in str(p).lower(),
+    'pytorch' in str(p).lower(),
+    '_torchcodec' in str(p),
+])]
 
 # ============================================================================
 # PYZ (Python Zip archive)
@@ -1188,6 +1057,7 @@ pyz = PYZ(
 # ============================================================================
 
 if ONE_FILE:
+    # Single file executable
     exe = EXE(
         pyz,
         a.scripts,
@@ -1201,12 +1071,11 @@ if ONE_FILE:
         strip=False,
         upx=ENABLE_UPX,
         upx_exclude=[
-            'vcruntime140.dll',
-            'python*.dll',
-            'api-ms-win-*.dll',
-            'ucrtbase.dll',
-            'msvcp*.dll',
-            'torch_cpu.dll',  # Don't compress torch CPU
+            'vcruntime140.dll',  # Don't compress Windows runtime
+            'python*.dll',       # Don't compress Python DLLs
+            'api-ms-win-*.dll',  # Don't compress Windows API DLLs
+            'ucrtbase.dll',      # Don't compress Universal CRT
+            'msvcp*.dll',        # Don't compress MSVC runtime
         ],
         runtime_tmpdir=None,
         console=ENABLE_CONSOLE,
@@ -1218,6 +1087,7 @@ if ONE_FILE:
         version='version_info.txt' if os.path.exists('version_info.txt') else None,
     )
 else:
+    # Folder distribution
     exe = EXE(
         pyz,
         a.scripts,
@@ -1250,42 +1120,51 @@ else:
             'api-ms-win-*.dll',
             'ucrtbase.dll',
             'msvcp*.dll',
-            'torch_cpu.dll',
         ],
         name=APP_NAME.replace(' ', '_'),
     )
 
 # ============================================================================
-# BUILD NOTES
+# NOTES
 # ============================================================================
 
 """
-GPU/CUDA-FREE BUILD - CPU ML FUNCTIONALITY PRESERVED
+Build Instructions:
+1. Install PyInstaller: pip install pyinstaller
+2. Install all dependencies: pip install -r requirements.txt
+3. Run: pyinstaller translator.spec
 
-This spec file removes ONLY GPU/CUDA components while keeping:
-✓ PyTorch CPU (torch_cpu.dll)
-✓ Transformers library
-✓ ONNX Runtime CPU
-✓ Ultralytics YOLO
-✓ All text processing
-✓ All API clients
+Optimization Tips:
+- Set ENABLE_UPX = True for smaller file size (but slower startup)
+- Set ONE_FILE = False for faster startup but folder distribution
+- Set ENABLE_CONSOLE = True for debugging
 
-REMOVED (GPU/CUDA only):
-✗ torch_cuda.dll (884MB)
-✗ cudnn_* libraries (870MB+)
-✗ cublasLt64_12.dll (513MB)
-✗ cusparse64_12.dll (250MB)
-✗ CUDA runtime libraries
-✗ onnxruntime_providers_cuda.dll (306MB)
+This build includes:
+- Datasketch for enhanced QA scanning performance
+- AI Hunter Enhanced for improved duplicate detection
+- Complete API client support (Google, OpenAI, Anthropic)
+- DeepL and Google Translate for traditional translation APIs 
+- Full text processing and analysis capabilities
+- Manga text detection with Google Cloud Vision OCR support
+- Manga text translation with API key
+- OpenCV for advanced image processing
+- Auto-update functionality with GitHub release checking
 
-KEPT (CPU ML):
-✓ torch_cpu.dll (237MB) - REQUIRED for PyTorch CPU
-✓ transformers library
-✓ ONNX Runtime CPU
-✓ All model inference capabilities
+The executable will be ~160MB due to included ML libraries and OpenCV.
 
-Expected size: ~3.9GB -> ~600-800MB
-All ML features work on CPU!
+For version information:
+Create a version_info.txt file with Windows version resource information
 
-Build command: pyinstaller translator.spec
+Note: Warnings about missing 'dask', 'torch', 'cupy', etc. are expected
+and safe to ignore. These are optional scipy dependencies.
+
+For manga translation:
+- Google Cloud Vision API credentials required (JSON file)
+- OpenCV (cv2) included for image processing
+- Supports manga panel text detection and translation
+
+For auto-update:
+- Checks GitHub releases for new versions
+- Downloads updates directly from GitHub
+- Configurable auto-check on startup
 """
