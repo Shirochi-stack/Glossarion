@@ -657,7 +657,7 @@ class MangaOCRProvider(OCRProvider):
                     source,
                     local_files_only=local_flag,
                     low_cpu_mem_usage=False,
-                    torch_dtype=torch.float32,
+                    dtype=torch.float32,
                     device_map=None
                 )
                 return tok, proc, mdl
