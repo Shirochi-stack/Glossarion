@@ -129,6 +129,26 @@ def _setup_file_logging():
 # Initialize logging at import time to catch early failures
 _setup_file_logging()
 
+# Start a lightweight background memory usage logger so we can track RAM over time
+try:
+    from memory_usage_reporter import start_global_memory_logger
+    start_global_memory_logger()
+except Exception as _e:
+    try:
+        logging.getLogger(__name__).warning("Memory usage logger failed to start: %s", _e)
+    except Exception:
+        pass
+
+# Apply a safety patch for tqdm to avoid shutdown-time AttributeError without disabling tqdm
+try:
+    from tqdm_safety import apply_tqdm_safety_patch
+    apply_tqdm_safety_patch()
+except Exception as _e:
+    try:
+        logging.getLogger(__name__).debug("tqdm safety patch failed to apply: %s", _e)
+    except Exception:
+        pass
+
 def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
     return model in ['deepl', 'google-translate'] or model.startswith('deepl/') or model.startswith('google-translate/')
