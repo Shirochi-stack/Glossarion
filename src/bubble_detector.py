@@ -116,6 +116,11 @@ else:
         TRANSFORMERS_AVAILABLE = False
         logger.info("Transformers not available for RT-DETR")
 
+# Configure ORT memory behavior before importing
+try:
+    os.environ.setdefault('ORT_DISABLE_MEMORY_ARENA', '1')
+except Exception:
+    pass
 # ONNX Runtime - works well in frozen environments
 try:
     import onnxruntime as ort
@@ -178,7 +183,16 @@ class BubbleDetector:
         # Detection settings
         self.default_confidence = 0.5
         self.default_iou_threshold = 0.45
-        self.default_max_detections = 100
+        # Allow override from settings
+        try:
+            ocr_cfg = self.config.get('manga_settings', {}).get('ocr', {}) if isinstance(self.config, dict) else {}
+            self.default_max_detections = int(ocr_cfg.get('bubble_max_detections', 100))
+            self.max_det_yolo = int(ocr_cfg.get('bubble_max_detections_yolo', self.default_max_detections))
+            self.max_det_rtdetr = int(ocr_cfg.get('bubble_max_detections_rtdetr', self.default_max_detections))
+        except Exception:
+            self.default_max_detections = 100
+            self.max_det_yolo = 100
+            self.max_det_rtdetr = 100
         
         # Cache directory for ONNX conversions
         self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'models')
@@ -188,11 +202,21 @@ class BubbleDetector:
         self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
         self.device = 'cuda' if self.use_gpu else 'cpu'
         
+        # Quantization/precision settings
+        adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+        ocr_cfg = self.config.get('manga_settings', {}).get('ocr', {}) if isinstance(self.config, dict) else {}
+        env_quant = os.environ.get('MODEL_QUANTIZE', 'false').lower() == 'true'
+        self.quantize_enabled = bool(env_quant or adv_cfg.get('quantize_models', False) or ocr_cfg.get('quantize_bubble_detector', False))
+        self.quantize_dtype = str(adv_cfg.get('torch_precision', os.environ.get('TORCH_PRECISION', 'auto'))).lower()
+        # Prefer advanced.onnx_quantize; fall back to env or global quantize
+        self.onnx_quantize_enabled = bool(adv_cfg.get('onnx_quantize', os.environ.get('ONNX_QUANTIZE', 'false').lower() == 'true' or self.quantize_enabled))
+        
         logger.info(f"🗨️ BubbleDetector initialized")
         logger.info(f"   GPU: {'Available' if self.use_gpu else 'Not available'}")
         logger.info(f"   YOLO: {'Available' if YOLO_AVAILABLE else 'Not installed'}")
         logger.info(f"   ONNX: {'Available' if ONNX_AVAILABLE else 'Not installed'}")
         logger.info(f"   RT-DETR: {'Available' if TRANSFORMERS_AVAILABLE else 'Not installed'}")
+        logger.info(f"   Quantization: {'ENABLED' if self.quantize_enabled else 'disabled'} (torch_precision={self.quantize_dtype}, onnx_quantize={'on' if self.onnx_quantize_enabled else 'off'})" )
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file."""
@@ -276,6 +300,14 @@ class BubbleDetector:
                             logger.warning(f"Could not move model to GPU: {gpu_error}")
                             
                     logger.info("✅ YOLOv8 model loaded successfully")
+                    # Apply optional FP16 precision to reduce VRAM if enabled
+                    if self.quantize_enabled and self.use_gpu and TORCH_AVAILABLE:
+                        try:
+                            m = self.model.model if hasattr(self.model, 'model') else self.model
+                            m.half()
+                            logger.info("🔻 Applied FP16 precision to YOLO model (GPU)")
+                        except Exception as _e:
+                            logger.warning(f"Could not switch YOLO model to FP16: {_e}")
                     
                 except Exception as yolo_error:
                     logger.error(f"Failed to load YOLO model: {yolo_error}")
@@ -290,7 +322,28 @@ class BubbleDetector:
                 try:
                     # Load ONNX model
                     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-                    self.onnx_session = ort.InferenceSession(model_path, providers=providers)
+                    session_path = model_path
+                    if self.quantize_enabled:
+                        try:
+                            from onnxruntime.quantization import quantize_dynamic, QuantType
+                            quant_path = os.path.splitext(model_path)[0] + ".int8.onnx"
+                            if not os.path.exists(quant_path) or os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true':
+                                logger.info("🔻 Quantizing ONNX model weights to INT8 (dynamic)...")
+                                quantize_dynamic(model_input=model_path, model_output=quant_path, weight_type=QuantType.QInt8, op_types_to_quantize=['Conv', 'MatMul'])
+                            session_path = quant_path
+                            self.config['last_onnx_quantized_path'] = quant_path
+                            self._save_config()
+                            logger.info(f"✅ Using quantized ONNX model: {quant_path}")
+                        except Exception as qe:
+                            logger.warning(f"ONNX quantization not applied: {qe}")
+                    # Use conservative ORT memory options to reduce RAM growth
+                    so = ort.SessionOptions()
+                    try:
+                        so.enable_mem_pattern = False
+                        so.enable_cpu_mem_arena = False
+                    except Exception:
+                        pass
+                    self.onnx_session = ort.InferenceSession(session_path, sess_options=so, providers=providers)
                     self.model_type = 'onnx'
                     
                     logger.info("✅ ONNX model loaded successfully")
@@ -324,6 +377,14 @@ class BubbleDetector:
                     
                     logger.info("✅ TorchScript model loaded successfully")
                     
+                    # Optional FP16 precision on GPU
+                    if self.quantize_enabled and self.use_gpu and TORCH_AVAILABLE:
+                        try:
+                            self.model = self.model.half()
+                            logger.info("🔻 Applied FP16 precision to TorchScript model (GPU)")
+                        except Exception as _e:
+                            logger.warning(f"Could not switch TorchScript model to FP16: {_e}")
+                    
                 except Exception as torch_error:
                     logger.error(f"Failed to load TorchScript model: {torch_error}")
                     return False
@@ -355,6 +416,10 @@ class BubbleDetector:
     def load_rtdetr_model(self, model_path: str = None, model_id: str = None, force_reload: bool = False) -> bool:
         """
         Load RT-DETR model for advanced bubble and text detection.
+        This implementation avoids the 'meta tensor' copy error by:
+        - Serializing the entire load under a class lock (no concurrent loads)
+        - Loading directly onto the target device (CUDA if available) via device_map='auto'
+        - Avoiding .to() on a potentially-meta model; no device migration post-load
         
         Args:
             model_path: Optional path to local model
@@ -384,12 +449,9 @@ class BubbleDetector:
             logger.info("RT-DETR model attached from shared cache")
             return True
         
-        try:
-            # Use custom model_id if provided, otherwise use default
-            repo_id = model_id if model_id else self.rtdetr_repo
-            
-            # Serialize initialization across threads/process instances
-            with BubbleDetector._rtdetr_init_lock:
+        # Serialize the ENTIRE loading sequence to avoid concurrent init issues
+        with BubbleDetector._rtdetr_init_lock:
+            try:
                 # Re-check after acquiring lock
                 if BubbleDetector._rtdetr_loaded and not force_reload:
                     self.rtdetr_model = BubbleDetector._rtdetr_shared_model
@@ -398,77 +460,139 @@ class BubbleDetector:
                     logger.info("RT-DETR model attached from shared cache (post-lock)")
                     return True
                 
+                # Use custom model_id if provided, otherwise use default
+                repo_id = model_id if model_id else self.rtdetr_repo
                 logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
 
-            # Ensure TorchDynamo/compile doesn't interfere on some builds
-            try:
-                os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
-            except Exception:
-                pass
-            
-            # Load processor (CPU-friendly settings)
-            self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
-                repo_id,
-                size={"width": 640, "height": 640},
-                cache_dir=self.cache_dir if not model_path else None
-            )
-            
-            # Load model with fully materialized weights to avoid 'meta' device tensors
-            self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                model_path if model_path else repo_id,
-                cache_dir=self.cache_dir if not model_path else None,
-                low_cpu_mem_usage=False,
-                torch_dtype=(torch.float32 if TORCH_AVAILABLE else None),
-                device_map=None
-            )
-            
-            # Always keep shared model on CPU for stability
-            self.rtdetr_model = self.rtdetr_model.to('cpu')
-            
-            # Finalize
-            self.rtdetr_model.eval()
+                # Ensure TorchDynamo/compile doesn't interfere on some builds
+                try:
+                    os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
+                except Exception:
+                    pass
+                
+                # Decide device strategy
+                gpu_available = bool(TORCH_AVAILABLE and hasattr(torch, 'cuda') and torch.cuda.is_available())
+                device_map = 'auto' if gpu_available else None
+                # Choose dtype
+                dtype = None
+                if TORCH_AVAILABLE:
+                    try:
+                        dtype = torch.float16 if gpu_available else torch.float32
+                    except Exception:
+                        dtype = None
+                low_cpu = True if gpu_available else False
+                
+                # Load processor (once)
+                self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
+                    repo_id,
+                    size={"width": 640, "height": 640},
+                    cache_dir=self.cache_dir if not model_path else None
+                )
+                
+                # Prepare kwargs for from_pretrained
+                from_kwargs = {
+                    'cache_dir': self.cache_dir if not model_path else None,
+                    'low_cpu_mem_usage': low_cpu,
+                    'device_map': device_map,
+                }
+                if dtype is not None:
+                    from_kwargs['dtype'] = dtype
+                
+                # First attempt: load directly to target (CUDA if available)
+                try:
+                    self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
+                        model_path if model_path else repo_id,
+                        **from_kwargs,
+                    )
+                except Exception as primary_err:
+                    # Fallback to a simple CPU load (no device move) if CUDA path fails
+                    logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU...")
+                    from_kwargs_fallback = {
+                        'cache_dir': self.cache_dir if not model_path else None,
+                        'low_cpu_mem_usage': False,
+                        'device_map': None,
+                    }
+                    if TORCH_AVAILABLE:
+                        from_kwargs_fallback['dtype'] = torch.float32
+                    self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
+                        model_path if model_path else repo_id,
+                        **from_kwargs_fallback,
+                    )
+                
+                # Optional dynamic quantization for linear layers (CPU only)
+                if self.quantize_enabled and TORCH_AVAILABLE and (not gpu_available):
+                    try:
+                        try:
+                            import torch.ao.quantization as tq
+                            quantize_dynamic = tq.quantize_dynamic  # type: ignore
+                        except Exception:
+                            import torch.quantization as tq  # type: ignore
+                            quantize_dynamic = tq.quantize_dynamic  # type: ignore
+                        self.rtdetr_model = quantize_dynamic(self.rtdetr_model, {torch.nn.Linear}, dtype=torch.qint8)
+                        logger.info("🔻 Applied dynamic INT8 quantization to RT-DETR linear layers (CPU)")
+                    except Exception as qe:
+                        logger.warning(f"RT-DETR dynamic quantization skipped: {qe}")
+                
+                # Finalize
+                self.rtdetr_model.eval()
 
-            # Sanity check: ensure no parameter is left on 'meta' device
-            try:
-                for n, p in self.rtdetr_model.named_parameters():
-                    if getattr(p, 'device', None) is not None and getattr(p.device, 'type', '') == 'meta':
-                        raise RuntimeError(f"Parameter {n} is on 'meta' device after load")
+                # Sanity check: ensure no parameter is left on 'meta' device
+                try:
+                    for n, p in self.rtdetr_model.named_parameters():
+                        dev = getattr(p, 'device', None)
+                        if dev is not None and getattr(dev, 'type', '') == 'meta':
+                            raise RuntimeError(f"Parameter {n} is on 'meta' device after load")
+                except Exception as e:
+                    logger.error(f"RT-DETR load sanity check failed: {e}")
+                    self.rtdetr_loaded = False
+                    return False
+
+                # Publish shared cache
+                BubbleDetector._rtdetr_shared_model = self.rtdetr_model
+                BubbleDetector._rtdetr_shared_processor = self.rtdetr_processor
+                BubbleDetector._rtdetr_loaded = True
+                BubbleDetector._rtdetr_repo_id = repo_id
+
+                self.rtdetr_loaded = True
+                
+                # Save the model ID that was used
+                self.config['rtdetr_loaded'] = True
+                self.config['rtdetr_model_id'] = repo_id
+                self._save_config()
+                
+                loc = 'CUDA' if gpu_available else 'CPU'
+                logger.info(f"✅ RT-DETR model loaded successfully ({loc})")
+                logger.info("   Classes: Empty bubbles, Text bubbles, Free text")
+                
+                # Auto-convert to ONNX for RT-DETR only if explicitly enabled
+                if os.environ.get('AUTO_CONVERT_RTDETR_ONNX', 'false').lower() == 'true':
+                    onnx_path = os.path.join(self.cache_dir, 'rtdetr_comic.onnx')
+                    if self.convert_to_onnx('rtdetr', onnx_path):
+                        logger.info("🚀 RT-DETR converted to ONNX for faster inference")
+                        # Store ONNX path for later use
+                        self.config['rtdetr_onnx_path'] = onnx_path
+                        self._save_config()
+                        # Optionally quantize ONNX for reduced RAM
+                        if self.onnx_quantize_enabled:
+                            try:
+                                from onnxruntime.quantization import quantize_dynamic, QuantType
+                                quant_path = os.path.splitext(onnx_path)[0] + ".int8.onnx"
+                                if not os.path.exists(quant_path) or os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true':
+                                    logger.info("🔻 Quantizing RT-DETR ONNX to INT8 (dynamic)...")
+                                    quantize_dynamic(model_input=onnx_path, model_output=quant_path, weight_type=QuantType.QInt8, op_types_to_quantize=['Conv', 'MatMul'])
+                                self.config['rtdetr_onnx_quantized_path'] = quant_path
+                                self._save_config()
+                                logger.info(f"✅ Quantized RT-DETR ONNX saved to: {quant_path}")
+                            except Exception as qe:
+                                logger.warning(f"ONNX quantization for RT-DETR skipped: {qe}")
+                    else:
+                        logger.info("ℹ️ Skipping RT-DETR ONNX export (converter not supported in current environment)")
+                
+                return True
             except Exception as e:
-                logger.error(f"RT-DETR load sanity check failed: {e}")
+                logger.error(f"❌ Failed to load RT-DETR: {e}")
                 self.rtdetr_loaded = False
                 return False
-
-            # Publish shared cache
-            BubbleDetector._rtdetr_shared_model = self.rtdetr_model
-            BubbleDetector._rtdetr_shared_processor = self.rtdetr_processor
-            BubbleDetector._rtdetr_loaded = True
-            BubbleDetector._rtdetr_repo_id = repo_id
-
-            self.rtdetr_loaded = True
-            
-            # Save the model ID that was used
-            self.config['rtdetr_loaded'] = True
-            self.config['rtdetr_model_id'] = repo_id
-            self._save_config()
-            
-            logger.info("✅ RT-DETR model loaded successfully (CPU)")
-            logger.info("   Classes: Empty bubbles, Text bubbles, Free text")
-            
-            # Auto-convert to ONNX if environment variable is set
-            if os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true':
-                onnx_path = os.path.join(self.cache_dir, 'rtdetr_comic.onnx')
-                if self.convert_to_onnx('rtdetr', onnx_path):
-                    logger.info("🚀 RT-DETR converted to ONNX for faster inference")
-                    # Store ONNX path for later use
-                    self.config['rtdetr_onnx_path'] = onnx_path
-                    self._save_config()
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to load RT-DETR: {e}")
-            self.rtdetr_loaded = False
-            return False
  
     def check_rtdetr_available(self, model_id: str = None) -> bool:
         """
@@ -564,7 +688,7 @@ class BubbleDetector:
                     image_path,
                     conf=confidence,
                     iou=iou_threshold,
-                    max_det=max_detections,
+                    max_det=min(max_detections, getattr(self, 'max_det_yolo', max_detections)),
                     verbose=False
                 )
                 
@@ -582,7 +706,8 @@ class BubbleDetector:
                             conf = float(box.conf[0])
                             
                             # Add to list
-                            bubbles.append((x, y, width, height))
+                            if len(bubbles) < max_detections:
+                                bubbles.append((x, y, width, height))
                             
                             logger.debug(f"   Bubble: ({x},{y}) {width}x{height} conf={conf:.2f}")
                 
@@ -669,6 +794,18 @@ class BubbleDetector:
                 threshold=confidence
             )[0]
             
+            # Apply per-detector cap if configured
+            cap = getattr(self, 'max_det_rtdetr', self.default_max_detections)
+            if cap and len(results['boxes']) > cap:
+                # Keep top-scoring first
+                scores = results['scores']
+                top_idx = scores.topk(k=cap).indices if hasattr(scores, 'topk') else range(cap)
+                results = {
+                    'boxes': [results['boxes'][i] for i in top_idx],
+                    'scores': [results['scores'][i] for i in top_idx],
+                    'labels': [results['labels'][i] for i in top_idx]
+                }
+            
             logger.info(f"📊 RT-DETR found {len(results['boxes'])} detections above {confidence:.2f} confidence")
 
             # Organize detections by class
@@ -693,6 +830,11 @@ class BubbleDetector:
                     detections['text_bubbles'].append(bbox)
                 elif label_id == self.CLASS_TEXT_FREE:
                     detections['text_free'].append(bbox)
+                
+                # Stop early if we hit the configured cap across all classes
+                total_count = len(detections['bubbles']) + len(detections['text_bubbles']) + len(detections['text_free'])
+                if total_count >= (self.config.get('manga_settings', {}).get('ocr', {}).get('bubble_max_detections', self.default_max_detections) if isinstance(self.config, dict) else self.default_max_detections):
+                    break
             
             # Log results
             total = len(detections['bubbles']) + len(detections['text_bubbles']) + len(detections['text_free'])
@@ -915,30 +1057,99 @@ class BubbleDetector:
                 # RT-DETR specific conversion
                 self.rtdetr_model.eval()
                 
-                # Create dummy input
+                # Create dummy input (pixel values): BxCxHxW
                 dummy_input = torch.randn(1, 3, 640, 640)
                 if self.device == 'cuda':
                     dummy_input = dummy_input.to('cuda')
                 
-                # Export with RT-DETR specific settings
-                torch.onnx.export(
-                    self.rtdetr_model,
-                    dummy_input,
-                    output_path,
-                    export_params=True,
-                    opset_version=16,  # RT-DETR needs higher opset
-                    do_constant_folding=True,
-                    input_names=['images'],
-                    output_names=['logits', 'boxes'],
-                    dynamic_axes={
-                        'images': {0: 'batch'},
-                        'logits': {0: 'batch'},
-                        'boxes': {0: 'batch'}
-                    }
-                )
+                # Wrap the model to return only tensors (logits, pred_boxes)
+                class _RTDetrExportWrapper(torch.nn.Module):
+                    def __init__(self, mdl):
+                        super().__init__()
+                        self.mdl = mdl
+                    def forward(self, images):
+                        out = self.mdl(pixel_values=images)
+                        # Handle dict/ModelOutput/tuple outputs
+                        logits = None
+                        boxes = None
+                        try:
+                            if isinstance(out, dict):
+                                logits = out.get('logits', None)
+                                boxes = out.get('pred_boxes', out.get('boxes', None))
+                            else:
+                                logits = getattr(out, 'logits', None)
+                                boxes = getattr(out, 'pred_boxes', getattr(out, 'boxes', None))
+                        except Exception:
+                            pass
+                        if (logits is None or boxes is None) and isinstance(out, (tuple, list)) and len(out) >= 2:
+                            logits, boxes = out[0], out[1]
+                        return logits, boxes
                 
-                logger.info(f"✅ RT-DETR ONNX saved to: {output_path}")
-                return True
+                wrapper = _RTDetrExportWrapper(self.rtdetr_model)
+                if self.device == 'cuda':
+                    wrapper = wrapper.to('cuda')
+                
+                # Try PyTorch 2.x dynamo_export first (more tolerant of newer aten ops)
+                try:
+                    success = False
+                    try:
+                        from torch.onnx import dynamo_export
+                        try:
+                            exp = dynamo_export(wrapper, dummy_input)
+                        except TypeError:
+                            # Older PyTorch dynamo_export may not support this calling convention
+                            exp = dynamo_export(wrapper, dummy_input)
+                        # exp may have save(); otherwise, it may expose model_proto
+                        try:
+                            exp.save(output_path)  # type: ignore
+                            success = True
+                        except Exception:
+                            try:
+                                import onnx as _onnx
+                                _onnx.save(exp.model_proto, output_path)  # type: ignore
+                                success = True
+                            except Exception as _se:
+                                logger.warning(f"dynamo_export produced model but could not save: {_se}")
+                    except Exception as de:
+                        logger.warning(f"dynamo_export failed; falling back to legacy exporter: {de}")
+                    if success:
+                        logger.info(f"✅ RT-DETR ONNX saved to: {output_path} (dynamo_export)")
+                        return True
+                except Exception as de2:
+                    logger.warning(f"dynamo_export path error: {de2}")
+
+                # Legacy exporter with opset fallback
+                last_err = None
+                for opset in [19, 18, 17, 16, 15, 14, 13]:
+                    try:
+                        torch.onnx.export(
+                            wrapper,
+                            dummy_input,
+                            output_path,
+                            export_params=True,
+                            opset_version=opset,
+                            do_constant_folding=True,
+                            input_names=['pixel_values'],
+                            output_names=['logits', 'boxes'],
+                            dynamic_axes={
+                                'pixel_values': {0: 'batch', 2: 'height', 3: 'width'},
+                                'logits': {0: 'batch'},
+                                'boxes': {0: 'batch'}
+                            }
+                        )
+                        logger.info(f"✅ RT-DETR ONNX saved to: {output_path} (opset {opset})")
+                        return True
+                    except Exception as _e:
+                        last_err = _e
+                        try:
+                            msg = str(_e)
+                        except Exception:
+                            msg = ''
+                        logger.warning(f"RT-DETR ONNX export failed at opset {opset}: {msg}")
+                        continue
+                
+                logger.error(f"All RT-DETR ONNX export attempts failed. Last error: {last_err}")
+                return False
             
             # Handle YOLOv8 conversion - FIXED
             elif YOLO_AVAILABLE and os.path.exists(model_path):
@@ -982,8 +1193,7 @@ class BubbleDetector:
                 
         except Exception as e:
             logger.error(f"Conversion failed: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            # Avoid noisy full stack trace in production logs; return False gracefully
             return False
     
     def batch_detect(self, image_paths: List[str], **kwargs) -> Dict[str, List[Tuple[int, int, int, int]]]:
@@ -1006,6 +1216,55 @@ class BubbleDetector:
         
         return results
     
+    def unload(self, release_shared: bool = False):
+        """Release model resources held by this detector instance.
+        Args:
+            release_shared: If True, also clear class-level shared RT-DETR caches.
+        """
+        try:
+            # Release instance-level models and sessions
+            try:
+                if getattr(self, 'onnx_session', None) is not None:
+                    self.onnx_session = None
+            except Exception:
+                pass
+            for attr in ['model', 'rtdetr_model', 'rtdetr_processor']:
+                try:
+                    if hasattr(self, attr):
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
+            for flag in ['model_loaded', 'rtdetr_loaded']:
+                try:
+                    if hasattr(self, flag):
+                        setattr(self, flag, False)
+                except Exception:
+                    pass
+
+            # Optional: release shared caches
+            if release_shared:
+                try:
+                    BubbleDetector._rtdetr_shared_model = None
+                    BubbleDetector._rtdetr_shared_processor = None
+                    BubbleDetector._rtdetr_loaded = False
+                except Exception:
+                    pass
+
+            # Free CUDA cache and trigger GC
+            try:
+                if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort only
+            pass
+
     def get_bubble_masks(self, image_path: str, bubbles: List[Tuple[int, int, int, int]]) -> np.ndarray:
         """
         Create a mask image with bubble regions.
