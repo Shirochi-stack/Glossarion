@@ -60,6 +60,14 @@ class MangaTranslationTab:
         self.failed_files = 0
         self.qwen2vl_model_size = self.main_gui.config.get('qwen2vl_model_size', '1')
         
+        # Advanced performance toggles
+        try:
+            adv_cfg = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+        except Exception:
+            adv_cfg = {}
+        # Do NOT preload big local models by default to avoid startup crashes
+        self.preload_local_models_on_open = bool(adv_cfg.get('preload_local_models_on_open', False))
+        
         # Queue for thread-safe GUI updates
         self.update_queue = Queue()
         
@@ -1866,6 +1874,14 @@ class MangaTranslationTab:
             command=self._browse_local_model,
             bootstyle="primary"
         ).pack(side=tk.LEFT)
+        
+        # Manual load button to avoid auto-loading on dialog open
+        tb.Button(
+            model_path_frame,
+            text="Load",
+            command=self._click_load_local_model,
+            bootstyle="success"
+        ).pack(side=tk.LEFT, padx=(5, 0))
 
         # Model status
         self.local_model_status_label = tk.Label(
@@ -1897,9 +1913,16 @@ class MangaTranslationTab:
 
         if initial_model_path and os.path.exists(initial_model_path):
             self.local_model_path_var.set(initial_model_path)
-            self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
-            # Auto-load after dialog is ready
-            self.dialog.after(500, lambda: self._try_load_model(initial_model_type, initial_model_path))
+            if getattr(self, 'preload_local_models_on_open', False):
+                self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
+                # Auto-load after dialog is ready
+                self.dialog.after(500, lambda: self._try_load_model(initial_model_type, initial_model_path))
+            else:
+                # Do not auto-load large models at startup to avoid crashes on some systems
+                self.local_model_status_label.config(
+                    text="💤 Saved model detected (not loaded). Click 'Load' to initialize.",
+                    fg='blue'
+                )
         else:
             self.local_model_status_label.config(text="No model loaded", fg='gray')
 
@@ -3897,6 +3920,19 @@ class MangaTranslationTab:
             # Auto-load the selected model
             self.dialog.after(100, lambda: self._try_load_model(model_type, path))
 
+    def _click_load_local_model(self):
+        """Manually trigger loading of the selected local inpainting model"""
+        try:
+            model_type = self.local_model_type_var.get() if hasattr(self, 'local_model_type_var') else None
+            path = self.local_model_path_var.get() if hasattr(self, 'local_model_path_var') else ''
+            if not model_type or not path:
+                messagebox.showinfo("Load Model", "Please select a model file first using the Browse button.")
+                return
+            # Defer to keep UI responsive
+            self.dialog.after(50, lambda: self._try_load_model(model_type, path))
+        except Exception:
+            pass
+
     def _try_load_model(self, method: str, model_path: str):
         """Try to load a model and update status"""
         try:
@@ -4704,8 +4740,9 @@ class MangaTranslationTab:
             
             self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
         
-        # Initialize translator if needed
-        if not self.translator:
+        # Initialize translator if needed (or if it was reset)
+        if not self.translator or not hasattr(self, 'translator'):
+            self._log("🆕 Creating new translator instance...", "info")
             try:
                 self.translator = MangaTranslator(
                     ocr_config,
@@ -5204,6 +5241,204 @@ class MangaTranslationTab:
             self._log(traceback.format_exc(), "error")
         
         finally:
+            # Check if auto cleanup is enabled in settings
+            auto_cleanup_enabled = True  # Default to true for backward compatibility
+            try:
+                advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                auto_cleanup_enabled = advanced_settings.get('auto_cleanup_models', True)
+            except Exception:
+                pass
+            
+            if auto_cleanup_enabled:
+                # Clean up all models to free RAM
+                try:
+                    # For parallel panel translation, cleanup happens here after ALL panels complete
+                    is_parallel_panel = False
+                    try:
+                        advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                        is_parallel_panel = advanced_settings.get('parallel_panel_translation', False)
+                    except Exception:
+                        pass
+                    
+                    if is_parallel_panel:
+                        self._log("\n🧹 All parallel panels complete - cleaning up models to free RAM...", "info")
+                    else:
+                        self._log("\n🧹 Cleaning up models to free RAM...", "info")
+                    
+                    # Clean up the shared translator if parallel processing was used
+                    if 'translator' in locals():
+                        translator.cleanup_all_models()
+                        self._log("✅ Shared translator models cleaned up!", "info")
+                    
+                    # Also clean up the instance translator if it exists
+                    if hasattr(self, 'translator') and self.translator:
+                        self.translator.cleanup_all_models()
+                        # Set to None to ensure it's released
+                        self.translator = None
+                        self._log("✅ Instance translator models cleaned up!", "info")
+                    
+                    self._log("✅ All models cleaned up - RAM freed!", "info")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Warning: Model cleanup failed: {e}", "warning")
+                
+                # Force garbage collection to ensure memory is freed
+                try:
+                    import gc
+                    gc.collect()
+                except Exception:
+                    pass
+            else:
+                self._log("🔑 Auto cleanup disabled - models will remain in RAM for faster subsequent translations", "info")
+            
+            # IMPORTANT: Reset the entire translator instance to free ALL memory
+            # This ensures the translator object itself is completely removed from RAM
+            try:
+                # Check if we should reset the translator instance
+                reset_translator = True  # Default to true for maximum memory savings
+                try:
+                    advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                    # Only reset if auto_cleanup is enabled (same toggle controls both)
+                    reset_translator = advanced_settings.get('auto_cleanup_models', True)
+                except Exception:
+                    pass
+                
+                if reset_translator:
+                    self._log("\n🗑️ Resetting translator instance to free all memory...", "info")
+                    
+                    # Clear the instance translator completely
+                    if hasattr(self, 'translator'):
+                        # First ensure models are cleaned if not already done
+                        try:
+                            if self.translator and hasattr(self.translator, 'cleanup_all_models'):
+                                self.translator.cleanup_all_models()
+                        except Exception:
+                            pass
+                        
+                        # Clear all internal state using the dedicated method
+                        try:
+                            if self.translator and hasattr(self.translator, 'clear_internal_state'):
+                                self.translator.clear_internal_state()
+                        except Exception:
+                            pass
+                        
+                        # Clear remaining references with proper cleanup
+                        try:
+                            if self.translator:
+                                # Properly unload OCR manager and all its providers
+                                if hasattr(self.translator, 'ocr_manager') and self.translator.ocr_manager:
+                                    try:
+                                        ocr_manager = self.translator.ocr_manager
+                                        # Clear all loaded OCR providers
+                                        if hasattr(ocr_manager, 'providers'):
+                                            for provider_name, provider in ocr_manager.providers.items():
+                                                # Unload each provider's models
+                                                if hasattr(provider, 'model'):
+                                                    provider.model = None
+                                                if hasattr(provider, 'processor'):
+                                                    provider.processor = None
+                                                if hasattr(provider, 'tokenizer'):
+                                                    provider.tokenizer = None
+                                                if hasattr(provider, 'reader'):
+                                                    provider.reader = None
+                                                if hasattr(provider, 'is_loaded'):
+                                                    provider.is_loaded = False
+                                                self._log(f"      ✓ Unloaded OCR provider: {provider_name}", "debug")
+                                            ocr_manager.providers.clear()
+                                        self._log("   ✓ OCR manager fully unloaded", "debug")
+                                    except Exception as e:
+                                        self._log(f"   Warning: OCR manager cleanup failed: {e}", "debug")
+                                    finally:
+                                        self.translator.ocr_manager = None
+                                
+                                # Properly unload local inpainter
+                                if hasattr(self.translator, 'local_inpainter') and self.translator.local_inpainter:
+                                    try:
+                                        if hasattr(self.translator.local_inpainter, 'unload'):
+                                            self.translator.local_inpainter.unload()
+                                            self._log("   ✓ Local inpainter unloaded", "debug")
+                                    except Exception as e:
+                                        self._log(f"   Warning: Local inpainter cleanup failed: {e}", "debug")
+                                    finally:
+                                        self.translator.local_inpainter = None
+                                
+                                # Properly unload bubble detector
+                                if hasattr(self.translator, 'bubble_detector') and self.translator.bubble_detector:
+                                    try:
+                                        if hasattr(self.translator.bubble_detector, 'unload'):
+                                            self.translator.bubble_detector.unload(release_shared=True)
+                                            self._log("   ✓ Bubble detector unloaded", "debug")
+                                    except Exception as e:
+                                        self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
+                                    finally:
+                                        self.translator.bubble_detector = None
+                                
+                                # Clear API clients
+                                if hasattr(self.translator, 'client'):
+                                    self.translator.client = None
+                                if hasattr(self.translator, 'vision_client'):
+                                    self.translator.vision_client = None
+                        except Exception:
+                            pass
+                        
+                        # Finally, delete the translator instance entirely
+                        self.translator = None
+                        self._log("✅ Translator instance reset - all memory freed!", "info")
+                    
+                    # Also clear the shared translator from parallel processing if it exists
+                    if 'translator' in locals():
+                        try:
+                            # Clear internal references
+                            if hasattr(translator, 'cache'):
+                                translator.cache = None
+                            if hasattr(translator, 'text_regions'):
+                                translator.text_regions = None
+                            if hasattr(translator, 'translated_regions'):
+                                translator.translated_regions = None
+                            # Delete the local reference
+                            del translator
+                        except Exception:
+                            pass
+                    
+                    # Clear standalone OCR manager if it exists in manga_integration
+                    if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                        try:
+                            ocr_manager = self.ocr_manager
+                            # Clear all loaded OCR providers
+                            if hasattr(ocr_manager, 'providers'):
+                                for provider_name, provider in ocr_manager.providers.items():
+                                    # Unload each provider's models
+                                    if hasattr(provider, 'model'):
+                                        provider.model = None
+                                    if hasattr(provider, 'processor'):
+                                        provider.processor = None
+                                    if hasattr(provider, 'tokenizer'):
+                                        provider.tokenizer = None
+                                    if hasattr(provider, 'reader'):
+                                        provider.reader = None
+                                    if hasattr(provider, 'is_loaded'):
+                                        provider.is_loaded = False
+                                ocr_manager.providers.clear()
+                            self.ocr_manager = None
+                            self._log("   ✓ Standalone OCR manager cleared", "debug")
+                        except Exception as e:
+                            self._log(f"   Warning: Standalone OCR manager cleanup failed: {e}", "debug")
+                    
+                    # Force multiple garbage collection passes to ensure everything is freed
+                    try:
+                        import gc
+                        gc.collect()
+                        gc.collect()  # Multiple passes for stubborn references
+                        gc.collect()
+                        self._log("✅ Memory fully reclaimed", "debug")
+                    except Exception:
+                        pass
+                else:
+                    self._log("🔑 Translator instance preserved for faster subsequent translations", "debug")
+                    
+            except Exception as e:
+                self._log(f"⚠️ Warning: Failed to reset translator instance: {e}", "warning")
+            
             # Check if parent frame still exists before scheduling callback
             if hasattr(self, 'parent_frame') and self.parent_frame.winfo_exists():
                 self.parent_frame.after(0, self._reset_ui_state)
