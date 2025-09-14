@@ -109,6 +109,7 @@ app_files = [
 # Add application files to datas
 datas.extend(app_files)
 datas.append(('memory_usage_reporter.py', '.'))
+datas.append(('tqdm_safety.py', '.'))
 
 # ============================================================================
 # ADD WINDOWS RUNTIME DEPENDENCIES
@@ -960,6 +961,7 @@ encoding_modules = [
 
 # Combine all hidden imports
 hiddenimports.append('memory_usage_reporter')
+hiddenimports.append('tqdm_safety')
 hiddenimports.extend(app_modules)
 hiddenimports.extend(gui_modules)
 hiddenimports.extend(epub_modules)
