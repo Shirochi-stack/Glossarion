@@ -995,27 +995,70 @@ class Qwen2VL(OCRProvider):
                 return_tensors="pt"
             )
 
-            # Get the device the model is currently on
+            # Get the device and dtype the model is currently on
             model_device = next(self.model.parameters()).device
+            model_dtype = next(self.model.parameters()).dtype
 
-            # Move inputs to the same device as the model
-            inputs = inputs.to(model_device)
+            # Move inputs to the same device as the model and cast float tensors to model dtype
+            try:
+                # Move first
+                inputs = inputs.to(model_device)
+                # Then align dtypes only for floating tensors (e.g., pixel_values)
+                for k, v in inputs.items():
+                    if isinstance(v, torch.Tensor) and torch.is_floating_point(v):
+                        inputs[k] = v.to(model_dtype)
+            except Exception:
+                # Fallback: ensure at least pixel_values is correct if present
+                try:
+                    if isinstance(inputs, dict) and "pixel_values" in inputs:
+                        pv = inputs["pixel_values"].to(model_device)
+                        if torch.is_floating_point(pv):
+                            inputs["pixel_values"] = pv.to(model_dtype)
+                except Exception:
+                    pass
+
+            # Ensure pixel_values explicitly matches model dtype if present
+            try:
+                if isinstance(inputs, dict) and "pixel_values" in inputs:
+                    inputs["pixel_values"] = inputs["pixel_values"].to(device=model_device, dtype=model_dtype)
+            except Exception:
+                pass
 
             # Generate text with stricter parameters to avoid creative responses
+            use_amp = (hasattr(torch, 'cuda') and model_device.type == 'cuda' and model_dtype in (torch.float16, torch.bfloat16))
+            autocast_dev = 'cuda' if model_device.type == 'cuda' else 'cpu'
+            autocast_dtype = model_dtype if model_dtype in (torch.float16, torch.bfloat16) else None
+
             with torch.no_grad():
-                generated_ids = self.model.generate(
-                    **inputs,
-                    max_new_tokens=128,      # Reduced from 512 - manga bubbles are typically short
-                    do_sample=False,        # Keep deterministic
-                    temperature=0.01,       # Keep your very low temperature
-                    top_p=1.0,             # Keep no nucleus sampling
-                    repetition_penalty=1.0, # Keep no repetition penalty
-                    num_beams=1,           # Ensure greedy decoding (faster than beam search)
-                    use_cache=True,        # Enable KV cache for speed
-                    early_stopping=True,   # Stop at EOS token
-                    pad_token_id=self.tokenizer.pad_token_id,      # Proper padding
-                    eos_token_id=self.tokenizer.eos_token_id,      # Proper stopping
-                )
+                if use_amp and autocast_dtype is not None:
+                    with torch.autocast(autocast_dev, dtype=autocast_dtype):
+                        generated_ids = self.model.generate(
+                            **inputs,
+                            max_new_tokens=128,      # Reduced from 512 - manga bubbles are typically short
+                            do_sample=False,        # Keep deterministic
+                            temperature=0.01,       # Keep your very low temperature
+                            top_p=1.0,             # Keep no nucleus sampling
+                            repetition_penalty=1.0, # Keep no repetition penalty
+                            num_beams=1,           # Ensure greedy decoding (faster than beam search)
+                            use_cache=True,        # Enable KV cache for speed
+                            early_stopping=True,   # Stop at EOS token
+                            pad_token_id=self.tokenizer.pad_token_id,      # Proper padding
+                            eos_token_id=self.tokenizer.eos_token_id,      # Proper stopping
+                        )
+                else:
+                    generated_ids = self.model.generate(
+                        **inputs,
+                        max_new_tokens=128,      # Reduced from 512 - manga bubbles are typically short
+                        do_sample=False,        # Keep deterministic
+                        temperature=0.01,       # Keep your very low temperature
+                        top_p=1.0,             # Keep no nucleus sampling
+                        repetition_penalty=1.0, # Keep no repetition penalty
+                        num_beams=1,           # Ensure greedy decoding (faster than beam search)
+                        use_cache=True,        # Enable KV cache for speed
+                        early_stopping=True,   # Stop at EOS token
+                        pad_token_id=self.tokenizer.pad_token_id,      # Proper padding
+                        eos_token_id=self.tokenizer.eos_token_id,      # Proper stopping
+                    )
             
             # Decode the output
             generated_ids_trimmed = [
