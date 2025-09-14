@@ -56,15 +56,64 @@ _FAULT_LOG_FH = None
 
 def _setup_file_logging():
     """Initialize rotating file logging and crash tracing (faulthandler).
-    Logs are written to <repo_root>/logs/run.log and crashes to crash.log.
-    This runs once at import time to capture early issues as well.
+    Ensures logs directory is writable in both source and PyInstaller one-file builds.
     """
     global _FAULT_LOG_FH
+    
+    def _can_write(dir_path: str) -> bool:
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+            test_file = os.path.join(dir_path, ".write_test")
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(test_file)
+            return True
+        except Exception:
+            return False
+    
+    def _resolve_logs_dir() -> str:
+        # 1) Explicit override
+        env_dir = os.environ.get("GLOSSARION_LOG_DIR")
+        if env_dir and _can_write(os.path.expanduser(env_dir)):
+            return os.path.expanduser(env_dir)
+        
+        # 2) Next to the executable for frozen builds
+        try:
+            if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+                exe_dir = os.path.dirname(sys.executable)
+                candidate = os.path.join(exe_dir, "logs")
+                if _can_write(candidate):
+                    return candidate
+        except Exception:
+            pass
+        
+        # 3) User-local app data (always writable)
+        try:
+            base = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or os.path.expanduser('~')
+            candidate = os.path.join(base, 'Glossarion', 'logs')
+            if _can_write(candidate):
+                return candidate
+        except Exception:
+            pass
+        
+        # 4) Development: alongside source file
+        try:
+            base_dir = os.path.abspath(os.path.dirname(__file__))
+            candidate = os.path.join(base_dir, "logs")
+            if _can_write(candidate):
+                return candidate
+        except Exception:
+            pass
+        
+        # 5) Last resort: current working directory
+        fallback = os.path.join(os.getcwd(), "logs")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+    
     try:
-        # Determine logs directory in the same folder as the Python scripts (src)
-        base_dir = os.path.abspath(os.path.dirname(__file__))
-        logs_dir = os.path.join(base_dir, "logs")
-        os.makedirs(logs_dir, exist_ok=True)
+        logs_dir = _resolve_logs_dir()
+        # Export for helper modules (e.g., memory_usage_reporter)
+        os.environ["GLOSSARION_LOG_DIR"] = logs_dir
 
         # Rotating log handler
         log_file = os.path.join(logs_dir, "run.log")
