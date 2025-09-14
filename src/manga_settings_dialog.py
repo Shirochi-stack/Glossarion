@@ -94,7 +94,7 @@ class MangaSettingsDialog:
             'onnx_quantize': False,
             'torch_precision': 'auto',
             # RAM cap defaults
-            'ram_cap_enabled': True,
+            'ram_cap_enabled': False,
             'ram_cap_mb': 4096,
             'ram_cap_mode': 'soft',
             'ram_gate_timeout_sec': 15.0,
