@@ -11,6 +11,10 @@ from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as tb
 from typing import Dict, Any, Optional, Callable
 from bubble_detector import BubbleDetector
+import logging
+
+# Use the same logging infrastructure initialized by translator_gui
+logger = logging.getLogger(__name__)
 
 class MangaSettingsDialog:
     """Settings dialog for manga translation"""
@@ -83,8 +87,18 @@ class MangaSettingsDialog:
             'max_workers': 4,
             'parallel_panel_translation': False,
             'panel_max_workers': 2,
+            'auto_cleanup_models': True,  # NEW: Auto cleanup models after translation
             'auto_convert_to_onnx': True,
-            'auto_convert_to_onnx_background': True
+            'auto_convert_to_onnx_background': True,
+            'quantize_models': False,
+            'onnx_quantize': False,
+            'torch_precision': 'auto',
+            # RAM cap defaults
+            'ram_cap_enabled': True,
+            'ram_cap_mb': 4096,
+            'ram_cap_mode': 'soft',
+            'ram_gate_timeout_sec': 15.0,
+            'ram_min_floor_over_baseline_mb': 256
             },
             'inpainting': {
                 'batch_size': 1,
@@ -1654,6 +1668,51 @@ class MangaSettingsDialog:
         )
         bubble_enable_cb.pack(anchor='w')
 
+        # Global Max detections (default)
+        maxdet_frame_global = tk.Frame(bubble_frame)
+        maxdet_frame_global.pack(fill='x', pady=(10, 0))
+        tk.Label(maxdet_frame_global, text="Max detections (default):", width=20, anchor='w').pack(side='left')
+        self.bubble_max_detections_var = tk.IntVar(
+            value=self.settings['ocr'].get('bubble_max_detections', 100)
+        )
+        tb.Spinbox(
+            maxdet_frame_global,
+            from_=1,
+            to=1000,
+            textvariable=self.bubble_max_detections_var,
+            width=10
+        ).pack(side='left', padx=10)
+        tk.Label(maxdet_frame_global, text="(fallback if per-detector not set)").pack(side='left')
+
+        # Per-detector caps
+        maxdet_frame_y = tk.Frame(bubble_frame)
+        maxdet_frame_y.pack(fill='x', pady=(6, 0))
+        tk.Label(maxdet_frame_y, text="Max detections (YOLO):", width=20, anchor='w').pack(side='left')
+        self.bubble_max_det_yolo_var = tk.IntVar(
+            value=self.settings['ocr'].get('bubble_max_detections_yolo', self.bubble_max_detections_var.get())
+        )
+        tb.Spinbox(
+            maxdet_frame_y,
+            from_=1,
+            to=2000,
+            textvariable=self.bubble_max_det_yolo_var,
+            width=10
+        ).pack(side='left', padx=10)
+
+        maxdet_frame_r = tk.Frame(bubble_frame)
+        maxdet_frame_r.pack(fill='x', pady=(6, 0))
+        tk.Label(maxdet_frame_r, text="Max detections (RT-DETR):", width=20, anchor='w').pack(side='left')
+        self.bubble_max_det_rtdetr_var = tk.IntVar(
+            value=self.settings['ocr'].get('bubble_max_detections_rtdetr', self.bubble_max_detections_var.get())
+        )
+        tb.Spinbox(
+            maxdet_frame_r,
+            from_=1,
+            to=2000,
+            textvariable=self.bubble_max_det_rtdetr_var,
+            width=10
+        ).pack(side='left', padx=10)
+
         # Detector type dropdown - PUT THIS DIRECTLY IN bubble_frame
         detector_type_frame = tk.Frame(bubble_frame)
         detector_type_frame.pack(fill='x', pady=(10, 0))
@@ -2287,6 +2346,31 @@ class MangaSettingsDialog:
         
         # Initialize workers state
         self._toggle_workers()
+        
+        # Memory management section
+        memory_frame = tk.LabelFrame(content_frame, text="Memory Management", padx=15, pady=10)
+        memory_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        self.auto_cleanup_models = tk.BooleanVar(
+            value=self.settings.get('advanced', {}).get('auto_cleanup_models', True)
+        )
+        cleanup_cb = tb.Checkbutton(
+            memory_frame,
+            text="Automatically cleanup models after translation to free RAM",
+            variable=self.auto_cleanup_models,
+            bootstyle="round-toggle"
+        )
+        cleanup_cb.pack(anchor='w')
+        
+        # Add a note about parallel processing
+        note_label = tk.Label(
+            memory_frame,
+            text="Note: When parallel panel translation is enabled, cleanup happens after ALL panels complete.",
+            font=('Arial', 9),
+            fg='gray',
+            wraplength=450
+        )
+        note_label.pack(anchor='w', pady=(5, 0), padx=(20, 0))
 
         # Panel-level parallel translation
         panel_frame = tk.LabelFrame(content_frame, text="Parallel Panel Translation", padx=15, pady=10)
@@ -2365,7 +2449,123 @@ class MangaSettingsDialog:
         bg_cb.pack(anchor='w', pady=(5, 0))
         
         _toggle_onnx_controls()
-    
+        
+        # Model memory optimization (quantization)
+        quant_frame = tk.LabelFrame(content_frame, text="Model Memory Optimization", padx=15, pady=10)
+        quant_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        self.quantize_models_var = tk.BooleanVar(value=self.settings['advanced'].get('quantize_models', False))
+        tb.Checkbutton(
+            quant_frame,
+            text="Reduce RAM with quantized models (global switch)",
+            variable=self.quantize_models_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        
+        # ONNX quantize sub-toggle
+        onnx_row = tk.Frame(quant_frame)
+        onnx_row.pack(fill='x', pady=(6, 0))
+        self.onnx_quantize_var = tk.BooleanVar(value=self.settings['advanced'].get('onnx_quantize', False))
+        tb.Checkbutton(
+            onnx_row,
+            text="Quantize ONNX models to INT8 (dynamic)",
+            variable=self.onnx_quantize_var,
+            bootstyle="round-toggle"
+        ).pack(side='left')
+        tk.Label(onnx_row, text="(lower RAM/CPU; slight accuracy trade-off)", font=('Arial', 9), fg='gray').pack(side='left', padx=8)
+        
+        # Torch precision dropdown
+        precision_row = tk.Frame(quant_frame)
+        precision_row.pack(fill='x', pady=(6, 0))
+        tk.Label(precision_row, text="Torch precision:", width=20, anchor='w').pack(side='left')
+        self.torch_precision_var = tk.StringVar(value=self.settings['advanced'].get('torch_precision', 'auto'))
+        ttk.Combobox(
+            precision_row,
+            textvariable=self.torch_precision_var,
+            values=['auto', 'fp16', 'fp32'],
+            state='readonly',
+            width=10
+        ).pack(side='left', padx=10)
+        tk.Label(precision_row, text="(auto uses FP16 on GPU when quantization is ON)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # Aggressive memory cleanup
+        cleanup_frame = tk.LabelFrame(content_frame, text="Memory & Cleanup", padx=15, pady=10)
+        cleanup_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        self.force_deep_cleanup_var = tk.BooleanVar(value=self.settings.get('advanced', {}).get('force_deep_cleanup_each_image', False))
+        tb.Checkbutton(
+            cleanup_frame,
+            text="Force deep model cleanup after every image (slowest, lowest RAM)",
+            variable=self.force_deep_cleanup_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        tk.Label(cleanup_frame, text="Also clears shared caches at batch end.", font=('Arial', 9), fg='gray').pack(anchor='w', padx=(0,0), pady=(2,0))
+        
+        # RAM cap controls
+        ramcap_frame = tk.Frame(cleanup_frame)
+        ramcap_frame.pack(fill='x', pady=(10, 0))
+        self.ram_cap_enabled_var = tk.BooleanVar(value=self.settings.get('advanced', {}).get('ram_cap_enabled', False))
+        tb.Checkbutton(
+            ramcap_frame,
+            text="Enable RAM cap",
+            variable=self.ram_cap_enabled_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        
+        # RAM cap value
+        ramcap_value_row = tk.Frame(cleanup_frame)
+        ramcap_value_row.pack(fill='x', pady=5)
+        tk.Label(ramcap_value_row, text="Max RAM (MB):", width=20, anchor='w').pack(side='left')
+        self.ram_cap_mb_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('ram_cap_mb', 0) or 0))
+        tb.Spinbox(
+            ramcap_value_row,
+            from_=512,
+            to=131072,
+            textvariable=self.ram_cap_mb_var,
+            width=12
+        ).pack(side='left', padx=10)
+        tk.Label(ramcap_value_row, text="(0 = disabled)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # RAM cap mode
+        ramcap_mode_row = tk.Frame(cleanup_frame)
+        ramcap_mode_row.pack(fill='x', pady=(5, 0))
+        tk.Label(ramcap_mode_row, text="Cap mode:", width=20, anchor='w').pack(side='left')
+        self.ram_cap_mode_var = tk.StringVar(value=self.settings.get('advanced', {}).get('ram_cap_mode', 'soft'))
+        ttk.Combobox(
+            ramcap_mode_row,
+            textvariable=self.ram_cap_mode_var,
+            values=['soft', 'hard (Windows only)'],
+            state='readonly',
+            width=20
+        ).pack(side='left', padx=10)
+        tk.Label(ramcap_mode_row, text="Soft = clean/trim, Hard = OS-enforced (may OOM)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # Advanced RAM gate tuning
+        gate_row = tk.Frame(cleanup_frame)
+        gate_row.pack(fill='x', pady=(5, 0))
+        tk.Label(gate_row, text="Gate timeout (sec):", width=20, anchor='w').pack(side='left')
+        self.ram_gate_timeout_var = tk.DoubleVar(value=float(self.settings.get('advanced', {}).get('ram_gate_timeout_sec', 10.0)))
+        tb.Spinbox(
+            gate_row,
+            from_=2.0,
+            to=60.0,
+            increment=0.5,
+            textvariable=self.ram_gate_timeout_var,
+            width=12
+        ).pack(side='left', padx=10)
+        
+        floor_row = tk.Frame(cleanup_frame)
+        floor_row.pack(fill='x', pady=(5, 0))
+        tk.Label(floor_row, text="Gate floor over baseline (MB):", width=25, anchor='w').pack(side='left')
+        self.ram_gate_floor_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('ram_min_floor_over_baseline_mb', 128)))
+        tb.Spinbox(
+            floor_row,
+            from_=64,
+            to=2048,
+            textvariable=self.ram_gate_floor_var,
+            width=12
+        ).pack(side='left', padx=10)
+
     def _toggle_workers(self):
         """Enable/disable worker settings based on parallel processing toggle"""
         enabled = bool(self.parallel_processing.get())
@@ -2692,6 +2892,9 @@ class MangaSettingsDialog:
             self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
             self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
             self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_path.get()
+            self.settings['ocr']['bubble_max_detections'] = int(self.bubble_max_detections_var.get())
+            self.settings['ocr']['bubble_max_detections_yolo'] = int(self.bubble_max_det_yolo_var.get())
+            self.settings['ocr']['bubble_max_detections_rtdetr'] = int(self.bubble_max_det_rtdetr_var.get())
             
             # Save the detector type properly
             if hasattr(self, 'detector_type'):
@@ -2737,6 +2940,9 @@ class MangaSettingsDialog:
             self.settings['advanced']['panel_max_workers'] = int(self.panel_max_workers_var.get())
             self.settings['advanced']['panel_start_stagger_ms'] = int(self.panel_stagger_ms_var.get())
             
+            # Memory management settings
+            self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_models.get())
+            
             # ONNX auto-convert settings (persist and apply to environment)
             if hasattr(self, 'auto_convert_onnx_var'):
                 self.settings['advanced']['auto_convert_to_onnx'] = bool(self.auto_convert_onnx_var.get())
@@ -2744,6 +2950,47 @@ class MangaSettingsDialog:
             if hasattr(self, 'auto_convert_onnx_bg_var'):
                 self.settings['advanced']['auto_convert_to_onnx_background'] = bool(self.auto_convert_onnx_bg_var.get())
                 os.environ['AUTO_CONVERT_TO_ONNX_BACKGROUND'] = 'true' if self.auto_convert_onnx_bg_var.get() else 'false'
+            
+            # Quantization toggles and precision
+            if hasattr(self, 'quantize_models_var'):
+                self.settings['advanced']['quantize_models'] = bool(self.quantize_models_var.get())
+                os.environ['MODEL_QUANTIZE'] = 'true' if self.quantize_models_var.get() else 'false'
+            if hasattr(self, 'onnx_quantize_var'):
+                self.settings['advanced']['onnx_quantize'] = bool(self.onnx_quantize_var.get())
+                os.environ['ONNX_QUANTIZE'] = 'true' if self.onnx_quantize_var.get() else 'false'
+            if hasattr(self, 'torch_precision_var'):
+                self.settings['advanced']['torch_precision'] = str(self.torch_precision_var.get())
+                os.environ['TORCH_PRECISION'] = self.settings['advanced']['torch_precision']
+            
+            # Memory cleanup toggle
+            if hasattr(self, 'force_deep_cleanup_var'):
+                if 'advanced' not in self.settings:
+                    self.settings['advanced'] = {}
+                self.settings['advanced']['force_deep_cleanup_each_image'] = bool(self.force_deep_cleanup_var.get())
+            # RAM cap settings
+            if hasattr(self, 'ram_cap_enabled_var'):
+                self.settings['advanced']['ram_cap_enabled'] = bool(self.ram_cap_enabled_var.get())
+            if hasattr(self, 'ram_cap_mb_var'):
+                try:
+                    self.settings['advanced']['ram_cap_mb'] = int(self.ram_cap_mb_var.get())
+                except Exception:
+                    self.settings['advanced']['ram_cap_mb'] = 0
+            if hasattr(self, 'ram_cap_mode_var'):
+                mode = self.ram_cap_mode_var.get()
+                if mode not in ['soft', 'hard (Windows only)']:
+                    mode = 'soft'
+                # Normalize to 'soft' or 'hard'
+                self.settings['advanced']['ram_cap_mode'] = 'hard' if mode.startswith('hard') else 'soft'
+            if hasattr(self, 'ram_gate_timeout_var'):
+                try:
+                    self.settings['advanced']['ram_gate_timeout_sec'] = float(self.ram_gate_timeout_var.get())
+                except Exception:
+                    self.settings['advanced']['ram_gate_timeout_sec'] = 10.0
+            if hasattr(self, 'ram_gate_floor_var'):
+                try:
+                    self.settings['advanced']['ram_min_floor_over_baseline_mb'] = int(self.ram_gate_floor_var.get())
+                except Exception:
+                    self.settings['advanced']['ram_min_floor_over_baseline_mb'] = 128
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_var'):
