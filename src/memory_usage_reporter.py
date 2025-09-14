@@ -24,13 +24,59 @@ _GLOBAL_STOP = threading.Event()
 
 
 def _ensure_logs_dir() -> str:
-    base_dir = os.path.abspath(os.path.dirname(__file__))
-    logs_dir = os.path.join(base_dir, "logs")
+    # Prefer explicit override from main app
     try:
-        os.makedirs(logs_dir, exist_ok=True)
+        env_dir = os.environ.get("GLOSSARION_LOG_DIR")
+        if env_dir:
+            dir_path = os.path.expanduser(env_dir)
+            os.makedirs(dir_path, exist_ok=True)
+            return dir_path
     except Exception:
         pass
-    return logs_dir
+
+    def _can_write(p: str) -> bool:
+        try:
+            os.makedirs(p, exist_ok=True)
+            test_file = os.path.join(p, ".write_test")
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(test_file)
+            return True
+        except Exception:
+            return False
+
+    # Frozen exe: try next to the executable first
+    try:
+        if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+            exe_dir = os.path.dirname(sys.executable)
+            candidate = os.path.join(exe_dir, "logs")
+            if _can_write(candidate):
+                return candidate
+    except Exception:
+        pass
+
+    # User-local app data (persistent and writable)
+    try:
+        base = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or os.path.expanduser('~')
+        candidate = os.path.join(base, 'Glossarion', 'logs')
+        if _can_write(candidate):
+            return candidate
+    except Exception:
+        pass
+
+    # Development fallback: next to this file
+    try:
+        base_dir = os.path.abspath(os.path.dirname(__file__))
+        candidate = os.path.join(base_dir, "logs")
+        if _can_write(candidate):
+            return candidate
+    except Exception:
+        pass
+
+    # Final fallback: CWD
+    fallback = os.path.join(os.getcwd(), "logs")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
 
 
 def _make_logger() -> logging.Logger:
