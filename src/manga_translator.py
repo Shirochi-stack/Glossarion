@@ -126,22 +126,20 @@ class MangaTranslator:
             self._log(f"📦 BATCH MODE: Processing {self.batch_size} images")
             self._log(f"⏱️ Keeping API delay for rate limit protection")
             
-            # Pre-load models for batch processing
-            if self.bubble_detector is None:
-                from bubble_detector import BubbleDetector
-                self.bubble_detector = BubbleDetector()
-            
-            # Pre-load RT-DETR if using it
+            # NOTE: We NO LONGER preload models here!
+            # Models should only be loaded when actually needed
+            # This was causing unnecessary RAM usage
             ocr_settings = self.manga_settings.get('ocr', {})
-            if ocr_settings.get('detector_type', 'yolo') == 'rtdetr':
-                self._log("📥 Pre-loading RT-DETR for batch processing...")
-                self.bubble_detector.load_rtdetr_model()
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+            if bubble_detection_enabled:
+                self._log("📦 BATCH MODE: Bubble detection will be loaded on first use")
+            else:
+                self._log("📦 BATCH MODE: Bubble detection is disabled")
         
         # Cache for processed images
         self.cache = {}
         # Determine OCR provider
         self.ocr_provider = ocr_config.get('provider', 'google')
-        self.bubble_detector = None
 
         if self.ocr_provider == 'google':
             if not GOOGLE_CLOUD_VISION_AVAILABLE:
@@ -176,9 +174,13 @@ class MangaTranslator:
             )
         else:
             # New OCR providers handled by OCR manager
-            from ocr_manager import OCRManager
-            self.ocr_manager = OCRManager(log_callback=log_callback)
-            print(f"Initialized OCR Manager for {self.ocr_provider}")
+            try:
+                from ocr_manager import OCRManager
+                self.ocr_manager = OCRManager(log_callback=log_callback)
+                print(f"Initialized OCR Manager for {self.ocr_provider}")
+            except Exception as _e:
+                self.ocr_manager = None
+                self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
         
         self.client = unified_client
         self.main_gui = main_gui
@@ -186,6 +188,11 @@ class MangaTranslator:
         
         # Get all settings from GUI
         self.api_delay = float(self.main_gui.delay_entry.get() if hasattr(main_gui, 'delay_entry') else 2.0)
+        # Propagate API delay to unified_api_client via env var so its internal pacing/logging matches GUI
+        try:
+            os.environ["SEND_INTERVAL_SECONDS"] = str(self.api_delay)
+        except Exception:
+            pass
         self.temperature = float(main_gui.trans_temp.get() if hasattr(main_gui, 'trans_temp') else 0.3)
         self.max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
         if hasattr(main_gui, 'token_limit_disabled') and main_gui.token_limit_disabled:
@@ -305,7 +312,30 @@ class MangaTranslator:
         self.save_intermediate = self.manga_settings.get('advanced', {}).get('save_intermediate', False)
         self.parallel_processing = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
         self.max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        # Deep cleanup control: if True, release models after every image (aggressive)
+        self.force_deep_cleanup_each_image = self.manga_settings.get('advanced', {}).get('force_deep_cleanup_each_image', False)
         
+        # RAM cap
+        adv = self.manga_settings.get('advanced', {})
+        self.ram_cap_enabled = bool(adv.get('ram_cap_enabled', False))
+        self.ram_cap_mb = int(adv.get('ram_cap_mb', 0) or 0)
+        self.ram_cap_mode = str(adv.get('ram_cap_mode', 'soft'))
+        self.ram_check_interval_sec = float(adv.get('ram_check_interval_sec', 1.0))
+        self.ram_recovery_margin_mb = int(adv.get('ram_recovery_margin_mb', 256))
+        self._mem_over_cap = False
+        self._mem_stop_event = threading.Event()
+        self._mem_thread = None
+        # Advanced RAM gate tuning
+        self.ram_gate_timeout_sec = float(adv.get('ram_gate_timeout_sec', 10.0))
+        self.ram_min_floor_over_baseline_mb = int(adv.get('ram_min_floor_over_baseline_mb', 128))
+        # Measure baseline at init
+        try:
+            self.ram_baseline_mb = self._get_process_rss_mb() or 0
+        except Exception:
+            self.ram_baseline_mb = 0
+        if self.ram_cap_enabled and self.ram_cap_mb > 0:
+            self._init_ram_cap()
+            
             
     def set_stop_flag(self, stop_flag):
         """Set the stop flag for checking interruptions"""
@@ -366,29 +396,565 @@ class MangaTranslator:
             import builtins
             builtins.print = self._original_print
 
+    def _cleanup_thread_locals(self):
+        """Aggressively release thread-local heavy objects (onnx sessions, detectors)."""
+        try:
+            if hasattr(self, '_thread_local'):
+                tl = self._thread_local
+                # Release thread-local inpainters
+                if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
+                    try:
+                        for inp in list(tl.local_inpainters.values()):
+                            try:
+                                if hasattr(inp, 'unload'):
+                                    inp.unload()
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            tl.local_inpainters.clear()
+                        except Exception:
+                            pass
+                # Release thread-local bubble detector
+                if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
+                    try:
+                        bd = tl.bubble_detector
+                        try:
+                            if hasattr(bd, 'unload'):
+                                bd.unload(release_shared=False)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            tl.bubble_detector = None
+                        except Exception:
+                            pass
+        except Exception:
+            # Best-effort cleanup only
+            pass
+
+    def _deep_cleanup_models(self):
+        """Release ALL model references and caches to reduce RAM after translation.
+        This is the COMPREHENSIVE cleanup that ensures all models are unloaded from RAM.
+        """
+        self._log("🧹 Starting comprehensive model cleanup to free RAM...", "info")
+        
+        try:
+            # ========== 1. CLEANUP OCR MODELS ==========
+            try:
+                if hasattr(self, 'ocr_manager'):
+                    ocr_manager = getattr(self, 'ocr_manager', None)
+                    if ocr_manager:
+                        self._log("   Cleaning up OCR models...", "debug")
+                        # Clear all loaded OCR providers
+                        if hasattr(ocr_manager, 'providers'):
+                            for provider_name, provider in ocr_manager.providers.items():
+                                try:
+                                    # Unload the model
+                                    if hasattr(provider, 'model'):
+                                        provider.model = None
+                                    if hasattr(provider, 'processor'):
+                                        provider.processor = None
+                                    if hasattr(provider, 'tokenizer'):
+                                        provider.tokenizer = None
+                                    if hasattr(provider, 'reader'):
+                                        provider.reader = None
+                                    if hasattr(provider, 'is_loaded'):
+                                        provider.is_loaded = False
+                                    self._log(f"      ✓ Unloaded {provider_name} OCR provider", "debug")
+                                except Exception as e:
+                                    self._log(f"      Warning: Failed to unload {provider_name}: {e}", "debug")
+                        # Clear the entire OCR manager
+                        self.ocr_manager = None
+                        self._log("   ✓ OCR models cleaned up", "debug")
+            except Exception as e:
+                self._log(f"   Warning: OCR cleanup failed: {e}", "debug")
+
+            # ========== 2. CLEANUP BUBBLE DETECTOR (YOLO/RT-DETR) ==========
+            try:
+                # Instance-level bubble detector
+                if hasattr(self, 'bubble_detector') and self.bubble_detector is not None:
+                    self._log("   Cleaning up bubble detector (YOLO/RT-DETR)...", "debug")
+                    bd = self.bubble_detector
+                    try:
+                        if hasattr(bd, 'unload'):
+                            bd.unload(release_shared=True)  # This unloads YOLO and RT-DETR models
+                            self._log("      ✓ Called bubble detector unload", "debug")
+                    except Exception as e:
+                        self._log(f"      Warning: Bubble detector unload failed: {e}", "debug")
+                    self.bubble_detector = None
+                    self._log("   ✓ Bubble detector cleaned up", "debug")
+                    
+                # Also clean class-level shared RT-DETR models
+                try:
+                    from bubble_detector import BubbleDetector
+                    if hasattr(BubbleDetector, '_rtdetr_shared_model'):
+                        BubbleDetector._rtdetr_shared_model = None
+                    if hasattr(BubbleDetector, '_rtdetr_shared_processor'):
+                        BubbleDetector._rtdetr_shared_processor = None
+                    if hasattr(BubbleDetector, '_rtdetr_loaded'):
+                        BubbleDetector._rtdetr_loaded = False
+                    self._log("      ✓ Cleared shared RT-DETR cache", "debug")
+                except Exception:
+                    pass
+            except Exception as e:
+                self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
+
+            # ========== 3. CLEANUP INPAINTERS ==========
+            try:
+                self._log("   Cleaning up inpainter models...", "debug")
+                
+                # Instance-level inpainter
+                if hasattr(self, 'local_inpainter') and self.local_inpainter is not None:
+                    try:
+                        if hasattr(self.local_inpainter, 'unload'):
+                            self.local_inpainter.unload()
+                            self._log("      ✓ Unloaded local inpainter", "debug")
+                    except Exception:
+                        pass
+                    self.local_inpainter = None
+                
+                # Hybrid inpainter
+                if hasattr(self, 'hybrid_inpainter') and self.hybrid_inpainter is not None:
+                    try:
+                        if hasattr(self.hybrid_inpainter, 'unload'):
+                            self.hybrid_inpainter.unload()
+                            self._log("      ✓ Unloaded hybrid inpainter", "debug")
+                    except Exception:
+                        pass
+                    self.hybrid_inpainter = None
+                
+                # Generic inpainter reference
+                if hasattr(self, 'inpainter') and self.inpainter is not None:
+                    try:
+                        if hasattr(self.inpainter, 'unload'):
+                            self.inpainter.unload()
+                            self._log("      ✓ Unloaded inpainter", "debug")
+                    except Exception:
+                        pass
+                    self.inpainter = None
+
+                # Release any shared inpainters in the global pool
+                with MangaTranslator._inpaint_pool_lock:
+                    for key, rec in list(MangaTranslator._inpaint_pool.items()):
+                        try:
+                            inp = rec.get('inpainter') if isinstance(rec, dict) else None
+                            if inp is not None:
+                                try:
+                                    if hasattr(inp, 'unload'):
+                                        inp.unload()
+                                        self._log(f"      ✓ Unloaded pooled inpainter: {key}", "debug")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    MangaTranslator._inpaint_pool.clear()
+                    self._log("      ✓ Cleared inpainter pool", "debug")
+
+                # Release process-wide shared inpainter
+                if hasattr(MangaTranslator, '_shared_local_inpainter'):
+                    shared = getattr(MangaTranslator, '_shared_local_inpainter', None)
+                    if shared is not None:
+                        try:
+                            if hasattr(shared, 'unload'):
+                                shared.unload()
+                                self._log("      ✓ Unloaded shared inpainter", "debug")
+                        except Exception:
+                            pass
+                        setattr(MangaTranslator, '_shared_local_inpainter', None)
+                
+                self._log("   ✓ Inpainter models cleaned up", "debug")
+            except Exception as e:
+                self._log(f"   Warning: Inpainter cleanup failed: {e}", "debug")
+
+            # ========== 4. CLEANUP THREAD-LOCAL MODELS ==========
+            try:
+                if hasattr(self, '_thread_local') and self._thread_local is not None:
+                    self._log("   Cleaning up thread-local models...", "debug")
+                    tl = self._thread_local
+                    
+                    # Thread-local inpainters
+                    if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
+                        for key, inp in list(tl.local_inpainters.items()):
+                            try:
+                                if hasattr(inp, 'unload'):
+                                    inp.unload()
+                                    self._log(f"      ✓ Unloaded thread-local inpainter: {key}", "debug")
+                            except Exception:
+                                pass
+                        tl.local_inpainters.clear()
+                    
+                    # Thread-local bubble detector
+                    if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
+                        try:
+                            if hasattr(tl.bubble_detector, 'unload'):
+                                tl.bubble_detector.unload(release_shared=False)
+                                self._log("      ✓ Unloaded thread-local bubble detector", "debug")
+                        except Exception:
+                            pass
+                        tl.bubble_detector = None
+                    
+                    self._log("   ✓ Thread-local models cleaned up", "debug")
+            except Exception as e:
+                self._log(f"   Warning: Thread-local cleanup failed: {e}", "debug")
+
+            # ========== 5. CLEAR PYTORCH/CUDA CACHE ==========
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    self._log("   ✓ Cleared CUDA cache", "debug")
+            except Exception:
+                pass
+
+            # ========== 6. FORCE GARBAGE COLLECTION ==========
+            try:
+                import gc
+                gc.collect()
+                # Multiple passes for stubborn references
+                gc.collect()
+                gc.collect()
+                self._log("   ✓ Forced garbage collection", "debug")
+            except Exception:
+                pass
+            
+            self._log("✅ Model cleanup complete - RAM should be freed", "info")
+            
+        except Exception as e:
+            # Never raise from deep cleanup
+            self._log(f"⚠️ Model cleanup encountered error: {e}", "warning")
+            pass
+
+    def _clear_hf_cache(self, repo_id: str = None):
+        """Best-effort: clear Hugging Face cache for a specific repo (RT-DETR by default).
+        This targets disk cache; it won’t directly reduce RAM but helps avoid growth across runs.
+        """
+        try:
+            # Determine repo_id from BubbleDetector if not provided
+            if repo_id is None:
+                try:
+                    import bubble_detector as _bdmod
+                    BD = getattr(_bdmod, 'BubbleDetector', None)
+                    if BD is not None and hasattr(BD, '_rtdetr_repo_id'):
+                        repo_id = getattr(BD, '_rtdetr_repo_id') or 'ogkalu/comic-text-and-bubble-detector'
+                    else:
+                        repo_id = 'ogkalu/comic-text-and-bubble-detector'
+                except Exception:
+                    repo_id = 'ogkalu/comic-text-and-bubble-detector'
+
+            # Try to use huggingface_hub to delete just the matching repo cache
+            try:
+                from huggingface_hub import scan_cache_dir
+                info = scan_cache_dir()
+                repos = getattr(info, 'repos', [])
+                to_delete = []
+                for repo in repos:
+                    rid = getattr(repo, 'repo_id', None) or getattr(repo, 'id', None)
+                    if rid == repo_id:
+                        to_delete.append(repo)
+                if to_delete:
+                    # Prefer the high-level deletion API if present
+                    if hasattr(info, 'delete_repos'):
+                        info.delete_repos(to_delete)
+                    else:
+                        import shutil
+                        for repo in to_delete:
+                            repo_dir = getattr(repo, 'repo_path', None) or getattr(repo, 'repo_dir', None)
+                            if repo_dir and os.path.exists(repo_dir):
+                                shutil.rmtree(repo_dir, ignore_errors=True)
+            except Exception:
+                # Fallback: try removing default HF cache dir for this repo pattern
+                try:
+                    from pathlib import Path
+                    hf_home = os.environ.get('HF_HOME')
+                    if hf_home:
+                        base = Path(hf_home)
+                    else:
+                        base = Path.home() / '.cache' / 'huggingface' / 'hub'
+                    # Repo cache dirs are named like models--{org}--{name}
+                    safe_name = repo_id.replace('/', '--')
+                    candidates = list(base.glob(f'models--{safe_name}*'))
+                    import shutil
+                    for c in candidates:
+                        shutil.rmtree(str(c), ignore_errors=True)
+                except Exception:
+                    pass
+        except Exception:
+            # Best-effort only
+            pass
+
+    def _trim_working_set(self):
+        """Release freed memory back to the OS where possible.
+        - On Windows: use EmptyWorkingSet on current process
+        - On Linux: attempt malloc_trim(0)
+        - On macOS: no direct API; rely on GC
+        """
+        import sys
+        import platform
+        try:
+            system = platform.system()
+            if system == 'Windows':
+                import ctypes
+                psapi = ctypes.windll.psapi
+                kernel32 = ctypes.windll.kernel32
+                h_process = kernel32.GetCurrentProcess()
+                psapi.EmptyWorkingSet(h_process)
+            elif system == 'Linux':
+                import ctypes
+                libc = ctypes.CDLL('libc.so.6')
+                try:
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _get_process_rss_mb(self) -> int:
+        """Return current RSS in MB (cross-platform best-effort)."""
+        try:
+            import psutil, os as _os
+            return int(psutil.Process(_os.getpid()).memory_info().rss / (1024*1024))
+        except Exception:
+            # Windows fallback
+            try:
+                import ctypes, os as _os
+                class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", ctypes.c_uint),
+                        ("PageFaultCount", ctypes.c_uint),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                    ]
+                GetCurrentProcess = ctypes.windll.kernel32.GetCurrentProcess
+                GetProcessMemoryInfo = ctypes.windll.psapi.GetProcessMemoryInfo
+                counters = PROCESS_MEMORY_COUNTERS()
+                counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+                GetProcessMemoryInfo(GetCurrentProcess(), ctypes.byref(counters), counters.cb)
+                return int(counters.WorkingSetSize / (1024*1024))
+            except Exception:
+                return 0
+
+    def _apply_windows_job_memory_limit(self, cap_mb: int) -> bool:
+        """Apply a hard memory cap using Windows Job Objects. Returns True on success."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
+            JobObjectExtendedLimitInformation = 9
+
+            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_void_p),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong),
+                ]
+
+            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            CreateJobObject = kernel32.CreateJobObjectW
+            CreateJobObject.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+            CreateJobObject.restype = wintypes.HANDLE
+            SetInformationJobObject = kernel32.SetInformationJobObject
+            SetInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.INT, ctypes.c_void_p, wintypes.DWORD]
+            SetInformationJobObject.restype = wintypes.BOOL
+            AssignProcessToJobObject = kernel32.AssignProcessToJobObject
+            AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            AssignProcessToJobObject.restype = wintypes.BOOL
+            GetCurrentProcess = kernel32.GetCurrentProcess
+            GetCurrentProcess.restype = wintypes.HANDLE
+
+            hJob = CreateJobObject(None, None)
+            if not hJob:
+                return False
+
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY
+            info.JobMemoryLimit = ctypes.c_size_t(int(cap_mb) * 1024 * 1024)
+
+            ok = SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info))
+            if not ok:
+                return False
+
+            ok = AssignProcessToJobObject(hJob, GetCurrentProcess())
+            if not ok:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _memory_watchdog(self):
+        try:
+            import time
+            while not self._mem_stop_event.is_set():
+                if not self.ram_cap_enabled or self.ram_cap_mb <= 0:
+                    break
+                rss = self._get_process_rss_mb()
+                if rss and rss > self.ram_cap_mb:
+                    self._mem_over_cap = True
+                    # Aggressive attempt to reduce memory
+                    try:
+                        self._deep_cleanup_models()
+                    except Exception:
+                        pass
+                    try:
+                        self._trim_working_set()
+                    except Exception:
+                        pass
+                    # Wait a bit before re-checking
+                    time.sleep(max(0.2, self.ram_check_interval_sec / 2))
+                else:
+                    # Below cap or couldn't read RSS
+                    self._mem_over_cap = False
+                    time.sleep(self.ram_check_interval_sec)
+        except Exception:
+            pass
+
+    def _init_ram_cap(self):
+        # Hard cap via Windows Job Object if selected and on Windows
+        try:
+            import platform
+            if self.ram_cap_mode.startswith('hard') or self.ram_cap_mode == 'hard':
+                if platform.system() == 'Windows':
+                    if not self._apply_windows_job_memory_limit(self.ram_cap_mb):
+                        self._log("⚠️ Failed to apply hard RAM cap; falling back to soft mode", "warning")
+                        self.ram_cap_mode = 'soft'
+                else:
+                    self._log("⚠️ Hard RAM cap only supported on Windows; using soft mode", "warning")
+                    self.ram_cap_mode = 'soft'
+        except Exception:
+            self.ram_cap_mode = 'soft'
+        # Start watchdog regardless of mode to proactively stay under cap during operations
+        try:
+            self._mem_thread = threading.Thread(target=self._memory_watchdog, daemon=True)
+            self._mem_thread.start()
+        except Exception:
+            pass
+
+    def _block_if_over_cap(self, context_msg: str = ""):
+        # If over cap, block until we drop under cap - margin
+        if not self.ram_cap_enabled or self.ram_cap_mb <= 0:
+            return
+        import time
+        # Never require target below baseline + floor margin
+        baseline = max(0, getattr(self, 'ram_baseline_mb', 0))
+        floor = baseline + max(0, self.ram_min_floor_over_baseline_mb)
+        # Compute target below cap by recovery margin, but not below floor
+        target = self.ram_cap_mb - max(64, min(self.ram_recovery_margin_mb, self.ram_cap_mb // 4))
+        target = max(target, floor)
+        start = time.time()
+        waited = False
+        last_log = 0
+        while True:
+            rss = self._get_process_rss_mb()
+            now = time.time()
+            if rss and rss <= target:
+                break
+            # Timeout to avoid deadlock when baseline can't go lower than target
+            if now - start > max(2.0, self.ram_gate_timeout_sec):
+                self._log(f"⌛ RAM gate timeout for {context_msg}: RSS={rss} MB, target={target} MB; proceeding in low-memory mode", "warning")
+                break
+            waited = True
+            # Periodic log to help diagnose
+            if now - last_log > 3.0 and rss:
+                self._log(f"⏳ Waiting for RAM drop: RSS={rss} MB, target={target} MB ({context_msg})", "info")
+                last_log = now
+            # Attempt cleanup while waiting
+            try:
+                self._deep_cleanup_models()
+            except Exception:
+                pass
+            try:
+                self._trim_working_set()
+            except Exception:
+                pass
+            if self._check_stop():
+                break
+            time.sleep(0.5)
+        if waited and context_msg:
+            self._log(f"🧹 Proceeding with {context_msg} (RSS now {self._get_process_rss_mb()} MB; target {target} MB)", "info")
+
     def set_batch_mode(self, enabled: bool, batch_size: int = 1):
         """Enable or disable batch mode optimizations"""
         self.batch_mode = enabled
         self.batch_size = batch_size
         
         if enabled:
-            # Pre-load models to avoid repeated loading
-            if hasattr(self, 'bubble_detector') and self.bubble_detector:
-                if not self.bubble_detector.rtdetr_loaded:
-                    self._log("📦 BATCH MODE: Pre-loading RT-DETR model...")
-                    self.bubble_detector.load_rtdetr_model()
+            # Check if bubble detection is actually enabled before considering preload
+            ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
+            bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
             
-            # Pre-load other models if needed
+            # Only suggest preloading if bubble detection is actually going to be used
+            if bubble_detection_enabled:
+                self._log("📦 BATCH MODE: Bubble detection models will load on first use")
+                # NOTE: We don't actually preload anymore to save RAM
+                # Models are loaded on-demand when first needed
+            
+            # Similarly for OCR models - they load on demand
             if hasattr(self, 'ocr_manager') and self.ocr_manager:
-                provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
-                if not provider_status['loaded']:
-                    self._log(f"📦 BATCH MODE: Pre-loading {self.ocr_provider}...")
-                    self.ocr_manager.load_provider(self.ocr_provider)
+                self._log(f"📦 BATCH MODE: {self.ocr_provider} will load on first use")
+                # NOTE: We don't preload OCR models either
             
             self._log(f"📦 BATCH MODE ENABLED: Processing {batch_size} images")
             self._log(f"⏱️ API delay: {self.api_delay}s (preserved for rate limiting)")
         else:
             self._log("📝 BATCH MODE DISABLED")
+
+    def _ensure_bubble_detector_ready(self, ocr_settings):
+        """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
+        try:
+            bd = self._get_thread_bubble_detector()
+            detector_type = ocr_settings.get('detector_type', 'rtdetr')
+            if detector_type == 'rtdetr':
+                if not getattr(bd, 'rtdetr_loaded', False):
+                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
+                    if not bd.load_rtdetr_model(model_id=model_id):
+                        return None
+            elif detector_type == 'yolo':
+                model_path = ocr_settings.get('bubble_model_path')
+                if model_path and not getattr(bd, 'model_loaded', False):
+                    if not bd.load_model(model_path):
+                        return None
+            else:  # auto
+                # Prefer RT-DETR if available, else YOLO if configured
+                if not getattr(bd, 'rtdetr_loaded', False):
+                    bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path'))
+            return bd
+        except Exception:
+            return None
 
     def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
         """Merge text regions by bubble and filter based on RT-DETR class settings"""
@@ -396,6 +962,12 @@ class MangaTranslator:
             # Get detector settings from config
             ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
             detector_type = ocr_settings.get('detector_type', 'yolo')
+            
+            # Ensure detector is ready (auto-reload after cleanup)
+            bd = self._ensure_bubble_detector_ready(ocr_settings)
+            if bd is None:
+                self._log("⚠️ Bubble detector unavailable after cleanup; falling back to proximity merge", "warning")
+                return self._merge_nearby_regions(regions)
             
             # Check if bubble detection is enabled
             if not ocr_settings.get('bubble_detection_enabled', False):
@@ -1216,9 +1788,21 @@ class MangaTranslator:
                         pil_image = PILImage.open(image_path)
                         image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                 
-                # Create OCR manager if not exists
-                if not hasattr(self, 'ocr_manager'):
-                    self.ocr_manager = gui.ocr_manager
+                # Ensure OCR manager is available
+                if not hasattr(self, 'ocr_manager') or self.ocr_manager is None:
+                    try:
+                        # Prefer GUI-provided manager if available
+                        if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'ocr_manager') and self.main_gui.ocr_manager is not None:
+                            self.ocr_manager = self.main_gui.ocr_manager
+                        else:
+                            from ocr_manager import OCRManager
+                            self.ocr_manager = OCRManager(log_callback=self.log_callback)
+                            self._log("Initialized internal OCRManager instance", "info")
+                    except Exception as _e:
+                        self.ocr_manager = None
+                        self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
+                if self.ocr_manager is None:
+                    raise RuntimeError("OCRManager is not available; cannot proceed with OCR provider.")
                 
                 # Check provider status and load if needed
                 provider_status = self.ocr_manager.check_provider_status(self.ocr_provider)
@@ -5299,7 +5883,7 @@ class MangaTranslator:
     
     def _get_thread_bubble_detector(self):
         """Get or create a BubbleDetector dedicated to the current thread."""
-        if not hasattr(self, '_thread_local'):
+        if not hasattr(self, '_thread_local') or getattr(self, '_thread_local', None) is None:
             self._thread_local = threading.local()
         if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
             from bubble_detector import BubbleDetector
@@ -5310,12 +5894,15 @@ class MangaTranslator:
         """Get or create a LocalInpainter dedicated to the current thread.
         Loads the requested model for this thread if needed.
         """
-        if not hasattr(self, '_thread_local'):
+        # Ensure thread-local storage exists and has a dict
+        tl = getattr(self, '_thread_local', None)
+        if tl is None:
             self._thread_local = threading.local()
-        if not hasattr(self._thread_local, 'local_inpainters'):
-            self._thread_local.local_inpainters = {}
+            tl = self._thread_local
+        if not hasattr(tl, 'local_inpainters') or getattr(tl, 'local_inpainters', None) is None:
+            tl.local_inpainters = {}
         key = (local_method or 'anime', model_path or '')
-        if key not in self._thread_local.local_inpainters or self._thread_local.local_inpainters[key] is None:
+        if key not in tl.local_inpainters or tl.local_inpainters[key] is None:
             try:
                 from local_inpainter import LocalInpainter
                 inp = LocalInpainter()
@@ -5345,11 +5932,27 @@ class MangaTranslator:
                 else:
                     self._log("⚠️ No model path available for thread-local inpainter", "warning")
                 
-                self._thread_local.local_inpainters[key] = inp
+                # Re-check thread-local in case it was cleared during load; then assign
+                tl2 = getattr(self, '_thread_local', None)
+                if tl2 is None:
+                    self._thread_local = threading.local()
+                    tl2 = self._thread_local
+                if not hasattr(tl2, 'local_inpainters') or getattr(tl2, 'local_inpainters', None) is None:
+                    tl2.local_inpainters = {}
+                tl2.local_inpainters[key] = inp
             except Exception as e:
                 self._log(f"❌ Failed to create thread-local inpainter: {e}", "error")
-                self._thread_local.local_inpainters[key] = None
-        return self._thread_local.local_inpainters.get(key)
+                try:
+                    tl3 = getattr(self, '_thread_local', None)
+                    if tl3 is None:
+                        self._thread_local = threading.local()
+                        tl3 = self._thread_local
+                    if not hasattr(tl3, 'local_inpainters') or getattr(tl3, 'local_inpainters', None) is None:
+                        tl3.local_inpainters = {}
+                    tl3.local_inpainters[key] = None
+                except Exception:
+                    pass
+        return getattr(self._thread_local, 'local_inpainters', {}).get(key)
     
     def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
         """Translate all text regions with API delay"""
@@ -5417,6 +6020,49 @@ class MangaTranslator:
             return regions
 
     #  parallel processing:
+
+    def _wait_for_api_slot(self, min_interval=None, jitter_max=0.25):
+        """Global, thread-safe front-edge rate limiter for API calls.
+        Ensures parallel requests are spaced out before dispatch, avoiding tail latency.
+        """
+        import time
+        import random
+        import threading
+
+        if min_interval is None:
+            try:
+                min_interval = float(getattr(self, "api_delay", 0.0))
+            except Exception:
+                min_interval = 0.0
+        if min_interval < 0:
+            min_interval = 0.0
+
+        # Lazy init shared state
+        if not hasattr(self, "_api_rl_lock"):
+            self._api_rl_lock = threading.Lock()
+            self._api_next_allowed = 0.0  # monotonic seconds
+
+        while True:
+            now = time.monotonic()
+            with self._api_rl_lock:
+                # If we're allowed now, book the next slot and proceed
+                if now >= self._api_next_allowed:
+                    jitter = random.uniform(0.0, max(jitter_max, 0.0)) if jitter_max else 0.0
+                    self._api_next_allowed = now + min_interval + jitter
+                    return
+
+                # Otherwise compute wait time (don’t hold the lock while sleeping)
+                wait = self._api_next_allowed - now
+
+            # Sleep outside the lock in short increments so stop flags can be honored
+            if wait > 0:
+                try:
+                    if self._check_stop():
+                        return
+                except Exception:
+                    pass
+                time.sleep(min(wait, 0.05))
+
     def _translate_regions_parallel(self, regions: List[TextRegion], image_path: str, max_workers: int = None) -> List[TextRegion]:
         """Translate regions using parallel processing"""
         # Get max_workers from settings if not provided
@@ -5528,6 +6174,9 @@ class MangaTranslator:
             
             # Note: Context is not used in parallel mode to avoid race conditions
             # Pass None for context to maintain compatibility with your translate_text method
+            # Front-edge rate limiting across threads
+            self._wait_for_api_slot()
+
             translated = self.translate_text(
                 region.text,
                 None,  # No context in parallel mode
@@ -5537,12 +6186,6 @@ class MangaTranslator:
             
             if translated:
                 self._log(f"[{thread_name}] Translated: {translated}")
-                
-                # Add random delay to prevent API rate limiting
-                import random
-                delay = self.api_delay + random.uniform(0, 0.5)
-                time.sleep(delay)
-                
                 return translated
             else:
                 self._log(f"[{thread_name}] Translation failed", "error")
@@ -5592,6 +6235,12 @@ class MangaTranslator:
         }
         
         try:
+            # RAM cap gating before heavy processing
+            try:
+                self._block_if_over_cap("processing image")
+            except Exception:
+                pass
+
             # Determine the output directory from output_path
             if output_path:
                 output_dir = os.path.dirname(output_path)
@@ -5764,6 +6413,10 @@ class MangaTranslator:
                 inpainted = image.copy()
             else:
                 self._log(f"🎭 Creating text mask...")
+                try:
+                    self._block_if_over_cap("mask creation")
+                except Exception:
+                    pass
                 mask = self.create_text_mask(image, regions)
                 
                 # Save mask and overlay only if 'Save intermediate images' is enabled
@@ -5794,6 +6447,10 @@ class MangaTranslator:
                     self._save_intermediate_image(image_path, mask, "mask", debug_base_dir=output_dir)
                 
                 self._log(f"🎨 Inpainting to remove original text")
+                try:
+                    self._block_if_over_cap("inpainting")
+                except Exception:
+                    pass
                 inpainted = self.inpaint_regions(image, mask)
                 
                 if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
@@ -5897,10 +6554,79 @@ class MangaTranslator:
                 except Exception:
                     pass
 
+                # Release thread-local heavy objects to curb RAM growth across runs
+                try:
+                    self._cleanup_thread_locals()
+                except Exception:
+                    pass
+
+                # Deep cleanup control - respects user settings and parallel processing
+                try:
+                    # Check if auto cleanup is enabled in settings
+                    auto_cleanup_enabled = True  # Default to true for backward compatibility
+                    try:
+                        if hasattr(self, 'manga_settings'):
+                            auto_cleanup_enabled = self.manga_settings.get('advanced', {}).get('auto_cleanup_models', True)
+                    except Exception:
+                        pass
+                    
+                    if not auto_cleanup_enabled:
+                        # User has disabled automatic cleanup
+                        self._log("🔑 Auto cleanup disabled - models will remain in RAM", "debug")
+                    else:
+                        # Determine if we should cleanup now
+                        should_cleanup_now = True
+                        
+                        # Check if we're in batch mode
+                        is_last_in_batch = False
+                        try:
+                            if getattr(self, 'batch_mode', False):
+                                bc = getattr(self, 'batch_current', None)
+                                bt = getattr(self, 'batch_size', None)
+                                if bc is not None and bt is not None:
+                                    is_last_in_batch = (bc >= bt)
+                                    # In batch mode, only cleanup at the end
+                                    should_cleanup_now = is_last_in_batch
+                        except Exception:
+                            pass
+                        
+                        # For parallel panel translation, cleanup is handled differently
+                        # (it's handled in manga_integration.py after all panels complete)
+                        is_parallel_panel = False
+                        try:
+                            if hasattr(self, 'manga_settings'):
+                                is_parallel_panel = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', False)
+                        except Exception:
+                            pass
+                        
+                        if is_parallel_panel:
+                            # Don't cleanup here - let manga_integration handle it after all panels
+                            self._log("🎯 Deferring cleanup until all parallel panels complete", "debug")
+                            should_cleanup_now = False
+                        
+                        if should_cleanup_now:
+                            # Perform the cleanup
+                            self._deep_cleanup_models()
+                            
+                            # Also clear HF cache for RT-DETR (best-effort)
+                            if is_last_in_batch or not getattr(self, 'batch_mode', False):
+                                try:
+                                    self._clear_hf_cache()
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
                 # Force a garbage collection cycle
                 try:
                     import gc
                     gc.collect()
+                except Exception:
+                    pass
+
+                # Aggressively trim process working set (Windows) or libc heap (Linux)
+                try:
+                    self._trim_working_set()
                 except Exception:
                     pass
             except Exception:
@@ -5916,6 +6642,142 @@ class MangaTranslator:
         self.history_output_dir = None
         self.translation_context = []
         self._log("📚 Reset history manager for new batch", "debug")
+    
+    def cleanup_all_models(self):
+        """Public method to force cleanup of all models - call this after translation!
+        This ensures all models (YOLO, RT-DETR, inpainters, OCR) are unloaded from RAM.
+        """
+        self._log("🧹 Forcing cleanup of all models to free RAM...", "info")
+        
+        # Call the comprehensive cleanup
+        self._deep_cleanup_models()
+        
+        # Also cleanup thread locals
+        try:
+            self._cleanup_thread_locals()
+        except Exception:
+            pass
+        
+        # Clear HF cache
+        try:
+            self._clear_hf_cache()
+        except Exception:
+            pass
+        
+        # Trim working set
+        try:
+            self._trim_working_set()
+        except Exception:
+            pass
+        
+        self._log("✅ All models cleaned up - RAM freed!", "info")
+    
+    def clear_internal_state(self):
+        """Clear all internal state and cached data to free memory.
+        This is called when the translator instance is being reset.
+        Ensures OCR manager, inpainters, and bubble detector are also cleaned.
+        """
+        try:
+            # Clear image data
+            self.current_image = None
+            self.current_mask = None
+            self.final_image = None
+            
+            # Clear text regions
+            if hasattr(self, 'text_regions'):
+                self.text_regions = []
+            if hasattr(self, 'translated_regions'):
+                self.translated_regions = []
+            
+            # Clear cache
+            if hasattr(self, 'cache'):
+                self.cache.clear()
+            
+            # Clear history and context
+            if hasattr(self, 'translation_context'):
+                self.translation_context = []
+            if hasattr(self, 'history_manager'):
+                self.history_manager = None
+            self.history_manager_initialized = False
+            self.history_output_dir = None
+            
+            # IMPORTANT: Properly unload OCR manager
+            if hasattr(self, 'ocr_manager') and self.ocr_manager:
+                try:
+                    ocr = self.ocr_manager
+                    if hasattr(ocr, 'providers'):
+                        for provider_name, provider in ocr.providers.items():
+                            # Clear all model references
+                            if hasattr(provider, 'model'):
+                                provider.model = None
+                            if hasattr(provider, 'processor'):
+                                provider.processor = None
+                            if hasattr(provider, 'tokenizer'):
+                                provider.tokenizer = None
+                            if hasattr(provider, 'reader'):
+                                provider.reader = None
+                            if hasattr(provider, 'client'):
+                                provider.client = None
+                            if hasattr(provider, 'is_loaded'):
+                                provider.is_loaded = False
+                        ocr.providers.clear()
+                    self.ocr_manager = None
+                    self._log("   ✓ OCR manager cleared", "debug")
+                except Exception as e:
+                    self._log(f"   Warning: OCR cleanup failed: {e}", "debug")
+            
+            # IMPORTANT: Properly unload local inpainter
+            if hasattr(self, 'local_inpainter') and self.local_inpainter:
+                try:
+                    if hasattr(self.local_inpainter, 'unload'):
+                        self.local_inpainter.unload()
+                    self.local_inpainter = None
+                    self._log("   ✓ Local inpainter cleared", "debug")
+                except Exception as e:
+                    self._log(f"   Warning: Inpainter cleanup failed: {e}", "debug")
+            
+            # Also clear hybrid and generic inpainter references
+            if hasattr(self, 'hybrid_inpainter'):
+                if self.hybrid_inpainter and hasattr(self.hybrid_inpainter, 'unload'):
+                    try:
+                        self.hybrid_inpainter.unload()
+                    except Exception:
+                        pass
+                self.hybrid_inpainter = None
+            
+            if hasattr(self, 'inpainter'):
+                if self.inpainter and hasattr(self.inpainter, 'unload'):
+                    try:
+                        self.inpainter.unload()
+                    except Exception:
+                        pass
+                self.inpainter = None
+            
+            # IMPORTANT: Properly unload bubble detector
+            if hasattr(self, 'bubble_detector') and self.bubble_detector:
+                try:
+                    if hasattr(self.bubble_detector, 'unload'):
+                        self.bubble_detector.unload(release_shared=True)
+                    self.bubble_detector = None
+                    self._log("   ✓ Bubble detector cleared", "debug")
+                except Exception as e:
+                    self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
+            
+            # Clear any file handles or temp data
+            if hasattr(self, '_thread_local'):
+                try:
+                    self._cleanup_thread_locals()
+                except Exception:
+                    pass
+            
+            # Clear processing flags
+            self.is_processing = False
+            self.cancel_requested = False
+            
+            self._log("🧹 Internal state and all components cleared", "debug")
+            
+        except Exception as e:
+            self._log(f"⚠️ Warning: Failed to clear internal state: {e}", "warning")
     
     def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
         """Process webtoon in chunks for better OCR"""
