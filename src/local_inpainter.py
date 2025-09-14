@@ -73,6 +73,11 @@ else:
         TORCH_AVAILABLE = False
         logger.warning("PyTorch not available - will use OpenCV fallback")
 
+# Configure ORT memory behavior before importing
+try:
+    os.environ.setdefault('ORT_DISABLE_MEMORY_ARENA', '1')
+except Exception:
+    pass
 # ONNX Runtime - usually works well in frozen environments
 ONNX_AVAILABLE = False
 try:
@@ -367,6 +372,34 @@ class LocalInpainter:
         else:
             logger.info("⚠️ PyTorch not available - inpainting disabled")
         
+        # Quantization/precision toggle (off by default)
+        try:
+            adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+            env_quant = os.environ.get('MODEL_QUANTIZE', 'false').lower() == 'true'
+            self.quantize_enabled = bool(env_quant or adv_cfg.get('quantize_models', False))
+            # ONNX quantization is now strictly opt-in (config or env), decoupled from general quantize_models
+            self.onnx_quantize_enabled = bool(
+                adv_cfg.get('onnx_quantize', os.environ.get('ONNX_QUANTIZE', 'false').lower() == 'true')
+            )
+            self.torch_precision = str(adv_cfg.get('torch_precision', os.environ.get('TORCH_PRECISION', 'auto'))).lower()
+            logger.info(f"Quantization: {'ENABLED' if self.quantize_enabled else 'disabled'} for Local Inpainter; onnx_quantize={'on' if self.onnx_quantize_enabled else 'off'}; torch_precision={self.torch_precision}")
+            self.int8_enabled = bool(
+                adv_cfg.get('int8_quantize', False)
+                or adv_cfg.get('quantize_int8', False)
+                or os.environ.get('TORCH_INT8', 'false').lower() == 'true'
+                or self.torch_precision in ('int8', 'int8_dynamic')
+            )
+            logger.info(
+                f"Quantization: {'ENABLED' if self.quantize_enabled else 'disabled'} for Local Inpainter; "
+                f"onnx_quantize={'on' if self.onnx_quantize_enabled else 'off'}; "
+                f"torch_precision={self.torch_precision}; int8={'on' if self.int8_enabled else 'off'}"
+            )
+        except Exception:
+            self.quantize_enabled = False
+            self.onnx_quantize_enabled = False
+            self.torch_precision = 'auto'
+            self.int8_enabled = False
+        
         # Initialize bubble detector if available
         if BUBBLE_DETECTOR_AVAILABLE:
             try:
@@ -440,7 +473,7 @@ class LocalInpainter:
                     (dummy_image, dummy_mask),
                     onnx_path,
                     export_params=True,
-                    opset_version=11,
+                    opset_version=13,
                     do_constant_folding=True,
                     input_names=['image', 'mask'],
                     output_names=['output'],
@@ -482,11 +515,408 @@ class LocalInpainter:
             else:
                 self.onnx_fixed_size = None
             
-            # Standard ONNX loading
+            # Standard ONNX loading, device-aware transformations for specific models
             providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-            self.onnx_session = ort.InferenceSession(onnx_path, providers=providers)
+            session_path = onnx_path
+            try:
+                fname_lower = os.path.basename(onnx_path).lower()
+            except Exception:
+                fname_lower = str(onnx_path).lower()
+
+            # Device-aware policy for LaMa-type ONNX (Carve or contains 'lama')
+            is_lama_model = is_carve_model or ('lama' in fname_lower)
+            if is_lama_model:
+                base = os.path.splitext(onnx_path)[0]
+                if self.use_gpu:
+                    # Prefer FP16 on CUDA
+                    fp16_path = base + '.fp16.onnx'
+                    if (not os.path.exists(fp16_path)) or FORCE_ONNX_REBUILD:
+                        try:
+                            import onnx as _onnx
+                            try:
+                                from onnxruntime_tools.transformers.float16 import convert_float_to_float16 as _to_fp16
+                            except Exception:
+                                try:
+                                    from onnxconverter_common import float16
+                                    def _to_fp16(m, keep_io_types=True):
+                                        return float16.convert_float_to_float16(m, keep_io_types=keep_io_types)
+                                except Exception:
+                                    _to_fp16 = None
+                            if _to_fp16 is not None:
+                                m = _onnx.load(onnx_path)
+                                m_fp16 = _to_fp16(m, keep_io_types=True)
+                                _onnx.save(m_fp16, fp16_path)
+                                logger.info(f"✅ Generated FP16 ONNX for LaMa: {fp16_path}")
+                        except Exception as e:
+                            logger.warning(f"FP16 conversion for LaMa failed: {e}")
+                    if os.path.exists(fp16_path):
+                        session_path = fp16_path
+                else:
+                    # CPU path for LaMa: quantize only if enabled, and MatMul-only to avoid artifacts
+                    if self.onnx_quantize_enabled:
+                        try:
+                            from onnxruntime.quantization import quantize_dynamic, QuantType
+                            quant_path = base + '.matmul.int8.onnx'
+                            if (not os.path.exists(quant_path)) or FORCE_ONNX_REBUILD:
+                                logger.info("🔻 LaMa: Quantizing ONNX weights to INT8 (dynamic, ops=['MatMul'])...")
+                                quantize_dynamic(
+                                    model_input=onnx_path,
+                                    model_output=quant_path,
+                                    weight_type=QuantType.QInt8,
+                                    op_types_to_quantize=['MatMul']
+                                )
+                            # Validate dynamic quant result
+                            try:
+                                import onnx as _onnx
+                                _m_q = _onnx.load(quant_path)
+                                _onnx.checker.check_model(_m_q)
+                            except Exception as _qchk:
+                                logger.warning(f"LaMa dynamic quant model invalid; deleting and falling back: {_qchk}")
+                                try:
+                                    os.remove(quant_path)
+                                except Exception:
+                                    pass
+                                quant_path = None
+                        except Exception as dy_err:
+                            logger.warning(f"LaMa dynamic quantization failed: {dy_err}")
+                            quant_path = None
+                        # Fallback: static QDQ MatMul-only with zero data reader
+                        if quant_path is None:
+                            try:
+                                import onnx as _onnx
+                                from onnxruntime.quantization import (
+                                    CalibrationDataReader, quantize_static,
+                                    QuantFormat, QuantType, CalibrationMethod
+                                )
+                                m = _onnx.load(onnx_path)
+                                shapes = {}
+                                for inp in m.graph.input:
+                                    dims = []
+                                    for d in inp.type.tensor_type.shape.dim:
+                                        dims.append(d.dim_value if d.dim_value > 0 else 1)
+                                    shapes[inp.name] = dims
+                                class _ZeroReader(CalibrationDataReader):
+                                    def __init__(self, shapes):
+                                        self.shapes = shapes
+                                        self.done = False
+                                    def get_next(self):
+                                        if self.done:
+                                            return None
+                                        feed = {}
+                                        for name, s in self.shapes.items():
+                                            ss = list(s)
+                                            if len(ss) == 4:
+                                                if ss[2] <= 1: ss[2] = 512
+                                                if ss[3] <= 1: ss[3] = 512
+                                                if ss[1] <= 1 and 'mask' not in name.lower():
+                                                    ss[1] = 3
+                                            feed[name] = np.zeros(ss, dtype=np.float32)
+                                        self.done = True
+                                        return feed
+                                dr = _ZeroReader(shapes)
+                                quant_path = base + '.matmul.int8.onnx'
+                                quantize_static(
+                                    model_input=onnx_path,
+                                    model_output=quant_path,
+                                    calibration_data_reader=dr,
+                                    quant_format=QuantFormat.QDQ,
+                                    activation_type=QuantType.QUInt8,
+                                    weight_type=QuantType.QInt8,
+                                    per_channel=False,
+                                    calibrate_method=CalibrationMethod.MinMax,
+                                    op_types_to_quantize=['MatMul']
+                                )
+                                # Validate
+                                try:
+                                    _m_q = _onnx.load(quant_path)
+                                    _onnx.checker.check_model(_m_q)
+                                except Exception as _qchk2:
+                                    logger.warning(f"LaMa static MatMul-only quant model invalid; deleting: {_qchk2}")
+                                    try:
+                                        os.remove(quant_path)
+                                    except Exception:
+                                        pass
+                                    quant_path = None
+                                else:
+                                    logger.info(f"✅ Generated MatMul-only INT8 ONNX for LaMa: {quant_path}")
+                            except Exception as st_err:
+                                logger.warning(f"LaMa static MatMul-only quantization failed: {st_err}")
+                                quant_path = None
+                        # Use the quantized model if valid
+                        if quant_path and os.path.exists(quant_path):
+                            session_path = quant_path
+                            logger.info(f"✅ Using LaMa quantized ONNX model: {quant_path}")
+                    # If quantization not enabled or failed, session_path remains onnx_path (FP32)
+
+            # Optional dynamic/static quantization for other models (opt-in)
+            if (not is_lama_model) and self.onnx_quantize_enabled:
+                base = os.path.splitext(onnx_path)[0]
+                fname = os.path.basename(onnx_path).lower()
+                is_aot = 'aot' in fname
+                # For AOT: ignore any MatMul-only file and prefer Conv+MatMul
+                if is_aot:
+                    try:
+                        ignored_matmul = base + ".matmul.int8.onnx"
+                        if os.path.exists(ignored_matmul):
+                            logger.info(f"⏭️ Ignoring MatMul-only quantized file for AOT: {ignored_matmul}")
+                    except Exception:
+                        pass
+                # Choose target quant file and ops
+                if is_aot:
+                    quant_path = base + ".int8.onnx"
+                    ops_to_quant = ['MatMul']
+                    # Use MatMul-only for safer quantization across models
+                    ops_for_static = ['MatMul']
+                    # Try to simplify AOT graph prior to quantization
+                    quant_input_path = onnx_path
+                    try:
+                        import onnx as _onnx
+                        try:
+                            from onnxsim import simplify as _onnx_simplify
+                            _model = _onnx.load(onnx_path)
+                            _sim_model, _check = _onnx_simplify(_model)
+                            if _check:
+                                sim_path = base + ".sim.onnx"
+                                _onnx.save(_sim_model, sim_path)
+                                quant_input_path = sim_path
+                                logger.info(f"🧰 Simplified AOT ONNX before quantization: {sim_path}")
+                        except Exception as _sim_err:
+                            logger.info(f"AOT simplification skipped: {_sim_err}")
+                        # No ONNX shape inference; keep original graph structure
+                        # Ensure opset >= 13 for QDQ (axis attribute on DequantizeLinear)
+                        try:
+                            _m_tmp = _onnx.load(quant_input_path)
+                            _opset = max([op.version for op in _m_tmp.opset_import]) if _m_tmp.opset_import else 11
+                            if _opset < 13:
+                                from onnx import version_converter as _vc
+                                _m13 = _vc.convert_version(_m_tmp, 13)
+                                up_path = base + ".op13.onnx"
+                                _onnx.save(_m13, up_path)
+                                quant_input_path = up_path
+                                logger.info(f"🧰 Upgraded ONNX opset to 13 before QDQ quantization: {up_path}")
+                        except Exception as _operr:
+                            logger.info(f"Opset upgrade skipped: {_operr}")
+                    except Exception:
+                        quant_input_path = onnx_path
+                else:
+                    quant_path = base + ".matmul.int8.onnx"
+                    ops_to_quant = ['MatMul']
+                    ops_for_static = ops_to_quant
+                    quant_input_path = onnx_path
+                # Perform quantization if needed
+                if not os.path.exists(quant_path) or FORCE_ONNX_REBUILD:
+                    if is_aot:
+                        # Directly perform static QDQ quantization for MatMul only (avoid Conv activations)
+                        try:
+                            import onnx as _onnx
+                            from onnxruntime.quantization import CalibrationDataReader, quantize_static, QuantFormat, QuantType, CalibrationMethod
+                            _model = _onnx.load(quant_input_path)
+                            # Build input shapes from the model graph
+                            input_shapes = {}
+                            for inp in _model.graph.input:
+                                dims = []
+                                for d in inp.type.tensor_type.shape.dim:
+                                    if d.dim_value > 0:
+                                        dims.append(d.dim_value)
+                                    else:
+                                        # default fallback dimension
+                                        dims.append(1)
+                                input_shapes[inp.name] = dims
+                            class _ZeroDataReader(CalibrationDataReader):
+                                def __init__(self, input_shapes):
+                                    self._shapes = input_shapes
+                                    self._provided = False
+                                def get_next(self):
+                                    if self._provided:
+                                        return None
+                                    feed = {}
+                                    for name, shape in self._shapes.items():
+                                        # Ensure reasonable default spatial size
+                                        s = list(shape)
+                                        if len(s) == 4:
+                                            if s[2] <= 1:
+                                                s[2] = 512
+                                            if s[3] <= 1:
+                                                s[3] = 512
+                                            # channel fallback
+                                            if s[1] <= 1 and 'mask' not in name.lower():
+                                                s[1] = 3
+                                        feed[name] = (np.zeros(s, dtype=np.float32))
+                                    self._provided = True
+                                    return feed
+                            dr = _ZeroDataReader(input_shapes)
+                            quantize_static(
+                                model_input=quant_input_path,
+                                model_output=quant_path,
+                                calibration_data_reader=dr,
+                                quant_format=QuantFormat.QDQ,
+                                activation_type=QuantType.QUInt8,
+                                weight_type=QuantType.QInt8,
+                                per_channel=True,
+                                calibrate_method=CalibrationMethod.MinMax,
+                                op_types_to_quantize=ops_for_static
+                            )
+                            # Validate quantized model to catch structural errors early
+                            try:
+                                _m_q = _onnx.load(quant_path)
+                                _onnx.checker.check_model(_m_q)
+                            except Exception as _qchk:
+                                logger.warning(f"Quantized AOT model validation failed: {_qchk}")
+                                # Remove broken quantized file to force fallback
+                                try:
+                                    os.remove(quant_path)
+                                except Exception:
+                                    pass
+                            else:
+                                logger.info(f"✅ Static INT8 quantization produced: {quant_path}")
+                        except Exception as st_err:
+                            logger.warning(f"Static ONNX quantization failed: {st_err}")
+                    else:
+                        # First attempt: dynamic quantization (MatMul)
+                        try:
+                            from onnxruntime.quantization import quantize_dynamic, QuantType
+                            logger.info("🔻 Quantizing ONNX inpainting model weights to INT8 (dynamic, ops=['MatMul'])...")
+                            quantize_dynamic(
+                                model_input=quant_input_path,
+                                model_output=quant_path,
+                                weight_type=QuantType.QInt8,
+                                op_types_to_quantize=['MatMul']
+                            )
+                        except Exception as dy_err:
+                            logger.warning(f"Dynamic ONNX quantization failed: {dy_err}; attempting static quantization...")
+                            # Fallback: static quantization with a zero data reader
+                            try:
+                                import onnx as _onnx
+                                from onnxruntime.quantization import CalibrationDataReader, quantize_static, QuantFormat, QuantType, CalibrationMethod
+                                _model = _onnx.load(quant_input_path)
+                                # Build input shapes from the model graph
+                                input_shapes = {}
+                                for inp in _model.graph.input:
+                                    dims = []
+                                    for d in inp.type.tensor_type.shape.dim:
+                                        if d.dim_value > 0:
+                                            dims.append(d.dim_value)
+                                        else:
+                                            # default fallback dimension
+                                            dims.append(1)
+                                    input_shapes[inp.name] = dims
+                                class _ZeroDataReader(CalibrationDataReader):
+                                    def __init__(self, input_shapes):
+                                        self._shapes = input_shapes
+                                        self._provided = False
+                                    def get_next(self):
+                                        if self._provided:
+                                            return None
+                                        feed = {}
+                                        for name, shape in self._shapes.items():
+                                            # Ensure reasonable default spatial size
+                                            s = list(shape)
+                                            if len(s) == 4:
+                                                if s[2] <= 1:
+                                                    s[2] = 512
+                                                if s[3] <= 1:
+                                                    s[3] = 512
+                                                # channel fallback
+                                                if s[1] <= 1 and 'mask' not in name.lower():
+                                                    s[1] = 3
+                                            feed[name] = (np.zeros(s, dtype=np.float32))
+                                        self._provided = True
+                                        return feed
+                                dr = _ZeroDataReader(input_shapes)
+                                quantize_static(
+                                    model_input=quant_input_path,
+                                    model_output=quant_path,
+                                    calibration_data_reader=dr,
+                                    quant_format=QuantFormat.QDQ,
+                                    activation_type=QuantType.QUInt8,
+                                    weight_type=QuantType.QInt8,
+                                    per_channel=True,
+                                    calibrate_method=CalibrationMethod.MinMax,
+                                    op_types_to_quantize=ops_for_static
+                                )
+                                # Validate quantized model to catch structural errors early
+                                try:
+                                    _m_q = _onnx.load(quant_path)
+                                    _onnx.checker.check_model(_m_q)
+                                except Exception as _qchk:
+                                    logger.warning(f"Quantized AOT model validation failed: {_qchk}")
+                                    # Remove broken quantized file to force fallback
+                                    try:
+                                        os.remove(quant_path)
+                                    except Exception:
+                                        pass
+                                else:
+                                    logger.info(f"✅ Static INT8 quantization produced: {quant_path}")
+                            except Exception as st_err:
+                                logger.warning(f"Static ONNX quantization failed: {st_err}")
+                # Prefer the quantized file if it now exists
+                if os.path.exists(quant_path):
+                    # Validate existing quantized model before using it
+                    try:
+                        import onnx as _onnx
+                        _m_q = _onnx.load(quant_path)
+                        _onnx.checker.check_model(_m_q)
+                    except Exception as _qchk:
+                        logger.warning(f"Existing quantized ONNX invalid; deleting and falling back: {_qchk}")
+                        try:
+                            os.remove(quant_path)
+                        except Exception:
+                            pass
+                    else:
+                        session_path = quant_path
+                        logger.info(f"✅ Using quantized ONNX model: {quant_path}")
+                else:
+                    logger.warning("ONNX quantization not applied: quantized file not created")
+            # Use conservative ORT memory options to reduce RAM growth
+            so = ort.SessionOptions()
+            try:
+                so.enable_mem_pattern = False
+                so.enable_cpu_mem_arena = False
+            except Exception:
+                pass
+            # Try to create an inference session, with graceful fallbacks
+            try:
+                self.onnx_session = ort.InferenceSession(session_path, sess_options=so, providers=providers)
+            except Exception as e:
+                err = str(e)
+                logger.warning(f"ONNX session creation failed for {session_path}: {err}")
+                # If quantized path failed due to unsupported ops or invalid graph, remove it and retry unquantized
+                if session_path != onnx_path and ('ConvInteger' in err or 'NOT_IMPLEMENTED' in err or 'INVALID_ARGUMENT' in err):
+                    try:
+                        if os.path.exists(session_path):
+                            os.remove(session_path)
+                            logger.info(f"🧹 Deleted invalid quantized model: {session_path}")
+                    except Exception:
+                        pass
+                    try:
+                        logger.info("Retrying with unquantized ONNX model...")
+                        self.onnx_session = ort.InferenceSession(onnx_path, sess_options=so, providers=providers)
+                        session_path = onnx_path
+                    except Exception as e2:
+                        logger.warning(f"Unquantized ONNX session failed with current providers: {e2}")
+                        # As a last resort, try CPU-only
+                        try:
+                            logger.info("Retrying ONNX on CPUExecutionProvider only...")
+                            self.onnx_session = ort.InferenceSession(onnx_path, sess_options=so, providers=['CPUExecutionProvider'])
+                            session_path = onnx_path
+                            providers = ['CPUExecutionProvider']
+                        except Exception as e3:
+                            logger.error(f"Failed to create ONNX session on CPU: {e3}")
+                            raise
+                else:
+                    # If we weren't quantized but failed on CUDA, try CPU-only once
+                    if self.use_gpu and 'NOT_IMPLEMENTED' in err:
+                        try:
+                            logger.info("Retrying ONNX on CPUExecutionProvider only...")
+                            self.onnx_session = ort.InferenceSession(session_path, sess_options=so, providers=['CPUExecutionProvider'])
+                            providers = ['CPUExecutionProvider']
+                        except Exception as e4:
+                            logger.error(f"Failed to create ONNX session on CPU: {e4}")
+                            raise
             
             # Get input/output names
+            if self.onnx_session is None:
+                raise RuntimeError("ONNX session was not created")
             self.onnx_input_names = [i.name for i in self.onnx_session.get_inputs()]
             self.onnx_output_names = [o.name for o in self.onnx_session.get_outputs()]
             
@@ -689,12 +1119,59 @@ class LocalInpainter:
                 self.is_jit_model = False
             
             logger.info(f"📥 Loading {method} from {model_path}")
-  
+
+            # Normalize path and enforce expected extension for certain methods
+            try:
+                _ext = os.path.splitext(model_path)[1].lower()
+                _method_lower = str(method).lower()
+                # For explicit ONNX methods, ensure we use a .onnx path
+                if _method_lower in ("lama_onnx",) and _ext != ".onnx":
+                    # If the file exists, try to detect if it's actually an ONNX model and correct the extension
+                    if os.path.exists(model_path) and ONNX_AVAILABLE:
+                        try:
+                            import onnx as _onnx
+                            _ = _onnx.load(model_path)  # will raise if not ONNX
+                            # Build a corrected path under the ONNX cache dir
+                            base_name = os.path.splitext(os.path.basename(model_path))[0]
+                            if base_name.endswith('.pt'):
+                                base_name = base_name[:-3]
+                            corrected_path = os.path.join(ONNX_CACHE_DIR, base_name + ".onnx")
+                            # Avoid overwriting a valid file with an invalid one
+                            if model_path != corrected_path:
+                                try:
+                                    import shutil as _shutil
+                                    _shutil.copy2(model_path, corrected_path)
+                                    model_path = corrected_path
+                                    logger.info(f"🔧 Corrected ONNX model extension/path: {model_path}")
+                                except Exception as _cp_e:
+                                    # As a fallback, try in-place rename to .onnx
+                                    try:
+                                        in_place = os.path.splitext(model_path)[0] + ".onnx"
+                                        os.replace(model_path, in_place)
+                                        model_path = in_place
+                                        logger.info(f"🔧 Renamed ONNX model to: {model_path}")
+                                    except Exception:
+                                        logger.warning(f"Could not correct ONNX extension automatically: {_cp_e}")
+                        except Exception:
+                            # Not an ONNX file; leave as-is
+                            pass
+                    # If the path doesn't exist or still wrong, prefer the known ONNX download for this method
+                    if (not os.path.exists(model_path)) or (os.path.splitext(model_path)[1].lower() != ".onnx"):
+                        try:
+                            _dl = self.download_jit_model("lama_onnx")
+                            if _dl and os.path.exists(_dl):
+                                model_path = _dl
+                                logger.info(f"🔧 Using downloaded LaMa ONNX: {model_path}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # Check file signature to detect ONNX files with wrong extension
             with open(model_path, 'rb') as f:
                 file_header = f.read(8)
             
-            # Check for ONNX signature (starts with \x08\x01)
+            # Check for ONNX signature (starts with \x08)
             if file_header.startswith(b'\x08'):
                 logger.info("📦 Detected ONNX file signature (regardless of extension)")
                 if self.load_onnx_model(model_path):
@@ -746,6 +1223,48 @@ class LocalInpainter:
                     self.model_loaded = True
                     self.current_method = method
                     logger.info("✅ JIT model loaded successfully!")
+                    
+                    # Optional FP16 precision on GPU to reduce VRAM
+                    if self.quantize_enabled and self.use_gpu:
+                        try:
+                            if self.torch_precision in ('fp16', 'auto'):
+                                self.model = self.model.half()
+                                logger.info("🔻 Applied FP16 precision to inpainting model (GPU)")
+                            else:
+                                logger.info("Torch precision set to fp32; skipping half()")
+                        except Exception as _e:
+                            logger.warning(f"Could not switch inpainting model precision: {_e}")
+                    
+                    # Optional INT8 dynamic quantization for CPU TorchScript (best-effort)
+                    if (self.int8_enabled or (self.quantize_enabled and not self.use_gpu and self.torch_precision in ('auto', 'int8'))) and not self.use_gpu:
+                        try:
+                            applied = False
+                            # Try TorchScript dynamic quantization API (older PyTorch)
+                            try:
+                                from torch.quantization import quantize_dynamic_jit  # type: ignore
+                                self.model = quantize_dynamic_jit(self.model, {"aten::linear"}, dtype=torch.qint8)  # type: ignore
+                                applied = True
+                            except Exception:
+                                pass
+                            # Try eager-style dynamic quantization on the scripted module (may no-op)
+                            if not applied:
+                                try:
+                                    import torch.ao.quantization as tq  # type: ignore
+                                    self.model = tq.quantize_dynamic(self.model, {nn.Linear}, dtype=torch.qint8)  # type: ignore
+                                    applied = True
+                                except Exception:
+                                    pass
+                            # Always try to optimize TorchScript for inference
+                            try:
+                                self.model = torch.jit.optimize_for_inference(self.model)  # type: ignore
+                            except Exception:
+                                pass
+                            if applied:
+                                logger.info("🔻 Applied INT8 dynamic quantization to JIT inpainting model (CPU)")
+                            else:
+                                logger.info("ℹ️ INT8 dynamic quantization not applied (unsupported for this JIT graph); using FP32 CPU")
+                        except Exception as _qe:
+                            logger.warning(f"INT8 quantization skipped: {_qe}")
                     
                     self.config[f'{method}_model_path'] = model_path
                     self._save_config()
@@ -815,6 +1334,15 @@ class LocalInpainter:
                         except Exception as gpu_error:
                             logger.warning(f"Could not move model to GPU: {gpu_error}")
                             logger.info("Using CPU instead")
+                    
+                    # Optional INT8 dynamic quantization for CPU eager model
+                    if (self.int8_enabled or (self.quantize_enabled and not self.use_gpu and self.torch_precision in ('auto', 'int8'))) and not self.use_gpu:
+                        try:
+                            import torch.ao.quantization as tq  # type: ignore
+                            self.model = tq.quantize_dynamic(self.model, {nn.Linear}, dtype=torch.qint8)  # type: ignore
+                            logger.info("🔻 Applied dynamic INT8 quantization to inpainting model (CPU)")
+                        except Exception as qe:
+                            logger.warning(f"INT8 dynamic quantization not applied: {qe}")
                             
                 except Exception as model_error:
                     logger.error(f"Failed to create or initialize model: {model_error}")
@@ -854,6 +1382,61 @@ class LocalInpainter:
             logger.info("This is normal for lightweight builds - inpainting will be disabled")
             self.model_loaded = False
             return False
+
+    def unload(self):
+        """Release all heavy resources held by this inpainter instance."""
+        try:
+            # Release ONNX session and metadata
+            try:
+                if self.onnx_session is not None:
+                    self.onnx_session = None
+            except Exception:
+                pass
+            for attr in ['onnx_input_names', 'onnx_output_names', 'current_onnx_path', 'onnx_fixed_size']:
+                try:
+                    if hasattr(self, attr):
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
+
+            # Release PyTorch model
+            try:
+                if self.model is not None:
+                    if TORCH_AVAILABLE and torch is not None:
+                        try:
+                            # Move to CPU then drop reference
+                            self.model = self.model.to('cpu') if hasattr(self.model, 'to') else None
+                        except Exception:
+                            pass
+                    self.model = None
+            except Exception:
+                pass
+
+            # Drop bubble detector reference (not the global cache)
+            try:
+                self.bubble_detector = None
+            except Exception:
+                pass
+
+            # Update flags
+            self.model_loaded = False
+            self.use_onnx = False
+            self.is_jit_model = False
+
+            # Free CUDA cache and trigger GC
+            try:
+                if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+        except Exception:
+            # Never raise from unload
+            pass
     
     def pad_img_to_modulo(self, img: np.ndarray, mod: int) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """Pad image to be divisible by mod"""
@@ -1184,6 +1767,15 @@ class LocalInpainter:
                     img_torch = img_torch.to(self.device)
                     mask_torch = mask_torch.to(self.device)
                     
+                    # Optional FP16 on GPU for lower VRAM
+                    if self.quantize_enabled and self.use_gpu:
+                        try:
+                            if self.torch_precision == 'fp16' or self.torch_precision == 'auto':
+                                img_torch = img_torch.half()
+                                mask_torch = mask_torch.half()
+                        except Exception:
+                            pass
+                    
                     # CRITICAL FOR AOT: Apply mask to input image
                     img_torch = img_torch * (1 - mask_torch)
                     
@@ -1247,6 +1839,15 @@ class LocalInpainter:
                     # Move to device
                     image_tensor = image_tensor.to(self.device)
                     mask_tensor = mask_tensor.to(self.device)
+                    
+                    # Optional FP16 on GPU for lower VRAM
+                    if self.quantize_enabled and self.use_gpu:
+                        try:
+                            if self.torch_precision == 'fp16' or self.torch_precision == 'auto':
+                                image_tensor = image_tensor.half()
+                                mask_tensor = mask_tensor.half()
+                        except Exception:
+                            pass
                     
                     # Debug shapes
                     logger.debug(f"Image tensor shape: {image_tensor.shape}")  # Should be [1, 3, H, W]
