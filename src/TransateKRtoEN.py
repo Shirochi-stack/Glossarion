@@ -1763,10 +1763,6 @@ class ChapterExtractor:
                             chapters_info.append(result)
                         completed += 1
                         
-                        # Yield to GUI periodically
-                        if completed % 5 == 0:
-                            time.sleep(0.001)
-                        
                         # Progress updates
                         if completed % 10 == 0 or completed == len(chapters):
                             progress_msg = f"Processed {completed}/{len(chapters)} chapters"
@@ -1890,10 +1886,6 @@ class ChapterExtractor:
                 # Progress update every 20 files
                 if extracted_count % 20 == 0 and self.progress_callback:
                     self.progress_callback(f"Extracting resources: {extracted_count}/{total_resources}")
-                
-                # Yield to GUI periodically
-                if extracted_count % 10 == 0:
-                    time.sleep(0.001)
                     
                 result = future.result()
                 if result:
@@ -1976,9 +1968,8 @@ class ChapterExtractor:
                 print("❌ Chapter extraction stopped by user")
                 return [], 'unknown'
             
-            # Yield to GUI every 50 files
+            # Progress update every 50 files
             if idx % 50 == 0 and idx > 0:
-                time.sleep(0.001)  # Brief yield to GUI
                 if self.progress_callback and total_files > 100:
                     self.progress_callback(f"Scanning files: {idx}/{total_files}")
                 
@@ -2228,9 +2219,6 @@ class ChapterExtractor:
                         return None
                     # Parse the (possibly merged) content
                     protected_html = self.protect_angle_brackets_with_korean(html_content)
-                    
-                    # Yield briefly before heavy parsing
-                    time.sleep(0.001)
                     
                     # Use lxml parser which handles both HTML and XHTML well
                     soup = BeautifulSoup(protected_html, self.parser)
@@ -2500,10 +2488,6 @@ class ChapterExtractor:
             unnumbered_chapters = []
             
             for idx, chapter in enumerate(candidate_chapters):
-                # Yield periodically during categorization
-                if idx % 10 == 0 and idx > 0:
-                    time.sleep(0.001)
-                    
                 if chapter["num"] is not None:
                     numbered_chapters.append(chapter)
                 else:
@@ -5751,9 +5735,6 @@ class GlossaryManager:
                         future = executor.submit(process_sentence_batch, batch, idx)
                     
                     futures.append(future)
-                    # Yield to GUI when submitting futures
-                    if idx % 10 == 0:
-                        time.sleep(0.001)
                 
                 # Collect results with progress
                 completed_batches = 0
@@ -5779,9 +5760,6 @@ class GlossaryManager:
                         elapsed = time.time() - batch_start_time
                         rate = (processed_count / elapsed) if elapsed > 0 else 0
                         print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
-                    
-                    # Yield to GUI after each batch completes
-                    time.sleep(0.001)
         else:
             # Sequential processing with progress
             for idx, sentence in enumerate(sentences):
@@ -5812,10 +5790,6 @@ class GlossaryManager:
                     progress = ((idx + 1) / total_sentences) * 100
                     print(f"📑 Processing sentences: {idx + 1:,}/{total_sentences:,} ({progress:.1f}%)")
                     last_progress_time = time.time()
-                    # Yield to GUI thread every 1000 sentences
-                    time.sleep(0.001)  # Tiny sleep to let GUI update
-                    # Yield to GUI thread every 1000 sentences
-                    time.sleep(0.001)  # Tiny sleep to let GUI update
         
         print(f"📑 Found {len(important_sentences):,} sentences with potential glossary terms")
         
@@ -5842,9 +5816,6 @@ class GlossaryManager:
                 combined_freq[term] = count
             
             term_count += 1
-            # Yield to GUI every 1000 terms
-            if term_count % 1000 == 0:
-                time.sleep(0.001)
         
         print(f"📑 Deduplicated to {len(combined_freq):,} unique terms")
         
@@ -5920,7 +5891,6 @@ class GlossaryManager:
                             break
                     if i % 1000 == 0:
                         print(f"📑 Progress: {i:,}/{len(filtered_sentences):,} sentences")
-                        time.sleep(0.001)
                 
                 filtered_sentences = new_filtered
                 print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
@@ -6347,9 +6317,6 @@ Text to analyze:
             if line_num % 10 == 0:
                 if is_stop_requested():
                     return csv_lines
-                # Yield to GUI
-                if line_num % 50 == 0:
-                    time.sleep(0.001)
                 # Progress report
                 if line_num % 100 == 0:
                     elapsed = time.time() - last_progress_time
@@ -6479,11 +6446,8 @@ Text to analyze:
         print(f"📑 Processing {total_entries} entries for deduplication...")
         
         for idx, line in enumerate(entry_lines):
-            # Yield to GUI every 100 entries
+            # Check stop flag every 100 entries
             if idx > 0 and idx % 100 == 0:
-                time.sleep(0.001)
-                
-                # Check stop flag
                 if is_stop_requested():
                     print(f"📑 ❌ Deduplication stopped at entry {idx}/{total_entries}")
                     return deduplicated
@@ -6548,9 +6512,6 @@ Text to analyze:
         print(f"📑 ✅ Removed {removed_count} duplicates from glossary")
         print(f"📑 Final glossary size: {len(deduplicated) - 1} unique entries")
         
-        # Yield to GUI after completion
-        time.sleep(0.001)
-        
         return deduplicated
  
     def _merge_csv_entries(self, new_csv_lines, existing_glossary, strip_honorifics, language):
@@ -6580,7 +6541,6 @@ Text to analyze:
                     if total_lines > 200:
                         progress = (idx / total_lines) * 100
                         print(f"📑 Processing existing glossary: {progress:.1f}%")
-                        time.sleep(0.001)  # Yield to GUI
                 
                 if 'type,raw_name' in line.lower():
                     continue  # Skip header
@@ -7147,7 +7107,7 @@ Text to analyze:
                     
                     print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
                     
-                    # Small delay between batches to avoid rate limiting
+                    # Small delay between batches to avoid rate limiting (configurable)
                     if i + batch_size < len(term_list):
                         # Check stop before sleep
                         if is_stop_requested():
@@ -7157,7 +7117,10 @@ Text to analyze:
                                 if term not in all_translations:
                                     all_translations[term] = term
                             return all_translations
-                        time.sleep(0.5)
+                        # Use configurable batch delay or default to 0.1s (much faster than 0.5s)
+                        batch_delay = float(os.getenv("GLOSSARY_BATCH_DELAY", "0.1"))
+                        if batch_delay > 0:
+                            time.sleep(batch_delay)
                         
                 except UnifiedClientError as e:
                     if "stopped by user" in str(e).lower():
@@ -9406,8 +9369,8 @@ def main(log_callback=None, stop_callback=None):
                         except:
                             pass
                         
-                        # Super short sleep to yield to GUI
-                        time.sleep(0.001)
+                        # Short sleep for polling (increased from 0.001 to 0.01 for less CPU usage)
+                        time.sleep(0.01)
                         
                         # Check for stop every 100 polls
                         if poll_count % 100 == 0:
