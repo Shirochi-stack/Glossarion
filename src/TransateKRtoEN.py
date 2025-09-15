@@ -1501,12 +1501,18 @@ class ChapterExtractor:
         
     def extract_chapters(self, zf, output_dir):
         """Extract chapters and all resources from EPUB using ThreadPoolExecutor"""
+        import time
+        
         # Check stop at the very beginning
         if is_stop_requested():
             print("❌ Extraction stopped by user")
             return []
             
         print("🚀 Starting EPUB extraction with ThreadPoolExecutor...")
+        
+        # Initial progress
+        if self.progress_callback:
+            self.progress_callback("Starting EPUB extraction...")
         
         # Get extraction mode from environment
         extraction_mode = os.getenv("EXTRACTION_MODE", "smart").lower()
@@ -1578,6 +1584,9 @@ class ChapterExtractor:
         # Process chapters in parallel
         print(f"🔄 Processing {len(chapters)} chapters in parallel...")
         
+        if self.progress_callback:
+            self.progress_callback(f"Processing {len(chapters)} chapters...")
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_chapter = {
@@ -1601,8 +1610,17 @@ class ChapterExtractor:
                         with chapters_info_lock:
                             chapters_info.append(result)
                         completed += 1
-                        if completed % 10 == 0:  # Progress update every 10 chapters
-                            print(f"   📊 Processed {completed}/{len(chapters)} chapters")
+                        
+                        # Yield to GUI periodically
+                        if completed % 5 == 0:
+                            time.sleep(0.001)
+                        
+                        # Progress updates
+                        if completed % 10 == 0 or completed == len(chapters):
+                            progress_msg = f"Processed {completed}/{len(chapters)} chapters"
+                            print(f"   📊 {progress_msg}")
+                            if self.progress_callback:
+                                self.progress_callback(progress_msg)
                 except Exception as e:
                     chapter = future_to_chapter[future]
                     print(f"   ❌ Error processing chapter {chapter['num']}: {e}")
@@ -1648,6 +1666,8 @@ class ChapterExtractor:
 
     def _extract_all_resources(self, zf, output_dir):
         """Extract all resources with parallel processing"""
+        import time
+        
         extracted_resources = {
             'css': [],
             'fonts': [],
@@ -1701,6 +1721,9 @@ class ChapterExtractor:
                 return None
         
         # Process files in parallel
+        total_resources = len(file_list)
+        extracted_count = 0
+        
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {executor.submit(extract_single_resource, file_path): file_path 
                       for file_path in file_list}
@@ -1709,11 +1732,23 @@ class ChapterExtractor:
                 if is_stop_requested():
                     executor.shutdown(wait=False)
                     break
+                
+                extracted_count += 1
+                
+                # Progress update every 20 files
+                if extracted_count % 20 == 0 and self.progress_callback:
+                    self.progress_callback(f"Extracting resources: {extracted_count}/{total_resources}")
+                
+                # Yield to GUI periodically
+                if extracted_count % 10 == 0:
+                    time.sleep(0.001)
                     
                 result = future.result()
                 if result:
                     resource_type, filename = result
-                    print(f"   📄 Extracted {resource_type}: {filename}")
+                    # Only print for important resources
+                    if extracted_count < 10 or resource_type in ['css', 'fonts']:
+                        print(f"   📄 Extracted {resource_type}: {filename}")
         
         # Mark as complete
         with open(extraction_marker, 'w') as f:
@@ -1733,6 +1768,9 @@ class ChapterExtractor:
         if is_stop_requested():
             print("❌ Chapter extraction stopped by user")
             return [], 'unknown'
+        
+        # Import time for yielding
+        import time
         
         # Initialize enhanced extractor if using enhanced mode
         enhanced_extractor = None
@@ -1773,11 +1811,24 @@ class ChapterExtractor:
         
         # First phase: Collect HTML files
         html_files = []
-        for name in zf.namelist():
+        file_list = zf.namelist()
+        total_files = len(file_list)
+        
+        # Update progress for file collection
+        if self.progress_callback and total_files > 100:
+            self.progress_callback(f"Scanning {total_files} files in EPUB...")
+        
+        for idx, name in enumerate(file_list):
             # Check stop while collecting files
             if is_stop_requested():
                 print("❌ Chapter extraction stopped by user")
                 return [], 'unknown'
+            
+            # Yield to GUI every 50 files
+            if idx % 50 == 0 and idx > 0:
+                time.sleep(0.001)  # Brief yield to GUI
+                if self.progress_callback and total_files > 100:
+                    self.progress_callback(f"Scanning files: {idx}/{total_files}")
                 
             if name.lower().endswith(('.xhtml', '.html', '.htm')):
                 # Always skip cover files in ALL modes - check basename exactly
@@ -2025,6 +2076,10 @@ class ChapterExtractor:
                         return None
                     # Parse the (possibly merged) content
                     protected_html = self.protect_angle_brackets_with_korean(html_content)
+                    
+                    # Yield briefly before heavy parsing
+                    time.sleep(0.001)
+                    
                     soup = BeautifulSoup(protected_html, 'html.parser')
                     
                     # Get effective mode for filtering
@@ -2291,7 +2346,11 @@ class ChapterExtractor:
             numbered_chapters = []
             unnumbered_chapters = []
             
-            for chapter in candidate_chapters:
+            for idx, chapter in enumerate(candidate_chapters):
+                # Yield periodically during categorization
+                if idx % 10 == 0 and idx > 0:
+                    time.sleep(0.001)
+                    
                 if chapter["num"] is not None:
                     numbered_chapters.append(chapter)
                 else:
@@ -5046,8 +5105,9 @@ class GlossaryManager:
         text_lower = text.lower()
         term_len = len(term)
         
-        # Log what we're searching for (only for large texts)
-        if len(text) > 100000:
+        # Only log for debugging if explicitly enabled
+        debug_search = os.getenv("GLOSSARY_DEBUG_SEARCH", "0") == "1"
+        if debug_search and len(text) > 100000:
             print(f"📑     Searching for '{term}' in {len(text):,} chars (threshold: {threshold})")
         
         # Strategy 1: Use exact matching first for efficiency
@@ -5056,7 +5116,7 @@ class GlossaryManager:
         exact_time = time.time() - exact_start
         
         if matches_count > 0:
-            if len(text) > 100000:
+            if debug_search and len(text) > 100000:
                 print(f"📑     Found {matches_count} exact matches in {exact_time:.3f}s")
             return matches_count
         
@@ -6104,12 +6164,28 @@ Text to analyze:
         
         print(f"📑 Processing {len(lines)} lines from AI response...")
         print(f"📑 Text corpus size: {len(all_text):,} chars")
-        print(f"📑 Frequency checking: {'DISABLED' if skip_frequency_check else f'ENABLED (min: {min_frequency})'}")
+        print(f"📑 Frequency checking: {'DISABLED' if skip_frequency_check else f'ENABLED (min: {min_frequency})'}")  
         print(f"📑 Fuzzy threshold: {fuzzy_threshold}")
+        
+        # Pre-compute word frequencies for efficiency when we have many terms
+        word_freq_cache = {}
+        if not skip_frequency_check and len(lines) > 100:
+            print(f"📑 Pre-computing word frequencies for {len(lines)} terms (this may take a moment)...")
+            # Create a simple word frequency map for exact matching
+            if fuzzy_threshold >= 1.0:
+                # For exact matching, split text into words and count
+                import re
+                # Use a simple regex to extract words
+                words = re.findall(r'[\w가-힣぀-ゟ゠-ヿ一-鿿]+', all_text)
+                from collections import Counter
+                word_freq_cache = Counter(words)
+                print(f"📑 Pre-computed frequencies for {len(word_freq_cache):,} unique words")
 
         entries_processed = 0
         entries_accepted = 0
         frequency_check_time = 0
+        last_progress_time = time.time()
+        total_lines = len(lines)
         
         for line_num, line in enumerate(lines, 1):
             # Check stop flag and yield to GUI periodically
@@ -6119,6 +6195,13 @@ Text to analyze:
                 # Yield to GUI
                 if line_num % 50 == 0:
                     time.sleep(0.001)
+                # Progress report
+                if line_num % 100 == 0:
+                    elapsed = time.time() - last_progress_time
+                    rate = 100 / elapsed if elapsed > 0 else 0
+                    progress_pct = (line_num / total_lines) * 100
+                    print(f"📑 Progress: {line_num}/{total_lines} terms ({progress_pct:.1f}%) - {rate:.0f} terms/sec")
+                    last_progress_time = time.time()
             
             # Check for header
             if not header_found and 'type' in line.lower() and 'raw_name' in line.lower():
@@ -6162,10 +6245,14 @@ Text to analyze:
                 if strip_honorifics:
                     raw_name = self._strip_honorific(raw_name, language)
                 
-                # Optimize frequency checking - use simple substring count for speed
-                # Only use fuzzy matching if threshold < 1.0
-                if fuzzy_threshold >= 1.0:
-                    # Exact matching - much faster
+                # Optimize frequency checking - use cache if available
+                if word_freq_cache and fuzzy_threshold >= 1.0:
+                    # Use pre-computed cache for exact matching
+                    count = word_freq_cache.get(raw_name, 0)
+                    if strip_honorifics and count < min_frequency:
+                        count += word_freq_cache.get(original_raw, 0)
+                elif fuzzy_threshold >= 1.0:
+                    # Fallback to substring count for exact matching
                     count = all_text.count(raw_name)
                     if strip_honorifics and count < min_frequency:
                         count += all_text.count(original_raw)
@@ -6190,15 +6277,26 @@ Text to analyze:
                     # Use enforced 3-column format
                     csv_line = f"{entry_type},{raw_name},{translated_name}"
                     csv_lines.append(csv_line)
-                    if line_num <= 10:
-                        print(f"📑   ✓ Added: {csv_line} (count: {count})")
+                    entries_accepted += 1
+                    # Only log first few for debugging
+                    if entries_accepted <= 5:
+                        print(f"📑   ✓ Example accepted: {raw_name} -> {translated_name} (count: {count})")
                 else:
-                    if line_num <= 10:
-                        print(f"📑   ✗ Skipped: {raw_name} (count: {count} < {min_frequency})")
+                    # Don't log skipped entries - too verbose
+                    pass
         
         # Ensure header exists with enforced 3-column format
         if not header_found:
             csv_lines.insert(0, "type,raw_name,translated_name")
+        
+        # Print summary
+        processing_time = time.time() - last_progress_time
+        print(f"📑 Processing complete:")
+        print(f"📑   - Total terms processed: {total_lines}")
+        print(f"📑   - Terms accepted: {entries_accepted}")
+        print(f"📑   - Terms rejected: {total_lines - entries_accepted}")
+        if not skip_frequency_check:
+            print(f"📑   - Frequency threshold: {min_frequency}")
         
         return csv_lines
     
@@ -8640,7 +8738,15 @@ def main(log_callback=None, stop_callback=None):
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
     progress_manager = ProgressManager(payloads_dir)
-    chapter_extractor = ChapterExtractor()
+    
+    # Create ChapterExtractor with progress callback if available
+    chapter_progress_callback = None
+    if log_callback:
+        # Create a wrapper that formats progress messages for the log
+        def chapter_progress_callback(msg):
+            log_callback(f"📊 {msg}")
+    
+    chapter_extractor = ChapterExtractor(progress_callback=chapter_progress_callback)
     glossary_manager = GlossaryManager()
 
     history_file = os.path.join(payloads_dir, "translation_history.json")
