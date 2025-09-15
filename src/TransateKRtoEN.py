@@ -4523,10 +4523,10 @@ class GlossaryManager:
                     chunks_to_process.append((len(chunks_to_process) + 1, chunk_text))
                 
                 print(f"📑 Split filtered text into {len(chunks_to_process)} chunks")
-                all_glossary_entries = {}
+                all_glossary_entries = []
             else:
                 # Original logic for unfiltered text
-                all_glossary_entries = {}
+                all_glossary_entries = []
                 chunk_size = 0
                 chunk_chapters = []
                 chunks_to_process = []
@@ -4605,19 +4605,21 @@ class GlossaryManager:
                         try:
                             chunk_glossary = future.result()
                             if isinstance(chunk_glossary, dict):
-                                all_glossary_entries.update(chunk_glossary)
+                                # Convert dict entries to CSV lines and accumulate
+                                for raw_name, translated_name in chunk_glossary.items():
+                                    entry_type = "character" if self._has_honorific(raw_name) else "term"
+                                    all_glossary_entries.append(f"{entry_type},{raw_name},{translated_name}")
                             elif isinstance(chunk_glossary, list):
-                                # It's CSV lines, need to convert back to dict for now
-                                for line in chunk_glossary[1:]:  # Skip header
-                                    parts = line.split(',')
-                                    if len(parts) >= 3:
-                                        all_glossary_entries[parts[1]] = parts[2]
+                                # Already CSV lines, just add them (skip header if present)
+                                for line in chunk_glossary:
+                                    if line and not line.startswith('type,'):
+                                        all_glossary_entries.append(line)
                             completed_chunks += 1
                             
                             # Print progress for GUI
                             progress_percent = (completed_chunks / total_chunks) * 100
                             print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
-                            print(f"📑 Chunk {futures[future]} completed and saved to file")
+                            print(f"📑 Chunk {futures[future]} completed and aggregated")
                             # Yield to GUI after each chunk completes
                             time.sleep(0.001)
                         except Exception as e:
@@ -4648,6 +4650,17 @@ class GlossaryManager:
                     # Add header
                     all_csv_lines.insert(0, "type,raw_name,translated_name")
                     
+                    # Merge with any on-disk glossary first (to avoid overwriting user edits)
+                    on_disk_path = os.path.join(output_dir, "glossary.csv")
+                    if os.path.exists(on_disk_path):
+                        try:
+                            with open(on_disk_path, 'r', encoding='utf-8') as f:
+                                on_disk_content = f.read()
+                            all_csv_lines = self._merge_csv_entries(all_csv_lines, on_disk_content, strip_honorifics, language)
+                            print("📑 Merged with existing on-disk glossary")
+                        except Exception as e:
+                            print(f"⚠️ Failed to merge with existing on-disk glossary: {e}")
+                    
                     # Apply filter mode if needed
                     if filter_mode == "only_with_honorifics":
                         filtered = [all_csv_lines[0]]  # Keep header
@@ -4658,7 +4671,7 @@ class GlossaryManager:
                         all_csv_lines = filtered
                         print(f"📑 Filter applied: {len(all_csv_lines)-1} character entries with honorifics kept")
                     
-                    # Apply fuzzy deduplication
+                    # Apply fuzzy deduplication (deferred until after all chunks)
                     print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
                     all_csv_lines = self._deduplicate_glossary_with_fuzzy(all_csv_lines, fuzzy_threshold)
                     
@@ -4692,164 +4705,98 @@ class GlossaryManager:
                 return {}
             else:
                 # Sequential processing
-                for chunk_idx, chunk_text in chunks_to_process:
-                    if is_stop_requested():
-                        break
-                    
-                    print(f"📑 Processing chunk {chunk_idx}/{len(chunks_to_process)} ({len(chunk_text):,} chars)...")
-                    
-                    if custom_prompt:
-                        chunk_glossary = self._extract_with_custom_prompt(
-                            custom_prompt, chunk_text, language, 
-                            min_frequency, max_names, max_titles, 
-                            None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode
-                        )
+                _prev_defer = os.getenv("GLOSSARY_DEFER_SAVE")
+                os.environ["GLOSSARY_DEFER_SAVE"] = "1"
+                try:
+                    for chunk_idx, chunk_text in chunks_to_process:
+                        if is_stop_requested():
+                            break
+                        
+                        print(f"📑 Processing chunk {chunk_idx}/{len(chunks_to_process)} ({len(chunk_text):,} chars)...")
+                        
+                        if custom_prompt:
+                            chunk_glossary = self._extract_with_custom_prompt(
+                                custom_prompt, chunk_text, language, 
+                                min_frequency, max_names, max_titles, 
+                                None, output_dir,  # Don't pass existing glossary to chunks
+                                strip_honorifics, fuzzy_threshold, filter_mode
+                            )
+                        else:
+                            chunk_glossary = self._extract_with_patterns(
+                                chunk_text, language, min_frequency, 
+                                max_names, max_titles, batch_size, 
+                                None, output_dir,  # Don't pass existing glossary to chunks
+                                strip_honorifics, fuzzy_threshold, filter_mode
+                            )
+                        
+                        # Merge chunk results (aggregate only)
+                        if isinstance(chunk_glossary, list):
+                            for line in chunk_glossary:
+                                if line and not line.startswith('type,'):
+                                    all_glossary_entries.append(line)
+                        else:
+                            # Old dictionary format, convert
+                            for raw_name, translated_name in chunk_glossary.items():
+                                entry_type = "character" if self._has_honorific(raw_name) else "term"
+                                all_glossary_entries.append(f"{entry_type},{raw_name},{translated_name}")
+                finally:
+                    if _prev_defer is None:
+                        if "GLOSSARY_DEFER_SAVE" in os.environ:
+                            del os.environ["GLOSSARY_DEFER_SAVE"]
                     else:
-                        chunk_glossary = self._extract_with_patterns(
-                            chunk_text, language, min_frequency, 
-                            max_names, max_titles, batch_size, 
-                            None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode
-                        )
-                    
-                    # Merge chunk results
-                    # chunk_glossary is now CSV lines, just extend
-                    if isinstance(chunk_glossary, list):
-                        all_glossary_entries.extend(chunk_glossary[1:])  # Skip header
-                    else:
-                        # Old dictionary format, convert
-                        for raw_name, translated_name in chunk_glossary.items():
-                            all_glossary_entries.append(f"term,{raw_name},{translated_name}")
+                        os.environ["GLOSSARY_DEFER_SAVE"] = _prev_defer
             
-            # Now merge with existing glossary if present
+            # Build CSV from aggregated entries
+            csv_lines = ["type,raw_name,translated_name"] + all_glossary_entries
+            
+            # Merge with any provided existing glossary AND on-disk glossary to avoid overwriting
+            on_disk_path = os.path.join(output_dir, "glossary.csv")
+            merge_sources = []
             if existing_glossary:
-                print(f"📑 Merging with existing glossary...")
-                # Convert merged results to CSV format for merging
-                csv_lines = ["type,raw_name,translated_name"]
-                for raw_name, translated_name in all_glossary_entries.items():
-                    # Determine type based on filter mode
-                    entry_type = "character" if filter_mode == "only_with_honorifics" else "term"
-                    csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
-                
-                csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
-                csv_content = '\n'.join(csv_lines)
-                
-                # Save and return
-                glossary_path = os.path.join(output_dir, "glossary.csv")
-                self._atomic_write_file(glossary_path, csv_content)
-                
-                print(f"\n📑 ✅ CHUNKED GLOSSARY SAVED!")
-                print(f"📑 File: {glossary_path}")
-                print(f"📑 Total entries: {len(csv_lines) - 1}")
-                
-                return self._parse_csv_to_dict(csv_content)
+                merge_sources.append(existing_glossary)
+            if os.path.exists(on_disk_path):
+                try:
+                    with open(on_disk_path, 'r', encoding='utf-8') as f:
+                        merge_sources.append(f.read())
+                    print("📑 Found existing on-disk glossary to merge")
+                except Exception as e:
+                    print(f"⚠️ Failed to read on-disk glossary for merging: {e}")
+            for src in merge_sources:
+                csv_lines = self._merge_csv_entries(csv_lines, src, strip_honorifics, language)
             
-            # Apply final filtering based on mode
-            filtered_entries = self._apply_final_filter(all_glossary_entries, filter_mode)
+            # Apply filter mode to final results
+            csv_lines = self._filter_csv_by_mode(csv_lines, filter_mode)
             
-            # Convert to CSV format
-            if filtered_entries:
-                csv_lines = ["type,raw_name,translated_name"]
-                
-                # When processing chunks, we lose the type information since all_glossary_entries is a dict
-                # We need to preserve types from the original extraction
-                for raw_name, translated_name in filtered_entries.items():
-                    # For filter mode "only_with_honorifics", everything should be character
-                    if filter_mode == "only_with_honorifics":
-                        entry_type = "character"
-                    elif filter_mode == "only_without_honorifics":
-                        # This mode includes both characters without honorifics AND terms
-                        # We can't distinguish them here, so default to term
-                        # unless we can detect it's clearly a name
-                        if self._looks_like_name(raw_name):
-                            entry_type = "character"
-                        else:
-                            entry_type = "term"
-                    else:  # "all" mode
-                        # Try to determine if it's a character or term
-                        # Characters typically have honorifics or look like names
-                        if self._has_honorific(raw_name) or self._looks_like_name(raw_name):
-                            entry_type = "character"
-                        else:
-                            entry_type = "term"
-                    
-                    csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
-                
-                # Apply fuzzy deduplication
-                print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
-                original_count = len(csv_lines) - 1
-                csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
-                deduped_count = len(csv_lines) - 1
-                if original_count > deduped_count:
-                    print(f"📑 Removed {original_count - deduped_count} duplicate entries")
-                
-                # Sort by type and name
-                print(f"📑 Sorting glossary by type and name...")
-                header = csv_lines[0]
-                entries = csv_lines[1:]
-                
-                # Sort entries
-                def sort_key(line):
-                    parts = line.split(',')
-                    if len(parts) >= 3:
-                        entry_type = parts[0]
-                        raw_name = parts[1]
-                        # Character entries first, then terms
-                        type_order = 0 if entry_type == "character" else 1
-                        return (type_order, raw_name.lower())
-                    return (999, "")
-                
-                sorted_entries = sorted(entries, key=sort_key)
-                csv_lines = [header] + sorted_entries
-                
-                # Check if we should use token-efficient format
-                use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
-
-                if not use_legacy_format:
-                    # Convert to token-efficient format
-                    csv_lines = self._convert_to_token_efficient_format(csv_lines)
-
-                # Create final CSV content
-                csv_content = '\n'.join(csv_lines)
-
-                # Save glossary as CSV with proper .csv extension
-                glossary_path = os.path.join(output_dir, "glossary.csv")
-                self._atomic_write_file(glossary_path, csv_content)
-
-                print(f"\n📑 ✅ GLOSSARY SAVED!")
-                print(f"📑 File: {glossary_path}")
-
-                # Count entries differently based on format
-                if use_legacy_format:
-                    print(f"📑 Character entries: {sum(1 for line in csv_lines[1:] if line.startswith('character,'))}")
-                    print(f"📑 Term entries: {sum(1 for line in csv_lines[1:] if line.startswith('term,'))}")
-                    print(f"📑 Total entries: {len(csv_lines) - 1}")
-                else:
-                    # For token-efficient format, count by section headers
-                    char_count = 0
-                    term_count = 0
-                    current_section = None
-                    
-                    for line in csv_lines:
-                        if '=== CHARACTERS ===' in line:
-                            current_section = 'character'
-                        elif '=== TERMS ===' in line:
-                            current_section = 'term'
-                        elif line.startswith('* '):
-                            if current_section == 'character':
-                                char_count += 1
-                            elif current_section == 'term':
-                                term_count += 1
-                    
-                    print(f"📑 Character entries: {char_count}")
-                    print(f"📑 Term entries: {term_count}")
-                    print(f"📑 Total entries: {char_count + term_count}")
-
-                return self._parse_csv_to_dict(csv_content)
-            else:
-                # No entries found
-                return {}
+            # Apply fuzzy deduplication (deferred until after all chunks)
+            print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+            original_count = len(csv_lines) - 1
+            csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+            deduped_count = len(csv_lines) - 1
+            if original_count > deduped_count:
+                print(f"📑 Removed {original_count - deduped_count} duplicate entries")
+            
+            # Sort by type and name
+            print(f"📑 Sorting glossary by type and name...")
+            header = csv_lines[0]
+            entries = csv_lines[1:]
+            entries.sort(key=lambda x: (0 if x.startswith('character,') else 1, x.split(',')[1].lower() if ',' in x else x.lower()))
+            csv_lines = [header] + entries
+            
+            # Token-efficient format if enabled
+            use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
+            if not use_legacy_format:
+                csv_lines = self._convert_to_token_efficient_format(csv_lines)
+            
+            # Save
+            csv_content = '\n'.join(csv_lines)
+            glossary_path = os.path.join(output_dir, "glossary.csv")
+            self._atomic_write_file(glossary_path, csv_content)
+            
+            print(f"\n📑 ✅ CHUNKED GLOSSARY SAVED!")
+            print(f"📑 File: {glossary_path}")
+            print(f"📑 Total entries: {len(csv_lines) - 1}")
+            
+            return self._parse_csv_to_dict(csv_content)
         
         # Original single-text processing
         if custom_prompt:
@@ -4947,6 +4894,10 @@ class GlossaryManager:
         
         print(f"📑 Using batch API mode with {api_batch_size} chunks per batch")
         
+        # Ensure we defer saving and heavy merging when processing chunks
+        _prev_defer = os.getenv("GLOSSARY_DEFER_SAVE")
+        os.environ["GLOSSARY_DEFER_SAVE"] = "1"
+        
         # Get thread submission delay
         thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
         if thread_delay > 0:
@@ -5026,7 +4977,7 @@ class GlossaryManager:
                         # Print progress for GUI
                         progress_percent = (completed_chunks / total_chunks) * 100
                         print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
-                        print(f"📑 Chunk {futures[future]} completed and saved to file")
+                        print(f"📑 Chunk {futures[future]} completed and aggregated")
                         
                     except Exception as e:
                         print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
@@ -5041,6 +4992,15 @@ class GlossaryManager:
                 time.sleep(api_delay)
         
         # CHANGE: Return CSV lines instead of dictionary
+        
+        # Restore previous defer setting
+        if _prev_defer is None:
+            # Default back to not deferring if it wasn't set
+            if "GLOSSARY_DEFER_SAVE" in os.environ:
+                del os.environ["GLOSSARY_DEFER_SAVE"]
+        else:
+            os.environ["GLOSSARY_DEFER_SAVE"] = _prev_defer
+        
         return all_csv_lines
     
     def _process_single_chunk(self, chunk_idx, chunk_text, custom_prompt, language,
@@ -5053,13 +5013,22 @@ class GlossaryManager:
         if custom_prompt:
             # Pass flag to indicate if text is already filtered
             os.environ["_CHUNK_ALREADY_FILTERED"] = "1" if already_filtered else "0"
-            result = self._extract_with_custom_prompt(
-                custom_prompt, chunk_text, language, 
-                min_frequency, max_names, max_titles, 
-                None, output_dir,
-                strip_honorifics, fuzzy_threshold, filter_mode
-            )
-            os.environ["_CHUNK_ALREADY_FILTERED"] = "0"  # Reset
+            _prev_defer = os.getenv("GLOSSARY_DEFER_SAVE")
+            os.environ["GLOSSARY_DEFER_SAVE"] = "1"
+            try:
+                result = self._extract_with_custom_prompt(
+                    custom_prompt, chunk_text, language, 
+                    min_frequency, max_names, max_titles, 
+                    None, output_dir,
+                    strip_honorifics, fuzzy_threshold, filter_mode
+                )
+            finally:
+                os.environ["_CHUNK_ALREADY_FILTERED"] = "0"  # Reset
+                if _prev_defer is None:
+                    if "GLOSSARY_DEFER_SAVE" in os.environ:
+                        del os.environ["GLOSSARY_DEFER_SAVE"]
+                else:
+                    os.environ["GLOSSARY_DEFER_SAVE"] = _prev_defer
             return result
         else:
             return self._extract_with_patterns(
@@ -6206,6 +6175,10 @@ Text to analyze:
 
                     process_time = time.time() - process_start
                     print(f"📑 Response processing took {process_time:.1f}s")
+                    
+                    # If we're running per-chunk, defer all heavy work and saving
+                    if os.getenv("GLOSSARY_DEFER_SAVE", "0") == "1":
+                        return csv_lines
                     
                     # Check stop before merging
                     if is_stop_requested():

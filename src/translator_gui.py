@@ -1351,7 +1351,7 @@ class TranslatorGUI:
         self.glossary_max_titles_var = tk.StringVar(value=str(self.config.get('glossary_max_titles', 30)))
         self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
         self.glossary_max_text_size_var = tk.StringVar(value=str(self.config.get('glossary_max_text_size', 50000)))
-        self.glossary_chapter_split_threshold_var = tk.StringVar(value=self.config.get('glossary_chapter_split_threshold', '100000'))
+        self.glossary_chapter_split_threshold_var = tk.StringVar(value=self.config.get('glossary_chapter_split_threshold', '8192'))
         self.glossary_max_sentences_var = tk.StringVar(value=str(self.config.get('glossary_max_sentences', 200)))
         self.glossary_filter_mode_var = tk.StringVar(value=self.config.get('glossary_filter_mode', 'all'))
 
