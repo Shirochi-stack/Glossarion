@@ -1719,14 +1719,144 @@ Text to analyze:
             print("[DEBUG] Update manager is None")
         
     def check_for_updates_manual(self):
-        """Manually check for updates from the Other Settings dialog"""
+        """Manually check for updates from the Other Settings dialog with loading animation"""
         if hasattr(self, 'update_manager') and self.update_manager:
-            self.update_manager.check_for_updates(silent=False)
+            self._show_update_loading_and_check()
         else:
             messagebox.showerror("Update Check", 
                                "Update manager is not available.\n"
                                "Please check the GitHub releases page manually:\n"
                                "https://github.com/Shirochi-stack/Glossarion/releases")
+
+    def _show_update_loading_and_check(self):
+        """Show animated loading dialog while checking for updates"""
+        import tkinter as tk
+        import tkinter.ttk as ttk
+        from PIL import Image, ImageTk
+        import threading
+        import os
+        
+        # Create loading dialog
+        loading_dialog = tk.Toplevel(self.master)
+        loading_dialog.title("Checking for Updates")
+        loading_dialog.geometry("300x150")
+        loading_dialog.resizable(False, False)
+        loading_dialog.transient(self.master)
+        loading_dialog.grab_set()
+        
+        # Set the proper application icon for the dialog
+        try:
+            # Use the same icon loading method as the main application
+            load_application_icon(loading_dialog, self.base_dir)
+        except Exception as e:
+            print(f"Could not load icon for loading dialog: {e}")
+        
+        # Position dialog at mouse cursor
+        try:
+            mouse_x = self.master.winfo_pointerx()
+            mouse_y = self.master.winfo_pointery()
+            # Offset slightly so dialog doesn't cover cursor
+            loading_dialog.geometry("+%d+%d" % (mouse_x + 10, mouse_y + 10))
+        except:
+            # Fallback to center of main window if mouse position fails
+            loading_dialog.geometry("+%d+%d" % (
+                self.master.winfo_rootx() + 50,
+                self.master.winfo_rooty() + 50
+            ))
+        
+        # Create main frame
+        main_frame = ttk.Frame(loading_dialog, padding="20")
+        main_frame.pack(fill="both", expand=True)
+        
+        # Try to load and resize the icon (same approach as main GUI)
+        icon_label = None
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                # Load and resize image
+                original_image = Image.open(ico_path)
+                # Resize to 48x48 for loading animation
+                resized_image = original_image.resize((48, 48), Image.Resampling.LANCZOS)
+                self.loading_icon = ImageTk.PhotoImage(resized_image)
+                
+                icon_label = ttk.Label(main_frame, image=self.loading_icon)
+                icon_label.pack(pady=(0, 10))
+        except Exception as e:
+            print(f"Could not load loading icon: {e}")
+        
+        # Add loading text
+        loading_text = ttk.Label(main_frame, text="Checking for updates...", 
+                                font=('TkDefaultFont', 11))
+        loading_text.pack()
+        
+        # Add progress bar
+        progress_bar = ttk.Progressbar(main_frame, mode='indeterminate')
+        progress_bar.pack(pady=(10, 10), fill='x')
+        progress_bar.start(10)  # Start animation
+        
+        # Animation state
+        self.loading_animation_active = True
+        self.loading_rotation = 0
+        
+        def animate_icon():
+            """Animate the loading icon by rotating it"""
+            if not self.loading_animation_active or not icon_label:
+                return
+                
+            try:
+                if hasattr(self, 'loading_icon'):
+                    # Simple text-based animation instead of rotation
+                    dots = "." * ((self.loading_rotation // 10) % 4)
+                    loading_text.config(text=f"Checking for updates{dots}")
+                    self.loading_rotation += 1
+                    
+                    # Schedule next animation frame
+                    loading_dialog.after(100, animate_icon)
+            except:
+                pass  # Dialog might have been destroyed
+        
+        # Start icon animation if we have an icon
+        if icon_label:
+            animate_icon()
+        
+        def check_updates_thread():
+            """Run update check in background thread"""
+            try:
+                # Perform the actual update check
+                self.update_manager.check_for_updates(silent=False, force_show=True)
+            except Exception as e:
+                # Schedule error display on main thread
+                loading_dialog.after(0, lambda: self._show_update_error(str(e)))
+            finally:
+                # Schedule cleanup on main thread
+                loading_dialog.after(0, cleanup_loading)
+        
+        def cleanup_loading():
+            """Clean up the loading dialog"""
+            try:
+                self.loading_animation_active = False
+                progress_bar.stop()
+                loading_dialog.grab_release()
+                loading_dialog.destroy()
+            except:
+                pass  # Dialog might already be destroyed
+        
+        def _show_update_error(error_msg):
+            """Show update check error"""
+            cleanup_loading()
+            messagebox.showerror("Update Check Failed", 
+                               f"Failed to check for updates:\n{error_msg}")
+        
+        # Start the update check in a separate thread
+        update_thread = threading.Thread(target=check_updates_thread, daemon=True)
+        update_thread.start()
+        
+        # Handle dialog close
+        def on_dialog_close():
+            self.loading_animation_active = False
+            cleanup_loading()
+        
+        loading_dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
                                
     def append_log_with_api_error_detection(self, message):
         """Enhanced log appending that detects and highlights API errors"""

@@ -69,7 +69,7 @@ class UpdateManager:
             response = requests.get(
                 f"{self.GITHUB_API_URL}?per_page={count}", 
                 headers=headers, 
-                timeout=10
+                timeout=30
             )
             response.raise_for_status()
             
@@ -134,7 +134,7 @@ class UpdateManager:
                 'User-Agent': 'Glossarion-Updater'
             }
             
-            response = requests.get(self.GITHUB_LATEST_URL, headers=headers, timeout=10)
+            response = requests.get(self.GITHUB_LATEST_URL, headers=headers, timeout=30)
             response.raise_for_status()
             
             release_data = response.json()
@@ -655,9 +655,8 @@ class UpdateManager:
             else:
                 download_path = new_exe_path
             
-            # Download with progress tracking
-            # Note: consider adding a timeout and retries if needed
-            response = requests.get(asset['browser_download_url'], stream=True)
+            # Download with progress tracking and timeout
+            response = requests.get(asset['browser_download_url'], stream=True, timeout=30)
             total_size = int(response.headers.get('content-length', 0))
             
             downloaded = 0
