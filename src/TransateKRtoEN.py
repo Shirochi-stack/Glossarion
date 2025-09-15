@@ -12,6 +12,14 @@ import builtins
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
+try:
+    from bs4 import XMLParsedAsHTMLWarning
+    import warnings
+    # Suppress the warning since we handle both HTML and XHTML content
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+except ImportError:
+    # Older versions of BeautifulSoup might not have this warning
+    pass
 from collections import Counter
 from unified_api_client import UnifiedClient, UnifiedClientError
 import hashlib
@@ -1344,16 +1352,138 @@ class ChapterExtractor:
     def __init__(self, progress_callback=None):
         self.pattern_manager = PatternManager()
         self.progress_callback = progress_callback  # Add progress callback
+        self.parser = self._get_best_parser()  # Determine best parser on init
+    
+    def _get_best_parser(self):
+        """Determine the best parser available, preferring lxml for CJK text"""
+        try:
+            import lxml
+            return 'lxml'
+        except ImportError:
+            return 'html.parser'
+    
+    def _sort_by_opf_spine(self, chapters, opf_path):
+        """Sort chapters according to OPF spine order"""
+        try:
+            import xml.etree.ElementTree as ET
+            
+            # Read OPF file
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                opf_content = f.read()
+            
+            # Parse OPF
+            root = ET.fromstring(opf_content)
+            
+            # Find namespaces
+            ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            if root.tag.startswith('{'):
+                default_ns = root.tag[1:root.tag.index('}')]
+                ns = {'opf': default_ns}
+            
+            # Build manifest map (id -> href)
+            manifest = {}
+            for item in root.findall('.//opf:manifest/opf:item', ns):
+                item_id = item.get('id')
+                href = item.get('href')
+                if item_id and href:
+                    manifest[item_id] = href
+            
+            # Get spine order
+            spine_order = []
+            spine = root.find('.//opf:spine', ns)
+            if spine is not None:
+                for itemref in spine.findall('opf:itemref', ns):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest:
+                        href = manifest[idref]
+                        spine_order.append(href)
+            
+            if not spine_order:
+                print("⚠️ No spine order found in OPF, keeping original order")
+                return chapters
+            
+            # Create a mapping of filenames to spine position
+            spine_map = {}
+            for idx, href in enumerate(spine_order):
+                # Try different matching strategies
+                basename = os.path.basename(href)
+                spine_map[basename] = idx
+                spine_map[href] = idx
+                # Also store without extension for flexible matching
+                name_no_ext = os.path.splitext(basename)[0]
+                spine_map[name_no_ext] = idx
+            
+            print(f"📋 OPF spine contains {len(spine_order)} items")
+            
+            # Sort chapters based on spine order
+            def get_spine_position(chapter):
+                # Try to match chapter to spine
+                filename = chapter.get('filename', '')
+                basename = chapter.get('original_basename', '')
+                
+                # Try exact filename match
+                if filename in spine_map:
+                    return spine_map[filename]
+                
+                # Try basename match
+                if basename in spine_map:
+                    return spine_map[basename]
+                
+                # Try basename of filename
+                if filename:
+                    fname_base = os.path.basename(filename)
+                    if fname_base in spine_map:
+                        return spine_map[fname_base]
+                
+                # Try without extension
+                if basename:
+                    if basename + '.html' in spine_map:
+                        return spine_map[basename + '.html']
+                    if basename + '.xhtml' in spine_map:
+                        return spine_map[basename + '.xhtml']
+                
+                # Fallback to chapter number * 1000 (to sort after spine items)
+                return 1000000 + chapter.get('num', 0)
+            
+            # Sort chapters
+            sorted_chapters = sorted(chapters, key=get_spine_position)
+            
+            # Renumber chapters based on new order
+            for idx, chapter in enumerate(sorted_chapters, 1):
+                chapter['spine_order'] = idx
+                # Optionally update chapter numbers to match spine order
+                # chapter['num'] = idx  # Uncomment if you want to renumber
+            
+            # Log reordering info
+            reordered_count = 0
+            for idx, chapter in enumerate(sorted_chapters):
+                original_idx = chapters.index(chapter)
+                if original_idx != idx:
+                    reordered_count += 1
+            
+            if reordered_count > 0:
+                print(f"🔄 Reordered {reordered_count} chapters to match OPF spine")
+            else:
+                print(f"✅ Chapter order already matches OPF spine")
+            
+            return sorted_chapters
+            
+        except Exception as e:
+            print(f"⚠️ Could not sort by OPF spine: {e}")
+            import traceback
+            traceback.print_exc()
+            return chapters
 
 
     def protect_angle_brackets_with_korean(self, text: str) -> str:
-        """Protect Korean text in angle brackets from HTML parsing"""
+        """Protect CJK text in angle brackets from HTML parsing"""
         if text is None:
             return ""
         
         import re
-        korean_pattern = r'[가-힣ㄱ-ㅎㅏ-ㅣ]'
-        bracket_pattern = rf'<([^<>]*{korean_pattern}[^<>]*)>'
+        # Extended pattern to include Korean, Chinese, and Japanese characters
+        cjk_pattern = r'[가-힣ㄱ-ㅎㅏ-ㅣ一-龿ぁ-ゟァ-ヿ]'
+        bracket_pattern = rf'<([^<>]*{cjk_pattern}[^<>]*)>'
         
         def replace_brackets(match):
             content = match.group(1)
@@ -1449,7 +1579,8 @@ class ChapterExtractor:
                         
                         # Create chapter entry
                         from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(content, 'html.parser')
+                        parser = 'lxml' if 'lxml' in sys.modules else 'html.parser'
+                        soup = BeautifulSoup(content, parser)
                         
                         # Get title
                         title = "Chapter " + str(chapter_num)
@@ -1509,10 +1640,24 @@ class ChapterExtractor:
             return []
             
         print("🚀 Starting EPUB extraction with ThreadPoolExecutor...")
+        print(f"📄 Using parser: {self.parser} {'(optimized for CJK)' if self.parser == 'lxml' else '(standard)'}")
         
         # Initial progress
         if self.progress_callback:
             self.progress_callback("Starting EPUB extraction...")
+        
+        # First, extract and save content.opf for reference
+        for name in zf.namelist():
+            if name.endswith('.opf'):
+                try:
+                    opf_content = zf.read(name).decode('utf-8', errors='ignore')
+                    opf_output_path = os.path.join(output_dir, 'content.opf')
+                    with open(opf_output_path, 'w', encoding='utf-8') as f:
+                        f.write(opf_content)
+                    print(f"📋 Saved OPF file: {name} → content.opf")
+                    break
+                except Exception as e:
+                    print(f"⚠️ Could not save OPF file: {e}")
         
         # Get extraction mode from environment
         extraction_mode = os.getenv("EXTRACTION_MODE", "smart").lower()
@@ -1540,6 +1685,13 @@ class ChapterExtractor:
             print(f"📋 Extracted metadata: {list(metadata.keys())}")
         
         chapters, detected_language = self._extract_chapters_universal(zf, extraction_mode)
+        
+        # Sort chapters according to OPF spine order if available
+        opf_path = os.path.join(output_dir, 'content.opf')
+        if os.path.exists(opf_path) and chapters:
+            print("📋 Sorting chapters according to OPF spine order...")
+            chapters = self._sort_by_opf_spine(chapters, opf_path)
+            print(f"✅ Chapters sorted according to OPF reading order")
         
         # Check stop after chapter extraction
         if is_stop_requested():
@@ -1573,7 +1725,7 @@ class ChapterExtractor:
             
             if chapter.get('has_images'):
                 try:
-                    soup = BeautifulSoup(chapter.get('body', ''), 'html.parser')
+                    soup = BeautifulSoup(chapter.get('body', ''), self.parser)
                     images = soup.find_all('img')
                     info['images'] = [img.get('src', '') for img in images]
                 except:
@@ -2019,12 +2171,12 @@ class ChapterExtractor:
                         
                         if section_html:
                             # Quick check if section is small enough to merge
-                            section_soup = BeautifulSoup(section_html, 'html.parser')
+                            section_soup = BeautifulSoup(section_html, self.parser)
                             section_text = section_soup.get_text(strip=True)
                             
                             if len(section_text) < 200:  # Merge if section is small
                                 # Extract body content
-                                chapter_soup = BeautifulSoup(html_content, 'html.parser')
+                                chapter_soup = BeautifulSoup(html_content, self.parser)
                                 
                                 if section_soup.body:
                                     section_body_content = ''.join(str(child) for child in section_soup.body.children)
@@ -2080,7 +2232,8 @@ class ChapterExtractor:
                     # Yield briefly before heavy parsing
                     time.sleep(0.001)
                     
-                    soup = BeautifulSoup(protected_html, 'html.parser')
+                    # Use lxml parser which handles both HTML and XHTML well
+                    soup = BeautifulSoup(protected_html, self.parser)
                     
                     # Get effective mode for filtering
                     effective_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
@@ -2147,7 +2300,7 @@ class ChapterExtractor:
                     else:
                         # When merging is enabled, try to extract chapter info
                         protected_html = self.protect_angle_brackets_with_korean(html_content)
-                        soup = BeautifulSoup(protected_html, 'html.parser')
+                        soup = BeautifulSoup(protected_html, self.parser)
                         
                         # Count headers (thread-safe)
                         h1_tags = soup.find_all('h1')
@@ -2176,7 +2329,7 @@ class ChapterExtractor:
                 
                 # Process images and metadata (same for all modes)
                 protected_html = self.protect_angle_brackets_with_korean(html_content)
-                soup = BeautifulSoup(protected_html, 'html.parser')
+                soup = BeautifulSoup(protected_html, self.parser)
                 images = soup.find_all('img')
                 has_images = len(images) > 0
                 is_image_only_chapter = has_images and len(content_text.strip()) < 500
@@ -2898,11 +3051,13 @@ class ChapterExtractor:
     def _extract_epub_metadata(self, zf):
         """Extract comprehensive metadata from EPUB file including all custom fields"""
         meta = {}
+        # Use lxml for XML if available
+        xml_parser = 'lxml-xml' if self.parser == 'lxml' else 'xml'
         try:
             for name in zf.namelist():
                 if name.lower().endswith('.opf'):
                     opf_content = zf.read(name)
-                    soup = BeautifulSoup(opf_content, 'xml')
+                    soup = BeautifulSoup(opf_content, xml_parser)
                     
                     # Extract ALL Dublin Core elements (expanded list)
                     dc_elements = ['title', 'creator', 'subject', 'description', 
@@ -8954,6 +9109,14 @@ def main(log_callback=None, stop_callback=None):
                 sample_files = os.listdir(out)[:10]
                 log_callback(f"❌ Sample files: {sample_files}")
                 return
+            
+            # Sort chapters by OPF spine order if available
+            opf_path = os.path.join(out, 'content.opf')
+            if os.path.exists(opf_path) and chapters:
+                log_callback("📋 Sorting chapters according to OPF spine order...")
+                # Use the existing chapter_extractor instance to sort
+                chapters = chapter_extractor._sort_by_opf_spine(chapters, opf_path)
+                log_callback("✅ Chapters sorted according to OPF reading order")
         else:
             print("🚀 Using comprehensive chapter extraction with resource handling...")
             with zipfile.ZipFile(input_path, 'r') as zf:

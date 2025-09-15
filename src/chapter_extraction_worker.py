@@ -62,6 +62,12 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
             
             print(f"[INFO] Extracted {len(chapters)} chapters", flush=True)
             
+            # The extract_chapters method already handles OPF sorting internally
+            # Just log if OPF was used
+            opf_path = os.path.join(output_dir, 'content.opf')
+            if os.path.exists(opf_path):
+                print(f"[INFO] OPF file available for chapter ordering", flush=True)
+            
             # CRITICAL: Save the full chapters with body content!
             # This is what the main process needs to load
             chapters_full_path = os.path.join(output_dir, "chapters_full.json")
