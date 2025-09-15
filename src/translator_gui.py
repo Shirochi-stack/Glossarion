@@ -4,7 +4,7 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()
 
 # Standard Library
-import io, json, logging, math, os, shutil, sys, threading, time, re
+import io, json, logging, math, os, shutil, sys, threading, time, re, concurrent.futures
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
@@ -1217,6 +1217,11 @@ class TranslatorGUI:
         self.stop_requested = False
         self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
         self.qa_thread = None
+        # Futures for executor-based tasks
+        self.translation_future = self.glossary_future = self.qa_future = self.epub_future = None
+        # Shared executor for background tasks
+        self.executor = None
+        self._executor_workers = None
         
         # Glossary tracking
         self.manual_glossary_path = None
@@ -1304,11 +1309,16 @@ class TranslatorGUI:
         self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
         self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 4))
 
-        # Set initial environment variable
+        # Set initial environment variable and ensure executor
         if self.enable_parallel_extraction_var.get():
             os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
         else:
             os.environ["EXTRACTION_WORKERS"] = "1"
+        # Initialize the executor based on current settings
+        try:
+            self._ensure_executor()
+        except Exception:
+            pass
 
 
         # Initialize compression-related variables
@@ -1697,16 +1707,14 @@ Text to analyze:
             print(f"Auto-encryption check failed: {e}")
         
     def _check_updates_on_startup(self):
-        """Check for updates on startup with debug logging"""
+        """Check for updates on startup with debug logging (async)"""
         print("[DEBUG] Running startup update check...")
         if self.update_manager:
             try:
-                update_available, release_info = self.update_manager.check_for_updates(silent=True)
-                print(f"[DEBUG] Update check result: available={update_available}")
-                if release_info:
-                    print(f"[DEBUG] Latest version: {release_info.get('tag_name', 'unknown')}")
+                self.update_manager.check_for_updates_async(silent=True)
+                print(f"[DEBUG] Update check dispatched asynchronously")
             except Exception as e:
-                print(f"[DEBUG] Update check failed: {e}")
+                print(f"[DEBUG] Update check failed to dispatch: {e}")
         else:
             print("[DEBUG] Update manager is None")
         
@@ -7062,8 +7070,10 @@ Provide translations in the same numbered format."""
             return file_list
  
     def run_translation_thread(self):
-        """Start translation in a separate thread"""
-        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+        """Start translation in a background worker (ThreadPoolExecutor)"""
+        # Prevent overlap with glossary extraction
+        if (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or \
+           (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done()):
             self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
             messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before starting translation.")
             return
@@ -7097,14 +7107,19 @@ Provide translations in the same numbered format."""
         if hasattr(self, 'button_run'):
             self.button_run.config(text="⏹ Stop", state="normal")
         
-        # Start thread IMMEDIATELY - no heavy operations here
-        thread_name = f"TranslationThread_{int(time.time())}"
-        self.translation_thread = threading.Thread(
-            target=self.run_translation_wrapper, 
-            name=thread_name, 
-            daemon=True
-        )
-        self.translation_thread.start()
+        # Start worker immediately - no heavy operations here
+        self._ensure_executor()
+        if self.executor:
+            self.translation_future = self.executor.submit(self.run_translation_wrapper)
+        else:
+            # Fallback to dedicated thread if executor unavailable
+            thread_name = f"TranslationThread_{int(time.time())}"
+            self.translation_thread = threading.Thread(
+                target=self.run_translation_wrapper,
+                name=thread_name,
+                daemon=True
+            )
+            self.translation_thread.start()
         
         # Schedule button update check
         self.master.after(100, self.update_run_button)
@@ -8446,8 +8461,9 @@ Provide translations in the same numbered format."""
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
         
     def run_glossary_extraction_thread(self):
-        """Start glossary extraction in a separate thread"""
-        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+        """Start glossary extraction in a background worker (ThreadPoolExecutor)"""
+        if ((hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
+            (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())):
             self.append_log("⚠️ Cannot run glossary extraction while translation is in progress.")
             messagebox.showwarning("Process Running", "Please wait for translation to complete before extracting glossary.")
             return
@@ -8477,9 +8493,14 @@ Provide translations in the same numbered format."""
         except:
             pass
         
-        thread_name = f"GlossaryThread_{int(time.time())}"
-        self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
-        self.glossary_thread.start()
+        # Use shared executor
+        self._ensure_executor()
+        if self.executor:
+            self.glossary_future = self.executor.submit(self.run_glossary_extraction_direct)
+        else:
+            thread_name = f"GlossaryThread_{int(time.time())}"
+            self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
+            self.glossary_thread.start()
         self.master.after(100, self.update_run_button)
 
     def run_glossary_extraction_direct(self):
@@ -9460,8 +9481,13 @@ Important rules:
        
        self.epub_folder = folder
        self.stop_requested = False
-       self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
-       self.epub_thread.start()
+       # Run via shared executor
+       self._ensure_executor()
+       if self.executor:
+           self.epub_future = self.executor.submit(self.run_epub_converter_direct)
+       else:
+           self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
+           self.epub_thread.start()
        self.master.after(100, self.update_run_button)
  
     def run_epub_converter_direct(self):
@@ -10422,8 +10448,13 @@ Important rules:
                         state=tk.NORMAL if scan_html_folder else tk.DISABLED
                     ))
             
-            self.qa_thread = threading.Thread(target=run_scan, daemon=True)
-            self.qa_thread.start()
+            # Run via shared executor
+            self._ensure_executor()
+            if self.executor:
+                self.qa_future = self.executor.submit(run_scan)
+            else:
+                self.qa_thread = threading.Thread(target=run_scan, daemon=True)
+                self.qa_thread.start()
 
     def show_qa_scanner_settings(self, parent_dialog, qa_settings):
             """Show QA Scanner settings dialog using WindowManager properly"""
@@ -11326,10 +11357,22 @@ Important rules:
 
     def update_run_button(self):
        """Switch Run↔Stop depending on whether a process is active."""
-       translation_running = hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()
-       glossary_running = hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()
-       qa_running = hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()
-       epub_running = hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()
+       translation_running = (
+           (hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
+           (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())
+       )
+       glossary_running = (
+           (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or
+           (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done())
+       )
+       qa_running = (
+           (hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()) or
+           (hasattr(self, 'qa_future') and self.qa_future and not self.qa_future.done())
+       )
+       epub_running = (
+           (hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()) or
+           (hasattr(self, 'epub_future') and self.epub_future and not self.epub_future.done())
+       )
        
        any_process_running = translation_running or glossary_running or qa_running or epub_running
        
@@ -11476,6 +11519,13 @@ Important rules:
                 self.save_config(show_message=False)
             except:
                 pass  # Don't prevent closing if save fails
+            
+            # Shutdown the executor to stop accepting new tasks
+            try:
+                if getattr(self, 'executor', None):
+                    self.executor.shutdown(wait=False)
+            except Exception:
+                pass
             
             self.master.destroy()
             sys.exit(0)
@@ -13168,6 +13218,12 @@ Important rules:
             self.extraction_workers_entry.config(state='disabled')
             # Set to 1 worker (sequential) when disabled
             os.environ["EXTRACTION_WORKERS"] = "1"
+        
+        # Ensure executor reflects current worker setting
+        try:
+            self._ensure_executor()
+        except Exception:
+            pass
         
     def create_ai_hunter_section(self, parent_frame):
         """Create the AI Hunter configuration section - without redundant toggle"""
@@ -15738,6 +15794,51 @@ Important rules:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open backup restore dialog: {e}")
             
+    def _ensure_executor(self):
+        """Ensure a ThreadPoolExecutor exists and matches configured worker count.
+        Also updates EXTRACTION_WORKERS environment variable.
+        """
+        try:
+            workers = 1
+            try:
+                workers = int(self.extraction_workers_var.get()) if self.enable_parallel_extraction_var.get() else 1
+            except Exception:
+                workers = 1
+            if workers < 1:
+                workers = 1
+            os.environ["EXTRACTION_WORKERS"] = str(workers)
+            
+            # If executor exists with same worker count, keep it
+            if getattr(self, 'executor', None) and getattr(self, '_executor_workers', None) == workers:
+                return
+            
+            # If executor exists but tasks are running, don't recreate to avoid disruption
+            active = any([
+                getattr(self, 'translation_future', None) and not self.translation_future.done(),
+                getattr(self, 'glossary_future', None) and not self.glossary_future.done(),
+                getattr(self, 'epub_future', None) and not self.epub_future.done(),
+                getattr(self, 'qa_future', None) and not self.qa_future.done(),
+            ])
+            if getattr(self, 'executor', None) and active:
+                self._executor_workers = workers  # Remember desired workers for later
+                return
+            
+            # Safe to (re)create
+            if getattr(self, 'executor', None):
+                try:
+                    self.executor.shutdown(wait=False)
+                except Exception:
+                    pass
+                self.executor = None
+            
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="Glossarion")
+            self._executor_workers = workers
+        except Exception as e:
+            try:
+                print(f"Executor setup failed: {e}")
+            except Exception:
+                pass
+    
     def log_debug(self, message):
         self.append_log(f"[DEBUG] {message}")
 

@@ -11,6 +11,7 @@ import threading
 import time
 import hashlib
 import traceback
+import concurrent.futures
 from tkinter import filedialog, messagebox
 import tkinter as tk
 from tkinter import ttk
@@ -49,6 +50,15 @@ class MangaTranslationTab:
         self.is_running = False
         self.stop_flag = threading.Event()
         self.translation_thread = None
+        self.translation_future = None
+        # Shared executor from main GUI if available
+        try:
+            if hasattr(self.main_gui, 'executor') and self.main_gui.executor:
+                self.executor = self.main_gui.executor
+            else:
+                self.executor = None
+        except Exception:
+            self.executor = None
         self.selected_files = []
         self.current_file_index = 0
         self.font_mapping = {}  # Initialize font mapping dictionary
@@ -616,13 +626,24 @@ class MangaTranslationTab:
                 download_active['value'] = False
         
         def start_download():
-            """Start download in background thread"""
+            """Start download in background thread or executor"""
             download_btn.config(state=tk.DISABLED)
             cancel_btn.config(text="Cancel")
             
-            import threading
-            download_thread = threading.Thread(target=download_with_progress, daemon=True)
-            download_thread.start()
+            try:
+                if hasattr(self.main_gui, '_ensure_executor'):
+                    self.main_gui._ensure_executor()
+                execu = getattr(self.main_gui, 'executor', None)
+                if execu:
+                    execu.submit(download_with_progress)
+                else:
+                    import threading
+                    download_thread = threading.Thread(target=download_with_progress, daemon=True)
+                    download_thread.start()
+            except Exception:
+                import threading
+                download_thread = threading.Thread(target=download_with_progress, daemon=True)
+                download_thread.start()
         
         def cancel_download():
             """Cancel or close dialog"""
@@ -1070,9 +1091,19 @@ class MangaTranslationTab:
         # Auto-resize
         self.main_gui.wm.auto_resize_dialog(progress_dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.3)
         
-        # Start setup in background
-        import threading
-        threading.Thread(target=setup_thread, daemon=True).start()
+        # Start setup in background via executor if available
+        try:
+            if hasattr(self.main_gui, '_ensure_executor'):
+                self.main_gui._ensure_executor()
+            execu = getattr(self.main_gui, 'executor', None)
+            if execu:
+                execu.submit(setup_thread)
+            else:
+                import threading
+                threading.Thread(target=setup_thread, daemon=True).start()
+        except Exception:
+            import threading
+            threading.Thread(target=setup_thread, daemon=True).start()
 
     def _on_ocr_provider_change(self, event=None):
         """Handle OCR provider change"""
@@ -4904,12 +4935,34 @@ class MangaTranslationTab:
             self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
         
-        # Start translation thread
-        self.translation_thread = threading.Thread(
-            target=self._translation_worker,
-            daemon=True
-        )
-        self.translation_thread.start()
+        # Start translation via executor
+        try:
+            # Sync with main GUI executor if possible and update EXTRACTION_WORKERS
+            if hasattr(self.main_gui, '_ensure_executor'):
+                self.main_gui._ensure_executor()
+                self.executor = self.main_gui.executor
+            # Ensure env var reflects current worker setting from main GUI
+            try:
+                os.environ["EXTRACTION_WORKERS"] = str(self.main_gui.extraction_workers_var.get())
+            except Exception:
+                pass
+            
+            if self.executor:
+                self.translation_future = self.executor.submit(self._translation_worker)
+            else:
+                # Fallback to dedicated thread
+                self.translation_thread = threading.Thread(
+                    target=self._translation_worker,
+                    daemon=True
+                )
+                self.translation_thread.start()
+        except Exception:
+            # Last resort fallback to thread
+            self.translation_thread = threading.Thread(
+                target=self._translation_worker,
+                daemon=True
+            )
+            self.translation_thread.start()
     
     def _apply_rendering_settings(self):
         """Apply current rendering settings to translator"""

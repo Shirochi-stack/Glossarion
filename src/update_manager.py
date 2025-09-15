@@ -4,6 +4,7 @@ import sys
 import json
 import requests
 import threading
+import concurrent.futures
 import time
 import re
 from typing import Optional, Dict, Tuple, List
@@ -23,6 +24,13 @@ class UpdateManager:
         self.main_gui = main_gui
         self.base_dir = base_dir
         self.update_available = False
+        # Use shared executor from main GUI if available
+        try:
+            if hasattr(self.main_gui, '_ensure_executor'):
+                self.main_gui._ensure_executor()
+            self.executor = getattr(self.main_gui, 'executor', None)
+        except Exception:
+            self.executor = None
         self.latest_release = None
         self.all_releases = []  # Store all fetched releases
         self.download_progress = 0
@@ -82,6 +90,31 @@ class UpdateManager:
             print(f"Error fetching releases: {e}")
             return []
     
+    def check_for_updates_async(self, silent=True, force_show=False):
+        """Run check_for_updates in the background using the shared executor.
+        Returns a Future if an executor is available, else runs in a thread.
+        """
+        try:
+            # Ensure shared executor
+            if hasattr(self.main_gui, '_ensure_executor'):
+                self.main_gui._ensure_executor()
+            execu = getattr(self, 'executor', None) or getattr(self.main_gui, 'executor', None)
+            if execu:
+                future = execu.submit(self.check_for_updates, silent, force_show)
+                return future
+        except Exception:
+            pass
+        
+        # Fallback to thread if executor not available
+        def _worker():
+            try:
+                self.check_for_updates(silent=silent, force_show=force_show)
+            except Exception:
+                pass
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        return None
+
     def check_for_updates(self, silent=True, force_show=False) -> Tuple[bool, Optional[Dict]]:
         """Check GitHub for newer releases
         
@@ -169,8 +202,8 @@ class UpdateManager:
             return False, None
     
     def check_for_updates_manual(self):
-        """Manual update check from menu - always shows dialog"""
-        return self.check_for_updates(silent=False, force_show=True)
+        """Manual update check from menu - always shows dialog (async)"""
+        return self.check_for_updates_async(silent=False, force_show=True)
     
     def format_markdown_to_tkinter(self, text_widget, markdown_text):
         """Convert GitHub markdown to formatted tkinter text - simplified version
@@ -488,10 +521,19 @@ class UpdateManager:
             self.progress_bar['value'] = 0
             self.download_progress = 0
             
-            # Start download in background thread
-            thread = threading.Thread(target=self.download_update, 
-                                    args=(dialog,), daemon=True)
-            thread.start()
+            # Start download using shared executor if available
+            try:
+                if hasattr(self.main_gui, '_ensure_executor'):
+                    self.main_gui._ensure_executor()
+                execu = getattr(self, 'executor', None) or getattr(self.main_gui, 'executor', None)
+                if execu:
+                    execu.submit(self.download_update, dialog)
+                else:
+                    thread = threading.Thread(target=self.download_update, args=(dialog,), daemon=True)
+                    thread.start()
+            except Exception:
+                thread = threading.Thread(target=self.download_update, args=(dialog,), daemon=True)
+                thread.start()
         
         # Always show download button if we have exe files
         has_exe_files = self.selected_asset is not None
@@ -614,6 +656,7 @@ class UpdateManager:
                 download_path = new_exe_path
             
             # Download with progress tracking
+            # Note: consider adding a timeout and retries if needed
             response = requests.get(asset['browser_download_url'], stream=True)
             total_size = int(response.headers.get('content-length', 0))
             
