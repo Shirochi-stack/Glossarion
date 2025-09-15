@@ -1311,9 +1311,15 @@ class TranslatorGUI:
 
         # Set initial environment variable and ensure executor
         if self.enable_parallel_extraction_var.get():
-            os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
+            # Set workers for glossary extraction optimization
+            workers = self.extraction_workers_var.get()
+            os.environ["EXTRACTION_WORKERS"] = str(workers)
+            # Also enable glossary parallel processing explicitly
+            os.environ["GLOSSARY_PARALLEL_ENABLED"] = "1"
+            print(f"✅ Parallel extraction enabled with {workers} workers")
         else:
             os.environ["EXTRACTION_WORKERS"] = "1"
+            os.environ["GLOSSARY_PARALLEL_ENABLED"] = "0"
         # Initialize the executor based on current settings
         try:
             self._ensure_executor()
@@ -7237,19 +7243,19 @@ Provide translations in the same numbered format."""
         if hasattr(self, 'button_run'):
             self.button_run.config(text="⏹ Stop", state="normal")
         
+        # Show immediate feedback that translation is starting
+        self.append_log("🚀 Initializing translation process...")
+        
         # Start worker immediately - no heavy operations here
-        self._ensure_executor()
-        if self.executor:
-            self.translation_future = self.executor.submit(self.run_translation_wrapper)
-        else:
-            # Fallback to dedicated thread if executor unavailable
-            thread_name = f"TranslationThread_{int(time.time())}"
-            self.translation_thread = threading.Thread(
-                target=self.run_translation_wrapper,
-                name=thread_name,
-                daemon=True
-            )
-            self.translation_thread.start()
+        # IMPORTANT: Do NOT call _ensure_executor() here as it may be slow
+        # Just start the thread directly
+        thread_name = f"TranslationThread_{int(time.time())}"
+        self.translation_thread = threading.Thread(
+            target=self.run_translation_wrapper,
+            name=thread_name,
+            daemon=True
+        )
+        self.translation_thread.start()
         
         # Schedule button update check
         self.master.after(100, self.update_run_button)
@@ -7257,12 +7263,16 @@ Provide translations in the same numbered format."""
     def run_translation_wrapper(self):
         """Wrapper that handles ALL initialization in background thread"""
         try:
-            # Show initial feedback immediately
-            self.append_log("🚀 Starting translation process...")
+            # Ensure executor is available (do this in background thread)
+            if not hasattr(self, 'executor') or self.executor is None:
+                try:
+                    self._ensure_executor()
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not initialize executor: {e}")
             
             # Load modules in background thread (not main thread!)
             if not self._modules_loaded:
-                self.append_log("📦 Loading translation modules...")
+                self.append_log("📦 Loading translation modules (this may take a moment)...")
                 
                 # Create a progress callback that uses append_log
                 def module_progress(msg):
@@ -7272,6 +7282,8 @@ Provide translations in the same numbered format."""
                 if not self._lazy_load_modules(splash_callback=module_progress):
                     self.append_log("❌ Failed to load required modules")
                     return
+                
+                self.append_log("✅ Translation modules loaded successfully")
             
             # Check for large EPUBs and set optimization parameters
             epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]

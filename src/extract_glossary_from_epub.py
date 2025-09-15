@@ -1489,6 +1489,12 @@ def main(log_callback=None, stop_callback=None):
                         idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
                     )
                     futures[future] = (idx, chap)
+                    # Small yield to keep GUI responsive when submitting many tasks
+                    if idx % 5 == 0:
+                        time.sleep(0.001)
+                    # Small yield to keep GUI responsive when submitting many tasks
+                    if idx % 5 == 0:
+                        time.sleep(0.001)
                 
                 # Process results AS THEY COMPLETE, not all at once
                 for future in as_completed(futures):
