@@ -1,7 +1,0 @@
-[tool.pytest.ini_options]
-addopts = "-q"
-pythonpath = ["src"]
-
-[tool.coverage.run]
-source = ["src"]
-branch = true

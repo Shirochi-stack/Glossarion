@@ -1,91 +1,14 @@
-# Secrets and API keys
-*.key
-.glossarion_key
-**/.*_key
-config.json
+# Ignore everything by default
+*
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+# Allow Python scripts
+!*.py
 
-# PyInstaller
-*.manifest
-*.spec.bak
+# Allow spec files
+!*.spec
 
-# Unit test / coverage reports
-htmlcov/
-htmlconv/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+# Allow .gitignore itself
+!.gitignore
 
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Temporary files
-*.tmp
-*.temp
-howtoruntest.txt
-WARP.md
-
-# Hooks and folders ending with period
-hooks/
-*./
-
-# Scripts folder (if it contains sensitive data)
-scripts/
+# Explicitly ignore all directories (this ensures folders are ignored even if they contain allowed files)
+*/
