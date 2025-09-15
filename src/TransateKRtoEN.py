@@ -4690,6 +4690,9 @@ class GlossaryManager:
                         # Convert to token-efficient format
                         all_csv_lines = self._convert_to_token_efficient_format(all_csv_lines)
 
+                    # Final sanitize to prevent stray headers
+                    all_csv_lines = self._sanitize_final_glossary_lines(all_csv_lines, use_legacy_format)
+
                     # Save
                     csv_content = '\n'.join(all_csv_lines)
                     glossary_path = os.path.join(output_dir, "glossary.csv")
@@ -4786,6 +4789,9 @@ class GlossaryManager:
             use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
             if not use_legacy_format:
                 csv_lines = self._convert_to_token_efficient_format(csv_lines)
+            
+            # Final sanitize to prevent stray headers
+            csv_lines = self._sanitize_final_glossary_lines(csv_lines, use_legacy_format)
             
             # Save
             csv_content = '\n'.join(csv_lines)
@@ -4885,6 +4891,35 @@ class GlossaryManager:
             result.append("")  # Blank line between sections
         
         return result
+    
+    def _sanitize_final_glossary_lines(self, lines, use_legacy_format=False):
+        """Remove stray CSV headers and normalize header placement before saving.
+        - In legacy CSV mode, ensure exactly one header at the very top.
+        - In token-efficient mode, remove any CSV header lines entirely.
+        """
+        header_norm = "type,raw_name,translated_name"
+        if not lines:
+            return lines
+        
+        if use_legacy_format:
+            sanitized = []
+            header_seen = False
+            for ln in lines:
+                txt = ln.strip()
+                if txt.lower().startswith("type,raw_name"):
+                    if not header_seen:
+                        sanitized.append(header_norm)
+                        header_seen = True
+                    # skip duplicates
+                else:
+                    sanitized.append(ln)
+            # ensure header at top
+            if sanitized and not sanitized[0].strip().lower().startswith("type,raw_name"):
+                sanitized.insert(0, header_norm)
+            return sanitized
+        else:
+            # remove any CSV header lines anywhere
+            return [ln for ln in lines if not ln.strip().lower().startswith("type,raw_name")]
     
     def _process_chunks_batch_api(self, chunks_to_process, custom_prompt, language, 
                                   min_frequency, max_names, max_titles, 
@@ -6221,10 +6256,13 @@ Text to analyze:
                     if not use_legacy_format:
                         # Convert to token-efficient format
                         csv_lines = self._convert_to_token_efficient_format(csv_lines)
-
+                    
+                    # Final sanitize to prevent stray headers
+                    csv_lines = self._sanitize_final_glossary_lines(csv_lines, use_legacy_format)
+                    
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
-
+                    
                     # Save glossary as CSV with proper extension
                     glossary_path = os.path.join(output_dir, "glossary.csv")
                     self._atomic_write_file(glossary_path, csv_content)
