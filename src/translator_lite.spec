@@ -67,6 +67,9 @@ app_files = [
     # Glossary extractors
     ('extract_glossary_from_epub.py', '.'),
     ('extract_glossary_from_txt.py', '.'),
+    ('glossary_worker.py', '.'),  # Glossary subprocess worker
+    ('chapter_extraction_worker.py', '.'),  # Chapter extraction subprocess worker
+    ('chapter_extraction_manager.py', '.'),  # Chapter extraction manager
     
     # Utilities
     ('scan_html_folder.py', '.'),
@@ -109,6 +112,9 @@ app_modules = [
     'TransateKRtoEN',
     'extract_glossary_from_epub',
     'extract_glossary_from_txt',
+    'glossary_worker',  # Glossary subprocess worker
+    'chapter_extraction_worker',  # Chapter extraction subprocess worker
+    'chapter_extraction_manager',  # Chapter extraction manager
     'epub_converter',
     'txt_processor',
     'scan_html_folder',
