@@ -2,7 +2,6 @@
 """
 Key Design Principles:
 - The client handles API communication and returns accurate status
-- Retry logic is implemented in the translation layer (TranslateKRtoEN.py)
 - The client must save responses properly for duplicate detection
 - The client must return accurate finish_reason for truncation detection
 - The client must support cancellation for timeout handling
@@ -3011,7 +3010,7 @@ class UnifiedClient:
                 # Mark key as successful in multi-key mode
                 self._mark_key_success()
                 
-                # Log important info for retry mechanisms
+                # Check for truncation and handle retry if enabled
                 if finish_reason in ['length', 'max_tokens']:
                     print(f"Response was truncated: {finish_reason}")
                     print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
@@ -3024,7 +3023,47 @@ class UnifiedClient:
                         context=context,
                         error_details=getattr(response, 'error_details', None) if response else None
                     )
-                    # The calling code will check finish_reason=='length' for retry
+                    
+                    # Check if retry on truncation is enabled
+                    retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                    
+                    if retry_truncated_enabled:
+                        print(f"  🔄 RETRY_TRUNCATED enabled - attempting to retry with increased token limit")
+                        
+                        # Get the max retry tokens limit
+                        max_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+                        current_max_tokens = max_tokens or 8192
+                        
+                        if current_max_tokens < max_retry_tokens:
+                            new_max_tokens = min(current_max_tokens * 2, max_retry_tokens)
+                            print(f"  📊 Retrying with increased tokens: {current_max_tokens} → {new_max_tokens}")
+                            
+                            try:
+                                # Recursive call with increased token limit
+                                retry_content, retry_finish_reason = self._send_internal(
+                                    messages=messages,
+                                    temperature=temperature, 
+                                    max_tokens=new_max_tokens,
+                                    max_completion_tokens=max_completion_tokens,
+                                    context=context,
+                                    retry_reason=f"truncation_retry_{finish_reason}",
+                                    request_id=request_id,
+                                    image_data=image_data
+                                )
+                                
+                                # Check if retry succeeded (not truncated)
+                                if retry_finish_reason not in ['length', 'max_tokens']:
+                                    print(f"  ✅ Truncation retry succeeded: {len(retry_content)} chars")
+                                    return retry_content, retry_finish_reason
+                                else:
+                                    print(f"  ⚠️ Retry was also truncated, returning original response")
+                                    
+                            except Exception as retry_error:
+                                print(f"  ❌ Truncation retry failed: {retry_error}")
+                        else:
+                            print(f"  📊 Already at max retry tokens ({current_max_tokens}), not retrying")
+                    else:
+                        print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
                 
                 # Apply API delay after successful call (even if truncated)
                 # SKIP DELAY DURING CLEANUP

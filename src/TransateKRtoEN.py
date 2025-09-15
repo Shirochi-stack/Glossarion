@@ -3593,11 +3593,14 @@ class TranslationProcessor:
                 retry_reason = ""
                 is_duplicate_retry = False
                 
-                # debug logging to verify the toggle state
-                #print(f"    DEBUG: RETRY_TRUNCATED = {self.config.RETRY_TRUNCATED}, finish_reason = {finish_reason}")
-                #print(f"    DEBUG: Current tokens = {self.config.MAX_OUTPUT_TOKENS}, Min retry tokens = {self.config.MAX_RETRY_TOKENS}")
+                # ENHANCED: Force re-read environment variable for latest setting
+                retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                
+                # Debug logging to verify the toggle state
+                print(f"    DEBUG: finish_reason='{finish_reason}', RETRY_TRUNCATED={retry_truncated_enabled}, config.RETRY_TRUNCATED={self.config.RETRY_TRUNCATED}")
+                print(f"    DEBUG: Current tokens={self.config.MAX_OUTPUT_TOKENS}, Min retry tokens={self.config.MAX_RETRY_TOKENS}, retry_count={retry_count}")
                     
-                if finish_reason == "length" and self.config.RETRY_TRUNCATED:
+                if finish_reason == "length" and (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
                     if retry_count < max_retries:
                         # For truncated responses, ensure we never go below the minimum retry tokens
                         proposed_limit = self.config.MAX_OUTPUT_TOKENS * 2
@@ -3613,13 +3616,17 @@ class TranslationProcessor:
                             retry_count += 1
                             
                             if old_limit < self.config.MAX_RETRY_TOKENS:
-                                print(f"    🔄 Boosting tokens: {old_limit} → {new_token_limit} (enforcing minimum: {self.config.MAX_RETRY_TOKENS})")
+                                print(f"    🔄 TRUNCATION RETRY: Boosting tokens {old_limit} → {new_token_limit} (enforcing minimum: {self.config.MAX_RETRY_TOKENS})")
                             else:
-                                print(f"    🔄 Doubling tokens: {old_limit} → {new_token_limit} (above minimum: {self.config.MAX_RETRY_TOKENS})")
+                                print(f"    🔄 TRUNCATION RETRY: Doubling tokens {old_limit} → {new_token_limit} (above minimum: {self.config.MAX_RETRY_TOKENS})")
                         else:
-                            print(f"    ⚠️ Token adjustment not needed: already at {self.config.MAX_OUTPUT_TOKENS}")
-                elif finish_reason == "length" and not self.config.RETRY_TRUNCATED:
-                    print(f"    ⏭️ Auto-retry is DISABLED - accepting truncated response")
+                            print(f"    ⚠️ TRUNCATION DETECTED: Token adjustment not needed - already at maximum {self.config.MAX_OUTPUT_TOKENS}")
+                    else:
+                        print(f"    ⚠️ TRUNCATION DETECTED: Max retries ({max_retries}) reached - accepting truncated response")
+                elif finish_reason == "length" and not (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
+                    print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
+                elif finish_reason == "length":
+                    print(f"    ⚠️ TRUNCATION DETECTED: Unexpected condition - check logic")
                 
                 if not retry_needed:
                     # Force re-read the environment variable to ensure we have current setting
