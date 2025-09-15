@@ -5378,7 +5378,7 @@ Rules:
                       variable=self.enable_auto_glossary_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT)
         
-        tk.Label(master_toggle_frame, text="(NOT RECOMMENDED, Automatic extraction and translation of character names)",
+        tk.Label(master_toggle_frame, text="(Automatic extraction and translation of character names/Terms)",
                 font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
         
         # Append glossary toggle
