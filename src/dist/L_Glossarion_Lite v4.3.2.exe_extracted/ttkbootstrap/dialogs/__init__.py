@@ -1,1 +1,0 @@
-from ttkbootstrap.dialogs.dialogs import *
