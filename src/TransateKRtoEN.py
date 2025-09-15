@@ -4067,7 +4067,7 @@ class GlossaryManager:
             return {}
         
         # Check if glossary already exists
-        glossary_path = os.path.join(output_dir, "glossary.json")
+        glossary_path = os.path.join(output_dir, "glossary.csv")
         if os.path.exists(glossary_path):
             print(f"📑 ✅ Glossary already exists at: {glossary_path}")
             try:
@@ -4110,7 +4110,7 @@ class GlossaryManager:
         if manual_glossary_path and os.path.exists(manual_glossary_path):
             print(f"📑 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
             
-            target_path = os.path.join(output_dir, "glossary.json")
+            target_path = os.path.join(output_dir, "glossary.csv")
             try:
                 # Read manual glossary
                 with open(manual_glossary_path, 'r', encoding='utf-8') as f:
@@ -4129,10 +4129,7 @@ class GlossaryManager:
                         f.write(csv_content)
                     print(f"📑 ✅ Manual glossary converted to CSV and saved to: {target_path}")
                 
-                # Also save simple version
-                simple_path = os.path.join(output_dir, "glossary_simple.json")
-                with open(simple_path, 'w', encoding='utf-8') as f:
-                    f.write(csv_content if 'csv_content' in locals() else content)
+                # No need for simple version anymore
                 
                 return self._parse_csv_to_dict(csv_content if 'csv_content' in locals() else content)
                 
@@ -4201,6 +4198,11 @@ class GlossaryManager:
         
         all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
         print(f"📑 Processing {len(all_text):,} characters of text")
+        
+        # Apply smart filtering if enabled
+        use_smart_filter = os.getenv("GLOSSARY_USE_SMART_FILTER", "1") == "1"
+        if use_smart_filter and custom_prompt:  # Only apply for AI extraction
+            print(f"📑 Smart filtering enabled for AI extraction")
         
         # Check if we need to split into chunks
         if chapter_split_threshold > 0 and len(all_text) > chapter_split_threshold:
@@ -4288,7 +4290,7 @@ class GlossaryManager:
 
                         # Save
                         csv_content = '\n'.join(all_csv_lines)
-                        glossary_path = os.path.join(output_dir, "glossary.json")
+                        glossary_path = os.path.join(output_dir, "glossary.csv")
                         self._atomic_write_file(glossary_path, csv_content)
                         
                         print(f"\n📑 ✅ GLOSSARY SAVED!")
@@ -4411,7 +4413,7 @@ class GlossaryManager:
                 csv_content = '\n'.join(csv_lines)
                 
                 # Save and return
-                glossary_path = os.path.join(output_dir, "glossary.json")
+                glossary_path = os.path.join(output_dir, "glossary.csv")
                 self._atomic_write_file(glossary_path, csv_content)
                 
                 print(f"\n📑 ✅ CHUNKED GLOSSARY SAVED!")
@@ -4488,8 +4490,8 @@ class GlossaryManager:
                 # Create final CSV content
                 csv_content = '\n'.join(csv_lines)
 
-                # Save glossary as CSV (with .json extension for compatibility)
-                glossary_path = os.path.join(output_dir, "glossary.json")
+                # Save glossary as CSV with proper .csv extension
+                glossary_path = os.path.join(output_dir, "glossary.csv")
                 self._atomic_write_file(glossary_path, csv_content)
 
                 print(f"\n📑 ✅ GLOSSARY SAVED!")
@@ -4809,7 +4811,7 @@ class GlossaryManager:
         return False
     
     def _convert_to_csv_format(self, data):
-        """Convert various glossary formats to CSV string format"""
+        """Convert various glossary formats to CSV string format with enforced 3 columns"""
         csv_lines = ["type,raw_name,translated_name"]
         
         if isinstance(data, str):
@@ -4828,12 +4830,10 @@ class GlossaryManager:
                     if 'type' in item and 'raw_name' in item:
                         # Already in correct format
                         line = f"{item['type']},{item['raw_name']},{item.get('translated_name', item['raw_name'])}"
-                        if 'gender' in item and item['gender']:
-                            line += f",{item['gender']}"
                         csv_lines.append(line)
                     else:
-                        # Old format
-                        entry_type = 'character'
+                        # Old format - default to 'term' type
+                        entry_type = 'term'
                         raw_name = item.get('original_name', '')
                         translated_name = item.get('name', raw_name)
                         if raw_name and translated_name:
@@ -4845,7 +4845,7 @@ class GlossaryManager:
                 for original, translated in data['entries'].items():
                     csv_lines.append(f"term,{original},{translated}")
             else:
-                # Plain dictionary
+                # Plain dictionary - default to 'term' type
                 for original, translated in data.items():
                     csv_lines.append(f"term,{original},{translated}")
         
@@ -5168,6 +5168,88 @@ class GlossaryManager:
             print(f"❌ Traditional API translation error: {e}")
             return None
     
+    def _filter_text_for_glossary(self, text, min_frequency=2):
+        """Filter text to extract only meaningful content for glossary extraction"""
+        import re
+        from collections import Counter
+        
+        # Clean HTML if present
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(text, 'html.parser')
+        clean_text = soup.get_text()
+        
+        # Split into sentences for better context
+        sentences = re.split(r'[.!?。！？]+', clean_text)
+        
+        # Extract potential terms (words/phrases that appear multiple times)
+        word_freq = Counter()
+        
+        # Pattern for detecting potential names/terms based on capitalization or special characters
+        # Korean names: 2-4 hangul characters
+        korean_pattern = r'[가-힣]{2,4}'
+        # Japanese names: kanji/hiragana/katakana combinations
+        japanese_pattern = r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,6}'
+        # Chinese names: 2-4 Chinese characters
+        chinese_pattern = r'[\u4e00-\u9fff]{2,4}'
+        # English proper nouns: Capitalized words
+        english_pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
+        
+        # Combine patterns
+        combined_pattern = f'({korean_pattern}|{japanese_pattern}|{chinese_pattern}|{english_pattern})'
+        
+        # Extract potential terms from each sentence
+        important_sentences = []
+        seen_contexts = set()
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) < 10 or len(sentence) > 500:  # Skip too short or too long sentences
+                continue
+                
+            # Find all potential terms in this sentence
+            matches = re.findall(combined_pattern, sentence)
+            
+            if matches:
+                # Count frequency of each match
+                for match in matches:
+                    word_freq[match] += 1
+                
+                # Keep sentences with potential terms
+                # Avoid duplicate contexts by checking similarity
+                sentence_key = ' '.join(sorted(matches))
+                if sentence_key not in seen_contexts:
+                    important_sentences.append(sentence)
+                    seen_contexts.add(sentence_key)
+        
+        # Filter to keep only terms that appear at least min_frequency times
+        frequent_terms = {term: count for term, count in word_freq.items() if count >= min_frequency}
+        
+        # Build filtered text focusing on sentences containing frequent terms
+        filtered_sentences = []
+        for sentence in important_sentences:
+            if any(term in sentence for term in frequent_terms):
+                filtered_sentences.append(sentence)
+        
+        # Limit the number of sentences to reduce token usage
+        max_sentences = int(os.getenv("GLOSSARY_MAX_SENTENCES", "200"))
+        if len(filtered_sentences) > max_sentences:
+            # Take a representative sample
+            step = len(filtered_sentences) // max_sentences
+            filtered_sentences = filtered_sentences[::step][:max_sentences]
+        
+        filtered_text = ' '.join(filtered_sentences)
+        
+        # Log filtering statistics
+        original_length = len(clean_text)
+        filtered_length = len(filtered_text)
+        reduction_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
+        
+        print(f"📑 Text filtering: {original_length:,} → {filtered_length:,} chars ({reduction_percent:.1f}% reduction)")
+        print(f"📑 Found {len(frequent_terms)} potential glossary terms (min frequency: {min_frequency})")
+        print(f"📑 Using {len(filtered_sentences)} representative sentences")
+        
+        return filtered_text, frequent_terms
+    
     def _extract_with_custom_prompt(self, custom_prompt, all_text, language, 
                                    min_frequency, max_names, max_titles, 
                                    existing_glossary, output_dir, 
@@ -5181,13 +5263,8 @@ class GlossaryManager:
             print("📑 ❌ Glossary extraction stopped by user")
             return {}
         
-        # Add filter mode instructions to the prompt if needed
-        if filter_mode == "only_with_honorifics":
-            filter_instruction = "\nIMPORTANT: Only extract character names that appear with honorifics (님, 씨, さん, 様, Mr., Ms., etc.). Do NOT extract any terms, titles, or names without honorifics."
-            custom_prompt = custom_prompt + filter_instruction
-        elif filter_mode == "only_without_honorifics":
-            filter_instruction = "\nIMPORTANT: Extract character names without honorifics AND terms/titles. Do NOT extract names that have honorifics attached."
-            custom_prompt = custom_prompt + filter_instruction
+        # Note: Filter mode can be controlled via the configurable prompt environment variable
+        # No hardcoded filter instructions are added here
         
         try:
             MODEL = os.getenv("MODEL", "gemini-2.0-flash")
@@ -5223,8 +5300,17 @@ class GlossaryManager:
                         print("📑 ❌ Glossary extraction stopped during delay")
                         return {}
                     
-                max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
-                text_sample = all_text[:max_text_size] if len(all_text) > max_text_size and max_text_size > 0 else all_text
+                # Apply smart filtering to reduce noise and focus on meaningful content
+                use_smart_filter = os.getenv("GLOSSARY_USE_SMART_FILTER", "1") == "1"
+                
+                if use_smart_filter:
+                    print("📑 Applying smart text filtering to reduce noise...")
+                    text_sample, detected_terms = self._filter_text_for_glossary(all_text, min_frequency)
+                else:
+                    # Fallback to simple truncation
+                    max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
+                    text_sample = all_text[:max_text_size] if len(all_text) > max_text_size and max_text_size > 0 else all_text
+                    detected_terms = {}
                 
                 # Replace placeholders in prompt
                 prompt = custom_prompt.replace('{language}', language)
@@ -5259,7 +5345,7 @@ Text to analyze:
                 enhanced_prompt = f"{prompt}\n\n{format_instructions}"
                 
                 messages = [
-                    {"role": "system", "content": "You are a glossary extraction assistant. Return ONLY CSV format, no JSON, no other formatting."},
+                    {"role": "system", "content": "You are a glossary extraction assistant. Return ONLY CSV format with exactly 3 columns: type,raw_name,translated_name. The 'type' column should classify entries (e.g., character, term, location, etc.)."},
                     {"role": "user", "content": enhanced_prompt}
                 ]
                 
@@ -5357,7 +5443,7 @@ Text to analyze:
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
 
-                    # Save glossary as CSV
+                    # Save glossary as CSV with proper extension
                     glossary_path = os.path.join(output_dir, "glossary.csv")
                     self._atomic_write_file(glossary_path, csv_content)
                     
@@ -5484,29 +5570,31 @@ Text to analyze:
         if skip_all_validation:
             print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
             
-            # Add header
+            # Always use the enforced 3-column header
             csv_lines.append("type,raw_name,translated_name")
             
-            # Just accept everything the AI returns
+            # Process the AI response
             for line in lines:
                 # Skip header lines
                 if 'type' in line.lower() and 'raw_name' in line.lower():
                     continue
                     
                 # Parse CSV line
-                parts = [p.strip().strip('"\'') for p in line.split(',')]
+                parts = [p.strip().strip('"\"') for p in line.split(',')]
                 
                 if len(parts) >= 3:
-                    entry_type = parts[0].lower()
+                    # Has all 3 columns
+                    entry_type = parts[0]
                     raw_name = parts[1]
                     translated_name = parts[2]
-                    
                     if raw_name and translated_name:
-                        csv_line = f"{entry_type},{raw_name},{translated_name}"
-                        # Add gender if present
-                        if len(parts) > 3 and parts[3]:
-                            csv_line += f",{parts[3]}"
-                        csv_lines.append(csv_line)
+                        csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                elif len(parts) == 2:
+                    # Missing type, default to 'term'
+                    raw_name = parts[0]
+                    translated_name = parts[1]
+                    if raw_name and translated_name:
+                        csv_lines.append(f"term,{raw_name},{translated_name}")
             
             print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
             return csv_lines
@@ -5537,12 +5625,20 @@ Text to analyze:
                 continue
             
             # Parse CSV line
-            parts = [p.strip().strip('"\'') for p in line.split(',')]
+            parts = [p.strip().strip('"\"') for p in line.split(',')]
             
             if len(parts) >= 3:
+                # Has all required columns
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
                 translated_name = parts[2]
+            elif len(parts) == 2:
+                # Missing type column, default to 'term'
+                entry_type = 'term'
+                raw_name = parts[0]
+                translated_name = parts[1]
+            else:
+                continue  # Skip invalid lines
                 
                 if not raw_name or not translated_name:
                     continue
@@ -5551,16 +5647,12 @@ Text to analyze:
                 if filter_mode == "only_with_honorifics":
                     # Just add it - AI already filtered for honorifics
                     csv_line = f"{entry_type},{raw_name},{translated_name}"
-                    if len(parts) > 3 and parts[3]:
-                        csv_line += f",{parts[3]}"
                     csv_lines.append(csv_line)
                     if line_num <= 5:  # Log first few entries
-                        print(f"📑   Added (honorifics mode): {entry_type},{raw_name},{translated_name}")
+                        print(f"📑   Added (honorifics mode): {csv_line}")
                 elif skip_frequency_check:
                     # Skip all frequency checking
                     csv_line = f"{entry_type},{raw_name},{translated_name}"
-                    if len(parts) > 3 and parts[3]:
-                        csv_line += f",{parts[3]}"
                     csv_lines.append(csv_line)
                 else:
                     # Normal frequency checking for other modes
@@ -5585,17 +5677,16 @@ Text to analyze:
                                     break
                     
                     if count >= min_frequency:
+                        # Use enforced 3-column format
                         csv_line = f"{entry_type},{raw_name},{translated_name}"
-                        if len(parts) > 3 and parts[3]:
-                            csv_line += f",{parts[3]}"
                         csv_lines.append(csv_line)
                         if line_num <= 10:
-                            print(f"📑   ✓ Added: {entry_type},{raw_name},{translated_name} (count: {count})")
+                            print(f"📑   ✓ Added: {csv_line} (count: {count})")
                     else:
                         if line_num <= 10:
                             print(f"📑   ✗ Skipped: {raw_name} (count: {count} < {min_frequency})")
         
-        # Ensure header exists
+        # Ensure header exists with enforced 3-column format
         if not header_found:
             csv_lines.insert(0, "type,raw_name,translated_name")
         

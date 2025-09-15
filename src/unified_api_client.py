@@ -4780,8 +4780,8 @@ class UnifiedClient:
                 # Create model instance
                 vertex_model = GenerativeModel(model_name)
                 
-                # Format messages for Vertex AI Gemini
-                formatted_prompt = self._format_gemini_prompt_simple(messages)
+                # Format messages for Vertex AI Gemini using existing formatter
+                formatted_prompt = self._format_prompt(messages, style='gemini')
                 
                 # Check if safety settings are disabled via config (from GUI)
                 disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
