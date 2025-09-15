@@ -34,6 +34,7 @@ MANIFEST
 
 # Unit test / coverage reports
 htmlcov/
+htmlconv/
 .tox/
 .nox/
 .coverage
@@ -80,6 +81,11 @@ logs/
 *.tmp
 *.temp
 howtoruntest.txt
+WARP.md
+
+# Hooks and folders ending with period
+hooks/
+*./
 
 # Scripts folder (if it contains sensitive data)
 scripts/
