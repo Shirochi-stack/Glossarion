@@ -7311,7 +7311,12 @@ class UnifiedClient:
                             elif norm_max_tokens is not None:
                                 params["max_tokens"] = norm_max_tokens
 
-                            response = client.chat.completions.create(**params, idempotency_key=self._get_idempotency_key())
+                            # Use Idempotency-Key via headers for compatibility
+                            idem_key = self._get_idempotency_key()
+                            response = client.chat.completions.create(
+                                **params,
+                                extra_headers={"Idempotency-Key": idem_key}
+                            )
                             
                             # Extract response
                             content = response.choices[0].message.content if response.choices else ""
@@ -7454,7 +7459,12 @@ class UnifiedClient:
                         params["moderation"] = False
                         logger.info(f"🔓 Safety moderation disabled for {provider}")
                     
-                    resp = client.chat.completions.create(**params, idempotency_key=self._get_idempotency_key())
+                    # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
+                    idem_key = self._get_idempotency_key()
+                    resp = client.chat.completions.create(
+                        **params,
+                        extra_headers={"Idempotency-Key": idem_key}
+                    )
                     
                     # Enhanced extraction for Gemini endpoints
                     content = None

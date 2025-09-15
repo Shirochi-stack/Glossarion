@@ -7730,65 +7730,63 @@ Provide translations in the same numbered format."""
                         try:
                             self.append_log(f"📑 Loading glossary for system prompt: {os.path.basename(manual_glossary_path)}")
                             
-                            with open(manual_glossary_path, 'r', encoding='utf-8') as f:
-                                glossary_data = json.load(f)
-                                
-                            output_glossary_path = os.path.join(output_dir, "glossary.json")
-                            with open(output_glossary_path, 'w', encoding='utf-8') as f:
-                                json.dump(glossary_data, f, ensure_ascii=False, indent=2)
-                            self.append_log(f"💾 Saved glossary to output folder for auto-loading")
+                            # Copy to output as the same extension, and prefer CSV naming
+                            ext = os.path.splitext(manual_glossary_path)[1].lower()
+                            out_name = "glossary.csv" if ext == ".csv" else "glossary.json"
+                            output_glossary_path = os.path.join(output_dir, out_name)
+                            try:
+                                import shutil as _shutil
+                                _shutil.copy(manual_glossary_path, output_glossary_path)
+                                self.append_log(f"💾 Saved glossary to output folder for auto-loading: {out_name}")
+                            except Exception as copy_err:
+                                self.append_log(f"⚠️ Could not copy glossary into output: {copy_err}")
                             
-                            # Format glossary for prompt
-                            formatted_entries = {}
-                            
-                            if isinstance(glossary_data, list):
-                                # List format (from glossary extractor)
-                                for char in glossary_data:
-                                    if not isinstance(char, dict):
-                                        continue
-                                        
-                                    original = char.get('original_name', '')
-                                    translated = char.get('name', original)
-                                    if original and translated:
-                                        formatted_entries[original] = translated
-                                    
-                                    # Include titles if present
-                                    title = char.get('title')
-                                    if title and original:
-                                        formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
-                                    
-                                    # Include reference mappings
-                                    refer_map = char.get('how_they_refer_to_others', {})
-                                    if isinstance(refer_map, dict):
-                                        for other_name, reference in refer_map.items():
-                                            if other_name and reference:
-                                                formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
-                            
-                            elif isinstance(glossary_data, dict):
-                                # Dictionary format
-                                if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
-                                    formatted_entries = glossary_data["entries"]
-                                else:
-                                    # Direct dictionary, exclude metadata
-                                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-                            
-                            # Append glossary to system prompt if we have entries
-                            if formatted_entries:
-                                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                                
-                                # Add newlines if system prompt already has content
+                            # Append to prompt
+                            if ext == ".csv":
+                                with open(manual_glossary_path, 'r', encoding='utf-8') as f:
+                                    csv_text = f.read()
                                 if system_prompt:
                                     system_prompt += "\n\n"
-                                
-                                # Get custom glossary prompt or use default
                                 glossary_prompt = self.config.get('append_glossary_prompt', 
                                     "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
-                                
-                                system_prompt += f"{glossary_prompt}\n{glossary_block}"
-                                
-                                self.append_log(f"✅ Added {len(formatted_entries)} glossary entries to system prompt")
+                                system_prompt += f"{glossary_prompt}\n{csv_text}"
+                                self.append_log(f"✅ Appended CSV glossary to system prompt")
                             else:
-                                self.append_log(f"⚠️ Glossary file has no valid entries")
+                                with open(manual_glossary_path, 'r', encoding='utf-8') as f:
+                                    glossary_data = json.load(f)
+                                
+                                formatted_entries = {}
+                                if isinstance(glossary_data, list):
+                                    for char in glossary_data:
+                                        if not isinstance(char, dict):
+                                            continue
+                                        original = char.get('original_name', '')
+                                        translated = char.get('name', original)
+                                        if original and translated:
+                                            formatted_entries[original] = translated
+                                        title = char.get('title')
+                                        if title and original:
+                                            formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
+                                        refer_map = char.get('how_they_refer_to_others', {})
+                                        if isinstance(refer_map, dict):
+                                            for other_name, reference in refer_map.items():
+                                                if other_name and reference:
+                                                    formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
+                                elif isinstance(glossary_data, dict):
+                                    if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
+                                        formatted_entries = glossary_data["entries"]
+                                    else:
+                                        formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+                                if formatted_entries:
+                                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                                    if system_prompt:
+                                        system_prompt += "\n\n"
+                                    glossary_prompt = self.config.get('append_glossary_prompt', 
+                                        "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+                                    system_prompt += f"{glossary_prompt}\n{glossary_block}"
+                                    self.append_log(f"✅ Added {len(formatted_entries)} glossary entries to system prompt")
+                                else:
+                                    self.append_log(f"⚠️ Glossary file has no valid entries")
                                 
                         except Exception as e:
                             self.append_log(f"⚠️ Failed to append glossary to prompt: {str(e)}")
@@ -11670,26 +11668,39 @@ Important rules:
         file_base = os.path.splitext(os.path.basename(file_path))[0]
         output_dir = file_base
         
+        # Prefer CSV over JSON when both exist
         glossary_candidates = [
+            os.path.join(output_dir, "glossary.csv"),
+            os.path.join(output_dir, f"{file_base}_glossary.csv"),
+            os.path.join(output_dir, "Glossary", f"{file_base}_glossary.csv"),
             os.path.join(output_dir, "glossary.json"),
             os.path.join(output_dir, f"{file_base}_glossary.json"),
             os.path.join(output_dir, "Glossary", f"{file_base}_glossary.json")
         ]
-        
         for glossary_path in glossary_candidates:
             if os.path.exists(glossary_path):
+                ext = os.path.splitext(glossary_path)[1].lower()
                 try:
-                    with open(glossary_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    
-                    if data:
+                    if ext == '.csv':
+                        # Accept CSV without parsing
                         self.manual_glossary_path = glossary_path
                         self.auto_loaded_glossary_path = glossary_path
                         self.auto_loaded_glossary_for_file = file_path
                         self.manual_glossary_manually_loaded = False  # This is auto-loaded
-                        self.append_log(f"📑 Auto-loaded glossary for {file_base}: {os.path.basename(glossary_path)}")
-                        return True
+                        self.append_log(f"📑 Auto-loaded glossary (CSV) for {file_base}: {os.path.basename(glossary_path)}")
+                        break
+                    else:
+                        with open(glossary_path, 'r', encoding='utf-8') as f:
+                            glossary_data = json.load(f)
+                        self.manual_glossary_path = glossary_path
+                        self.auto_loaded_glossary_path = glossary_path
+                        self.auto_loaded_glossary_for_file = file_path
+                        self.manual_glossary_manually_loaded = False  # This is auto-loaded
+                        self.append_log(f"📑 Auto-loaded glossary (JSON) for {file_base}: {os.path.basename(glossary_path)}")
+                        break
                 except Exception:
+                    # If JSON parsing fails, try next candidate
+                    continue
                     continue
         
         return False

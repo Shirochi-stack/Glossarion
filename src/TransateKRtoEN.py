@@ -5357,8 +5357,8 @@ Text to analyze:
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
 
-                    # Save glossary as CSV (with .json extension for compatibility)
-                    glossary_path = os.path.join(output_dir, "glossary.json")
+                    # Save glossary as CSV
+                    glossary_path = os.path.join(output_dir, "glossary.csv")
                     self._atomic_write_file(glossary_path, csv_content)
                     
                     print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
@@ -6148,9 +6148,8 @@ Text to analyze:
         
         # Create CSV content
         csv_content = '\n'.join(csv_lines)
-        
-        # Save glossary as CSV (with .json extension for compatibility)
-        glossary_path = os.path.join(output_dir, "glossary.json")
+        # Save glossary as CSV
+        glossary_path = os.path.join(output_dir, "glossary.csv")
         self._atomic_write_file(glossary_path, csv_content)
         
         print(f"\n📑 ✅ TARGETED GLOSSARY SAVED!")
@@ -6567,6 +6566,17 @@ def get_content_hash(html_content):
 def clean_ai_artifacts(text, remove_artifacts=True):
     """Remove AI response artifacts from text"""
     return ContentProcessor.clean_ai_artifacts(text, remove_artifacts)
+
+def find_glossary_file(output_dir):
+    """Return path to glossary file preferring CSV over JSON, or None if not found"""
+    candidates = [
+        os.path.join(output_dir, "glossary.csv"),
+        os.path.join(output_dir, "glossary.json"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
 
 def clean_memory_artifacts(text):
     """Remove any memory/summary artifacts"""
@@ -8268,7 +8278,9 @@ def main(log_callback=None, stop_callback=None):
     print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
 
     if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
-        target_path = os.path.join(out, "glossary.json")
+        ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
+        target_name = "glossary.csv" if ext == ".csv" else "glossary.json"
+        target_path = os.path.join(out, target_name)
         if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
             shutil.copy(config.MANUAL_GLOSSARY, target_path)
             print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
@@ -8291,45 +8303,47 @@ def main(log_callback=None, stop_callback=None):
                 if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
                     print("📑 Processing deferred glossary append to system prompt...")
                     
-                    glossary_path = os.path.join(out, "glossary.json")
-                    if os.path.exists(glossary_path):
+                    glossary_path = find_glossary_file(out)
+                    if glossary_path and os.path.exists(glossary_path):
                         try:
-                            with open(glossary_path, 'r', encoding='utf-8') as f:
-                                glossary_data = json.load(f)
-                            
-                            # Format glossary for prompt
-                            formatted_entries = {}
-                            
-                            if isinstance(glossary_data, dict) and 'entries' in glossary_data:
-                                formatted_entries = glossary_data['entries']
-                            elif isinstance(glossary_data, dict):
-                                formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-                            
-                            if formatted_entries:
-                                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                            glossary_block = None
+                            if glossary_path.lower().endswith('.csv'):
+                                with open(glossary_path, 'r', encoding='utf-8') as f:
+                                    glossary_block = f.read()
+                            else:
+                                with open(glossary_path, 'r', encoding='utf-8') as f:
+                                    glossary_data = json.load(f)
                                 
-                                # Get the stored append prompt
+                                formatted_entries = {}
+                                if isinstance(glossary_data, dict) and 'entries' in glossary_data:
+                                    formatted_entries = glossary_data['entries']
+                                elif isinstance(glossary_data, dict):
+                                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+                                
+                                if formatted_entries:
+                                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                                else:
+                                    glossary_block = None
+                            
+                            if glossary_block:
                                 glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
                                     "Character/Term Glossary (use these translations consistently):")
                                 
-                                # Update the system prompt in config
                                 current_prompt = config.PROMPT
                                 if current_prompt:
                                     current_prompt += "\n\n"
                                 current_prompt += f"{glossary_prompt}\n{glossary_block}"
                                 
-                                # Update the config with the new prompt
                                 config.PROMPT = current_prompt
                                 
-                                print(f"✅ Added {len(formatted_entries)} auto-generated glossary entries to system prompt")
+                                print(f"✅ Added auto-generated glossary to system prompt ({os.path.basename(glossary_path)})")
                                 
-                                # Clear the deferred flag
-                                del os.environ['DEFER_GLOSSARY_APPEND']
+                                if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                                    del os.environ['DEFER_GLOSSARY_APPEND']
                                 if 'GLOSSARY_APPEND_PROMPT' in os.environ:
                                     del os.environ['GLOSSARY_APPEND_PROMPT']
                             else:
                                 print("⚠️ Auto-generated glossary has no entries - skipping append")
-                                # Still clear the deferred flag even if we don't append
                                 if 'DEFER_GLOSSARY_APPEND' in os.environ:
                                     del os.environ['DEFER_GLOSSARY_APPEND']
                                 if 'GLOSSARY_APPEND_PROMPT' in os.environ:
@@ -8345,59 +8359,67 @@ def main(log_callback=None, stop_callback=None):
         print("📑 Automatic glossary generation disabled")
         # Don't create an empty glossary - let any existing manual glossary remain
 
-    glossary_path = os.path.join(out, "glossary.json")
-    if os.path.exists(glossary_path):
+    glossary_file = find_glossary_file(out)
+    if glossary_file and os.path.exists(glossary_file):
         try:
-            with open(glossary_path, 'r', encoding='utf-8') as f:
-                glossary_data = json.load(f)
-            
-            if isinstance(glossary_data, dict):
-                if 'entries' in glossary_data and isinstance(glossary_data['entries'], dict):
-                    entry_count = len(glossary_data['entries'])
-                    sample_items = list(glossary_data['entries'].items())[:3]
-                else:
-                    entry_count = len(glossary_data)
-                    sample_items = list(glossary_data.items())[:3]
-                
-                print(f"📑 Glossary ready with {entry_count} entries")
-                print("📑 Sample glossary entries:")
-                for key, value in sample_items:
-                    print(f"   • {key} → {value}")
-                    
-            elif isinstance(glossary_data, list):
-                print(f"📑 Glossary ready with {len(glossary_data)} entries")
-                print("📑 Sample glossary entries:")
-                for i, entry in enumerate(glossary_data[:3]):
-                    if isinstance(entry, dict):
-                        original = entry.get('original_name', '?')
-                        translated = entry.get('name', original)
-                        print(f"   • {original} → {translated}")
+            if glossary_file.lower().endswith('.csv'):
+                # Quick CSV stats
+                with open(glossary_file, 'r', encoding='utf-8') as f:
+                    lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+                entry_count = max(0, len(lines) - 1) if lines and ',' in lines[0] else len(lines)
+                print(f"📑 Glossary ready (CSV) with {entry_count} entries")
+                print("📑 Sample glossary lines:")
+                for ln in lines[1:4]:
+                    print(f"   • {ln}")
             else:
-                print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
+                with open(glossary_file, 'r', encoding='utf-8') as f:
+                    glossary_data = json.load(f)
+                
+                if isinstance(glossary_data, dict):
+                    if 'entries' in glossary_data and isinstance(glossary_data['entries'], dict):
+                        entry_count = len(glossary_data['entries'])
+                        sample_items = list(glossary_data['entries'].items())[:3]
+                    else:
+                        entry_count = len(glossary_data)
+                        sample_items = list(glossary_data.items())[:3]
+                    
+                    print(f"📑 Glossary ready with {entry_count} entries")
+                    print("📑 Sample glossary entries:")
+                    for key, value in sample_items:
+                        print(f"   • {key} → {value}")
+                        
+                elif isinstance(glossary_data, list):
+                    print(f"📑 Glossary ready with {len(glossary_data)} entries")
+                    print("📑 Sample glossary entries:")
+                    for i, entry in enumerate(glossary_data[:3]):
+                        if isinstance(entry, dict):
+                            original = entry.get('original_name', '?')
+                            translated = entry.get('name', original)
+                            print(f"   • {original} → {translated}")
+                else:
+                    print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
                 
         except Exception as e:
-            print(f"⚠️ Glossary file exists but is not valid JSON: {e}")
-            print(f"📑 Will use as-is (might be CSV/TXT format)")
-            # REMOVED: Don't overwrite the file!
+            print(f"⚠️ Failed to inspect glossary file: {e}")
     else:
-        print("📑 No glossary.json file found")
-        # REMOVED: Don't create empty file!
+        print("📑 No glossary file found")
 
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
     print("="*50 + "\n")
 
-    glossary_path = os.path.join(out, "glossary.json")
-    if os.path.exists(glossary_path):
+    glossary_path = find_glossary_file(out)
+    if glossary_path and os.path.exists(glossary_path) and glossary_path.lower().endswith('.json'):
         try:
             with open(glossary_path, 'r', encoding='utf-8') as f:
                 g_data = json.load(f)
+            
             print(f"[DEBUG] Glossary type before translation: {type(g_data)}")
             if isinstance(g_data, list):
                 print(f"[DEBUG] Glossary is a list")
         except Exception as e:
             print(f"[DEBUG] Error checking glossary: {e}")
-            
+    glossary_path = find_glossary_file(out)
     system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path)
     base_msg = [{"role": "system", "content": system}]
     
