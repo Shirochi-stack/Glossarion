@@ -413,6 +413,9 @@ class MultiAPIKeyDialog:
             
             # Save fallback settings
             self.translator_gui.config['use_fallback_keys'] = self.use_fallback_var.get()
+            # Update the parent GUI's variable to stay in sync
+            if hasattr(self.translator_gui, 'use_fallback_keys_var'):
+                self.translator_gui.use_fallback_keys_var.set(self.use_fallback_var.get())
             # Fallback keys are already saved when added/removed
             
             # Use the current state of the toggle

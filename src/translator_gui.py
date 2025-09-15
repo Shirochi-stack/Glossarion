@@ -1183,7 +1183,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.3.1"
+        __version__ = "4.3.2"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -2070,7 +2070,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.3.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.3.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -8335,6 +8335,13 @@ Provide translations in the same numbered format."""
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
             'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
             'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
+            # New network/HTTP controls
+            'CONNECT_TIMEOUT': str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))),
+            'READ_TIMEOUT': str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180')))),
+            'HTTP_POOL_CONNECTIONS': str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))),
+            'HTTP_POOL_MAXSIZE': str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))),
+            'RETRY_AFTER_MAX_WAIT': str(self.config.get('retry_after_max_wait', os.environ.get('RETRY_AFTER_MAX_WAIT', '120'))),
+            'MAX_RETRIES': str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))),
             'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
             'BATCH_SIZE': self.batch_size_var.get(),
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
@@ -8344,7 +8351,7 @@ Provide translations in the same numbered format."""
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
             'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var.get(),
-            'USE_FALLBACK_KEYS': '1' if self.use_fallback_keys_var.get() else '0',
+            'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
             # Extraction settings
@@ -12973,6 +12980,82 @@ Important rules:
 
         tk.Label(section_frame, text="Retry chunks/images that take too long\n(reduces tokens for faster response)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+
+        # Separator
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+
+        # HTTP Timeouts & Connection Pooling
+        title_http = tk.Label(section_frame, text="HTTP Timeouts & Connection Pooling", 
+                              font=('TkDefaultFont', 11, 'bold'))
+        title_http.pack(anchor=tk.W)
+
+        http_frame = tk.Frame(section_frame)
+        http_frame.pack(anchor=tk.W, padx=20, pady=(5, 0), fill=tk.X)
+
+        # Build a compact grid so fields align nicely
+        http_grid = tk.Frame(http_frame)
+        http_grid.pack(anchor=tk.W, fill=tk.X)
+
+        if not hasattr(self, 'connect_timeout_var'):
+            self.connect_timeout_var = tk.StringVar(value=str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))))
+        if not hasattr(self, 'read_timeout_var'):
+            # Default to READ_TIMEOUT, fallback to CHUNK_TIMEOUT if provided, else 180
+            self.read_timeout_var = tk.StringVar(value=str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180')))))
+        if not hasattr(self, 'http_pool_connections_var'):
+            self.http_pool_connections_var = tk.StringVar(value=str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))))
+        if not hasattr(self, 'http_pool_maxsize_var'):
+            self.http_pool_maxsize_var = tk.StringVar(value=str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))))
+        if not hasattr(self, 'retry_after_max_wait_var'):
+            self.retry_after_max_wait_var = tk.StringVar(value=str(self.config.get('retry_after_max_wait', os.environ.get('RETRY_AFTER_MAX_WAIT', '120'))))
+
+        # Layout columns
+        http_grid.grid_columnconfigure(0, weight=0)
+        http_grid.grid_columnconfigure(1, weight=0)
+        http_grid.grid_columnconfigure(2, weight=1)  # spacer
+        http_grid.grid_columnconfigure(3, weight=0)
+        http_grid.grid_columnconfigure(4, weight=0)
+
+        # Row 0: Timeouts
+        tk.Label(http_grid, text="Connect timeout (s):").grid(row=0, column=0, sticky='w', padx=(0, 6), pady=2)
+        tb.Entry(http_grid, width=6, textvariable=self.connect_timeout_var).grid(row=0, column=1, sticky='w', pady=2)
+        tk.Label(http_grid, text="Read timeout (s):").grid(row=0, column=3, sticky='w', padx=(12, 6), pady=2)
+        tb.Entry(http_grid, width=6, textvariable=self.read_timeout_var).grid(row=0, column=4, sticky='w', pady=2)
+
+        # Row 1: Pool sizes
+        tk.Label(http_grid, text="Pool connections:").grid(row=1, column=0, sticky='w', padx=(0, 6), pady=2)
+        tb.Entry(http_grid, width=6, textvariable=self.http_pool_connections_var).grid(row=1, column=1, sticky='w', pady=2)
+        tk.Label(http_grid, text="Pool max size:").grid(row=1, column=3, sticky='w', padx=(12, 6), pady=2)
+        tb.Entry(http_grid, width=6, textvariable=self.http_pool_maxsize_var).grid(row=1, column=4, sticky='w', pady=2)
+
+        # Row 2: Retry-After cap
+        tk.Label(http_grid, text="Retry-After max wait (s):").grid(row=2, column=0, sticky='w', padx=(0, 6), pady=(2, 4))
+        tb.Entry(http_grid, width=6, textvariable=self.retry_after_max_wait_var).grid(row=2, column=1, sticky='w', pady=(2, 4))
+
+        tk.Label(section_frame, text="Controls network behavior to reduce 500/503s: connection establishment timeout, read timeout,\nHTTP connection pool sizes, and cap on honoring Retry-After headers.",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 5))
+        
+        # Separator
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+        
+        # Max Retries Configuration
+        title_retries = tk.Label(section_frame, text="API Request Retries", 
+                                font=('TkDefaultFont', 11, 'bold'))
+        title_retries.pack(anchor=tk.W)
+        
+        retries_frame = tk.Frame(section_frame)
+        retries_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        
+        # Create MAX_RETRIES variable if it doesn't exist
+        if not hasattr(self, 'max_retries_var'):
+            self.max_retries_var = tk.StringVar(value=str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))))
+        
+        tk.Label(retries_frame, text="Maximum retry attempts:").pack(side=tk.LEFT)
+        tb.Entry(retries_frame, width=4, textvariable=self.max_retries_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(retries_frame, text="(default: 7)").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Number of times to retry failed API requests before giving up.\nApplies to all API providers (OpenAI, Gemini, Anthropic, etc.)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 5))
+        
                 
     def toggle_gemini_endpoint(self):
         """Enable/disable Gemini endpoint entry based on toggle"""
@@ -14354,6 +14437,14 @@ Important rules:
                     'duplicate_lookback_chapters': safe_int(self.duplicate_lookback_var.get(), 5),
                     'retry_timeout': self.retry_timeout_var.get(),
                     'chunk_timeout': safe_int(self.chunk_timeout_var.get(), 900),
+                    # New network/HTTP controls
+                    'connect_timeout': safe_float(self.connect_timeout_var.get() if hasattr(self, 'connect_timeout_var') else os.environ.get('CONNECT_TIMEOUT', 10), 10.0),
+                    'read_timeout': safe_float(self.read_timeout_var.get() if hasattr(self, 'read_timeout_var') else os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', 180)), 180.0),
+                    'http_pool_connections': safe_int(self.http_pool_connections_var.get() if hasattr(self, 'http_pool_connections_var') else os.environ.get('HTTP_POOL_CONNECTIONS', 20), 20),
+                    'http_pool_maxsize': safe_int(self.http_pool_maxsize_var.get() if hasattr(self, 'http_pool_maxsize_var') else os.environ.get('HTTP_POOL_MAXSIZE', 50), 50),
+                    'retry_after_max_wait': safe_int(self.retry_after_max_wait_var.get() if hasattr(self, 'retry_after_max_wait_var') else os.environ.get('RETRY_AFTER_MAX_WAIT', 120), 120),
+                    'max_retries': safe_int(self.max_retries_var.get() if hasattr(self, 'max_retries_var') else os.environ.get('MAX_RETRIES', 7), 7),
+
                     'reinforcement_frequency': safe_int(self.reinforcement_freq_var.get(), 10),
                     'translate_book_title': self.translate_book_title_var.get(),
                     'book_title_prompt': getattr(self, 'book_title_prompt', 
@@ -14387,7 +14478,8 @@ Important rules:
                     'gemini_openai_endpoint': self.gemini_openai_endpoint_var.get(),
                     'image_chunk_overlap': safe_float(self.image_chunk_overlap_var.get(), 1.0),
                     'azure_api_version': self.azure_api_version_var.get() if hasattr(self, 'azure_api_version_var') else '2024-08-01-preview',
-                    'use_fallback_keys': self.use_fallback_keys_var.get(),
+                    # Preserve use_fallback_keys from config if it was set by multi API key manager
+                    'use_fallback_keys': self.config.get('use_fallback_keys', self.use_fallback_keys_var.get()),
 
                                         
                     # ALL Anti-duplicate parameters (moved below other settings)
@@ -14446,6 +14538,13 @@ Important rules:
                     "DUPLICATE_LOOKBACK_CHAPTERS": str(self.config['duplicate_lookback_chapters']),
                     "RETRY_TIMEOUT": "1" if self.retry_timeout_var.get() else "0",
                     "CHUNK_TIMEOUT": str(self.config['chunk_timeout']),
+                    # New network/HTTP controls
+                    "CONNECT_TIMEOUT": str(self.config['connect_timeout']),
+                    "READ_TIMEOUT": str(self.config['read_timeout']),
+                    "HTTP_POOL_CONNECTIONS": str(self.config['http_pool_connections']),
+                    "HTTP_POOL_MAXSIZE": str(self.config['http_pool_maxsize']),
+                    "RETRY_AFTER_MAX_WAIT": str(self.config['retry_after_max_wait']),
+                    "MAX_RETRIES": str(self.config['max_retries']),
                     "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
                     "BOOK_TITLE_PROMPT": self.book_title_prompt,
@@ -14492,7 +14591,7 @@ Important rules:
                     'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
                     'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
                     'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
-                    'USE_FALLBACK_KEYS': '1' if self.use_fallback_keys_var.get() else '0',
+                    'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
                     'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
                     'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var.get(),
                     
@@ -15238,7 +15337,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v4.3.1...")
+    print("🚀 Starting Glossarion v4.3.2...")
     
     # Initialize splash screen
     splash_manager = None
