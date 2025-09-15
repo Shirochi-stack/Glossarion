@@ -21,12 +21,11 @@ requirements-dev.txt
 !src/
 # Ignore everything under src by default (including all subfolders)
 src/**
-# Allow only top-level .py and .spec directly under src (no subfolders)
+# Allow only top-level files directly under src (no subfolders)
 !src/*.py
 !src/*.spec
-# Explicitly exclude Windows launcher scripts in src
-src/*.bat
-src/*.vbs
+!src/*.bat
+!src/*.vbs
 
 # Never commit secrets and configs anywhere
 **/config.json
