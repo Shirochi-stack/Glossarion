@@ -3735,6 +3735,18 @@ class UnifiedClient:
                     # Extract content from candidate
                     if hasattr(candidate, 'content'):
                         content = candidate.content
+                        print(f"   🔍 [Gemini] Content object: {content}")
+                        print(f"   🔍 [Gemini] Content type: {type(content)}")
+                        print(f"   🔍 [Gemini] Content attributes: {[attr for attr in dir(content) if not attr.startswith('_')][:10]}")
+                        
+                        # NEW: Try to access content as string directly first
+                        try:
+                            content_str = str(content)
+                            if content_str and len(content_str) > 20 and 'role=' not in content_str:
+                                print(f"   ✅ [Gemini] Got content from string conversion: {len(content_str)} chars")
+                                return content_str, finish_reason
+                        except Exception as e:
+                            print(f"   ⚠️ [Gemini] String conversion failed: {e}")
                         
                         # Content might have parts - FIX: Add None check for parts
                         if hasattr(content, 'parts') and content.parts is not None:
@@ -3756,14 +3768,24 @@ class UnifiedClient:
                                 # NEW: Handle case where parts exist but contain no text
                                 parts_count = self._safe_len(content.parts, "gemini_empty_parts")
                                 print(f"   ⚠️ [Gemini] Parts found but no text extracted from {parts_count} parts")           
-                                return "", finish_reason
-                            
+                                # Don't return here, try other methods
                         
                         # Try direct text access on content
                         elif hasattr(content, 'text'):
                             if content.text:
                                 print(f"   ✅ [Gemini] Got text from content.text: {len(content.text)} chars")
                                 return content.text, finish_reason
+                        
+                        # NEW: Try accessing raw content data
+                        for attr in ['text', 'content', 'data', 'message', 'response']:
+                            if hasattr(content, attr):
+                                try:
+                                    value = getattr(content, attr)
+                                    if value and isinstance(value, str) and len(value) > 10:
+                                        print(f"   ✅ [Gemini] Got text from content.{attr}: {len(value)} chars")
+                                        return value, finish_reason
+                                except Exception as e:
+                                    print(f"   ⚠️ [Gemini] Failed to get content.{attr}: {e}")
                     
                     # Try to get text directly from candidate
                     if hasattr(candidate, 'text'):
@@ -3950,6 +3972,58 @@ class UnifiedClient:
                 print(f"   🔧 Extracted from string representation: {len(result)} chars")
                 return result, finish_reason
         
+        # Method 4: AGGRESSIVE GEMINI FALLBACK - Parse response string manually
+        if provider == 'gemini' and not result:
+            print(f"   🔍 [Gemini] Attempting aggressive manual parsing...")
+            try:
+                response_str = str(response)
+                
+                # Look for common patterns in Gemini response strings
+                import re
+                patterns = [
+                    r'text["\']([^"\'].*?)["\']',  # text="content" or text='content'
+                    r'text=([^,\)\]]+)',  # text=content
+                    r'content["\']([^"\'].*?)["\']',  # content="text"
+                    r'>([^<>{},\[\]]+)<',  # HTML-like tags
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, response_str, re.DOTALL)
+                    for match in matches:
+                        if match and len(match.strip()) > 20:
+                            # Clean up the match
+                            clean_match = match.strip()
+                            clean_match = clean_match.replace('\\n', '\n').replace('\\t', '\t')
+                            if len(clean_match) > 20:
+                                print(f"   🔧 [Gemini] Extracted via regex pattern: {len(clean_match)} chars")
+                                return clean_match, finish_reason
+                
+                # If no patterns match, try to find the largest text block
+                words = response_str.split()
+                text_blocks = []
+                current_block = []
+                
+                for word in words:
+                    if len(word) > 2 and word.isalpha() or any(c.isalpha() for c in word):
+                        current_block.append(word)
+                    else:
+                        if len(current_block) > 5:  # At least 5 words
+                            text_blocks.append(' '.join(current_block))
+                        current_block = []
+                
+                if current_block and len(current_block) > 5:
+                    text_blocks.append(' '.join(current_block))
+                
+                if text_blocks:
+                    # Return the longest text block
+                    longest_block = max(text_blocks, key=len)
+                    if len(longest_block) > 50:
+                        print(f"   🔧 [Gemini] Extracted longest text block: {len(longest_block)} chars")
+                        return longest_block, finish_reason
+                
+            except Exception as e:
+                print(f"   ⚠️ [Gemini] Aggressive parsing failed: {e}")
+        
         # Final failure - log detailed debug info
         print(f"   ❌ Failed to extract text from {provider} response")
         
@@ -3979,8 +4053,12 @@ class UnifiedClient:
     def _extract_part_text(self, part, provider=None, part_index=None):
         """
         Extract text from a part object (handles various formats).
-        Enhanced with provider-specific handling.
+        Enhanced with provider-specific handling and aggressive extraction.
         """
+        if provider == 'gemini' and part_index:
+            print(f"   🔍 [Gemini] Part {part_index} type: {type(part)}")
+            print(f"   🔍 [Gemini] Part {part_index} attributes: {[attr for attr in dir(part) if not attr.startswith('_')][:10]}")
+        
         # Direct text attribute
         if hasattr(part, 'text'):
             try:
@@ -3992,6 +4070,17 @@ class UnifiedClient:
             except Exception as e:
                 if provider == 'gemini' and part_index:
                     print(f"   ⚠️ [Gemini] Failed direct access on part {part_index}: {e}")
+        
+        # NEW: Try direct string conversion of the part
+        try:
+            part_str = str(part)
+            if part_str and len(part_str) > 10 and 'text=' not in part_str.lower():
+                if provider == 'gemini' and part_index:
+                    print(f"   ✅ [Gemini] Part {part_index} extracted as string: {len(part_str)} chars")
+                return part_str
+        except Exception as e:
+            if provider == 'gemini' and part_index:
+                print(f"   ⚠️ [Gemini] Part {part_index} string conversion failed: {e}")
         
         # Use getattr with fallback
         try:
