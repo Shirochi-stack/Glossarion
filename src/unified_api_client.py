@@ -285,8 +285,27 @@ class UnifiedClient:
         except Exception:
             return 2.0
 
+    def _safe_len(self, obj, context="unknown"):
+        """Safely get length of an object with better error reporting"""
+        try:
+            if obj is None:
+                print(f"⚠️ Warning: Attempting to get length of None in context: {context}")
+                return 0
+            return len(obj)
+        except TypeError as e:
+            print(f"❌ TypeError in _safe_len for context '{context}': {e}")
+            print(f"❌ Object type: {type(obj)}, Object value: {obj}")
+            return 0
+        except Exception as e:
+            print(f"❌ Unexpected error in _safe_len for context '{context}': {e}")
+            return 0
+
     def _extract_first_image_base64(self, messages) -> Optional[str]:
+        if messages is None:
+            return None
         for msg in messages:
+            if msg is None:
+                continue
             content = msg.get('content')
             if isinstance(content, list):
                 for part in content:
@@ -358,11 +377,19 @@ class UnifiedClient:
         if provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
             if not extracted_content and finish_reason != 'error':
                 return True
-        # 5) Suspiciously short output vs long input
+        # 5) Suspiciously short output vs long input - FIX: Add None checks
         if extracted_content and len(extracted_content) < 50:
-            input_length = sum(len(m.get('content', '')) for m in messages if m.get('role') == 'user')
-            if input_length > 200 and any(w in extracted_content.lower() for w in ['cannot', 'unable', 'sorry', 'assist']):
-                return True
+            # FIX: Add None check for messages
+            if messages is not None:
+                input_length = 0
+                for m in messages:
+                    if m is not None and m.get('role') == 'user':
+                        content = m.get('content', '')
+                        # FIX: Add None check for content
+                        if content is not None:
+                            input_length += len(str(content))
+                if input_length > 200 and any(w in extracted_content.lower() for w in ['cannot', 'unable', 'sorry', 'assist']):
+                    return True
         return False
 
     def _finalize_empty_response(self, messages, context, response, extracted_content: str, finish_reason: Optional[str], provider: str, request_type: str, start_time: float) -> Tuple[str, str]:
@@ -1042,11 +1069,13 @@ class UnifiedClient:
                         self.key_identifier = tls.key_identifier
                         self.current_key_index = key_index
                     
-                    # Log key assignment
-                    if len(self.api_key) > 12:
+                    # Log key assignment - FIX: Add None check for api_key
+                    if self.api_key and len(self.api_key) > 12:
                         masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
+                    elif self.api_key and len(self.api_key) > 5:
+                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:]
                     else:
-                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
+                        masked_key = "***"
                     
                     print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
@@ -1135,7 +1164,11 @@ class UnifiedClient:
                     with self._assignment_lock:
                         self._key_assignments[thread_id] = (key_index, self.key_identifier)
                     
-                    masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
+                    # FIX: Add None check for api_key
+                    if self.api_key and len(self.api_key) > 12:
+                        masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
+                    else:
+                        masked_key = self.api_key or "***"
                     print(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
                     
                     # Setup client for this key
@@ -1552,8 +1585,11 @@ class UnifiedClient:
                 self.mistral_client = None
                 self.cohere_client = None
             
-            # Logging (outside lock - just reading)
-            masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
+            # Logging (outside lock - just reading) - FIX: Add None check
+            if self.api_key and len(self.api_key) > 12:
+                masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
+            else:
+                masked_key = self.api_key or "***"
             print(f"[DEBUG] 🔄 Rotating from {old_key_identifier} to {self.key_identifier} - {masked_key}")
             
             # Re-setup the client with new key
@@ -1729,8 +1765,11 @@ class UnifiedClient:
             self.mistral_client = None
             self.cohere_client = None
         
-        # Logging OUTSIDE the lock
-        masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
+        # Logging OUTSIDE the lock - FIX: Add None check
+        if self.api_key and len(self.api_key) > 8:
+            masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
+        else:
+            masked_key = self.api_key or "***"
         print(f"[DEBUG] 🔄 Switched from {old_key_identifier} to {self.key_identifier}")
         
         # Reset clients
@@ -3054,8 +3093,25 @@ class UnifiedClient:
                 return fallback_content, 'error'
                 
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                # COMPREHENSIVE ERROR HANDLING FOR NoneType and other issues
                 error_str = str(e).lower()
+                print(f"Unexpected error: {e}")
+                
+                # Special handling for NoneType length errors
+                if "nonetype" in error_str and "len" in error_str:
+                    print(f"🚨 Detected NoneType length error - likely caused by None message content")
+                    print(f"🔍 Error details: {type(e).__name__}: {e}")
+                    print(f"🔍 Context: {context}, Messages count: {self._safe_len(messages, 'unexpected_error_messages')}")
+                    
+                    # Log the actual traceback for debugging
+                    import traceback
+                    print(f"🔍 Traceback: {traceback.format_exc()}")
+                    
+                    # Return a safe fallback
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, "nonetype_length_error", time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, "NoneType length error")
+                    return fallback_content, 'error'
                 
                 # For unexpected errors, check if it's a timeout
                 if "timed out" in error_str:
@@ -3285,8 +3341,8 @@ class UnifiedClient:
                             print(f"[{label} {idx+1}] ❌ Got error message: {content}")
                             continue
                         
-                        # Check if content is valid
-                        if content and len(content) > 50:
+                        # Check if content is valid - FIX: Add None check
+                        if content and self._safe_len(content, "main_key_retry_content") > 50:
                             print(f"[{label} {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
                             self._save_response(content, response_name)
                             return content, finish_reason
@@ -3438,13 +3494,44 @@ class UnifiedClient:
         
         return messages
     
+    def _validate_and_clean_messages(self, messages):
+        """Validate and clean messages, removing None entries and fixing content issues"""
+        if messages is None:
+            return []
+        
+        cleaned_messages = []
+        for msg in messages:
+            if msg is None:
+                continue
+            
+            # Ensure the message is a dict
+            if not isinstance(msg, dict):
+                continue
+            
+            # Ensure content is not None
+            if msg.get('content') is None:
+                msg = dict(msg)  # Make a copy
+                msg['content'] = ''
+            
+            cleaned_messages.append(msg)
+        
+        return cleaned_messages
+    
     def _validate_request(self, messages, max_tokens=None):
         """Validate request parameters before sending"""
+        # Clean messages first
+        messages = self._validate_and_clean_messages(messages)
+        
         if not messages:
             return False, "Empty messages list"
         
-        # Check message content isn't empty
-        total_chars = sum(len(msg.get('content', '')) for msg in messages)
+        # Check message content isn't empty - FIX: Add None checks
+        total_chars = 0
+        for msg in messages:
+            if msg is not None and msg.get('role') == 'user':
+                content = msg.get('content', '')
+                if content is not None:
+                    total_chars += len(str(content))
         if total_chars == 0:
             return False, "Empty request content"
         
@@ -3649,9 +3736,10 @@ class UnifiedClient:
                     if hasattr(candidate, 'content'):
                         content = candidate.content
                         
-                        # Content might have parts
-                        if hasattr(content, 'parts'):
-                            print(f"   🔍 [Gemini] Found {len(content.parts)} parts in content")
+                        # Content might have parts - FIX: Add None check for parts
+                        if hasattr(content, 'parts') and content.parts is not None:
+                            parts_count = self._safe_len(content.parts, "gemini_content_parts")
+                            print(f"   🔍 [Gemini] Found {parts_count} parts in content")
                             text_parts = []
                             
                             for i, part in enumerate(content.parts):
@@ -3666,8 +3754,9 @@ class UnifiedClient:
                                 
                             else:
                                 # NEW: Handle case where parts exist but contain no text
-                                print(f"   ⚠️ [Gemini] Parts found but no text extracted from {len(content.parts)} parts")           
-                                return "", finish_reason                                
+                                parts_count = self._safe_len(content.parts, "gemini_empty_parts")
+                                print(f"   ⚠️ [Gemini] Parts found but no text extracted from {parts_count} parts")           
+                                return "", finish_reason
                             
                         
                         # Try direct text access on content
@@ -3693,8 +3782,8 @@ class UnifiedClient:
                 except Exception as e:
                     print(f"   ⚠️ [Gemini] Error accessing response.text: {e}")
             
-            # Try parts directly on response
-            if hasattr(response, 'parts'):
+            # Try parts directly on response - FIX: Add None check
+            if hasattr(response, 'parts') and response.parts is not None:
                 print(f"   🔍 [Gemini] Found parts directly on response")
                 text_parts = []
                 for i, part in enumerate(response.parts):
@@ -3714,8 +3803,9 @@ class UnifiedClient:
             print(f"   🔍 [OpenAI] Attempting specialized extraction...")
             
             # Check if it's an OpenAI ChatCompletion object
-            if hasattr(response, 'choices'):
-                print(f"   🔍 [OpenAI] Found choices attribute, {len(response.choices)} choices")
+            if hasattr(response, 'choices') and response.choices is not None:
+                choices_count = self._safe_len(response.choices, "openai_response_choices")
+                print(f"   🔍 [OpenAI] Found choices attribute, {choices_count} choices")
                 
                 if response.choices:
                     choice = response.choices[0]
