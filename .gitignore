@@ -27,7 +27,7 @@ src/**
 !src/*.bat
 !src/*.vbs
 # Explicitly include application icon in src
-!src/glossarion.ico
+!src/Halgakos.ico
 
 # Never commit secrets and configs anywhere
 **/config.json
