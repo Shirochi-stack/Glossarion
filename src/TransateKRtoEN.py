@@ -3597,8 +3597,8 @@ class TranslationProcessor:
                 retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
                 
                 # Debug logging to verify the toggle state
-                print(f"    DEBUG: finish_reason='{finish_reason}', RETRY_TRUNCATED={retry_truncated_enabled}, config.RETRY_TRUNCATED={self.config.RETRY_TRUNCATED}")
-                print(f"    DEBUG: Current tokens={self.config.MAX_OUTPUT_TOKENS}, Min retry tokens={self.config.MAX_RETRY_TOKENS}, retry_count={retry_count}")
+                #print(f"    DEBUG: finish_reason='{finish_reason}', RETRY_TRUNCATED={retry_truncated_enabled}, config.RETRY_TRUNCATED={self.config.RETRY_TRUNCATED}")
+                #print(f"    DEBUG: Current tokens={self.config.MAX_OUTPUT_TOKENS}, Min retry tokens={self.config.MAX_RETRY_TOKENS}, retry_count={retry_count}")
                     
                 if finish_reason == "length" and (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
                     if retry_count < max_retries:
