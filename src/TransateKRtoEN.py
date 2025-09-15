@@ -1704,12 +1704,14 @@ class ChapterExtractor:
         
         chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
         chapters_info = []
+        chapters_info_lock = threading.Lock()
         
-        # Build chapters_info directly from already-extracted data
-        # No need for parallel processing since we're just copying existing values
-        print(f"📝 Building chapter metadata from {len(chapters)} extracted chapters...")
-        
-        for chapter in chapters:
+        def process_chapter(chapter):
+            """Process a single chapter"""
+            # Check stop in worker
+            if is_stop_requested():
+                return None
+                
             info = {
                 'num': chapter['num'],
                 'title': chapter['title'],
@@ -1721,7 +1723,6 @@ class ChapterExtractor:
                 'content_hash': chapter.get('content_hash', '')
             }
             
-            # Only parse HTML if we have images and need to extract src attributes
             if chapter.get('has_images'):
                 try:
                     soup = BeautifulSoup(chapter.get('body', ''), self.parser)
@@ -1730,9 +1731,53 @@ class ChapterExtractor:
                 except:
                     info['images'] = []
             
-            chapters_info.append(info)
+            return info
         
-        # Already sorted from extraction phase, but ensure order
+        # Process chapters in parallel
+        print(f"🔄 Processing {len(chapters)} chapters in parallel...")
+        
+        if self.progress_callback:
+            self.progress_callback(f"Processing {len(chapters)} chapters...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_chapter = {
+                executor.submit(process_chapter, chapter): chapter 
+                for chapter in chapters
+            }
+            
+            # Process completed tasks
+            completed = 0
+            for future in as_completed(future_to_chapter):
+                if is_stop_requested():
+                    print("❌ Extraction stopped by user")
+                    # Cancel remaining futures
+                    for f in future_to_chapter:
+                        f.cancel()
+                    return []
+                
+                try:
+                    result = future.result()
+                    if result:
+                        with chapters_info_lock:
+                            chapters_info.append(result)
+                        completed += 1
+                        
+                        # Yield to GUI periodically
+                        if completed % 5 == 0:
+                            time.sleep(0.001)
+                        
+                        # Progress updates
+                        if completed % 10 == 0 or completed == len(chapters):
+                            progress_msg = f"Processed {completed}/{len(chapters)} chapters"
+                            print(f"   📊 {progress_msg}")
+                            if self.progress_callback:
+                                self.progress_callback(progress_msg)
+                except Exception as e:
+                    chapter = future_to_chapter[future]
+                    print(f"   ❌ Error processing chapter {chapter['num']}: {e}")
+        
+        # Sort chapters_info by chapter number to maintain order
         chapters_info.sort(key=lambda x: x['num'])
         
         print(f"✅ Successfully processed {len(chapters_info)} chapters")
@@ -1845,6 +1890,10 @@ class ChapterExtractor:
                 # Progress update every 20 files
                 if extracted_count % 20 == 0 and self.progress_callback:
                     self.progress_callback(f"Extracting resources: {extracted_count}/{total_resources}")
+                
+                # Yield to GUI periodically
+                if extracted_count % 10 == 0:
+                    time.sleep(0.001)
                     
                 result = future.result()
                 if result:
@@ -1927,8 +1976,9 @@ class ChapterExtractor:
                 print("❌ Chapter extraction stopped by user")
                 return [], 'unknown'
             
-            # Progress update every 50 files
+            # Yield to GUI every 50 files
             if idx % 50 == 0 and idx > 0:
+                time.sleep(0.001)  # Brief yield to GUI
                 if self.progress_callback and total_files > 100:
                     self.progress_callback(f"Scanning files: {idx}/{total_files}")
                 
@@ -2166,9 +2216,10 @@ class ChapterExtractor:
                     enhanced_extraction_used = True
                     print(f"✅ Enhanced extraction complete: {len(clean_content)} chars")
                     
-                    # For enhanced mode, use clean text as the body
-                    content_html = clean_content  # This is PLAIN TEXT from html2text
-                    content_text = clean_content  # Same clean text for both
+                    # For enhanced mode, store the markdown/plain text
+                    # This will be sent to the translation API as-is
+                    content_html = clean_content  # This is MARKDOWN/PLAIN TEXT from html2text
+                    content_text = clean_content  # Same clean text for analysis
                 
                 # BeautifulSoup method (only for non-enhanced modes)
                 if not enhanced_extraction_used:
@@ -2347,7 +2398,11 @@ class ChapterExtractor:
                 return None
         
         # Process files in parallel or sequentially based on file count
-        print(f"🚀 Extracting content from {len(files_to_process)} HTML files...")
+        print(f"🚀 Processing {len(files_to_process)} HTML files...")
+        
+        # Initial progress
+        if self.progress_callback:
+            self.progress_callback(f"Processing {len(files_to_process)} chapters...")
         
         candidate_chapters = []  # For smart mode
         chapters_direct = []      # For other modes
@@ -2407,8 +2462,9 @@ class ChapterExtractor:
                     else:
                         chapters_direct.append(chapter_info)
         
-        # Final extraction count
-        print(f"✅ Extracted {len(candidate_chapters) + len(chapters_direct)} chapters from HTML files")
+        # Final progress update
+        if self.progress_callback:
+            self.progress_callback(f"Chapter processing complete: {len(candidate_chapters) + len(chapters_direct)} chapters")
         
         # Sort direct chapters by file index to maintain order
         chapters_direct.sort(key=lambda x: x["file_index"])
@@ -2442,6 +2498,10 @@ class ChapterExtractor:
             unnumbered_chapters = []
             
             for idx, chapter in enumerate(candidate_chapters):
+                # Yield periodically during categorization
+                if idx % 10 == 0 and idx > 0:
+                    time.sleep(0.001)
+                    
                 if chapter["num"] is not None:
                     numbered_chapters.append(chapter)
                 else:
@@ -3814,9 +3874,13 @@ class TranslationProcessor:
                     msgs, self.client, current_temp, current_max_tokens, 
                     self.check_stop, chunk_timeout
                 )
+                # Enhanced mode workflow:
+                # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
+                # 2. Markdown sent to translation API (better for translation quality)
+                # 3. Translated markdown -> HTML conversion (here)
                 if result and c.get("enhanced_extraction", False):
-                    print(f"🔄 Converting enhanced mode plain text back to HTML...")
-                    result = convert_enhanced_text_to_html(result, c)               
+                    print(f"🔄 Converting translated markdown back to HTML...")
+                    result = convert_enhanced_text_to_html(result, c)
                 retry_needed = False
                 retry_reason = ""
                 is_duplicate_retry = False
@@ -4121,9 +4185,13 @@ class BatchTranslationProcessor:
             
             print(f"📥 Received Chapter {actual_num} response, finish_reason: {finish_reason}")
 
+            # Enhanced mode workflow (same as non-batch):
+            # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
+            # 2. Markdown sent to translation API (better for translation quality)
+            # 3. Translated markdown -> HTML conversion (here)
             if result and chapter.get("enhanced_extraction", False):
-                print(f"🔄 Converting enhanced mode plain text back to HTML...")
-                result = convert_enhanced_text_to_html(result, chapter)  
+                print(f"🔄 Converting translated markdown back to HTML...")
+                result = convert_enhanced_text_to_html(result, chapter)
                 
             if finish_reason in ["length", "max_tokens"]:
                 print(f"⚠️ Chapter {actual_num} response was TRUNCATED!")
@@ -5689,6 +5757,9 @@ class GlossaryManager:
                         future = executor.submit(process_sentence_batch, batch, idx)
                     
                     futures.append(future)
+                    # Yield to GUI when submitting futures
+                    if idx % 10 == 0:
+                        time.sleep(0.001)
                 
                 # Collect results with progress
                 completed_batches = 0
@@ -5714,6 +5785,9 @@ class GlossaryManager:
                         elapsed = time.time() - batch_start_time
                         rate = (processed_count / elapsed) if elapsed > 0 else 0
                         print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
+                    
+                    # Yield to GUI after each batch completes
+                    time.sleep(0.001)
         else:
             # Sequential processing with progress
             for idx, sentence in enumerate(sentences):
@@ -5744,6 +5818,10 @@ class GlossaryManager:
                     progress = ((idx + 1) / total_sentences) * 100
                     print(f"📑 Processing sentences: {idx + 1:,}/{total_sentences:,} ({progress:.1f}%)")
                     last_progress_time = time.time()
+                    # Yield to GUI thread every 1000 sentences
+                    time.sleep(0.001)  # Tiny sleep to let GUI update
+                    # Yield to GUI thread every 1000 sentences
+                    time.sleep(0.001)  # Tiny sleep to let GUI update
         
         print(f"📑 Found {len(important_sentences):,} sentences with potential glossary terms")
         
@@ -5770,6 +5848,9 @@ class GlossaryManager:
                 combined_freq[term] = count
             
             term_count += 1
+            # Yield to GUI every 1000 terms
+            if term_count % 1000 == 0:
+                time.sleep(0.001)
         
         print(f"📑 Deduplicated to {len(combined_freq):,} unique terms")
         
@@ -5845,6 +5926,7 @@ class GlossaryManager:
                             break
                     if i % 1000 == 0:
                         print(f"📑 Progress: {i:,}/{len(filtered_sentences):,} sentences")
+                        time.sleep(0.001)
                 
                 filtered_sentences = new_filtered
                 print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
@@ -7072,7 +7154,7 @@ Text to analyze:
                                     all_translations[term] = term
                             return all_translations
                         # Use configurable batch delay or default to 0.1s (much faster than 0.5s)
-                        batch_delay = float(os.getenv("GLOSSARY_BATCH_DELAY", "0.1"))
+                        batch_delay = float(os.getenv("GLOSSARY_BATCH_DELAY", "0.001"))
                         if batch_delay > 0:
                             time.sleep(batch_delay)
                         
@@ -8661,42 +8743,89 @@ def get_failure_reason(content):
     return "Unknown failure pattern"
     
 def convert_enhanced_text_to_html(plain_text, chapter_info=None):
-    """Convert plain text back to HTML after translation (for enhanced mode)"""
+    """Convert markdown/plain text back to HTML after translation (for enhanced mode)
+    
+    This function handles the conversion of translated markdown back to HTML.
+    The input is the TRANSLATED text that was originally extracted using html2text.
+    """
     import re
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
-    if preserve_structure:
-        try:
-            import markdown2
-            
-            # For novels, we want each line to be a paragraph
-            # So we need to add blank lines between each line for markdown to recognize them
-            lines = plain_text.strip().split('\n')
-            # Add blank line between each line so markdown treats them as separate paragraphs
-            markdown_text = '\n\n'.join(line.strip() for line in lines if line.strip())
-            
-            # Convert with markdown2
-            html = markdown2.markdown(markdown_text, extras=[
+    # First, try to use markdown2 for proper markdown conversion
+    try:
+        import markdown2
+        
+        # Check if the text contains markdown patterns
+        has_markdown = any([
+            '##' in plain_text,  # Headers
+            '**' in plain_text,  # Bold
+            '*' in plain_text and not '**' in plain_text,  # Italic
+            '[' in plain_text and '](' in plain_text,  # Links
+            '```' in plain_text,  # Code blocks
+            '> ' in plain_text,  # Blockquotes
+            '- ' in plain_text or '* ' in plain_text or '1. ' in plain_text  # Lists
+        ])
+        
+        if has_markdown or preserve_structure:
+            # Use markdown2 for proper conversion
+            html = markdown2.markdown(plain_text, extras=[
                 'cuddled-lists',       # Lists without blank lines
                 'fenced-code-blocks',  # Code blocks with ```
+                'break-on-newline',    # Treat single newlines as <br>
+                'smarty-pants',        # Smart quotes and dashes
+                'tables',              # Markdown tables
             ])
+            
+            # Post-process to ensure proper paragraph structure
+            if not '<p>' in html:
+                # If markdown2 didn't create paragraphs, wrap content
+                lines = html.split('\n')
+                processed_lines = []
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith('<') and not line.endswith('>'):
+                        processed_lines.append(f'<p>{line}</p>')
+                    elif line:
+                        processed_lines.append(line)
+                html = '\n'.join(processed_lines)
             
             return html
             
-        except ImportError:
-            print("⚠️ markdown2 not available, install with: pip install markdown2")
+    except ImportError:
+        print("⚠️ markdown2 not available, using fallback HTML conversion")
     
-    # Fallback or non-preserve mode: treat each line as a paragraph
+    # Fallback: Manual markdown-to-HTML conversion
     lines = plain_text.strip().split('\n')
-    
     html_parts = []
+    in_code_block = False
+    code_block_content = []
     
     for line in lines:
+        # Handle code blocks
+        if line.strip().startswith('```'):
+            if in_code_block:
+                # End code block
+                html_parts.append('<pre><code>' + '\n'.join(code_block_content) + '</code></pre>')
+                code_block_content = []
+                in_code_block = False
+            else:
+                # Start code block
+                in_code_block = True
+            continue
+        
+        if in_code_block:
+            code_block_content.append(line)
+            continue
+        
         line = line.strip()
         if not line:
+            # Preserve empty lines as paragraph breaks
+            if html_parts and not html_parts[-1].endswith('</p>'):
+                # Only add break if not already after a closing tag
+                html_parts.append('<br/>')
             continue
-            
+        
         # Check for markdown headers
         if line.startswith('#'):
             match = re.match(r'^(#+)\s*(.+)$', line)
@@ -8706,10 +8835,65 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 html_parts.append(f'<h{level}>{header_text}</h{level}>')
                 continue
         
-        # Every line becomes its own paragraph
+        # Check for blockquotes
+        if line.startswith('> '):
+            quote_text = line[2:].strip()
+            html_parts.append(f'<blockquote>{quote_text}</blockquote>')
+            continue
+        
+        # Check for lists
+        if re.match(r'^[*\-+]\s+', line):
+            list_text = re.sub(r'^[*\-+]\s+', '', line)
+            html_parts.append(f'<li>{list_text}</li>')
+            continue
+        
+        if re.match(r'^\d+\.\s+', line):
+            list_text = re.sub(r'^\d+\.\s+', '', line)
+            html_parts.append(f'<li>{list_text}</li>')
+            continue
+        
+        # Convert inline markdown
+        # Bold
+        line = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line)
+        line = re.sub(r'__(.+?)__', r'<strong>\1</strong>', line)
+        
+        # Italic
+        line = re.sub(r'\*(.+?)\*', r'<em>\1</em>', line)
+        line = re.sub(r'_(.+?)_', r'<em>\1</em>', line)
+        
+        # Links
+        line = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', line)
+        
+        # Code inline
+        line = re.sub(r'`([^`]+)`', r'<code>\1</code>', line)
+        
+        # Regular paragraph
         html_parts.append(f'<p>{line}</p>')
     
-    return '\n'.join(html_parts)
+    # Post-process lists to wrap in ul/ol tags
+    final_html = []
+    in_list = False
+    list_type = None
+    
+    for part in html_parts:
+        if part.startswith('<li>'):
+            if not in_list:
+                # Determine list type based on context (simplified)
+                list_type = 'ul'  # Default to unordered
+                final_html.append(f'<{list_type}>')
+                in_list = True
+            final_html.append(part)
+        else:
+            if in_list:
+                final_html.append(f'</{list_type}>')
+                in_list = False
+            final_html.append(part)
+    
+    # Close any open list
+    if in_list:
+        final_html.append(f'</{list_type}>')
+    
+    return '\n'.join(final_html)
 # =====================================================
 # MAIN TRANSLATION FUNCTION
 # =====================================================
@@ -9323,8 +9507,8 @@ def main(log_callback=None, stop_callback=None):
                         except:
                             pass
                         
-                        # Short sleep for polling (increased from 0.001 to 0.01 for less CPU usage)
-                        time.sleep(0.01)
+                        # Super short sleep to yield to GUI
+                        time.sleep(0.001)
                         
                         # Check for stop every 100 polls
                         if poll_count % 100 == 0:
