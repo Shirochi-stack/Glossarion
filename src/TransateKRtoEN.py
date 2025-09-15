@@ -5258,6 +5258,96 @@ class GlossaryManager:
         print(f"📑     RapidFuzz found {matches_count} matches in {elapsed:.2f}s")
         return matches_count
     
+    def _batch_compute_frequencies(self, terms, all_text, fuzzy_threshold=0.90, min_frequency=2):
+        """Compute frequencies for all terms at once - MUCH faster than individual checking"""
+        print(f"📑 Computing frequencies for {len(terms)} terms in batch mode...")
+        start_time = time.time()
+        
+        # Result dictionary
+        term_frequencies = {}
+        
+        # First pass: exact matching (very fast)
+        print(f"📑   Phase 1: Exact matching...")
+        text_lower = all_text.lower()
+        for term in terms:
+            if is_stop_requested():
+                return term_frequencies
+            term_lower = term.lower()
+            count = text_lower.count(term_lower)
+            term_frequencies[term] = count
+        
+        exact_time = time.time() - start_time
+        high_freq_terms = sum(1 for count in term_frequencies.values() if count >= min_frequency)
+        print(f"📑   Exact matching complete: {high_freq_terms}/{len(terms)} terms meet threshold ({exact_time:.1f}s)")
+        
+        # If fuzzy matching is disabled, we're done
+        if fuzzy_threshold >= 1.0:
+            return term_frequencies
+        
+        # Second pass: fuzzy matching ONLY for low-frequency terms
+        low_freq_terms = [term for term, count in term_frequencies.items() if count < min_frequency]
+        
+        if low_freq_terms:
+            print(f"📑   Phase 2: Fuzzy matching for {len(low_freq_terms)} low-frequency terms...")
+            
+            # Try to use RapidFuzz batch processing
+            try:
+                from rapidfuzz import process, fuzz
+                
+                # For very large texts, sample it for fuzzy matching
+                if len(text_lower) > 500000:
+                    print(f"📑   Text too large ({len(text_lower):,} chars), sampling for fuzzy matching...")
+                    # Sample every Nth character to reduce size
+                    sample_rate = max(1, len(text_lower) // 100000)
+                    sampled_text = text_lower[::sample_rate]
+                else:
+                    sampled_text = text_lower
+                
+                # Create chunks of text for fuzzy matching
+                chunk_size = 1000  # Process text in chunks
+                text_chunks = [sampled_text[i:i+chunk_size] for i in range(0, len(sampled_text), chunk_size//2)]  # Overlapping chunks
+                
+                print(f"📑   Processing {len(text_chunks)} text chunks...")
+                threshold_percent = fuzzy_threshold * 100
+                
+                # Process in batches to avoid memory issues
+                batch_size = 100  # Process 100 terms at a time
+                for batch_start in range(0, len(low_freq_terms), batch_size):
+                    if is_stop_requested():
+                        break
+                    
+                    batch_end = min(batch_start + batch_size, len(low_freq_terms))
+                    batch_terms = low_freq_terms[batch_start:batch_end]
+                    
+                    for term in batch_terms:
+                        if is_stop_requested():
+                            break
+                        
+                        # Quick fuzzy search in chunks
+                        fuzzy_count = 0
+                        for chunk in text_chunks[:50]:  # Limit to first 50 chunks for speed
+                            if fuzz.partial_ratio(term.lower(), chunk) >= threshold_percent:
+                                fuzzy_count += 1
+                        
+                        if fuzzy_count > 0:
+                            # Scale up based on sampling
+                            if len(text_lower) > 500000:
+                                fuzzy_count *= (len(text_lower) // len(sampled_text))
+                            term_frequencies[term] += fuzzy_count
+                    
+                    if (batch_end % 500 == 0) or (batch_end == len(low_freq_terms)):
+                        elapsed = time.time() - start_time
+                        print(f"📑   Processed {batch_end}/{len(low_freq_terms)} terms ({elapsed:.1f}s)")
+                
+            except ImportError:
+                print("📑   RapidFuzz not available, skipping fuzzy matching")
+        
+        total_time = time.time() - start_time
+        final_high_freq = sum(1 for count in term_frequencies.values() if count >= min_frequency)
+        print(f"📑 Batch frequency computation complete: {final_high_freq}/{len(terms)} terms accepted ({total_time:.1f}s)")
+        
+        return term_frequencies
+    
     def _find_fuzzy_matches(self, term, text, threshold=0.90):
         """Find fuzzy matches of a term in text using efficient method with parallel processing"""
         start_time = time.time()
@@ -6328,133 +6418,109 @@ Text to analyze:
         print(f"📑 Frequency checking: {'DISABLED' if skip_frequency_check else f'ENABLED (min: {min_frequency})'}")  
         print(f"📑 Fuzzy threshold: {fuzzy_threshold}")
         
-        # Pre-compute word frequencies for efficiency when we have many terms
-        word_freq_cache = {}
-        if not skip_frequency_check and len(lines) > 100:
-            print(f"📑 Pre-computing word frequencies for {len(lines)} terms (this may take a moment)...")
-            # Create a simple word frequency map for exact matching
-            if fuzzy_threshold >= 1.0:
-                # For exact matching, split text into words and count
-                import re
-                # Use a simple regex to extract words
-                words = re.findall(r'[\w가-힣぀-ゟ゠-ヿ一-鿿]+', all_text)
-                from collections import Counter
-                word_freq_cache = Counter(words)
-                print(f"📑 Pre-computed frequencies for {len(word_freq_cache):,} unique words")
+        # Collect all terms first for batch processing
+        all_terms_to_check = []
+        term_info_map = {}  # Map term to its full info
+        
+        if not skip_frequency_check:
+            # First pass: collect all terms that need frequency checking
+            for line in lines:
+                if 'type' in line.lower() and 'raw_name' in line.lower():
+                    continue  # Skip header
+                
+                parts = [p.strip().strip('"\"') for p in line.split(',')]
+                if len(parts) >= 3:
+                    entry_type = parts[0].lower()
+                    raw_name = parts[1]
+                    translated_name = parts[2]
+                elif len(parts) == 2:
+                    entry_type = 'term'
+                    raw_name = parts[0]
+                    translated_name = parts[1]
+                else:
+                    continue
+                
+                if raw_name and translated_name:
+                    # Store for batch processing
+                    original_raw = raw_name
+                    if strip_honorifics:
+                        raw_name = self._strip_honorific(raw_name, language)
+                    
+                    all_terms_to_check.append(raw_name)
+                    term_info_map[raw_name] = {
+                        'entry_type': entry_type,
+                        'original_raw': original_raw,
+                        'translated_name': translated_name,
+                        'line': line
+                    }
+            
+            # Batch compute all frequencies at once
+            if all_terms_to_check:
+                print(f"📑 Computing frequencies for {len(all_terms_to_check)} terms...")
+                term_frequencies = self._batch_compute_frequencies(
+                    all_terms_to_check, all_text, fuzzy_threshold, min_frequency
+                )
+            else:
+                term_frequencies = {}
 
+        # Now process the results using pre-computed frequencies
         entries_processed = 0
         entries_accepted = 0
-        frequency_check_time = 0
-        last_progress_time = time.time()
-        total_lines = len(lines)
-        
-        for line_num, line in enumerate(lines, 1):
-            # Check stop flag and yield to GUI periodically
-            if line_num % 10 == 0:
-                if is_stop_requested():
-                    return csv_lines
-                # Progress report
-                if line_num % 100 == 0:
-                    elapsed = time.time() - last_progress_time
-                    rate = 100 / elapsed if elapsed > 0 else 0
-                    progress_pct = (line_num / total_lines) * 100
-                    print(f"📑 Progress: {line_num}/{total_lines} terms ({progress_pct:.1f}%) - {rate:.0f} terms/sec")
-                    last_progress_time = time.time()
-            
-            # Check for header
-            if not header_found and 'type' in line.lower() and 'raw_name' in line.lower():
-                csv_lines.append("type,raw_name,translated_name")
-                header_found = True
-                continue
-            
-            # Parse CSV line
-            parts = [p.strip().strip('"\"') for p in line.split(',')]
-            
-            if len(parts) >= 3:
-                # Has all required columns
-                entry_type = parts[0].lower()
-                raw_name = parts[1]
-                translated_name = parts[2]
-            elif len(parts) == 2:
-                # Missing type column, default to 'term'
-                entry_type = 'term'
-                raw_name = parts[0]
-                translated_name = parts[1]
-            else:
-                continue  # Skip invalid lines
-            
-            if not raw_name or not translated_name:
-                continue
-            
-            # For "only_with_honorifics" mode with AI, trust the AI's filtering
-            if filter_mode == "only_with_honorifics":
-                # Just add it - AI already filtered for honorifics
-                csv_line = f"{entry_type},{raw_name},{translated_name}"
-                csv_lines.append(csv_line)
-                if line_num <= 5:  # Log first few entries
-                    print(f"📑   Added (honorifics mode): {csv_line}")
-            elif skip_frequency_check:
-                # Skip all frequency checking
-                csv_line = f"{entry_type},{raw_name},{translated_name}"
-                csv_lines.append(csv_line)
-            else:
-                # Normal frequency checking for other modes
-                original_raw = raw_name
-                if strip_honorifics:
-                    raw_name = self._strip_honorific(raw_name, language)
+        # Process based on mode
+        if filter_mode == "only_with_honorifics" or skip_frequency_check:
+            # For these modes, accept all entries
+            csv_lines.append("type,raw_name,translated_name")  # Header
+            for line in lines:
+                if 'type' in line.lower() and 'raw_name' in line.lower():
+                    continue  # Skip header
                 
-                # Optimize frequency checking - use cache if available
-                if word_freq_cache and fuzzy_threshold >= 1.0:
-                    # Use pre-computed cache for exact matching
-                    count = word_freq_cache.get(raw_name, 0)
-                    if strip_honorifics and count < min_frequency:
-                        count += word_freq_cache.get(original_raw, 0)
-                elif fuzzy_threshold >= 1.0:
-                    # Fallback to substring count for exact matching
-                    count = all_text.count(raw_name)
-                    if strip_honorifics and count < min_frequency:
-                        count += all_text.count(original_raw)
+                parts = [p.strip().strip('"\"') for p in line.split(',')]
+                if len(parts) >= 3:
+                    entry_type = parts[0].lower()
+                    raw_name = parts[1]
+                    translated_name = parts[2]
+                elif len(parts) == 2:
+                    entry_type = 'term'
+                    raw_name = parts[0]
+                    translated_name = parts[1]
                 else:
-                    # Use fuzzy matching (slower)
-                    count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
-                    
-                    # Also check with honorifics if stripped
-                    if strip_honorifics and count < min_frequency:
-                        count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
-                        
-                        # Check with common honorifics
-                        if language in self.pattern_manager.CJK_HONORIFICS:
-                            for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
-                                if is_stop_requested():
-                                    return csv_lines
-                                count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
-                                if count >= min_frequency:
-                                    break
+                    continue
                 
-                if count >= min_frequency:
-                    # Use enforced 3-column format
+                if raw_name and translated_name:
                     csv_line = f"{entry_type},{raw_name},{translated_name}"
                     csv_lines.append(csv_line)
                     entries_accepted += 1
-                    # Only log first few for debugging
+            
+            print(f"📑 Accepted {entries_accepted} entries (frequency check disabled)")
+        
+        else:
+            # Use pre-computed frequencies
+            csv_lines.append("type,raw_name,translated_name")  # Header
+            
+            for term, info in term_info_map.items():
+                count = term_frequencies.get(term, 0)
+                
+                # Also check original form if it was stripped
+                if info['original_raw'] != term:
+                    count += term_frequencies.get(info['original_raw'], 0)
+                
+                if count >= min_frequency:
+                    csv_line = f"{info['entry_type']},{term},{info['translated_name']}"
+                    csv_lines.append(csv_line)
+                    entries_accepted += 1
+                    
+                    # Log first few examples
                     if entries_accepted <= 5:
-                        print(f"📑   ✓ Example accepted: {raw_name} -> {translated_name} (count: {count})")
-                else:
-                    # Don't log skipped entries - too verbose
-                    pass
+                        print(f"📑   ✓ Example: {term} -> {info['translated_name']} (freq: {count})")
+            
+            print(f"📑 Frequency filtering complete: {entries_accepted}/{len(term_info_map)} terms accepted")
         
-        # Ensure header exists with enforced 3-column format
-        if not header_found:
-            csv_lines.insert(0, "type,raw_name,translated_name")
+        # Ensure we have at least the header
+        if len(csv_lines) == 0:
+            csv_lines.append("type,raw_name,translated_name")
         
-        # Print summary
-        processing_time = time.time() - last_progress_time
-        print(f"📑 Processing complete:")
-        print(f"📑   - Total terms processed: {total_lines}")
-        print(f"📑   - Terms accepted: {entries_accepted}")
-        print(f"📑   - Terms rejected: {total_lines - entries_accepted}")
-        if not skip_frequency_check:
-            print(f"📑   - Frequency threshold: {min_frequency}")
+        # Print final summary
+        print(f"📑 Processing complete: {entries_accepted} terms accepted")
         
         return csv_lines
     
