@@ -7,8 +7,21 @@
 # Allow spec files
 !*.spec
 
-# Allow .gitignore itself
+# Allow text and document files
+!*.txt
+!*.docx
+
+# Allow specific root files
+!README.md
+!LICENSE
+!requirements.txt
+!install_requirements.bat
 !.gitignore
 
-# Explicitly ignore all directories (this ensures folders are ignored even if they contain allowed files)
-*/
+# Allow specific folders and their contents
+!.github/
+!.github/**
+!docs/
+!docs/**
+!assets/
+!assets/**

@@ -1,0 +1,10 @@
+How to run
+•  Install dev deps:
+•  pip install -r requirements-dev.txt
+•  Run tests:
+•  pytest -q
+•  Optional coverage:
+•  python -m coverage run -m pytest -q
+•  coverage report -m
+•  python -m coverage html  
+•  python -m coverage run -m pytest -q
