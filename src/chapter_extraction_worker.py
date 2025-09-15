@@ -62,6 +62,26 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
             
             print(f"[INFO] Extracted {len(chapters)} chapters", flush=True)
             
+            # CRITICAL: Save the full chapters with body content!
+            # This is what the main process needs to load
+            chapters_full_path = os.path.join(output_dir, "chapters_full.json")
+            try:
+                with open(chapters_full_path, 'w', encoding='utf-8') as f:
+                    json.dump(chapters, f, ensure_ascii=False)
+                print(f"[INFO] Saved full chapters data to: {chapters_full_path}", flush=True)
+            except Exception as e:
+                print(f"[WARNING] Could not save full chapters: {e}", flush=True)
+                # Fall back to saving individual files
+                for chapter in chapters:
+                    try:
+                        chapter_file = f"chapter_{chapter['num']:04d}_{chapter.get('filename', 'content').replace('/', '_')}.html"
+                        chapter_path = os.path.join(output_dir, chapter_file)
+                        with open(chapter_path, 'w', encoding='utf-8') as f:
+                            f.write(chapter.get('body', ''))
+                        print(f"[INFO] Saved chapter {chapter['num']} to {chapter_file}", flush=True)
+                    except Exception as ce:
+                        print(f"[WARNING] Could not save chapter {chapter.get('num')}: {ce}", flush=True)
+            
             # Return results as JSON for IPC
             result = {
                 "success": True,
@@ -72,7 +92,8 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
                         "num": ch.get("num"),
                         "title": ch.get("title"),
                         "has_images": ch.get("has_images", False),
-                        "file_size": ch.get("file_size", 0)
+                        "file_size": ch.get("file_size", 0),
+                        "content_hash": ch.get("content_hash", "")
                     }
                     for ch in chapters
                 ]

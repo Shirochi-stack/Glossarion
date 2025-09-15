@@ -8865,39 +8865,95 @@ def main(log_callback=None, stop_callback=None):
             else:
                 metadata = extraction_result["result"].get("metadata", {})
             
-            # Load chapters from saved files
-            chapters_info_path = os.path.join(out, "chapters_info.json")
-            if os.path.exists(chapters_info_path):
+            # The async extraction should have saved chapters directly, similar to the sync version
+            # We need to reconstruct the chapters list with body content
+            
+            # Check if the extraction actually created a chapters.json file with full content
+            chapters_full_path = os.path.join(out, "chapters_full.json")
+            chapters_info_path = os.path.join(out, "chapters_info.json") 
+            
+            chapters = []
+            
+            # First try to load full chapters if saved
+            if os.path.exists(chapters_full_path):
+                log_callback("Loading full chapters data...")
+                with open(chapters_full_path, 'r', encoding='utf-8') as f:
+                    chapters = json.load(f)
+                log_callback(f"✅ Loaded {len(chapters)} chapters with content")
+                    
+            elif os.path.exists(chapters_info_path):
+                # Fall back to loading from individual files
+                log_callback("Loading chapter info and searching for content files...")
                 with open(chapters_info_path, 'r', encoding='utf-8') as f:
                     chapters_info = json.load(f)
-                    # Convert to the format expected by the rest of the code
-                    chapters = []
-                    for info in chapters_info:
-                        # Read the actual chapter content
-                        chapter_files = [f for f in os.listdir(out) if f.startswith(f"chapter_{info['num']:04d}_")]
-                        if chapter_files:
-                            chapter_path = os.path.join(out, chapter_files[0])
-                            with open(chapter_path, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                            chapters.append({
-                                "num": info["num"],
-                                "title": info["title"],
-                                "body": content,
-                                "filename": info.get("original_filename", ""),
-                                "has_images": info.get("has_images", False),
-                                "file_size": info.get("text_length", len(content))
-                            })
-            else:
-                # Fallback to basic chapter info from result
-                chapters = []
-                for i, info in enumerate(extraction_result["result"].get("chapter_info", []), 1):
-                    chapters.append({
-                        "num": info.get("num", i),
-                        "title": info.get("title", f"Chapter {i}"),
-                        "body": "",  # Content will be loaded later
-                        "has_images": info.get("has_images", False),
-                        "file_size": info.get("file_size", 0)
-                    })
+                
+                # List all files in the output directory
+                all_files = os.listdir(out)
+                log_callback(f"Found {len(all_files)} files in output directory")
+                
+                # Try to match chapter files
+                for info in chapters_info:
+                    chapter_num = info['num']
+                    found = False
+                    
+                    # Try different naming patterns
+                    patterns = [
+                        f"chapter_{chapter_num:04d}_",  # With leading zeros
+                        f"chapter_{chapter_num}_",       # Without leading zeros  
+                        f"ch{chapter_num:04d}_",         # Shortened with zeros
+                        f"ch{chapter_num}_",             # Shortened without zeros
+                        f"{chapter_num:04d}_",          # Just number with zeros
+                        f"{chapter_num}_"                # Just number
+                    ]
+                    
+                    for pattern in patterns:
+                        # Find files matching this pattern (any extension)
+                        matching_files = [f for f in all_files if f.startswith(pattern)]
+                        
+                        if matching_files:
+                            # Prefer HTML/XHTML files
+                            html_files = [f for f in matching_files if f.endswith(('.html', '.xhtml', '.htm'))]
+                            if html_files:
+                                chapter_file = html_files[0]
+                            else:
+                                chapter_file = matching_files[0]
+                            
+                            chapter_path = os.path.join(out, chapter_file)
+                            
+                            try:
+                                with open(chapter_path, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                
+                                chapters.append({
+                                    "num": chapter_num,
+                                    "title": info.get("title", f"Chapter {chapter_num}"),
+                                    "body": content,
+                                    "filename": info.get("original_filename", ""),
+                                    "has_images": info.get("has_images", False),
+                                    "file_size": len(content),
+                                    "content_hash": info.get("content_hash", "")
+                                })
+                                found = True
+                                break
+                            except Exception as e:
+                                log_callback(f"⚠️ Error reading {chapter_file}: {e}")
+                    
+                    if not found:
+                        log_callback(f"⚠️ No file found for Chapter {chapter_num}")
+                        # Log available files for debugging
+                        if len(all_files) < 50:
+                            similar_files = [f for f in all_files if str(chapter_num) in f]
+                            if similar_files:
+                                log_callback(f"   Similar files: {similar_files[:3]}")
+            
+            if not chapters:
+                log_callback("❌ No chapters could be loaded!")
+                log_callback(f"❌ Output directory: {out}")
+                log_callback(f"❌ Files in directory: {len(os.listdir(out))} files")
+                # Show first few files for debugging
+                sample_files = os.listdir(out)[:10]
+                log_callback(f"❌ Sample files: {sample_files}")
+                return
         else:
             print("🚀 Using comprehensive chapter extraction with resource handling...")
             with zipfile.ZipFile(input_path, 'r') as zf:
