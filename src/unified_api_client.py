@@ -130,7 +130,19 @@ from datetime import datetime
 import traceback
 import hashlib
 import html
-from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
+try:
+    from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
+except ImportError:
+    try:
+        from .multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
+    except ImportError:
+        # Fallback classes if module not available
+        class APIKeyPool:
+            def __init__(self): pass
+        class APIKeyEntry:
+            def __init__(self): pass
+        class RateLimitCache:
+            def __init__(self): pass
 import threading
 import uuid
 from threading import RLock
@@ -257,11 +269,16 @@ class UnifiedClient:
     # ----- Helper methods to reduce duplication -----
     @contextlib.contextmanager
     def _model_lock(self):
-        if hasattr(self, '_instance_model_lock'):
+        """Context manager for thread-safe model access"""
+        if hasattr(self, '_instance_model_lock') and self._instance_model_lock is not None:
             with self._instance_model_lock:
                 yield
         else:
-            yield
+            # Fallback - create a temporary lock if needed
+            if not hasattr(self, '_temp_model_lock'):
+                self._temp_model_lock = threading.RLock()
+            with self._temp_model_lock:
+                yield
     def _get_send_interval(self) -> float:
         try:
             return float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -704,8 +721,8 @@ class UnifiedClient:
         # File write coordination
         self._file_write_locks = {}  # {filepath: RLock}
         self._file_write_locks_lock = RLock()
-        if not hasattr(self, '_model_lock'):
-            self._model_lock = threading.RLock()
+        if not hasattr(self, '_instance_model_lock'):
+            self._instance_model_lock = threading.RLock()
         
         # Stats tracking
         self.stats = {
@@ -1018,7 +1035,7 @@ class UnifiedClient:
                     tls.last_rotation = time.time()
                     
                     # MICROSECOND LOCK: Only when copying to instance variables
-                    with self._model_lock():
+                    with self._model_lock:
                         # Copy to instance for compatibility
                         self.api_key = tls.api_key
                         self.model = tls.model
@@ -1043,7 +1060,7 @@ class UnifiedClient:
                 # Not rotating, ensure instance variables match thread-local
                 if tls.initialized:
                     # MICROSECOND LOCK: When syncing instance variables
-                    with self._model_lock():
+                    with self._model_lock:
                         self.api_key = tls.api_key
                         self.model = tls.model
                         self.key_identifier = tls.key_identifier
@@ -1058,7 +1075,7 @@ class UnifiedClient:
             tls.request_count = 0
             
             # MICROSECOND LOCK: When setting instance variables
-            with self._model_lock():
+            with self._model_lock:
                 self.api_key = tls.api_key
                 self.model = tls.model
                 self.key_identifier = tls.key_identifier
@@ -1520,7 +1537,7 @@ class UnifiedClient:
         key_info = self._get_next_available_key()
         if key_info:
             # MICROSECOND LOCK: Protect all instance variable modifications
-            with self._model_lock():
+            with self._model_lock:
                 # Update key and model
                 self.api_key = key_info[0].api_key
                 self.model = key_info[0].model
@@ -1551,7 +1568,7 @@ class UnifiedClient:
                     custom_base_url = 'https://' + custom_base_url
                 
                 # MICROSECOND LOCK: When modifying client instance
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=custom_base_url
@@ -1700,7 +1717,7 @@ class UnifiedClient:
         self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
         
         # MICROSECOND LOCK: Atomic update of all key-related variables
-        with self._model_lock():
+        with self._model_lock:
             self.api_key = key_info[0].api_key
             self.model = key_info[0].model
             self.current_key_index = key_info[1]
@@ -1795,7 +1812,7 @@ class UnifiedClient:
         WITH MICROSECOND LOCKING for thread safety."""
         
         # MICROSECOND LOCK: Ensure atomic hash generation
-        with self._model_lock():
+        with self._model_lock:
             # Get thread-specific identifier to prevent cross-thread cache collisions
             thread_id = threading.current_thread().ident
             thread_name = threading.current_thread().name
@@ -1832,7 +1849,7 @@ class UnifiedClient:
             normalized_messages.append(normalized_msg)
         
         # MICROSECOND LOCK: Ensure atomic hash generation
-        with self._model_lock():
+        with self._model_lock:
             # Include thread_id but NO request-specific IDs for stable caching
             hash_data = {
                 'thread_id': thread_id,  # THREAD ISOLATION
@@ -1867,7 +1884,7 @@ class UnifiedClient:
         """
         
         # MICROSECOND LOCK: Ensure atomic reading of model/settings
-        with self._model_lock():
+        with self._model_lock:
             # Get thread-specific identifier
             thread_id = threading.current_thread().ident
             thread_name = threading.current_thread().name
@@ -2490,7 +2507,7 @@ class UnifiedClient:
                 chutes_base_url = os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1")
                 
                 # MICROSECOND LOCK for chutes client
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=chutes_base_url
@@ -2558,7 +2575,7 @@ class UnifiedClient:
                 base_url = 'https://api.openai.com/v1'
             
             # MICROSECOND LOCK for OpenAI client
-            with self._model_lock():
+            with self._model_lock:
                 self.openai_client = openai.OpenAI(
                     api_key=self.api_key,
                     base_url=base_url
@@ -2572,7 +2589,7 @@ class UnifiedClient:
                     base_url = gemini_endpoint
                 
                 # MICROSECOND LOCK for Gemini with OpenAI endpoint
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=base_url
@@ -2582,7 +2599,7 @@ class UnifiedClient:
                 print(f"[DEBUG] Gemini using OpenAI-compatible endpoint: {base_url}")
             else:
                 # MICROSECOND LOCK for native Gemini client
-                with self._model_lock():
+                with self._model_lock:
                     self.gemini_client = genai.Client(api_key=self.api_key)
                 if hasattr(tls, 'model'):
                     tls.gemini_configured = True
@@ -2604,7 +2621,7 @@ class UnifiedClient:
         elif self.client_type == 'cohere':
             if cohere is not None:
                 # MICROSECOND LOCK for Cohere client
-                with self._model_lock():
+                with self._model_lock:
                     self.cohere_client = cohere.Client(self.api_key)
                 logger.info("Cohere client created")
         
@@ -2614,7 +2631,7 @@ class UnifiedClient:
                     base_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
                 
                 # MICROSECOND LOCK for DeepSeek client
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=base_url
@@ -2627,7 +2644,7 @@ class UnifiedClient:
                     base_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
                 
                 # MICROSECOND LOCK for Groq client
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=base_url
@@ -2640,7 +2657,7 @@ class UnifiedClient:
                     base_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
                 
                 # MICROSECOND LOCK for Fireworks client
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=base_url
@@ -2653,7 +2670,7 @@ class UnifiedClient:
                     base_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
                 
                 # MICROSECOND LOCK for xAI client
-                with self._model_lock():
+                with self._model_lock:
                     self.openai_client = openai.OpenAI(
                         api_key=self.api_key,
                         base_url=base_url
@@ -2687,7 +2704,7 @@ class UnifiedClient:
         # Store thread-local client reference if in multi-key mode
         if self._multi_key_mode and hasattr(tls, 'model'):
             # MICROSECOND LOCK for thread-local storage
-            with self._model_lock():
+            with self._model_lock:
                 tls.client_type = self.client_type
                 if hasattr(self, 'openai_client'):
                     tls.openai_client = self.openai_client
@@ -2813,6 +2830,9 @@ class UnifiedClient:
         # Track if we've tried main key for prohibited content
         main_key_attempted = False
         
+        # Initialize variables that might be referenced in exception handlers
+        extracted_content = ""
+        finish_reason = 'error'
         
         for attempt in range(internal_retries):
             try:
@@ -3376,7 +3396,7 @@ class UnifiedClient:
  
     def reset_conversation_for_new_context(self, new_context):
         """Reset conversation state when context changes"""
-        with self._model_lock():
+        with self._model_lock:
             self.current_session_context = new_context
             self.conversation_message_count = 0
             self.pattern_counts.clear()
@@ -3407,7 +3427,7 @@ class UnifiedClient:
                 pattern_key = f"reinforcement_{pattern[0]}_{pattern[1]}"
                 
                 # MICROSECOND LOCK: When modifying pattern_counts
-                with self._model_lock():
+                with self._model_lock:
                     self.pattern_counts[pattern_key] = self.pattern_counts.get(pattern_key, 0) + 1
                     count = self.pattern_counts[pattern_key]
                 
@@ -7004,7 +7024,7 @@ class UnifiedClient:
             effective_model = model_override
         else:
             # Read instance model under microsecond lock to avoid cross-thread contamination
-            with self._model_lock():
+            with self._model_lock:
                 effective_model = self.model
         # Provider-specific model normalization (transport-only)
         if provider == 'openrouter':
@@ -7358,6 +7378,27 @@ class UnifiedClient:
                 usage=usage,
                 raw_response=json_resp
             )
+    
+    def _send_openai(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
+        """Send request to OpenAI API with proper token parameter handling"""
+        # Determine the base URL (could be custom endpoint or default)
+        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        
+        if custom_base_url and use_custom_endpoint:
+            base_url = custom_base_url
+        else:
+            base_url = 'https://api.openai.com/v1'
+        
+        # For OpenAI, we need to handle max_completion_tokens properly
+        return self._send_openai_compatible(
+            messages=messages,
+            temperature=temperature, 
+            max_tokens=max_tokens if not max_completion_tokens else max_completion_tokens,
+            base_url=base_url,
+            response_name=response_name,
+            provider="openai"
+        )
 
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
