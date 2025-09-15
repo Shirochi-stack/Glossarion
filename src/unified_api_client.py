@@ -983,6 +983,7 @@ class UnifiedClient:
             self._thread_local.mistral_client = None
             self._thread_local.cohere_client = None
             self._thread_local.client_type = None
+            self._thread_local.current_request_label = None
             
             # THREAD-LOCAL CACHE
             self._thread_local.request_cache = {}  # Each thread gets its own cache!
@@ -5046,6 +5047,15 @@ class UnifiedClient:
                 
                 # Sleep outside lock
                 time.sleep(sleep_time)
+                
+                # Immediately after stagger completes, indicate what is being sent
+                try:
+                    tls = self._get_thread_local_client()
+                    label = getattr(tls, 'current_request_label', None)
+                    if label:
+                        print(f"📤 [{thread_name}] Sending {label} to API...")
+                except Exception:
+                    pass
             else:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
@@ -5514,6 +5524,12 @@ class UnifiedClient:
             label = self._extract_chapter_label(messages)
             ctx = context or 'translation'
             print(f"📤 [{thread_name}] Sending {label} ({ctx}) — queuing staggered API call...")
+            # Stash label so stagger logger can show what is being translated
+            try:
+                tls = self._get_thread_local_client()
+                tls.current_request_label = label
+            except Exception:
+                pass
         except Exception:
             # Never block on logging
             pass

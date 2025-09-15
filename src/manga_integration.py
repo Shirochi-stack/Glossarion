@@ -4688,6 +4688,31 @@ class MangaTranslationTab:
             self._log(f"Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
         
         if needs_new_client:
+            # Apply multi-key settings from config so UnifiedClient picks them up
+            try:
+                use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                mk_list = self.main_gui.config.get('multi_api_keys', [])
+                if use_mk and mk_list:
+                    os.environ['USE_MULTI_API_KEYS'] = '1'
+                    os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
+                    os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
+                    os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
+                    os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
+                    self._log("🔑 Multi-key mode ENABLED for manga translator", "info")
+                else:
+                    # Explicitly disable if not configured
+                    os.environ['USE_MULTI_API_KEYS'] = '0'
+                    os.environ['USE_MULTI_KEYS'] = '0'
+                # Fallback keys (optional)
+                if self.main_gui.config.get('use_fallback_keys', False):
+                    os.environ['USE_FALLBACK_KEYS'] = '1'
+                    os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
+                else:
+                    os.environ['USE_FALLBACK_KEYS'] = '0'
+                    os.environ['FALLBACK_KEYS'] = '[]'
+            except Exception as env_err:
+                self._log(f"⚠️ Failed to apply multi-key settings: {env_err}", "warning")
+            
             # Create the unified client with the current model
             try:
                 from unified_api_client import UnifiedClient
