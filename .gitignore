@@ -1,27 +1,50 @@
 # Ignore everything by default
-*
-
-# Allow Python scripts
-!*.py
-
-# Allow spec files
-!*.spec
-
-# Allow text and document files
-!*.txt
-!*.docx
+/*
 
 # Allow specific root files
+!.gitignore
 !README.md
 !LICENSE
 !requirements.txt
 !install_requirements.bat
-!.gitignore
 
-# Allow specific folders and their contents
+# Allow .github, docs, assets folders if present
 !.github/
 !.github/**
 !docs/
 !docs/**
 !assets/
 !assets/**
+
+# Only include src, and inside it ONLY .py and .spec files
+!src/
+# Ignore everything under src by default
+src/**
+# Re-allow directories so negated file patterns can match
+!src/**/
+# Re-allow only Python and spec files
+!src/**/*.py
+!src/**/*.spec
+
+# Never commit secrets and configs anywhere
+**/config.json
+*.key
+*_key
+.glossarion_key
+
+# Never commit logs anywhere
+*.log
+logs/
+**/logs/
+
+# Exclude Python caches and compiled artifacts
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Do not commit text files by default (change if needed)
+*.txt
+
+# Exclude all JSON by default (change if needed)
+*.json
