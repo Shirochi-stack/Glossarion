@@ -26,6 +26,8 @@ src/**
 !src/*.spec
 !src/*.bat
 !src/*.vbs
+# Explicitly include application icon in src
+!src/glossarion.ico
 
 # Never commit secrets and configs anywhere
 **/config.json
