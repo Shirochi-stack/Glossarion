@@ -7,6 +7,7 @@
 !LICENSE
 !requirements.txt
 !install_requirements.bat
+requirements-dev.txt
 
 # Allow .github, docs, assets folders if present
 !.github/
@@ -16,15 +17,16 @@
 !assets/
 !assets/**
 
-# Only include src, and inside it ONLY .py and .spec files
+# Only include src, but exclude all subfolders; allow only top-level .py and .spec files
 !src/
-# Ignore everything under src by default
+# Ignore everything under src by default (including all subfolders)
 src/**
-# Re-allow directories so negated file patterns can match
-!src/**/
-# Re-allow only Python and spec files
-!src/**/*.py
-!src/**/*.spec
+# Allow only top-level .py and .spec directly under src (no subfolders)
+!src/*.py
+!src/*.spec
+# Explicitly exclude Windows launcher scripts in src
+src/*.bat
+src/*.vbs
 
 # Never commit secrets and configs anywhere
 **/config.json
@@ -45,6 +47,7 @@ logs/
 
 # Do not commit text files by default (change if needed)
 *.txt
+howtoruntest.txt
 
 # Exclude all JSON by default (change if needed)
 *.json
