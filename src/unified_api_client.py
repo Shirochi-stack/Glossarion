@@ -394,13 +394,13 @@ class UnifiedClient:
     def _finalize_empty_response(self, messages, context, response, extracted_content: str, finish_reason: Optional[str], provider: str, request_type: str, start_time: float) -> Tuple[str, str]:
         is_safety = self._detect_safety_filter(messages, extracted_content, finish_reason, response, provider)
         # Always save failure snapshot and log truncation details
-        self._save_failed_request(messages, f"Empty {request_type} response from {self.client_type}", context, response)
+        self._save_failed_request(messages, f"Empty {request_type} response from {getattr(self, 'client_type', 'unknown')}", context, response)
         error_details = getattr(response, 'error_details', None)
         if is_safety:
             error_details = {
                 'likely_safety_filter': True,
                 'original_finish_reason': finish_reason,
-                'provider': self.client_type,
+                'provider': getattr(self, 'client_type', None),
                 'model': self.model,
                 'key_identifier': getattr(self, 'key_identifier', None),
                 'request_type': request_type
@@ -457,7 +457,8 @@ class UnifiedClient:
         tls.idem_attempt = attempt
 
     def _get_extraction_kwargs(self) -> dict:
-        if self.client_type == 'gemini':
+        ct = getattr(self, 'client_type', None)
+        if ct == 'gemini':
             return {
                 'supports_thinking': self._supports_thinking(),
                 'thinking_budget': int(os.getenv("THINKING_BUDGET", "-1")),
@@ -2263,6 +2264,7 @@ class UnifiedClient:
         
         return info
 
+
     def get_current_key_info(self) -> str:
         """Get information about the currently active key"""
         if self.use_multi_keys and self.current_key_index is not None:
@@ -2357,6 +2359,8 @@ class UnifiedClient:
             self._sequential_send_lock.acquire()
         try:
             self.reset_cleanup_state()
+            # Pre-stagger log so users see what's being sent before delay
+            self._log_pre_stagger(messages, context or ('image_translation' if image_data else 'translation'))
             self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
             if image_data is None:
@@ -2807,7 +2811,7 @@ class UnifiedClient:
             response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
             
             # Extract text uniformly
-            extracted_content, finish_reason = self._extract_response_text(response, provider=self.client_type)
+            extracted_content, finish_reason = self._extract_response_text(response, provider=getattr(self, 'client_type', 'unknown'))
             
             # Save response if any
             if extracted_content:
@@ -2941,20 +2945,20 @@ class UnifiedClient:
                     # Add provider-specific parameters if applicable
                     extraction_kwargs.update(self._get_extraction_kwargs())
                     
-                    # Try universal extraction with provider-specific parameters
+# Try universal extraction with provider-specific parameters
                     extracted_content, finish_reason = self._extract_response_text(
                         response, 
-                        provider=self.client_type,
+                        provider=getattr(self, 'client_type', 'unknown'),
                         **extraction_kwargs
                     )
                     
                     # If extraction failed but we have a response object
                     if not extracted_content and response:
-                        print(f"⚠️ Failed to extract text from {self.client_type} response")
+                        print(f"⚠️ Failed to extract text from {getattr(self, 'client_type', 'unknown')} response")
                         print(f"   Response type: {type(response)}")
                         
                         # Provider-specific guidance
-                        if self.client_type == 'gemini':
+                        if getattr(self, 'client_type', None) == 'gemini':
                             print(f"   Consider checking Gemini response structure")
                             print(f"   Response attributes: {dir(response)[:5]}...")  # Show first 5 attributes
                         else:
@@ -2989,7 +2993,7 @@ class UnifiedClient:
 
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
-                    is_likely_safety_filter = self._detect_safety_filter(messages, extracted_content, finish_reason, response, self.client_type)
+                    is_likely_safety_filter = self._detect_safety_filter(messages, extracted_content, finish_reason, response, getattr(self, 'client_type', 'unknown'))
                     if is_likely_safety_filter and not main_key_attempted and self._multi_key_mode and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None):
                         main_key_attempted = True
                         try:
@@ -3002,7 +3006,7 @@ class UnifiedClient:
                             pass
                     # Finalize empty handling
                     req_type = 'image' if image_data else 'text'
-                    return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, self.client_type, req_type, start_time)
+                    return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
                                 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
@@ -3067,6 +3071,7 @@ class UnifiedClient:
                 
                 # Apply API delay after successful call (even if truncated)
                 # SKIP DELAY DURING CLEANUP
+                
                 self._apply_api_delay()
                 
                 # Return the response with accurate finish_reason
@@ -3089,7 +3094,7 @@ class UnifiedClient:
                     raise
                 
                 # Check for prohibited content - check BOTH error_type AND error string
-                if e.error_type == "prohibited_content" or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, self.client_type):
+                if e.error_type == "prohibited_content" or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
                     
                     # Attempt main key retry once, then fall through to fallback
@@ -3162,7 +3167,7 @@ class UnifiedClient:
                     raise  # Re-raise for multi-key retry logic
                 
                 # Check for prohibited content in unexpected errors
-                if self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, self.client_type):
+                if self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
                     print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
                     
                     # If we're in multi-key mode and haven't tried the main key yet
@@ -3597,7 +3602,7 @@ class UnifiedClient:
         
         if not success:
             self.stats['empty_results'] += 1
-            error_key = f"{self.client_type}_{context}_{error_type}"
+            error_key = f"{getattr(self, 'client_type', 'unknown')}_{context}_{error_type}"
             self.stats['errors'][error_key] = self.stats['errors'].get(error_key, 0) + 1
         
         if response_time:
@@ -3628,13 +3633,13 @@ class UnifiedClient:
             'error': str(error),
             'error_type': type(error).__name__,
             'messages': messages,
-            'model': self.model,
-            'client_type': self.client_type,
+            'model': getattr(self, 'model', None),
+            'client_type': getattr(self, 'client_type', None),
             'response': str(response) if response else None,
             'traceback': traceback.format_exc()
         }
         
-        filename = f"{failed_dir}/failed_{context}_{self.client_type}_{timestamp}.json"
+        filename = f"{failed_dir}/failed_{context}_{getattr(self, 'client_type', 'unknown')}_{timestamp}.json"
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(failure_data, f, indent=2, ensure_ascii=False)
         
@@ -4324,12 +4329,12 @@ class UnifiedClient:
                 # Write the payload
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump({
-                        'model': self.model,
-                        'client_type': self.client_type,
+                        'model': getattr(self, 'model', None),
+                        'client_type': getattr(self, 'client_type', None),
                         'messages': messages,
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
-                        'key_identifier': self.key_identifier,
+                        'key_identifier': getattr(self, 'key_identifier', None),
                         'retry_info': {
                             'reason': retry_reason,
                             'attempt': getattr(self, '_current_retry_attempt', 0),
@@ -5351,6 +5356,14 @@ class UnifiedClient:
             response_name: Name for saving response
         """
         self._apply_api_call_stagger()
+        # Ensure client_type is initialized before routing (important for multi-key mode)
+        try:
+            if not hasattr(self, 'client_type') or self.client_type is None:
+                self._ensure_thread_client()
+        except Exception:
+            # Guard against missing attribute in extreme early paths
+            if not hasattr(self, 'client_type'):
+                self.client_type = None
 
         # FIX: Ensure max_tokens has a value before passing to handlers
         if max_tokens is None and max_completion_tokens is None:
@@ -5438,7 +5451,7 @@ class UnifiedClient:
             if self.client_type in ['bigscience', 'meta']:
                 logger.info(f"Using Together AI for {self.client_type} model")
                 return self._send_openai_provider_router(messages, temperature, max_tokens, response_name)
-            raise UnifiedClientError(f"No handler for client type: {self.client_type}")
+            raise UnifiedClientError(f"No handler for client type: {getattr(self, 'client_type', 'unknown')}")
 
         if self.client_type in ['deepl', 'google_translate']:
             # These services don't use temperature or token limits
@@ -5469,7 +5482,41 @@ class UnifiedClient:
         # Check if this is Gemini using OpenAI endpoint
         if hasattr(self, '_original_client_type') and self._original_client_type:
             return self._original_client_type
-        return self.client_type
+        return getattr(self, 'client_type', 'openai')
+
+    def _extract_chapter_label(self, messages) -> str:
+        """Extract a concise chapter/chunk label from messages for logging."""
+        try:
+            s = str(messages)
+            import re
+            chap = None
+            m = re.search(r'Chapter\s+(\d+)', s)
+            if m:
+                chap = f"Chapter {m.group(1)}"
+            chunk = None
+            mc = re.search(r'Chunk\s+(\d+)/(\d+)', s)
+            if mc:
+                chunk = f"{mc.group(1)}/{mc.group(2)}"
+            if chap and chunk:
+                return f"{chap} (chunk {chunk})"
+            if chap:
+                return chap
+            if chunk:
+                return f"chunk {chunk}"
+        except Exception:
+            pass
+        return "request"
+
+    def _log_pre_stagger(self, messages, context: Optional[str] = None) -> None:
+        """Emit a pre-stagger log line so users see what's being sent before delay."""
+        try:
+            thread_name = threading.current_thread().name
+            label = self._extract_chapter_label(messages)
+            ctx = context or 'translation'
+            print(f"📤 [{thread_name}] Sending {label} ({ctx}) — queuing staggered API call...")
+        except Exception:
+            # Never block on logging
+            pass
 
     def _is_gemini_request(self) -> bool:
         """
