@@ -8336,6 +8336,12 @@ Provide translations in the same numbered format."""
                 
                 # Set environment variables
                 env_vars = self._get_environment_variables(file_path, api_key)
+                
+                # Enable async chapter extraction for EPUBs to prevent GUI freezing
+                if file_path.lower().endswith('.epub'):
+                    env_vars['USE_ASYNC_CHAPTER_EXTRACTION'] = '1'
+                    self.append_log("🚀 Using async chapter extraction (subprocess mode)")
+                
                 os.environ.update(env_vars)
                 
                 # Handle chapter range

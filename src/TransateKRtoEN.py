@@ -8803,10 +8803,106 @@ def main(log_callback=None, stop_callback=None):
                 log_callback(f"❌ Error processing text file: {e}")
             return
     else:
-        print("🚀 Using comprehensive chapter extraction with resource handling...")
-        with zipfile.ZipFile(input_path, 'r') as zf:
-            metadata = chapter_extractor._extract_epub_metadata(zf)
-            chapters = chapter_extractor.extract_chapters(zf, out)
+        # Check if we should use async extraction (for GUI mode)
+        use_async_extraction = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+        
+        if use_async_extraction and log_callback:
+            print("🚀 Using async chapter extraction (subprocess mode)...")
+            from chapter_extraction_manager import ChapterExtractionManager
+            
+            # Create manager with log callback
+            extraction_manager = ChapterExtractionManager(log_callback=log_callback)
+            
+            # Get extraction mode
+            extraction_mode = os.getenv("EXTRACTION_MODE", "smart").lower()
+            
+            # Define completion callback
+            extraction_result = {"completed": False, "result": None}
+            
+            def on_extraction_complete(result):
+                extraction_result["completed"] = True
+                extraction_result["result"] = result
+                if result and result.get("success"):
+                    log_callback(f"✅ Chapter extraction completed: {result.get('chapters', 0)} chapters")
+                else:
+                    log_callback(f"❌ Chapter extraction failed: {result.get('error', 'Unknown error')}")
+            
+            # Start async extraction
+            extraction_manager.extract_chapters_async(
+                input_path,
+                out,
+                extraction_mode=extraction_mode,
+                progress_callback=lambda msg: log_callback(f"📊 {msg}"),
+                completion_callback=on_extraction_complete
+            )
+            
+            # Wait for completion (with timeout)
+            timeout = 300  # 5 minutes timeout
+            start_time = time.time()
+            
+            while not extraction_result["completed"]:
+                if check_stop():
+                    extraction_manager.stop_extraction()
+                    return
+                
+                if time.time() - start_time > timeout:
+                    log_callback("⚠️ Chapter extraction timeout")
+                    extraction_manager.stop_extraction()
+                    return
+                
+                time.sleep(0.1)  # Check every 100ms
+            
+            # Check if extraction was successful
+            if not extraction_result["result"] or not extraction_result["result"].get("success"):
+                log_callback("❌ Chapter extraction failed")
+                return
+            
+            # Load the extracted data
+            metadata_path = os.path.join(out, "metadata.json")
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+            else:
+                metadata = extraction_result["result"].get("metadata", {})
+            
+            # Load chapters from saved files
+            chapters_info_path = os.path.join(out, "chapters_info.json")
+            if os.path.exists(chapters_info_path):
+                with open(chapters_info_path, 'r', encoding='utf-8') as f:
+                    chapters_info = json.load(f)
+                    # Convert to the format expected by the rest of the code
+                    chapters = []
+                    for info in chapters_info:
+                        # Read the actual chapter content
+                        chapter_files = [f for f in os.listdir(out) if f.startswith(f"chapter_{info['num']:04d}_")]
+                        if chapter_files:
+                            chapter_path = os.path.join(out, chapter_files[0])
+                            with open(chapter_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            chapters.append({
+                                "num": info["num"],
+                                "title": info["title"],
+                                "body": content,
+                                "filename": info.get("original_filename", ""),
+                                "has_images": info.get("has_images", False),
+                                "file_size": info.get("text_length", len(content))
+                            })
+            else:
+                # Fallback to basic chapter info from result
+                chapters = []
+                for i, info in enumerate(extraction_result["result"].get("chapter_info", []), 1):
+                    chapters.append({
+                        "num": info.get("num", i),
+                        "title": info.get("title", f"Chapter {i}"),
+                        "body": "",  # Content will be loaded later
+                        "has_images": info.get("has_images", False),
+                        "file_size": info.get("file_size", 0)
+                    })
+        else:
+            print("🚀 Using comprehensive chapter extraction with resource handling...")
+            with zipfile.ZipFile(input_path, 'r') as zf:
+                metadata = chapter_extractor._extract_epub_metadata(zf)
+                chapters = chapter_extractor.extract_chapters(zf, out)
 
             print(f"\n📚 Extraction Summary:")
             print(f"   Total chapters extracted: {len(chapters)}")
