@@ -29,6 +29,82 @@ from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import csv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+# Module-level functions for ProcessPoolExecutor compatibility
+def _check_sentence_batch_for_terms(args):
+    """Check a batch of sentences for term matches - used by ProcessPoolExecutor"""
+    batch_sentences, terms = args
+    filtered = []
+    
+    # Use pre-compiled term list for fast checking
+    for sentence in batch_sentences:
+        # Quick check using any() - stops at first match
+        if any(term in sentence for term in terms):
+            filtered.append(sentence)
+    
+    return filtered
+
+def _process_sentence_batch_for_extraction(args):
+    """Process sentences to extract terms - used by ProcessPoolExecutor"""
+    batch_sentences, batch_idx, combined_pattern, exclude_check_data = args
+    from collections import Counter
+    import re
+    
+    local_word_freq = Counter()
+    local_important = []
+    local_seen = set()
+    
+    # Rebuild the exclusion check function from data
+    honorifics_to_exclude, title_patterns_str, common_words, chinese_nums = exclude_check_data
+    title_patterns = [re.compile(p) for p in title_patterns_str]
+    
+    def should_exclude_term(term):
+        term_lower = term.lower()
+        
+        # Check if it's a common word
+        if term in common_words or term_lower in common_words:
+            return True
+        
+        # Check if it contains honorifics
+        for honorific in honorifics_to_exclude:
+            if honorific in term or (honorific.startswith('-') and term.endswith(honorific[1:])):
+                return True
+        
+        # Check if it matches title patterns
+        for pattern in title_patterns:
+            if pattern.search(term):
+                return True
+        
+        # Check if it's a number
+        if term in chinese_nums or term.isdigit():
+            return True
+        
+        return False
+    
+    for sentence in batch_sentences:
+        sentence = sentence.strip()
+        if len(sentence) < 10 or len(sentence) > 500:
+            continue
+            
+        # Find all potential terms in this sentence
+        matches = re.findall(combined_pattern, sentence)
+        
+        if matches:
+            # Filter out excluded terms
+            filtered_matches = []
+            for match in matches:
+                if not should_exclude_term(match):
+                    local_word_freq[match] += 1
+                    filtered_matches.append(match)
+            
+            # Keep sentences with valid potential terms
+            if filtered_matches:
+                sentence_key = ' '.join(sorted(filtered_matches))
+                if sentence_key not in local_seen:
+                    local_important.append(sentence)
+                    local_seen.add(sentence_key)
+    
+    return local_word_freq, local_important, local_seen, batch_idx
 from tqdm import tqdm
 
 def is_traditional_translation_api(model: str) -> bool:
@@ -4322,11 +4398,15 @@ class GlossaryManager:
                             progress_percent = (completed_chunks / total_chunks) * 100
                             print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
                             print(f"📑 Chunk {futures[future]} completed and saved to file")
+                            # Yield to GUI after each chunk completes
+                            time.sleep(0.001)
                         except Exception as e:
                             print(f"⚠️ Chunk {futures[future]} failed: {e}")
                             completed_chunks += 1
                             progress_percent = (completed_chunks / total_chunks) * 100
                             print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+                            # Yield to GUI
+                            time.sleep(0.001)
             elif batch_translation and custom_prompt and len(chunks_to_process) > 1:
                 print(f"📑 Processing chunks in batch mode with {api_batch_size} chunks per batch...")
                 # Set fast mode for batch processing
@@ -5334,8 +5414,10 @@ class GlossaryManager:
         extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
         # Auto-detect optimal workers if not set
         if extraction_workers == 1 and len(sentences) > 1000:
-            extraction_workers = min(os.cpu_count() or 4, 8)  # Use up to 8 cores
-            print(f"📑 Auto-detected {extraction_workers} CPU cores for parallel processing")
+            # Use more cores for better parallelization
+            cpu_count = os.cpu_count() or 4
+            extraction_workers = min(cpu_count, 12)  # Use up to 12 cores
+            print(f"📑 Auto-detected {cpu_count} CPU cores, using {extraction_workers} workers")
         
         use_parallel = extraction_workers > 1 and len(sentences) > 100
         
@@ -5381,20 +5463,78 @@ class GlossaryManager:
             return local_word_freq, local_important, local_seen, batch_idx
         
         if use_parallel:
-            # Optimize batch size for better load balancing
-            # Smaller batches = better responsiveness, more overhead
-            # Larger batches = less overhead, may block GUI longer
-            optimal_batch_size = max(50, len(sentences) // (extraction_workers * 10))
+            # Force SMALL batches for real parallelization
+            # We want MANY small batches, not few large ones!
+            
+            # Calculate based on total sentences
+            total_sentences = len(sentences)
+            
+            if total_sentences < 1000:
+                # Small dataset: 50-100 sentences per batch
+                optimal_batch_size = 100
+            elif total_sentences < 10000:
+                # Medium dataset: 200 sentences per batch
+                optimal_batch_size = 200
+            elif total_sentences < 50000:
+                # Large dataset: 300 sentences per batch
+                optimal_batch_size = 300
+            else:
+                # Very large dataset: 400 sentences per batch max
+                optimal_batch_size = 400
+            
+            # Ensure we have enough batches for all workers
+            min_batches = extraction_workers * 3  # At least 3 batches per worker
+            max_batch_size = max(50, total_sentences // min_batches)
+            optimal_batch_size = min(optimal_batch_size, max_batch_size)
+            
+            print(f"📑 Total sentences: {total_sentences:,}")
+            print(f"📑 Target batch size: {optimal_batch_size} sentences")
+            
+            # Calculate expected number of batches
+            expected_batches = (total_sentences + optimal_batch_size - 1) // optimal_batch_size
+            print(f"📑 Expected batches: {expected_batches} (for {extraction_workers} workers)")
+            print(f"📑 Batches per worker: ~{expected_batches // extraction_workers} batches")
+            
             batches = [sentences[i:i + optimal_batch_size] for i in range(0, len(sentences), optimal_batch_size)]
             print(f"📑 Processing {len(batches)} batches of ~{optimal_batch_size} sentences each")
+            print(f"📑 Expected speedup: {min(extraction_workers, len(batches))}x (using {extraction_workers} workers)")
             
-            # Use ThreadPoolExecutor with optimized batching
-            # While not true parallelism due to GIL, the small batches and yields keep GUI responsive
-            with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
+            # Decide between ThreadPoolExecutor and ProcessPoolExecutor
+            import multiprocessing
+            in_subprocess = multiprocessing.current_process().name != 'MainProcess'
+            
+            # Use ProcessPoolExecutor for better parallelism on larger datasets
+            use_process_pool = (not in_subprocess and len(sentences) > 5000)
+            
+            if use_process_pool:
+                print(f"📑 Using ProcessPoolExecutor for maximum performance (true parallelism)")
+                executor_class = ProcessPoolExecutor
+            else:
+                print(f"📑 Using ThreadPoolExecutor for sentence processing")
+                executor_class = ThreadPoolExecutor
+            
+            with executor_class(max_workers=extraction_workers) as executor:
                 futures = []
+                
+                # Prepare data for ProcessPoolExecutor if needed
+                if use_process_pool:
+                    # Serialize exclusion check data for process pool
+                    exclude_check_data = (
+                        list(honorifics_to_exclude),
+                        [p.pattern for p in title_patterns],  # Convert regex to strings
+                        self.pattern_manager.COMMON_WORDS,
+                        self.pattern_manager.CHINESE_NUMS
+                    )
+                
                 for idx, batch in enumerate(batches):
-                    # Use the original function since ThreadPoolExecutor doesn't need pickling
-                    future = executor.submit(process_sentence_batch, batch, idx)
+                    if use_process_pool:
+                        # Use module-level function for ProcessPoolExecutor
+                        future = executor.submit(_process_sentence_batch_for_extraction, 
+                                               (batch, idx, combined_pattern, exclude_check_data))
+                    else:
+                        # Use local function for ThreadPoolExecutor
+                        future = executor.submit(process_sentence_batch, batch, idx)
+                    
                     futures.append(future)
                     # Yield to GUI when submitting futures
                     if idx % 10 == 0:
@@ -5402,13 +5542,10 @@ class GlossaryManager:
                 
                 # Collect results with progress
                 completed_batches = 0
+                batch_start_time = time.time()
                 for future in as_completed(futures):
-                    try:
-                        local_word_freq, local_important, local_seen, batch_idx = future.result(timeout=0.1)
-                    except TimeoutError:
-                        # Quick timeout to keep GUI responsive
-                        time.sleep(0.001)
-                        continue
+                    # Get result without timeout - as_completed already handles waiting
+                    local_word_freq, local_important, local_seen, batch_idx = future.result()
                     
                     # Merge results
                     word_freq.update(local_word_freq)
@@ -5421,9 +5558,12 @@ class GlossaryManager:
                     processed_count += len(batches[batch_idx])
                     completed_batches += 1
                     
-                    # Show progress more frequently for better feedback
-                    progress = (processed_count / total_sentences) * 100
-                    print(f"📑 Processing sentences: {processed_count:,}/{total_sentences:,} ({progress:.1f}%) - Batch {completed_batches}/{len(batches)} complete")
+                    # Show progress every 10 batches or at key milestones
+                    if completed_batches % 10 == 0 or completed_batches == len(batches):
+                        progress = (processed_count / total_sentences) * 100
+                        elapsed = time.time() - batch_start_time
+                        rate = (processed_count / elapsed) if elapsed > 0 else 0
+                        print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
                     
                     # Yield to GUI after each batch completes
                     time.sleep(0.001)
@@ -5464,111 +5604,111 @@ class GlossaryManager:
         
         print(f"📑 Found {len(important_sentences):,} sentences with potential glossary terms")
         
-        # Also create a version with honorifics stripped for better matching
-        print(f"📑 Step 6/7: Stripping honorifics and combining term frequencies...")
-        print(f"📑 Processing {len(word_freq):,} unique terms...")
+        # Step 6/7: Deduplicate and normalize terms
+        print(f"📑 Step 6/7: Normalizing and deduplicating {len(word_freq):,} unique terms...")
         
-        word_freq_stripped = Counter()
-        strip_count = 0
+        # Since should_exclude_term already filters honorifics, we just need to deduplicate
+        # based on normalized forms (lowercase, etc.)
+        combined_freq = Counter()
         term_count = 0
+        
         for term, count in word_freq.items():
-            # Strip honorifics from the term
-            stripped_term = self._strip_all_honorifics(term, primary_lang)
-            if stripped_term and len(stripped_term) > 1:  # Keep if meaningful after stripping
-                word_freq_stripped[stripped_term] += count
-                if stripped_term != term:
-                    strip_count += 1
+            # Normalize term for deduplication (but keep original form)
+            normalized = term.lower().strip()
+            
+            # Keep the version with highest count
+            if normalized in combined_freq:
+                # If we already have this normalized form, keep the one with higher count
+                if count > combined_freq[normalized]:
+                    # Remove old entry and add new one
+                    del combined_freq[normalized]
+                    combined_freq[term] = count
+            else:
+                combined_freq[term] = count
+            
             term_count += 1
             # Yield to GUI every 1000 terms
             if term_count % 1000 == 0:
                 time.sleep(0.001)
         
-        print(f"📑 Stripped honorifics from {strip_count:,} terms")
-        
-        # Combine both versions, preferring the stripped version for cleaner terms
-        combined_freq = Counter()
-        combined_freq.update(word_freq_stripped)  # Start with stripped versions
-        combine_count = 0
-        for term, count in word_freq.items():
-            if not self._has_honorific(term):  # Add terms without honorifics
-                combined_freq[term] = max(combined_freq.get(term, 0), count)
-            combine_count += 1
-            # Yield to GUI every 1000 terms
-            if combine_count % 1000 == 0:
-                time.sleep(0.001)
+        print(f"📑 Deduplicated to {len(combined_freq):,} unique terms")
         
         # Filter to keep only terms that appear at least min_frequency times
         frequent_terms = {term: count for term, count in combined_freq.items() if count >= min_frequency}
         
         # Build filtered text focusing on sentences containing frequent terms
         print(f"📑 Step 7/7: Building filtered text from relevant sentences...")
-        print(f"📑 Checking {len(important_sentences):,} sentences against {len(frequent_terms):,} terms...")
         
-        # Use parallel processing for checking if enabled and worthwhile
-        if use_parallel and len(important_sentences) > 500:
-            print(f"📑 Using parallel checking with {extraction_workers} workers")
+        # OPTIMIZATION: Skip sentences that already passed filtering in step 5
+        # These sentences already contain glossary terms, no need to check again!
+        # We just need to limit the sample size
+        
+        filtered_sentences = important_sentences  # Already filtered!
+        print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
+        
+        # For extremely large datasets, we can optionally do additional filtering
+        if len(filtered_sentences) > 10000 and len(frequent_terms) > 1000:
+            print(f"📑 Large dataset detected - applying frequency-based filtering...")
+            print(f"📑 Filtering {len(filtered_sentences):,} sentences for top frequent terms...")
             
-            def check_sentence_batch(batch_sentences):
-                """Check a batch of sentences for term matches"""
-                local_filtered = []
-                for sentence in batch_sentences:
-                    has_term = False
-                    for term in frequent_terms:
-                        if term in sentence:
-                            has_term = True
-                            break
-                        # Also check with common honorifics
-                        for honorific in list(honorifics_to_exclude)[:5]:
-                            if term + honorific in sentence:
-                                has_term = True
+            # Sort terms by frequency to prioritize high-frequency ones
+            sorted_terms = sorted(frequent_terms.items(), key=lambda x: x[1], reverse=True)
+            top_terms = dict(sorted_terms[:1000])  # Focus on top 1000 most frequent terms
+            
+            print(f"📑 Using top {len(top_terms):,} most frequent terms for final filtering")
+            
+            # Use parallel processing only if really needed
+            if use_parallel and len(filtered_sentences) > 5000:
+                import multiprocessing
+                in_subprocess = multiprocessing.current_process().name != 'MainProcess'
+                
+                # Create a simple set of terms for fast lookup (no variations needed)
+                term_set = set(top_terms.keys())
+                
+                print(f"📑 Using parallel filtering with {extraction_workers} workers...")
+                
+                # Optimize batch size
+                check_batch_size = 500  # Larger batches since we're doing simpler checks
+                check_batches = [filtered_sentences[i:i + check_batch_size] 
+                               for i in range(0, len(filtered_sentences), check_batch_size)]
+                
+                print(f"📑 Processing {len(check_batches)} batches of ~{check_batch_size} sentences")
+                
+                # Simple function to check if sentence contains any top term
+                def check_batch_simple(batch):
+                    result = []
+                    for sentence in batch:
+                        # Simple substring check - much faster than regex
+                        for term in term_set:
+                            if term in sentence:
+                                result.append(sentence)
                                 break
-                        if has_term:
-                            break
-                    if has_term:
-                        local_filtered.append(sentence)
-                return local_filtered
-            
-            # Split into batches for parallel checking
-            check_batch_size = max(100, len(important_sentences) // (extraction_workers * 4))
-            check_batches = [important_sentences[i:i + check_batch_size] 
-                           for i in range(0, len(important_sentences), check_batch_size)]
-            
-            filtered_sentences = []
-            with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
-                check_futures = [executor.submit(check_sentence_batch, batch) for batch in check_batches]
+                    return result
                 
-                completed_checks = 0
-                for future in as_completed(check_futures):
-                    batch_filtered = future.result()
-                    filtered_sentences.extend(batch_filtered)
-                    completed_checks += 1
+                new_filtered = []
+                with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
+                    futures = [executor.submit(check_batch_simple, batch) for batch in check_batches]
                     
-                    progress = (completed_checks / len(check_batches)) * 100
-                    print(f"📑 Checking progress: {completed_checks}/{len(check_batches)} batches ({progress:.1f}%)")
-                    time.sleep(0.001)  # Yield to GUI
-        else:
-            # Sequential checking for smaller datasets
-            filtered_sentences = []
-            sentence_check_count = 0
-            for sentence in important_sentences:
-                # Check if sentence contains any frequent term (or its honorific version)
-                has_term = False
-                for term in frequent_terms:
-                    if term in sentence:
-                        has_term = True
-                        break
-                    # Also check with common honorifics
-                    for honorific in list(honorifics_to_exclude)[:5]:  # Check top 5 honorifics
-                        if term + honorific in sentence:
-                            has_term = True
-                            break
-                if has_term:
-                    filtered_sentences.append(sentence)
+                    for future in as_completed(futures):
+                        new_filtered.extend(future.result())
                 
-                sentence_check_count += 1
-                if sentence_check_count % 500 == 0:
-                    print(f"📑 Checking sentences: {sentence_check_count:,}/{len(important_sentences):,}")
-                    time.sleep(0.001)  # Yield to GUI
+                filtered_sentences = new_filtered
+                print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
+            else:
+                # For smaller datasets, simple sequential filtering
+                print(f"📑 Using sequential filtering...")
+                new_filtered = []
+                for i, sentence in enumerate(filtered_sentences):
+                    for term in top_terms:
+                        if term in sentence:
+                            new_filtered.append(sentence)
+                            break
+                    if i % 1000 == 0:
+                        print(f"📑 Progress: {i:,}/{len(filtered_sentences):,} sentences")
+                        time.sleep(0.001)
+                
+                filtered_sentences = new_filtered
+                print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
         
         print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
         
@@ -5972,9 +6112,13 @@ Text to analyze:
         frequency_check_time = 0
         
         for line_num, line in enumerate(lines, 1):
-            # Check stop flag periodically
-            if line_num % 10 == 0 and is_stop_requested():
-                return csv_lines
+            # Check stop flag and yield to GUI periodically
+            if line_num % 10 == 0:
+                if is_stop_requested():
+                    return csv_lines
+                # Yield to GUI
+                if line_num % 50 == 0:
+                    time.sleep(0.001)
             
             # Check for header
             if not header_found and 'type' in line.lower() and 'raw_name' in line.lower():
@@ -6018,21 +6162,29 @@ Text to analyze:
                 if strip_honorifics:
                     raw_name = self._strip_honorific(raw_name, language)
                 
-                # Verify frequency using fuzzy matching
-                count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
-                
-                # Also check with honorifics if stripped
-                if strip_honorifics and count < min_frequency:
-                    count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
+                # Optimize frequency checking - use simple substring count for speed
+                # Only use fuzzy matching if threshold < 1.0
+                if fuzzy_threshold >= 1.0:
+                    # Exact matching - much faster
+                    count = all_text.count(raw_name)
+                    if strip_honorifics and count < min_frequency:
+                        count += all_text.count(original_raw)
+                else:
+                    # Use fuzzy matching (slower)
+                    count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
                     
-                    # Check with common honorifics
-                    if language in self.pattern_manager.CJK_HONORIFICS:
-                        for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
-                            if is_stop_requested():
-                                return csv_lines
-                            count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
-                            if count >= min_frequency:
-                                break
+                    # Also check with honorifics if stripped
+                    if strip_honorifics and count < min_frequency:
+                        count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
+                        
+                        # Check with common honorifics
+                        if language in self.pattern_manager.CJK_HONORIFICS:
+                            for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
+                                if is_stop_requested():
+                                    return csv_lines
+                                count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
+                                if count >= min_frequency:
+                                    break
                 
                 if count >= min_frequency:
                     # Use enforced 3-column format
@@ -6065,20 +6217,26 @@ Text to analyze:
         entry_lines = csv_lines[1:]  # Data lines
         
         deduplicated = [header_line]
-        seen_entries = []  # List of (type, raw_name, translated_name)
+        seen_entries = {}  # Use dict for O(1) lookups instead of list
+        seen_names_lower = set()  # Quick exact match check
         removed_count = 0
         total_entries = len(entry_lines)
         
+        # Pre-process all entries for faster comparison
+        print(f"📑 Processing {total_entries} entries for deduplication...")
+        
         for idx, line in enumerate(entry_lines):
-            # Check stop flag every 20 entries
-            if idx > 0 and idx % 20 == 0:
+            # Yield to GUI every 100 entries
+            if idx > 0 and idx % 100 == 0:
+                time.sleep(0.001)
+                
+                # Check stop flag
                 if is_stop_requested():
                     print(f"📑 ❌ Deduplication stopped at entry {idx}/{total_entries}")
-                    # Return what we have so far
                     return deduplicated
             
             # Show progress for large glossaries
-            if total_entries > 100 and idx % 50 == 0:
+            if total_entries > 500 and idx % 200 == 0:
                 progress = (idx / total_entries) * 100
                 print(f"📑 Deduplication progress: {progress:.1f}% ({idx}/{total_entries})")
             
@@ -6092,31 +6250,53 @@ Text to analyze:
             entry_type = parts[0]
             raw_name = parts[1]
             translated_name = parts[2]
+            raw_name_lower = raw_name.lower()
             
-            # Check against all seen entries for fuzzy matches
+            # Fast exact duplicate check first
+            if raw_name_lower in seen_names_lower:
+                removed_count += 1
+                continue
+            
+            # For fuzzy matching, only check if threshold is less than 1.0
             is_duplicate = False
-            for seen_type, seen_raw, seen_trans in seen_entries:
-                # Check stop flag in inner loop for very large glossaries
-                if len(seen_entries) > 500 and len(seen_entries) % 100 == 0:
-                    if is_stop_requested():
-                        print(f"📑 ❌ Deduplication stopped during comparison")
-                        return deduplicated
+            if fuzzy_threshold < 1.0:
+                # Use a more efficient approach: only check similar length strings
+                name_len = len(raw_name)
+                min_len = int(name_len * 0.7)
+                max_len = int(name_len * 1.3)
                 
-                # Check if raw names are fuzzy matches
-                raw_similarity = SequenceMatcher(None, raw_name.lower(), seen_raw.lower()).ratio()
+                # Only compare with entries of similar length
+                candidates = []
+                for seen_name, (seen_type, seen_trans) in seen_entries.items():
+                    if min_len <= len(seen_name) <= max_len:
+                        candidates.append(seen_name)
                 
-                if raw_similarity >= fuzzy_threshold:
-                    print(f"📑   Removing duplicate: '{raw_name}' ~= '{seen_raw}' (similarity: {raw_similarity:.2%})")
-                    removed_count += 1
-                    is_duplicate = True
-                    break
+                # Check fuzzy similarity with candidates
+                for seen_name in candidates:
+                    # Quick character overlap check before expensive SequenceMatcher
+                    char_overlap = len(set(raw_name_lower) & set(seen_name.lower()))
+                    if char_overlap < len(raw_name_lower) * 0.5:
+                        continue  # Too different, skip
+                    
+                    raw_similarity = SequenceMatcher(None, raw_name_lower, seen_name.lower()).ratio()
+                    
+                    if raw_similarity >= fuzzy_threshold:
+                        if removed_count < 10:  # Only log first few
+                            print(f"📑   Removing duplicate: '{raw_name}' ~= '{seen_name}' (similarity: {raw_similarity:.2%})")
+                        removed_count += 1
+                        is_duplicate = True
+                        break
             
             if not is_duplicate:
-                seen_entries.append((entry_type, raw_name, translated_name))
+                seen_entries[raw_name] = (entry_type, translated_name)
+                seen_names_lower.add(raw_name_lower)
                 deduplicated.append(line)
         
-        print(f"📑 ✅ Removed {removed_count} fuzzy duplicates from glossary")
+        print(f"📑 ✅ Removed {removed_count} duplicates from glossary")
         print(f"📑 Final glossary size: {len(deduplicated) - 1} unique entries")
+        
+        # Yield to GUI after completion
+        time.sleep(0.001)
         
         return deduplicated
  
@@ -6147,6 +6327,7 @@ Text to analyze:
                     if total_lines > 200:
                         progress = (idx / total_lines) * 100
                         print(f"📑 Processing existing glossary: {progress:.1f}%")
+                        time.sleep(0.001)  # Yield to GUI
                 
                 if 'type,raw_name' in line.lower():
                     continue  # Skip header
@@ -8744,8 +8925,98 @@ def main(log_callback=None, stop_callback=None):
         else:
             print("📑 Starting automatic glossary generation...")
             try:
+                # Use the new process-safe glossary worker
+                from glossary_process_worker import generate_glossary_in_process
+                import concurrent.futures
+                import multiprocessing
+                
                 instructions = ""
-                glossary_manager.save_glossary(out, chapters, instructions)
+                
+                # Get extraction workers setting
+                extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
+                if extraction_workers == 1:
+                    # Auto-detect for better performance
+                    extraction_workers = min(os.cpu_count() or 4, 4)
+                    print(f"📑 Using {extraction_workers} CPU cores for glossary generation")
+                
+                # Collect environment variables to pass to subprocess
+                env_vars = {}
+                important_vars = [
+                    'EXTRACTION_WORKERS', 'GLOSSARY_MIN_FREQUENCY', 'GLOSSARY_MAX_NAMES',
+                    'GLOSSARY_MAX_TITLES', 'GLOSSARY_BATCH_SIZE', 'GLOSSARY_STRIP_HONORIFICS',
+                    'GLOSSARY_FUZZY_THRESHOLD', 'GLOSSARY_MAX_TEXT_SIZE', 'AUTO_GLOSSARY_PROMPT',
+                    'GLOSSARY_USE_SMART_FILTER', 'GLOSSARY_USE_LEGACY_CSV', 'GLOSSARY_PARALLEL_ENABLED',
+                    'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK', 'GLOSSARY_SKIP_ALL_VALIDATION',
+                    'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'MAX_OUTPUT_TOKENS',
+                    'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY'
+                ]
+                
+                for var in important_vars:
+                    if var in os.environ:
+                        env_vars[var] = os.environ[var]
+                
+                # Create a Queue for real-time log streaming
+                manager = multiprocessing.Manager()
+                log_queue = manager.Queue()
+                
+                # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
+                print("📑 Starting glossary generation in separate process...")
+                with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                    # Submit to separate process WITH log queue
+                    future = executor.submit(
+                        generate_glossary_in_process,
+                        out,
+                        chapters,
+                        instructions,
+                        env_vars,
+                        log_queue  # Pass the queue for real-time logs
+                    )
+                    
+                    # Poll for completion and stream logs in real-time
+                    poll_count = 0
+                    while not future.done():
+                        poll_count += 1
+                        
+                        # Check for logs from subprocess and print them immediately
+                        try:
+                            while not log_queue.empty():
+                                log_line = log_queue.get_nowait()
+                                print(log_line)  # Print to GUI
+                        except:
+                            pass
+                        
+                        # Super short sleep to yield to GUI
+                        time.sleep(0.001)
+                        
+                        # Check for stop every 100 polls
+                        if poll_count % 100 == 0:
+                            if check_stop():
+                                print("📑 ❌ Glossary generation cancelled")
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return
+                    
+                    # Get any remaining logs from queue
+                    try:
+                        while not log_queue.empty():
+                            log_line = log_queue.get_nowait()
+                            print(log_line)
+                    except:
+                        pass
+                    
+                    # Get result
+                    if future.done():
+                        try:
+                            result = future.result(timeout=0.1)
+                            if isinstance(result, dict):
+                                if result.get('success'):
+                                    print(f"📑 ✅ Glossary generation completed successfully")
+                                else:
+                                    print(f"📑 ❌ Glossary generation failed: {result.get('error')}")
+                                    if result.get('traceback'):
+                                        print(f"📑 Error details:\n{result.get('traceback')}")
+                        except Exception as e:
+                            print(f"📑 ❌ Error retrieving glossary result: {e}")
+                
                 print("✅ Automatic glossary generation COMPLETED")
                 
                 # Handle deferred glossary appending

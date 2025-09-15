@@ -1352,6 +1352,7 @@ class TranslatorGUI:
         self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
         self.glossary_max_text_size_var = tk.StringVar(value=str(self.config.get('glossary_max_text_size', 50000)))
         self.glossary_chapter_split_threshold_var = tk.StringVar(value=self.config.get('glossary_chapter_split_threshold', '100000'))
+        self.glossary_max_sentences_var = tk.StringVar(value=str(self.config.get('glossary_max_sentences', 200)))
         self.glossary_filter_mode_var = tk.StringVar(value=self.config.get('glossary_filter_mode', 'all'))
 
         
@@ -4858,6 +4859,7 @@ Recent translations to summarize:
                 self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
                 self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
                 self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
+                self.config['glossary_max_sentences'] = int(self.glossary_max_sentences_var.get())
 
                 
                 # Honorifics and other settings
@@ -4897,6 +4899,7 @@ Recent translations to summarize:
                 os.environ['GLOSSARY_TRANSLATION_PROMPT'] = getattr(self, 'glossary_translation_prompt', '')
                 os.environ['GLOSSARY_FORMAT_INSTRUCTIONS'] = getattr(self, 'glossary_format_instructions', '')
                 os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if self.use_legacy_csv_var.get() else '0'
+                os.environ['GLOSSARY_MAX_SENTENCES'] = str(self.glossary_max_sentences_var.get())
                 
                 # Set custom entry types and fields as environment variables
                 os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
@@ -5455,10 +5458,16 @@ Rules:
         tk.Label(extraction_grid, text="Chapter split threshold:").grid(row=3, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Entry(extraction_grid, textvariable=self.glossary_chapter_split_threshold_var, width=10).grid(row=3, column=3, sticky=tk.W, pady=(5, 0))
         
-        # Row 4 - Filter mode
-        tk.Label(extraction_grid, text="Filter mode:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # Row 4 - Max sentences for glossary
+        tk.Label(extraction_grid, text="Max sentences:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_sentences_var, width=10).grid(row=4, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        
+        tk.Label(extraction_grid, text="(Limit for AI processing)", font=('TkDefaultFont', 9), fg='gray').grid(row=4, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        
+        # Row 5 - Filter mode
+        tk.Label(extraction_grid, text="Filter mode:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         filter_frame = tk.Frame(extraction_grid)
-        filter_frame.grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        filter_frame.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
         
         tb.Radiobutton(filter_frame, text="All names & terms", variable=self.glossary_filter_mode_var, 
                       value="all", bootstyle="info").pack(side=tk.LEFT, padx=(0, 10))
@@ -5467,17 +5476,17 @@ Rules:
         tb.Radiobutton(filter_frame, text="Names without honorifics & terms", variable=self.glossary_filter_mode_var, 
                       value="only_without_honorifics", bootstyle="info").pack(side=tk.LEFT)
 
-        # Row 5 - Strip honorifics
-        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # Row 6 - Strip honorifics
+        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Checkbutton(extraction_grid, text="Remove honorifics from extracted names", 
                       variable=self.strip_honorifics_var,
-                      bootstyle="round-toggle").grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+                      bootstyle="round-toggle").grid(row=6, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
         
-        # Row 6 - Fuzzy matching threshold (reuse existing variable)
-        tk.Label(extraction_grid, text="Fuzzy threshold:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # Row 7 - Fuzzy matching threshold (reuse existing variable)
+        tk.Label(extraction_grid, text="Fuzzy threshold:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         
         fuzzy_frame = tk.Frame(extraction_grid)
-        fuzzy_frame.grid(row=6, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        fuzzy_frame.grid(row=7, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
         
         # Reuse the existing fuzzy_threshold_var that's already initialized elsewhere
         fuzzy_slider = tb.Scale(
@@ -5562,6 +5571,7 @@ Rules:
             "• Translation batch: Terms per API call (larger = faster but may reduce quality)",
             "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
             "• Chapter split: Split large texts into chunks (0 = no splitting, 100000 = split at 100k chars)",
+            "• Max sentences: Maximum sentences to send to AI (default 200, increase for more context)",
             "• Filter mode:",
             "  - All names & terms: Extract character names (with/without honorifics) + titles/terms",
             "  - Names with honorifics only: ONLY character names with honorifics (no titles/terms)",
@@ -8506,6 +8516,7 @@ Provide translations in the same numbered format."""
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
             'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var.get(),
+            'GLOSSARY_MAX_SENTENCES': self.glossary_max_sentences_var.get(),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
