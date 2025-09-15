@@ -1704,14 +1704,12 @@ class ChapterExtractor:
         
         chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
         chapters_info = []
-        chapters_info_lock = threading.Lock()
         
-        def process_chapter(chapter):
-            """Process a single chapter"""
-            # Check stop in worker
-            if is_stop_requested():
-                return None
-                
+        # Build chapters_info directly from already-extracted data
+        # No need for parallel processing since we're just copying existing values
+        print(f"📝 Building chapter metadata from {len(chapters)} extracted chapters...")
+        
+        for chapter in chapters:
             info = {
                 'num': chapter['num'],
                 'title': chapter['title'],
@@ -1723,6 +1721,7 @@ class ChapterExtractor:
                 'content_hash': chapter.get('content_hash', '')
             }
             
+            # Only parse HTML if we have images and need to extract src attributes
             if chapter.get('has_images'):
                 try:
                     soup = BeautifulSoup(chapter.get('body', ''), self.parser)
@@ -1731,49 +1730,9 @@ class ChapterExtractor:
                 except:
                     info['images'] = []
             
-            return info
+            chapters_info.append(info)
         
-        # Process chapters in parallel
-        print(f"🔄 Processing {len(chapters)} chapters in parallel...")
-        
-        if self.progress_callback:
-            self.progress_callback(f"Processing {len(chapters)} chapters...")
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_chapter = {
-                executor.submit(process_chapter, chapter): chapter 
-                for chapter in chapters
-            }
-            
-            # Process completed tasks
-            completed = 0
-            for future in as_completed(future_to_chapter):
-                if is_stop_requested():
-                    print("❌ Extraction stopped by user")
-                    # Cancel remaining futures
-                    for f in future_to_chapter:
-                        f.cancel()
-                    return []
-                
-                try:
-                    result = future.result()
-                    if result:
-                        with chapters_info_lock:
-                            chapters_info.append(result)
-                        completed += 1
-                        
-                        # Progress updates
-                        if completed % 10 == 0 or completed == len(chapters):
-                            progress_msg = f"Processed {completed}/{len(chapters)} chapters"
-                            print(f"   📊 {progress_msg}")
-                            if self.progress_callback:
-                                self.progress_callback(progress_msg)
-                except Exception as e:
-                    chapter = future_to_chapter[future]
-                    print(f"   ❌ Error processing chapter {chapter['num']}: {e}")
-        
-        # Sort chapters_info by chapter number to maintain order
+        # Already sorted from extraction phase, but ensure order
         chapters_info.sort(key=lambda x: x['num'])
         
         print(f"✅ Successfully processed {len(chapters_info)} chapters")
@@ -2388,11 +2347,7 @@ class ChapterExtractor:
                 return None
         
         # Process files in parallel or sequentially based on file count
-        print(f"🚀 Processing {len(files_to_process)} HTML files...")
-        
-        # Initial progress
-        if self.progress_callback:
-            self.progress_callback(f"Processing {len(files_to_process)} chapters...")
+        print(f"🚀 Extracting content from {len(files_to_process)} HTML files...")
         
         candidate_chapters = []  # For smart mode
         chapters_direct = []      # For other modes
@@ -2452,9 +2407,8 @@ class ChapterExtractor:
                     else:
                         chapters_direct.append(chapter_info)
         
-        # Final progress update
-        if self.progress_callback:
-            self.progress_callback(f"Chapter processing complete: {len(candidate_chapters) + len(chapters_direct)} chapters")
+        # Final extraction count
+        print(f"✅ Extracted {len(candidate_chapters) + len(chapters_direct)} chapters from HTML files")
         
         # Sort direct chapters by file index to maintain order
         chapters_direct.sort(key=lambda x: x["file_index"])
