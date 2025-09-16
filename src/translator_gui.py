@@ -1433,7 +1433,10 @@ Text to analyze:
         self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '400'))
         self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
         self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
-        self.attach_css_to_chapters_var = tk.BooleanVar(value=self.config.get('attach_css_to_chapters', False))
+        self.attach_css_to_chapters_var = tk.BooleanVar(value=self.config.get('attach_css_to_chapters', False)) 
+        
+        # Retain exact source extension and disable 'response_' prefix
+        self.retain_source_extension_var = tk.BooleanVar(value=self.config.get('retain_source_extension', False))
 
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
@@ -12866,47 +12869,54 @@ Important rules:
                 self.thinking_budget_entry.config(state='disabled')
 
     def open_other_settings(self):
-       """Open the Other Settings dialog"""
-       dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-           self.master,
-           "Other Settings",
-           width=0,
-           height=None,
-           max_width_ratio=0.7,
-           max_height_ratio=0.8
-       )
-       
-       scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
-       scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
-       
-       # Section 1: Context Management
-       self._create_context_management_section(scrollable_frame)
-       
-       # Section 2: Response Handling
-       self._create_response_handling_section(scrollable_frame)
-       
-       # Section 3: Prompt Management
-       self._create_prompt_management_section(scrollable_frame)
-       
-       # Section 4: Processing Options
-       self._create_processing_options_section(scrollable_frame)
-       
-       # Section 5: Image Translation
-       self._create_image_translation_section(scrollable_frame)
-       
-       # Section 6: Anti-Duplicate Parameters
-       self._create_anti_duplicate_section(scrollable_frame)
-       
-       # Section 7: Custom API Endpoints (NEW)
-       self._create_custom_api_endpoints_section(scrollable_frame)
-       
-       # Save & Close buttons
-       self._create_settings_buttons(scrollable_frame, dialog, canvas)
-       
-       # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.78, max_height_ratio=1.82)
-       
-       dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        """Open the Other Settings dialog"""
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            self.master,
+            "Other Settings",
+            width=0,
+            height=None,
+            max_width_ratio=0.7,
+            max_height_ratio=0.8
+        )
+        
+        scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
+        scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
+        
+        # Section 1: Context Management
+        self._create_context_management_section(scrollable_frame)
+        
+        # Section 2: Response Handling
+        self._create_response_handling_section(scrollable_frame)
+        
+        # Section 3: Prompt Management
+        self._create_prompt_management_section(scrollable_frame)
+        
+        # Section 4: Processing Options
+        self._create_processing_options_section(scrollable_frame)
+        
+        # Section 5: Image Translation
+        self._create_image_translation_section(scrollable_frame)
+        
+        # Section 6: Anti-Duplicate Parameters
+        self._create_anti_duplicate_section(scrollable_frame)
+        
+        # Section 7: Custom API Endpoints (NEW)
+        self._create_custom_api_endpoints_section(scrollable_frame)
+        
+        # Save & Close buttons
+        self._create_settings_buttons(scrollable_frame, dialog, canvas)
+        
+        # Persist toggle change on dialog close
+        def _persist_settings():
+            self.config['retain_source_extension'] = self.retain_source_extension_var.get()
+            os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var.get() else '0'
+            self.save_config()
+            dialog._cleanup_scrolling()
+            dialog.destroy()
+        dialog.protocol("WM_DELETE_WINDOW", _persist_settings)
+        
+        # Auto-resize and show
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.78, max_height_ratio=1.82)
 
     def _create_context_management_section(self, parent):
         """Create context management section"""
@@ -13554,6 +13564,11 @@ Important rules:
         tb.Checkbutton(section_frame, text="Attach CSS to Chapters (Fixes styling issues)", 
                       variable=self.attach_css_to_chapters_var,
               bootstyle="round-toggle").pack(anchor=tk.W, pady=(5, 5))      
+        
+        # Output file naming
+        tb.Checkbutton(section_frame, text="Retain source extension (no 'response_' prefix)", 
+                      variable=self.retain_source_extension_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(5, 5))
 
     def _create_processing_options_section(self, parent):
         """Create processing options section"""
@@ -14675,7 +14690,8 @@ Important rules:
                 self.config.update({
                     'use_rolling_summary': self.rolling_summary_var.get(),
                     'summary_role': self.summary_role_var.get(),
-                    'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
+'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
+                    'retain_source_extension': self.retain_source_extension_var.get(),
                     'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
                     'rolling_summary_mode': self.rolling_summary_mode_var.get(),
                     'retry_truncated': self.retry_truncated_var.get(),
@@ -14774,7 +14790,8 @@ Important rules:
                 env_updates = {
                     "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
                     "SUMMARY_ROLE": self.summary_role_var.get(),
-                    "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
+"ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
+                    "RETAIN_SOURCE_EXTENSION": "1" if self.retain_source_extension_var.get() else "0",
                     "ROLLING_SUMMARY_EXCHANGES": str(self.config['rolling_summary_exchanges']),
                     "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
                     "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
@@ -15580,8 +15597,8 @@ Important rules:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
             
             # Only show message if requested
-            if show_message:
-                messagebox.showinfo("Saved", "Configuration saved.")
+            #if show_message:
+            #    messagebox.showinfo("Saved", "Configuration saved.")
                 
         except Exception as e:
             # Always show error messages regardless of show_message

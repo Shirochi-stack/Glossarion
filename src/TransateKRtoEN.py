@@ -7572,6 +7572,12 @@ def sanitize_resource_filename(filename):
     
     return name + ext
 
+def should_retain_source_extension():
+    """Read GUI toggle for retaining original extension and no 'response_' prefix.
+    This is stored in config or env by the GUI; we read env as bridge.
+    """
+    return os.getenv('RETAIN_SOURCE_EXTENSION', os.getenv('retain_source_extension', '0')) in ('1', 'true', 'True')
+
 def make_safe_filename(title, actual_num):
     """Create a safe filename that works across different filesystems"""
     if not title:
@@ -11118,7 +11124,11 @@ def main(log_callback=None, stop_callback=None):
                 log_callback(f"❌ Error creating combined text file: {e}")
     else:
         print("🔍 Checking for translated chapters...")
-        response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
+        # Respect retain extension toggle: if enabled, don't look for response_ prefix
+        if should_retain_source_extension():
+            response_files = [f for f in os.listdir(out) if f.endswith('.html') and not f.startswith('chapter_')]
+        else:
+            response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
         chapter_files = [f for f in os.listdir(out) if f.startswith('chapter_') and f.endswith('.html')]
 
         if not response_files and chapter_files:
