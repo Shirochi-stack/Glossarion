@@ -31,6 +31,22 @@ except ImportError:
 class MangaTranslationTab:
     """GUI interface for manga translation integrated with TranslatorGUI"""
     
+    # Class-level cancellation flag for all instances
+    _global_cancelled = False
+    _global_cancel_lock = threading.RLock()
+    
+    @classmethod
+    def set_global_cancellation(cls, cancelled: bool):
+        """Set global cancellation flag for all translation instances"""
+        with cls._global_cancel_lock:
+            cls._global_cancelled = cancelled
+    
+    @classmethod
+    def is_globally_cancelled(cls) -> bool:
+        """Check if globally cancelled"""
+        with cls._global_cancel_lock:
+            return cls._global_cancelled
+    
     def __init__(self, parent_frame: tk.Frame, main_gui, dialog, canvas):
         """Initialize manga translation interface
         
@@ -146,7 +162,42 @@ class MangaTranslationTab:
         
         # Start update loop
         self._process_updates()
-
+    
+    def _is_stop_requested(self) -> bool:
+        """Check if stop has been requested using multiple sources"""
+        # Check global cancellation first
+        if self.is_globally_cancelled():
+            return True
+            
+        # Check local stop flag
+        if hasattr(self, 'stop_flag') and self.stop_flag.is_set():
+            return True
+            
+        # Check running state
+        if hasattr(self, 'is_running') and not self.is_running:
+            return True
+            
+        return False
+    
+    def _reset_global_cancellation(self):
+        """Reset all global cancellation flags for new translation"""
+        # Reset local class flag
+        self.set_global_cancellation(False)
+        
+        # Reset MangaTranslator class flag
+        try:
+            from manga_translator import MangaTranslator
+            MangaTranslator.set_global_cancellation(False)
+        except ImportError:
+            pass
+            
+        # Reset UnifiedClient flag
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_global_cancellation(False)
+        except ImportError:
+            pass
+    
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox"""
         spinbox.bind("<MouseWheel>", lambda e: "break")
@@ -4543,6 +4594,13 @@ class MangaTranslationTab:
     
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI text widget or console"""
+        # Suppress logs when stop is requested (except for stop/error messages)
+        if self._is_stop_requested() and not any(keyword in message for keyword in [
+            "⏹️", "❌", "Stopping", "stopped", "cancelled", "Error", "Failed", 
+            "Translation Summary", "Complete!", "Summary:"
+        ]):
+            return
+            
         # Check if log_text widget exists yet
         if hasattr(self, 'log_text') and self.log_text:
             # Thread-safe logging to GUI
@@ -4909,6 +4967,9 @@ class MangaTranslationTab:
         self.completed_files = 0
         self.failed_files = 0
         self.current_file_index = 0
+        
+        # Reset all global cancellation flags for new translation
+        self._reset_global_cancellation()
         
         # Update UI state
         self.is_running = True
@@ -5524,7 +5585,26 @@ class MangaTranslationTab:
     def _stop_translation(self):
         """Stop the translation process"""
         if self.is_running:
+            # Set local stop flag
             self.stop_flag.set()
+            
+            # Set global cancellation flags for coordinated stopping
+            self.set_global_cancellation(True)
+            
+            # Also propagate to MangaTranslator class
+            try:
+                from manga_translator import MangaTranslator
+                MangaTranslator.set_global_cancellation(True)
+            except ImportError:
+                pass
+            
+            # Also propagate to UnifiedClient if available
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.set_global_cancellation(True)
+            except ImportError:
+                pass
+            
             self.stop_button.config(state=tk.DISABLED)
             self._log("\n⏸️ Stopping translation...", "warning")
     

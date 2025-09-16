@@ -67,6 +67,22 @@ class MangaTranslator:
     _inpaint_pool_lock = threading.Lock()
     _inpaint_pool = {}  # (method, model_path) -> {'inpainter': obj|None, 'loaded': bool, 'event': threading.Event()}
     
+    # Class-level cancellation flag for all instances
+    _global_cancelled = False
+    _global_cancel_lock = threading.RLock()
+    
+    @classmethod
+    def set_global_cancellation(cls, cancelled: bool):
+        """Set global cancellation flag for all translator instances"""
+        with cls._global_cancel_lock:
+            cls._global_cancelled = cancelled
+    
+    @classmethod
+    def is_globally_cancelled(cls) -> bool:
+        """Check if globally cancelled"""
+        with cls._global_cancel_lock:
+            return cls._global_cancelled
+    
     def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
         """Initialize with OCR configuration and API client from main GUI
         
@@ -343,10 +359,21 @@ class MangaTranslator:
         self.cancel_requested = False
 
     def _check_stop(self):
-        """Check if stop has been requested"""
+        """Check if stop has been requested using multiple sources"""
+        # Check global cancellation first
+        if self.is_globally_cancelled():
+            self.cancel_requested = True
+            return True
+            
+        # Check local stop flag
         if self.stop_flag and self.stop_flag.is_set():
             self.cancel_requested = True
             return True
+            
+        # Check processing flag
+        if hasattr(self, 'cancel_requested') and self.cancel_requested:
+            return True
+            
         return False
 
     def _setup_stdout_capture(self):
@@ -1248,6 +1275,12 @@ class MangaTranslator:
         """Log message to GUI or console, and also to file logger.
         The file logger is configured in translator_gui._setup_file_logging().
         """
+        # Suppress logs when stop is requested (except for stop/error messages)
+        if self._check_stop() and not any(keyword in message for keyword in [
+            "⏹️", "❌", "Stopping", "stopped", "cancelled", "Error", "Failed"
+        ]):
+            return
+            
         # In batch mode, only log important messages
         if self.batch_mode:
             # Skip verbose/debug messages in batch mode
