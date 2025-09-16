@@ -516,6 +516,10 @@ class UnifiedClient:
     _key_assignments = {}  # thread_id -> (key_index, key_identifier)
     _assignment_lock = threading.Lock()
     
+    # Track displayed log messages to avoid spam
+    _displayed_messages = set()
+    _message_lock = threading.Lock()
+    
     # Your existing MODEL_PROVIDERS and other class variables
     MODEL_PROVIDERS = {
         'vertex/': 'vertex_model_garden',
@@ -608,6 +612,19 @@ class UnifiedClient:
         'max_completion_tokens': ['o4', 'o1', 'o3', 'gpt-5-mini','gpt-5','gpt-5-nano'],
         'chinese_optimized': ['qwen', 'yi', 'glm', 'chatglm', 'baichuan', 'ernie', 'hunyuan'],
     }
+    
+    @classmethod
+    def _log_once(cls, message: str, is_debug: bool = False):
+        """Log a message only once per session to avoid spam"""
+        with cls._message_lock:
+            if message not in cls._displayed_messages:
+                cls._displayed_messages.add(message)
+                if is_debug:
+                    print(f"[DEBUG] {message}")
+                else:
+                    logger.info(message)
+                return True
+        return False
     
     @classmethod
     def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
@@ -904,33 +921,28 @@ class UnifiedClient:
                 use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
                 custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
 
-                # Only force OpenAI client if:
-                # 1. Custom endpoint is enabled via toggle
-                # 2. We have a custom URL
-                # 3. No client was set up (or it's already openai)
+                # Force OpenAI client when custom endpoint is enabled
                 if custom_base_url and use_custom_endpoint and self.openai_client is None:
-                    if self.client_type is None or self.client_type == 'openai':
-                        print(f"[DEBUG] Custom base URL detected and enabled, using OpenAI client for model: {self.model}")
-                        self.client_type = 'openai'
-                        
-                        # Check if openai module is available
-                        try:
-                            import openai
-                        except ImportError:
-                            raise ImportError("OpenAI library not installed. Install with: pip install openai")
-                        
-                        # Validate URL has protocol
-                        if not custom_base_url.startswith(('http://', 'https://')):
-                            print(f"[WARNING] Custom base URL missing protocol, adding https://")
-                            custom_base_url = 'https://' + custom_base_url
-                        
-                        self.openai_client = openai.OpenAI(
-                            api_key=self.api_key,
-                            base_url=custom_base_url
-                        )
-                        print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
-                    else:
-                        print(f"[DEBUG] Custom base URL set but model {self.model} uses {self.client_type}, not overriding")
+                    original_client_type = self.client_type
+                    print(f"[DEBUG] Custom base URL detected and enabled, overriding {original_client_type or 'unmatched'} model to use OpenAI client: {self.model}")
+                    self.client_type = 'openai'
+                    
+                    # Check if openai module is available
+                    try:
+                        import openai
+                    except ImportError:
+                        raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                    
+                    # Validate URL has protocol
+                    if not custom_base_url.startswith(('http://', 'https://')):
+                        print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                        custom_base_url = 'https://' + custom_base_url
+                    
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=custom_base_url
+                    )
+                    print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
                 elif custom_base_url and not use_custom_endpoint:
                     print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
  
@@ -1520,15 +1532,32 @@ class UnifiedClient:
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
         
-        if custom_base_url and use_custom_endpoint and self.client_type == 'openai':
+        if custom_base_url and use_custom_endpoint:
             if not custom_base_url.startswith(('http://', 'https://')):
                 custom_base_url = 'https://' + custom_base_url
             
-            self.openai_client = openai.OpenAI(
-                api_key=self.api_key,
-                base_url=custom_base_url
-            )
-            print(f"[DEBUG] Applied custom OpenAI endpoint: {custom_base_url}")
+            # Don't override Gemini models - they have their own separate endpoint toggle
+            if self.client_type == 'gemini':
+                # Only log if Gemini OpenAI endpoint is not also enabled
+                use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+                if not use_gemini_endpoint:
+                    self._log_once("Gemini model detected, not overriding with custom OpenAI endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)", is_debug=True)
+                return
+            
+            # Override other model types to use OpenAI client when custom endpoint is enabled
+            original_client_type = self.client_type
+            self.client_type = 'openai'
+            
+            try:
+                import openai
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=custom_base_url
+                )
+                print(f"[DEBUG] Custom endpoint enabled: Overriding {original_client_type} model to use OpenAI client with: {custom_base_url}")
+            except ImportError:
+                print(f"[ERROR] OpenAI library not installed, cannot use custom endpoint")
+                self.client_type = original_client_type  # Restore original type
     
     # Properties for backward compatibility
     @property
@@ -1617,18 +1646,33 @@ class UnifiedClient:
             use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             
-            if custom_base_url and use_custom_endpoint and self.client_type == 'openai':
+            if custom_base_url and use_custom_endpoint:
                 if not custom_base_url.startswith(('http://', 'https://')):
                     custom_base_url = 'https://' + custom_base_url
                 
-                # MICROSECOND LOCK: When modifying client instance
-                with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
-                        base_url=custom_base_url
-                    )
-                
-                print(f"[DEBUG] Rotated key: Re-created OpenAI client with custom base URL")
+                # Don't override Gemini models - they have their own separate endpoint toggle
+                if self.client_type == 'gemini':
+                    # Only log if Gemini OpenAI endpoint is not also enabled
+                    use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+                    if not use_gemini_endpoint:
+                        self._log_once("Gemini model detected after key rotation, not overriding with custom OpenAI endpoint", is_debug=True)
+                else:
+                    # Override other model types to use OpenAI client when custom endpoint is enabled
+                    original_client_type = self.client_type
+                    self.client_type = 'openai'
+                    
+                    # MICROSECOND LOCK: When modifying client instance
+                    with self._model_lock:
+                        try:
+                            import openai
+                            self.openai_client = openai.OpenAI(
+                                api_key=self.api_key,
+                                base_url=custom_base_url
+                            )
+                            print(f"[DEBUG] Rotated key: Overriding {original_client_type} model to use OpenAI client with custom base URL: {custom_base_url}")
+                        except ImportError:
+                            print(f"[ERROR] OpenAI library not installed, cannot use custom endpoint")
+                            self.client_type = original_client_type  # Restore original type
             
             return True
         
@@ -1668,6 +1712,79 @@ class UnifiedClient:
             stats['multi_key_enabled'] = False
         
         return stats
+    
+    def diagnose_custom_endpoint(self) -> Dict[str, Any]:
+        """Diagnose custom endpoint configuration for troubleshooting"""
+        diagnosis = {
+            'timestamp': datetime.now().isoformat(),
+            'model': self.model,
+            'client_type': getattr(self, 'client_type', None),
+            'multi_key_mode': getattr(self, '_multi_key_mode', False),
+            'environment_variables': {
+                'USE_CUSTOM_OPENAI_ENDPOINT': os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', 'not_set'),
+                'OPENAI_CUSTOM_BASE_URL': os.getenv('OPENAI_CUSTOM_BASE_URL', 'not_set'),
+                'OPENAI_API_BASE': os.getenv('OPENAI_API_BASE', 'not_set'),
+            },
+            'client_status': {
+                'openai_client_exists': hasattr(self, 'openai_client') and self.openai_client is not None,
+                'gemini_client_exists': hasattr(self, 'gemini_client') and self.gemini_client is not None,
+                'current_api_key_length': len(self.api_key) if hasattr(self, 'api_key') and self.api_key else 0,
+            }
+        }
+        
+        # Check if custom endpoint should be applied
+        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+        
+        diagnosis['custom_endpoint_analysis'] = {
+            'toggle_enabled': use_custom_endpoint,
+            'custom_url_provided': bool(custom_base_url),
+            'should_use_custom_endpoint': use_custom_endpoint and bool(custom_base_url),
+            'would_override_model_type': True,  # With our fix, it always overrides now
+        }
+        
+        # Determine if there are any issues
+        issues = []
+        if use_custom_endpoint and not custom_base_url:
+            issues.append("Custom endpoint enabled but no URL provided in OPENAI_CUSTOM_BASE_URL")
+        if custom_base_url and not use_custom_endpoint:
+            issues.append("Custom URL provided but toggle USE_CUSTOM_OPENAI_ENDPOINT is disabled")
+        if not openai and use_custom_endpoint:
+            issues.append("OpenAI library not installed - cannot use custom endpoints")
+            
+        diagnosis['issues'] = issues
+        diagnosis['status'] = 'OK' if not issues else 'ISSUES_FOUND'
+        
+        return diagnosis
+    
+    def print_custom_endpoint_diagnosis(self):
+        """Print a user-friendly diagnosis of custom endpoint configuration"""
+        diagnosis = self.diagnose_custom_endpoint()
+        
+        print("\n🔍 Custom OpenAI Endpoint Diagnosis:")
+        print(f"   Model: {diagnosis['model']}")
+        print(f"   Client Type: {diagnosis['client_type']}")
+        print(f"   Multi-Key Mode: {diagnosis['multi_key_mode']}")
+        print("\n📋 Environment Variables:")
+        for key, value in diagnosis['environment_variables'].items():
+            print(f"   {key}: {value}")
+        
+        print("\n🔧 Custom Endpoint Analysis:")
+        analysis = diagnosis['custom_endpoint_analysis']
+        print(f"   Toggle Enabled: {analysis['toggle_enabled']}")
+        print(f"   Custom URL Provided: {analysis['custom_url_provided']}")
+        print(f"   Should Use Custom Endpoint: {analysis['should_use_custom_endpoint']}")
+        
+        if diagnosis['issues']:
+            print("\n⚠️  Issues Found:")
+            for issue in diagnosis['issues']:
+                print(f"   • {issue}")
+        else:
+            print("\n✅ No configuration issues detected")
+            
+        print(f"\n📊 Status: {diagnosis['status']}\n")
+        
+        return diagnosis
     
     def reset_stats(self):
         """Reset usage statistics and pattern tracking"""
@@ -2438,7 +2555,7 @@ class UnifiedClient:
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
         
-        # Only apply custom endpoint logic for OpenAI models or unmatched models
+        # Apply custom endpoint logic when enabled - override any model type (except Gemini which has its own toggle)
         if custom_base_url and custom_base_url != 'https://api.openai.com/v1' and use_custom_endpoint:
             if not self.client_type:
                 # No prefix matched - assume it's a custom model that should use OpenAI endpoint
@@ -2446,8 +2563,18 @@ class UnifiedClient:
                 logger.info(f"Using OpenAI client for custom endpoint with unmatched model: {self.model}")
             elif self.client_type == 'openai':
                 logger.info(f"Using custom OpenAI endpoint for OpenAI model: {self.model}")
+            elif self.client_type == 'gemini':
+                # Don't override Gemini - it has its own separate endpoint toggle
+                # Only log if Gemini OpenAI endpoint is not also enabled
+                use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+                if not use_gemini_endpoint:
+                    self._log_once(f"Gemini model detected, not overriding with custom OpenAI endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)")
             else:
-                logger.info(f"Model {self.model} matched to {self.client_type}, not using custom OpenAI endpoint")
+                # Override other model types to use custom OpenAI endpoint when toggle is enabled
+                original_client_type = self.client_type
+                self.client_type = 'openai'
+                print(f"[DEBUG] Custom endpoint override: {original_client_type} -> openai for model '{self.model}'")
+                logger.info(f"Custom endpoint enabled: Overriding {original_client_type} model {self.model} to use OpenAI client")
         elif not use_custom_endpoint and custom_base_url and self.client_type == 'openai':
             logger.info("Custom OpenAI endpoint disabled via toggle, using default endpoint")
         
