@@ -700,6 +700,22 @@ class UnifiedClient:
         """Get max retry count from environment variable, default to 7"""
         return int(os.getenv('MAX_RETRIES', '7'))
     
+    # Class-level cancellation flag for all instances
+    _global_cancelled = False
+    _global_cancel_lock = threading.RLock()
+    
+    @classmethod
+    def set_global_cancellation(cls, cancelled: bool):
+        """Set global cancellation flag for all client instances"""
+        with cls._global_cancel_lock:
+            cls._global_cancelled = cancelled
+    
+    @classmethod
+    def is_globally_cancelled(cls) -> bool:
+        """Check if globally cancelled"""
+        with cls._global_cancel_lock:
+            return cls._global_cancelled
+    
     def __init__(self, api_key: str, model: str, output_dir: str = "Output"):
         """Initialize the unified client with enhanced thread safety"""
         # Store original values
@@ -4460,13 +4476,18 @@ class UnifiedClient:
         """
         self._cancelled = True
         self._in_cleanup = True  # Set cleanup flag correctly
+        # Show cancellation messages before setting global flag (to avoid circular check)
         print("🛑 Operation cancelled (timeout or user stop)")
         print("🛑 API operation cancelled")
+        # Set global cancellation to affect all instances
+        self.set_global_cancellation(True)
 
     def reset_cleanup_state(self):
             """Reset cleanup state for new operations"""
             self._in_cleanup = False
             self._cancelled = False
+            # Reset global cancellation flag for new operations
+            self.set_global_cancellation(False)
 
     def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None, response_name=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
@@ -5551,9 +5572,13 @@ class UnifiedClient:
     
     def _is_stop_requested(self) -> bool:
         """
-        Check if stop was requested by checking both global flag and local cancelled flag
+        Check if stop was requested by checking global flag, local cancelled flag, and class-level cancellation
         """
-        # Check local cancelled flag first (more reliable in threading context)
+        # Check class-level global cancellation first
+        if self.is_globally_cancelled():
+            return True
+            
+        # Check local cancelled flag (more reliable in threading context)
         if getattr(self, '_cancelled', False):
             return True
             
