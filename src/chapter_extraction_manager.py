@@ -70,19 +70,28 @@ class ChapterExtractionManager:
         Run the extraction subprocess and handle its output
         """
         try:
-            # Path to worker script
-            # Resolve worker script path for frozen executables
-            base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
-            worker_script = base_dir / "chapter_extraction_worker.py"
-            
-            # Build command
-            cmd = [
-                sys.executable,
-                str(worker_script),
-                epub_path,
-                output_dir,
-                extraction_mode
-            ]
+            # Build command differently for frozen vs dev mode
+            if getattr(sys, 'frozen', False):
+                # In a frozen one-file build, sys.executable is our GUI .exe, not Python.
+                # Use an internal worker-mode flag handled by translator_gui.py to run the worker.
+                cmd = [
+                    sys.executable,
+                    '--run-chapter-extraction',
+                    epub_path,
+                    output_dir,
+                    extraction_mode
+                ]
+            else:
+                # In dev mode, invoke the worker script with the Python interpreter
+                base_dir = Path(__file__).parent
+                worker_script = base_dir / "chapter_extraction_worker.py"
+                cmd = [
+                    sys.executable,
+                    str(worker_script),
+                    epub_path,
+                    output_dir,
+                    extraction_mode
+                ]
             
             # Set environment to force UTF-8 encoding
             env = os.environ.copy()
@@ -205,7 +214,26 @@ class ChapterExtractionManager:
             
         finally:
             self.is_running = False
+            # Store process reference before clearing it in case termination is needed
+            process_ref = self.process
             self.process = None
+            
+            # If process is still running, try to clean it up
+            if process_ref and process_ref.poll() is None:
+                try:
+                    process_ref.terminate()
+                    time.sleep(0.1)  # Brief wait
+                    if process_ref.poll() is None:
+                        process_ref.kill()
+                except Exception:
+                    pass  # Ignore cleanup errors in finally block
+            
+            # Ensure result is never None
+            if self.result is None:
+                self.result = {
+                    "success": False,
+                    "error": "Extraction process ended unexpectedly"
+                }
             
             # Call completion callback
             if completion_callback:
@@ -219,30 +247,45 @@ class ChapterExtractionManager:
         self._log("🛑 Stopping chapter extraction...")
         self.stop_requested = True
         
+        # Store process reference to avoid race condition
+        process_ref = self.process
+        
         # Give it a moment to stop gracefully
         time.sleep(0.5)
         
-        # Force terminate if still running
-        if self.process:
-            self._terminate_process()
+        # Force terminate if still running and process still exists
+        if process_ref:
+            self._terminate_process_ref(process_ref)
         
         return True
     
     def _terminate_process(self):
-        """Terminate the subprocess"""
+        """Terminate the subprocess using current process reference"""
         if self.process:
-            try:
-                self.process.terminate()
+            self._terminate_process_ref(self.process)
+    
+    def _terminate_process_ref(self, process_ref):
+        """Terminate a specific process reference"""
+        if not process_ref:
+            return
+            
+        try:
+            # Check if process is still alive before attempting termination
+            if process_ref.poll() is None:
+                process_ref.terminate()
                 # Give it a moment to terminate
                 time.sleep(0.5)
                 
                 # Force kill if still running
-                if self.process.poll() is None:
-                    self.process.kill()
+                if process_ref.poll() is None:
+                    process_ref.kill()
+                    time.sleep(0.1)  # Brief wait after kill
                     
                 self._log("✅ Process terminated")
-            except Exception as e:
-                self._log(f"⚠️ Error terminating process: {e}")
+            else:
+                self._log("✅ Process already terminated")
+        except Exception as e:
+            self._log(f"⚠️ Error terminating process: {e}")
     
     def _log(self, message):
         """Log a message using the callback if available"""

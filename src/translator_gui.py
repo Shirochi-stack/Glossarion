@@ -19,6 +19,23 @@ from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
 from metadata_batch_translator import MetadataBatchTranslatorUI
 
+# Support worker-mode dispatch in frozen builds to avoid requiring Python interpreter
+# This allows spawning the same .exe with a special flag to run helper tasks.
+if '--run-chapter-extraction' in sys.argv:
+    try:
+        # Ensure UTF-8 I/O in worker mode
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        from chapter_extraction_worker import main as _ce_main
+        _ce_main()
+    except Exception as _e:
+        try:
+            print(f"[ERROR] Worker failed: {_e}")
+        except Exception:
+            pass
+    finally:
+        # Make sure we exit without initializing the GUI when in worker mode
+        sys.exit(0)
+
 # The frozen check can stay here for other purposes
 if getattr(sys, 'frozen', False):
     # Any other frozen-specific setup
@@ -16080,6 +16097,23 @@ Important rules:
 
 if __name__ == "__main__":
     import time
+    # Ensure console encoding can handle emojis/Unicode in frozen exe environments
+    try:
+        import io, sys as _sys
+        if hasattr(_sys.stdout, 'reconfigure'):
+            try:
+                _sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
+                _sys.stderr.reconfigure(encoding='utf-8', errors='ignore')
+            except Exception:
+                pass
+        else:
+            try:
+                _sys.stdout = io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='ignore')
+                _sys.stderr = io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='ignore')
+            except Exception:
+                pass
+    except Exception:
+        pass
     
     print("🚀 Starting Glossarion v4.4.4...")
     

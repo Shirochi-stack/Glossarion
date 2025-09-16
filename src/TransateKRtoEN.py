@@ -9267,7 +9267,13 @@ def main(log_callback=None, stop_callback=None):
             def on_extraction_complete(result):
                 extraction_result["completed"] = True
                 extraction_result["result"] = result
-                if result and result.get("success"):
+                
+                # Safety check for None result
+                if result is None:
+                    log_callback("❌ Chapter extraction failed: No result returned")
+                    return
+                
+                if result.get("success"):
                     log_callback(f"✅ Chapter extraction completed: {result.get('chapters', 0)} chapters")
                 else:
                     log_callback(f"❌ Chapter extraction failed: {result.get('error', 'Unknown error')}")
