@@ -4027,7 +4027,8 @@ class TranslationProcessor:
                     time.sleep(5)
                     continue
                 
-                elif getattr(e, "http_status", None) == 429:
+                elif getattr(e, "error_type", None) == "rate_limit" or getattr(e, "http_status", None) == 429:
+                    # Rate limit errors - clean handling without traceback
                     print("⚠️ Rate limited, sleeping 60s…")
                     for i in range(60):
                         if self.check_stop():
@@ -4037,7 +4038,12 @@ class TranslationProcessor:
                     continue
                 
                 else:
-                    raise
+                    # For unexpected errors, show the error message but suppress traceback in most cases
+                    if getattr(e, "error_type", None) in ["api_error", "validation", "prohibited_content"]:
+                        print(f"❌ API Error: {error_msg}")
+                        raise UnifiedClientError(f"API Error: {error_msg}")
+                    else:
+                        raise
             
             except Exception as e:
                 print(f"❌ Unexpected error during API call: {e}")
@@ -8408,6 +8414,9 @@ def cleanup_previous_extraction(output_dir):
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, request_id=None):
     """Send API request with interrupt capability and optional timeout retry"""
+    # Import UnifiedClientError at function level to avoid scoping issues
+    from unified_api_client import UnifiedClientError
+    
     # The client.send() call will handle multi-key rotation automatically
     
     # Generate request_id if not provided
@@ -8450,7 +8459,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         try:
             result = result_queue.get(timeout=check_interval)
             if isinstance(result, Exception):
-                raise result
+                # For expected errors like rate limits, preserve the error type without extra traceback
+                if hasattr(result, 'error_type') and result.error_type == "rate_limit":
+                    raise result
+                elif "429" in str(result) or "rate limit" in str(result).lower():
+                    # Convert generic exceptions to UnifiedClientError for rate limits
+                    raise UnifiedClientError(str(result), error_type="rate_limit")
+                else:
+                    raise result
             if isinstance(result, tuple):
                 api_result, api_time = result
                 if chunk_timeout and api_time > chunk_timeout:
@@ -9623,6 +9639,12 @@ def main(log_callback=None, stop_callback=None):
     print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
     print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
     print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
+    
+    # Check if glossary.csv already exists in the source folder
+    existing_glossary_csv = os.path.join(out, "glossary.csv")
+    existing_glossary_json = os.path.join(out, "glossary.json")
+    print(f"📑 DEBUG: Existing glossary.csv? {os.path.exists(existing_glossary_csv)}")
+    print(f"📑 DEBUG: Existing glossary.json? {os.path.exists(existing_glossary_json)}")
 
     if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
         ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
@@ -9633,6 +9655,12 @@ def main(log_callback=None, stop_callback=None):
             print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
         else:
             print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
+    elif os.path.exists(existing_glossary_csv) or os.path.exists(existing_glossary_json):
+        print("📑 Existing glossary file detected in source folder - skipping automatic generation")
+        if os.path.exists(existing_glossary_csv):
+            print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
+        elif os.path.exists(existing_glossary_json):
+            print(f"📑 Using existing glossary.json: {existing_glossary_json}")
     elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
         model = os.getenv("MODEL", "gpt-4")
         if is_traditional_translation_api(model):
