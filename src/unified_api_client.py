@@ -4866,9 +4866,13 @@ class UnifiedClient:
                             threshold=HarmBlockThreshold.BLOCK_NONE
                         ),
                     ]
-                    print(f"🔒 Vertex AI Gemini Safety Status: DISABLED - All categories set to BLOCK_NONE")
+                    # Only log if not stopping
+                    if not self._is_stop_requested():
+                        print(f"🔒 Vertex AI Gemini Safety Status: DISABLED - All categories set to BLOCK_NONE")
                 else:
-                    print(f"🔒 Vertex AI Gemini Safety Status: ENABLED - Using default Gemini safety settings")
+                    # Only log if not stopping
+                    if not self._is_stop_requested():
+                        print(f"🔒 Vertex AI Gemini Safety Status: ENABLED - Using default Gemini safety settings")
                     
                 # SAVE SAFETY CONFIGURATION FOR VERIFICATION
                 if safety_settings:
@@ -4911,7 +4915,9 @@ class UnifiedClient:
                         generation_config_dict["max_output_tokens"] = max_tokens or 8192
                         generation_config = GenerationConfig(**generation_config_dict)
                         
-                        print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens or 8192}")
+                        # Only log if not stopping
+                        if not self._is_stop_requested():
+                            print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens or 8192}")
                         
                         # Generate content with optional safety settings
                         if safety_settings:
@@ -5545,8 +5551,12 @@ class UnifiedClient:
     
     def _is_stop_requested(self) -> bool:
         """
-        Check if stop was requested by importing the global function
+        Check if stop was requested by checking both global flag and local cancelled flag
         """
+        # Check local cancelled flag first (more reliable in threading context)
+        if getattr(self, '_cancelled', False):
+            return True
+            
         try:
             # Import the stop check function from the main translation module
             from TransateKRtoEN import is_stop_requested
