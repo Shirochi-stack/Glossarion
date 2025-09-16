@@ -59,8 +59,8 @@ if IS_FROZEN:
         BaseModel = nn.Module
         logger.info("✓ PyTorch loaded in frozen environment")
     except Exception as e:
-        logger.warning(f"PyTorch not available in frozen environment: {e}")
-        logger.info("💡 Inpainting will use OpenCV fallback methods")
+        logger.error(f"PyTorch not available in frozen environment: {e}")
+        logger.error("❌ Inpainting disabled - PyTorch is required")
 else:
     # Normal environment
     try:
@@ -71,7 +71,7 @@ else:
         BaseModel = nn.Module
     except ImportError:
         TORCH_AVAILABLE = False
-        logger.warning("PyTorch not available - will use OpenCV fallback")
+        logger.error("PyTorch not available - inpainting disabled")
 
 # Configure ORT memory behavior before importing
 try:
@@ -242,11 +242,11 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
     def forward(self, image, mask):
         if not self._pytorch_available:
             logger.error("PyTorch not available for forward pass")
-            return image  # Return input image as fallback
+            raise RuntimeError("PyTorch not available for forward pass")
             
         if not TORCH_AVAILABLE or torch is None:
             logger.error("PyTorch not available for forward pass")
-            return image  # Return input image as fallback
+            raise RuntimeError("PyTorch not available for forward pass")
             
         try:
             x = torch.cat([image, mask], dim=1)
@@ -276,14 +276,14 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
             
         except Exception as e:
             logger.error(f"Forward pass failed: {e}")
-            return image  # Return input image as fallback
+            raise RuntimeError(f"Forward pass failed: {e}")
     
     def _ffc_block(self, x_l, x_g, idx, conv_type):
         if not self._pytorch_available:
-            return x_l, x_g  # Return unchanged inputs as fallback
+            raise RuntimeError("PyTorch not available for FFC block")
             
         if not TORCH_AVAILABLE:
-            return x_l, x_g  # Return unchanged inputs as fallback
+            raise RuntimeError("PyTorch not available for FFC block")
             
         try:
             convl2l = getattr(self, f'model_{idx}_{conv_type}_ffc_convl2l')
@@ -304,7 +304,7 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
             
         except Exception as e:
             logger.error(f"FFC block failed: {e}")
-            return x_l, x_g  # Return unchanged inputs as fallback
+            raise RuntimeError(f"FFC block failed: {e}")
 
 
 class LocalInpainter:
@@ -326,7 +326,7 @@ class LocalInpainter:
         self.model = None
         self.model_loaded = False
         self.current_method = None
-        self.use_opencv_fallback = False
+        self.use_opencv_fallback = False  # FORCED DISABLED - No OpenCV fallback allowed
         self.onnx_session = None
         self.use_onnx = False
         self.is_jit_model = False
@@ -1678,7 +1678,7 @@ class LocalInpainter:
             if self.use_onnx and self.onnx_session:
                 logger.debug("Using ONNX inference")
                 
-                # Convert BGR to RGB
+                # CRITICAL: Convert BGR (OpenCV default) to RGB (ML model expected)
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 
                 # Check if this is a Carve model
@@ -1695,20 +1695,21 @@ class LocalInpainter:
                     
                     # Prepare inputs based on model type
                     if is_carve_model:
-                        # Carve model expects normalized input [0, 1] but NOT [-1, 1]
+                        # Carve model expects normalized input [0, 1] range
                         logger.debug("Using Carve model normalization [0, 1]")
                         img_np = image_resized.astype(np.float32) / 255.0
                         mask_np = mask_resized.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0.5) * 1.0  # Binary mask
                     elif self.current_method == 'aot':
-                        # AOT normalization: [-1, 1] range
-                        img_np = image_resized.astype(np.float32) / 127.5 - 1.0
+                        # AOT normalization: [-1, 1] range for image
+                        logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
+                        img_np = (image_resized.astype(np.float32) / 127.5) - 1.0
                         mask_np = mask_resized.astype(np.float32) / 255.0
-                        mask_np[mask_np < 0.5] = 0
-                        mask_np[mask_np >= 0.5] = 1
-                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
                     else:
-                        # Standard normalization: [0, 1] range
+                        # Standard LaMa normalization: [0, 1] range
+                        logger.debug("Using standard LaMa normalization [0, 1]")
                         img_np = image_resized.astype(np.float32) / 255.0
                         mask_np = mask_resized.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0) * 1.0
@@ -1731,7 +1732,9 @@ class LocalInpainter:
                         # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
                         # DO NOT multiply by 255 or apply any scaling
                         logger.debug("Carve model output is already in [0, 255] range")
-                        result = output[0].transpose(1, 2, 0)  # Just transpose, no scaling
+                        raw_output = output[0].transpose(1, 2, 0)
+                        logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
+                        result = raw_output  # Just transpose, no scaling
                     elif self.current_method == 'aot':
                         # AOT: [-1, 1] to [0, 255]
                         result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
@@ -1740,6 +1743,7 @@ class LocalInpainter:
                         result = output[0].transpose(1, 2, 0) * 255
                     
                     result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
                     
                     # Resize back to original size
@@ -1758,14 +1762,15 @@ class LocalInpainter:
                         mask_np = mask_padded.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0.5) * 1.0
                     elif self.current_method == 'aot':
-                        # AOT normalization
-                        img_np = image_padded.astype(np.float32) / 127.5 - 1.0
+                        # AOT normalization: [-1, 1] for image
+                        logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
+                        img_np = (image_padded.astype(np.float32) / 127.5) - 1.0
                         mask_np = mask_padded.astype(np.float32) / 255.0
-                        mask_np[mask_np < 0.5] = 0
-                        mask_np[mask_np >= 0.5] = 1
-                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                        mask_np = (mask_np > 0.5) * 1.0
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
                     else:
-                        # Standard normalization
+                        # Standard LaMa normalization: [0, 1]
+                        logger.debug("Using standard LaMa normalization [0, 1]")
                         img_np = image_padded.astype(np.float32) / 255.0
                         mask_np = mask_padded.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0) * 1.0
@@ -1773,11 +1778,6 @@ class LocalInpainter:
                     # Convert to NCHW format
                     img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
                     mask_np = mask_np[np.newaxis, np.newaxis, ...]
-                    
-                    # Check for stop before inference
-                    if self._check_stop():
-                        self._log("⏹️ ONNX inference stopped by user", "warning")
-                        return image
                     
                     # Check for stop before inference
                     if self._check_stop():
@@ -1797,13 +1797,16 @@ class LocalInpainter:
                     if is_carve_model:
                         # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
                         logger.debug("Carve model output is already in [0, 255] range")
-                        result = output[0].transpose(1, 2, 0)  # Just transpose, no scaling
+                        raw_output = output[0].transpose(1, 2, 0)
+                        logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
+                        result = raw_output  # Just transpose, no scaling
                     elif self.current_method == 'aot':
                         result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
                     else:
                         result = output[0].transpose(1, 2, 0) * 255
                     
                     result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
                     
                     # Remove padding
@@ -1815,7 +1818,7 @@ class LocalInpainter:
                     # Special handling for AOT model
                     logger.debug("Using AOT-specific preprocessing")
                     
-                    # Convert BGR to RGB
+                    # CRITICAL: Convert BGR (OpenCV) to RGB (AOT model expected)
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                     
                     # Pad images to be divisible by mod
@@ -1856,7 +1859,7 @@ class LocalInpainter:
                     result = ((inpainted.cpu().squeeze_(0).permute(1, 2, 0).numpy() + 1.0) * 127.5)
                     result = np.clip(np.round(result), 0, 255).astype(np.uint8)
                     
-                    # Convert RGB back to BGR
+                    # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
                     
                     # Remove padding
@@ -1866,7 +1869,7 @@ class LocalInpainter:
                     # LaMa/Anime model processing
                     logger.debug(f"Using standard processing for {self.current_method}")
                     
-                    # Convert BGR to RGB (CRITICAL - JIT models expect RGB)
+                    # CRITICAL: Convert BGR (OpenCV) to RGB (LaMa/JIT models expected)
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                     
                     # Pad images to be divisible by mod
@@ -1881,27 +1884,9 @@ class LocalInpainter:
                     mask_binary = (mask_norm > 0) * 1.0
                     
                     # Convert to PyTorch tensors with correct shape
-                    # Image should be [B, C, H, W]
-                    image_tensor = torch.from_numpy(image_norm).float()
-                    
-                    # Ensure image is [H, W, C] -> [C, H, W]
-                    if len(image_tensor.shape) == 3:
-                        if image_tensor.shape[2] == 3:  # [H, W, C] format
-                            image_tensor = image_tensor.permute(2, 0, 1)
-                    
-                    # Add batch dimension [C, H, W] -> [B, C, H, W]
-                    image_tensor = image_tensor.unsqueeze(0)
-                    
-                    # Mask should be [B, 1, H, W]
-                    mask_tensor = torch.from_numpy(mask_binary).float()
-                    
-                    # Add dimensions as needed
-                    while len(mask_tensor.shape) < 4:
-                        mask_tensor = mask_tensor.unsqueeze(0)
-                    
-                    # Ensure mask has single channel
-                    if mask_tensor.shape[1] != 1:
-                        mask_tensor = mask_tensor[:, :1, :, :]
+                    # Image should be [B, C, H, W]  
+                    image_tensor = torch.from_numpy(image_norm).permute(2, 0, 1).unsqueeze(0).float()
+                    mask_tensor = torch.from_numpy(mask_binary).unsqueeze(0).unsqueeze(0).float()
                     
                     # Move to device
                     image_tensor = image_tensor.to(self.device)
@@ -1974,7 +1959,7 @@ class LocalInpainter:
                     # Denormalize to 0-255 range
                     result = np.clip(result * 255, 0, 255).astype(np.uint8)
                     
-                    # Convert RGB back to BGR for OpenCV
+                    # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
                     
                     # Remove padding
