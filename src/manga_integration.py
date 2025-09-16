@@ -482,8 +482,15 @@ class MangaTranslationTab:
         progress_label.pack(pady=(5, 10))
         
         progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
-                                      variable=progress_var)
+        try:
+            # Try to use our custom progress bar style
+            progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
+                                          variable=progress_var,
+                                          style="MangaProgress.Horizontal.TProgressbar")
+        except Exception:
+            # Fallback to default if style not available yet
+            progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
+                                          variable=progress_var)
         progress_bar.pack(pady=(0, 5))
         
         size_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
@@ -1104,11 +1111,21 @@ class MangaTranslationTab:
         progress_label = tk.Label(progress_section, text="Initializing...", font=('Arial', 10))
         progress_label.pack(pady=(10, 15))
         
-        progress_bar = ttk.Progressbar(
-            progress_section,
-            length=350,
-            mode='indeterminate'
-        )
+        try:
+            # Try to use our custom progress bar style
+            progress_bar = ttk.Progressbar(
+                progress_section,
+                length=350,
+                mode='indeterminate',
+                style="MangaProgress.Horizontal.TProgressbar"
+            )
+        except Exception:
+            # Fallback to default if style not available yet
+            progress_bar = ttk.Progressbar(
+                progress_section,
+                length=350,
+                mode='indeterminate'
+            )
         progress_bar.pack(pady=(0, 10))
         progress_bar.start(10)
         
@@ -2516,15 +2533,40 @@ class MangaTranslationTab:
         self.progress_label = tk.Label(
             progress_frame,
             text="Ready to start",
-            font=('Arial', 11)
+            font=('Arial', 11),
+            fg='white'  # White text for dark mode
         )
         self.progress_label.pack(anchor=tk.W)
         
-        self.progress_bar = ttk.Progressbar(
-            progress_frame,
-            mode='determinate',
-            length=400
-        )
+        # Create and configure progress bar with custom styling
+        try:
+            # Create a custom style for the progress bar
+            style = ttk.Style()
+            
+            # Configure the progress bar for dark mode with white fill
+            style.configure("MangaProgress.Horizontal.TProgressbar",
+                          troughcolor='#2d3748',      # Dark gray background
+                          background='white',          # White progress fill color
+                          lightcolor='#f7fafc',       # Light white highlight
+                          darkcolor='#e2e8f0',        # Light gray shadow
+                          bordercolor='#4a5568',      # Border color
+                          relief='flat')
+            
+            # Apply the style to our progress bar
+            self.progress_bar = ttk.Progressbar(
+                progress_frame,
+                mode='determinate',
+                length=400,
+                style="MangaProgress.Horizontal.TProgressbar"
+            )
+        except Exception:
+            # Fallback to default progress bar if styling fails
+            self.progress_bar = ttk.Progressbar(
+                progress_frame,
+                mode='determinate',
+                length=400
+            )
+        
         self.progress_bar.pack(fill=tk.X, pady=(5, 10))
         
         # Current file status
@@ -2532,7 +2574,7 @@ class MangaTranslationTab:
             progress_frame,
             text="",
             font=('Arial', 10),
-            fg='gray'
+            fg='lightgray'  # Light gray for dark mode visibility
         )
         self.current_file_label.pack(anchor=tk.W)
         
@@ -4239,12 +4281,23 @@ class MangaTranslationTab:
         
         # Progress bar
         progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(
-            progress_dialog,
-            length=350,
-            mode='determinate',
-            variable=progress_var
-        )
+        try:
+            # Try to use our custom progress bar style
+            progress_bar = ttk.Progressbar(
+                progress_dialog,
+                length=350,
+                mode='determinate',
+                variable=progress_var,
+                style="MangaProgress.Horizontal.TProgressbar"
+            )
+        except Exception:
+            # Fallback to default if style not available yet
+            progress_bar = ttk.Progressbar(
+                progress_dialog,
+                length=350,
+                mode='determinate',
+                variable=progress_var
+            )
         progress_bar.pack(pady=10)
         
         # Status label
@@ -4713,8 +4766,8 @@ class MangaTranslationTab:
                         # Error status
                         self.progress_label.config(text=f"❌ {status}", fg='red')
                     else:
-                        # Normal status
-                        self.progress_label.config(text=status, fg='black')
+                        # Normal status - white for dark mode
+                        self.progress_label.config(text=status, fg='white')
                     
                 elif update[0] == 'current_file':
                     _, filename = update
@@ -4726,7 +4779,7 @@ class MangaTranslationTab:
                     elif "error" in filename.lower() or "failed" in filename.lower():
                         self.current_file_label.config(text=f"❌ {filename}", fg='red')
                     else:
-                        self.current_file_label.config(text=f"Current: {filename}", fg='gray')
+                        self.current_file_label.config(text=f"Current: {filename}", fg='lightgray')
                     
         except:
             pass
@@ -5322,8 +5375,12 @@ class MangaTranslationTab:
                         # Process image
                         result = translator.process_image(filepath, output_path, batch_index=idx+1, batch_total=total)
                         
-                        # Update counters
+                        # Update counters only if not stopped
                         with progress_lock:
+                            if self.stop_flag.is_set():
+                                # Don't update counters if translation was stopped
+                                return False
+                            
                             if result.get('interrupted', False) or not result.get('success', False):
                                 self.failed_files += 1
                                 counters['failed'] += 1
@@ -5335,11 +5392,14 @@ class MangaTranslationTab:
                         return result.get('success', False)
                     except Exception as e:
                         with progress_lock:
-                            self.failed_files += 1
-                            counters['failed'] += 1
-                            counters['done'] += 1
-                        self._log(f"❌ Error in panel task: {str(e)}", "error")
-                        self._log(traceback.format_exc(), "error")
+                            # Don't update error counters if stopped
+                            if not self.stop_flag.is_set():
+                                self.failed_files += 1
+                                counters['failed'] += 1
+                                counters['done'] += 1
+                        if not self.stop_flag.is_set():
+                            self._log(f"❌ Error in panel task: {str(e)}", "error")
+                            self._log(traceback.format_exc(), "error")
                         return False
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=panel_workers) as executor:
