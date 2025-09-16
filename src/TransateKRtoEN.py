@@ -4647,15 +4647,26 @@ class GlossaryManager:
                                 strip_honorifics, fuzzy_threshold, filter_mode
                             )
                         
-                        # Aggregate results only
+                        # Normalize to CSV lines and aggregate
+                        chunk_lines = []
                         if isinstance(chunk_glossary, list):
                             for line in chunk_glossary:
                                 if line and not line.startswith('type,'):
                                     all_glossary_entries.append(line)
+                                    chunk_lines.append(line)
                         else:
                             for raw_name, translated_name in chunk_glossary.items():
                                 entry_type = "character" if self._has_honorific(raw_name) else "term"
-                                all_glossary_entries.append(f"{entry_type},{raw_name},{translated_name}")
+                                line = f"{entry_type},{raw_name},{translated_name}"
+                                all_glossary_entries.append(line)
+                                chunk_lines.append(line)
+                        
+                        # Incremental update
+                        try:
+                            self._incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode)
+                            print(f"📑 Incremental write: +{len(chunk_lines)} entries")
+                        except Exception as e2:
+                            print(f"⚠️ Incremental write failed: {e2}")
                 finally:
                     if _prev_defer is None:
                         if "GLOSSARY_DEFER_SAVE" in os.environ:
@@ -4986,24 +4997,28 @@ class GlossaryManager:
                     
                     try:
                         chunk_glossary = future.result()
-                        entries_added = 0
                         print(f"📑 DEBUG: Chunk {futures[future]} returned type={type(chunk_glossary)}, len={len(chunk_glossary)}")
 
-                        entries_added = 0                        
-                        # CHANGE: Just collect all entries as CSV lines
+                        # Normalize to CSV lines (without header)
+                        chunk_lines = []
                         if isinstance(chunk_glossary, dict):
-                            print(f"📑 DEBUG: Dict keys: {list(chunk_glossary.keys())[:5]}")  # Show first 5 keys
                             for raw_name, translated_name in chunk_glossary.items():
-                                # Determine type based on content
                                 entry_type = "character" if self._has_honorific(raw_name) else "term"
-                                all_csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
-                                entries_added += 1
+                                chunk_lines.append(f"{entry_type},{raw_name},{translated_name}")
                         elif isinstance(chunk_glossary, list):
-                            # Already CSV lines, just add them (skip header)
                             for line in chunk_glossary:
                                 if line and not line.startswith('type,'):
-                                    all_csv_lines.append(line)
-                                    entries_added += 1
+                                    chunk_lines.append(line)
+                        
+                        # Aggregate for end-of-run
+                        all_csv_lines.extend(chunk_lines)
+                        
+                        # Incremental update of glossary.csv in token-efficient format
+                        try:
+                            self._incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode)
+                            print(f"📑 Incremental write: +{len(chunk_lines)} entries")
+                        except Exception as e2:
+                            print(f"⚠️ Incremental write failed: {e2}")
                         
                         completed_chunks += 1
                         
@@ -5046,6 +5061,42 @@ class GlossaryManager:
         
         return all_csv_lines
     
+    def _incremental_update_glossary(self, output_dir, chunk_lines, strip_honorifics, language, filter_mode):
+        """Incrementally update glossary.csv (token-efficient) using an on-disk CSV aggregator.
+        This keeps glossary.csv present and growing after each chunk while preserving
+        token-efficient format for the visible file.
+        """
+        if not chunk_lines:
+            return
+        # Paths
+        agg_path = os.path.join(output_dir, "glossary.incremental.csv")
+        vis_path = os.path.join(output_dir, "glossary.csv")
+        # Ensure output dir
+        os.makedirs(output_dir, exist_ok=True)
+        # Compose CSV with header for merging
+        new_csv_lines = ["type,raw_name,translated_name"] + chunk_lines
+        # Load existing aggregator content, if any
+        existing_csv = None
+        if os.path.exists(agg_path):
+            try:
+                with open(agg_path, 'r', encoding='utf-8') as f:
+                    existing_csv = f.read()
+            except Exception as e:
+                print(f"⚠️ Incremental: cannot read aggregator: {e}")
+        # Merge (exact merge, no fuzzy to keep this fast)
+        merged_csv_lines = self._merge_csv_entries(new_csv_lines, existing_csv or "", strip_honorifics, language)
+        # Optional filter mode
+        merged_csv_lines = self._filter_csv_by_mode(merged_csv_lines, filter_mode)
+        # Save aggregator (CSV)
+        self._atomic_write_file(agg_path, "\n".join(merged_csv_lines))
+        # Convert to token-efficient format for visible glossary.csv
+        token_lines = self._convert_to_token_efficient_format(merged_csv_lines)
+        token_lines = self._sanitize_final_glossary_lines(token_lines, use_legacy_format=False)
+        self._atomic_write_file(vis_path, "\n".join(token_lines))
+        if not os.path.exists(vis_path):
+            with open(vis_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(token_lines))
+
     def _process_single_chunk(self, chunk_idx, chunk_text, custom_prompt, language,
                              min_frequency, max_names, max_titles, batch_size,
                              output_dir, strip_honorifics, fuzzy_threshold, filter_mode,
