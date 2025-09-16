@@ -63,6 +63,34 @@ class AIHunterConfigGUI:
                 'min_text_length': 500,
                 'max_length_ratio': 1.3,
                 'min_length_ratio': 0.7
+            },
+            'language_detection': {
+                'enabled': False,
+                'target_language': 'english',
+                'threshold_characters': 500,
+                'languages': {
+                    'english': ['en'],
+                    'japanese': ['ja', 'jp'],
+                    'korean': ['ko', 'kr'],
+                    'chinese': ['zh', 'zh-cn', 'zh-tw'],
+                    'spanish': ['es'],
+                    'french': ['fr'],
+                    'german': ['de'],
+                    'russian': ['ru'],
+                    'arabic': ['ar'],
+                    'hindi': ['hi'],
+                    'portuguese': ['pt'],
+                    'italian': ['it'],
+                    'dutch': ['nl'],
+                    'thai': ['th'],
+                    'vietnamese': ['vi'],
+                    'turkish': ['tr'],
+                    'polish': ['pl'],
+                    'swedish': ['sv'],
+                    'danish': ['da'],
+                    'norwegian': ['no'],
+                    'finnish': ['fi']
+                }
             }
         }
         
@@ -394,6 +422,46 @@ class AIHunterConfigGUI:
         
         tk.Label(edge_frame, text="Chapters with vastly different lengths won't be compared",
                 font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=20)
+        
+        # Language Detection
+        lang_frame = tk.LabelFrame(frame, text="Non-Target Language Detection", padx=20, pady=20)
+        lang_frame.pack(fill='x', padx=20, pady=10)
+        
+        # Enable toggle
+        enable_frame = tk.Frame(lang_frame)
+        enable_frame.pack(fill='x', pady=5)
+        
+        self.lang_enabled_var = tk.BooleanVar(value=ai_config['language_detection']['enabled'])
+        tb.Checkbutton(enable_frame, text="Enable non-target language detection",
+                      variable=self.lang_enabled_var, bootstyle="round-toggle").pack(anchor='w')
+        tk.Label(enable_frame, text="Trigger retranslation when too much non-target language is detected",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=(25, 0))
+        
+        # Target language selection
+        target_frame = tk.Frame(lang_frame)
+        target_frame.pack(fill='x', pady=10)
+        
+        tk.Label(target_frame, text="Target language:", width=20, anchor='w').pack(side='left')
+        self.target_lang_var = tk.StringVar(value=ai_config['language_detection']['target_language'])
+        
+        lang_options = list(ai_config['language_detection']['languages'].keys())
+        target_combo = ttk.Combobox(target_frame, textvariable=self.target_lang_var,
+                                   values=lang_options, state='readonly', width=15)
+        target_combo.pack(side='left', padx=10)
+        
+        tk.Label(target_frame, text="Language that should be in the translation",
+                font=('TkDefaultFont', 9), fg='gray').pack(side='left', padx=(10, 0))
+        
+        # Threshold setting
+        thresh_frame = tk.Frame(lang_frame)
+        thresh_frame.pack(fill='x', pady=5)
+        
+        tk.Label(thresh_frame, text="Character threshold:", width=20, anchor='w').pack(side='left')
+        self.lang_threshold_var = tk.IntVar(value=ai_config['language_detection']['threshold_characters'])
+        tb.Spinbox(thresh_frame, from_=100, to=2000, increment=50,
+                  textvariable=self.lang_threshold_var, width=10).pack(side='left', padx=10)
+        tk.Label(thresh_frame, text="non-target language characters to trigger retranslation",
+                font=('TkDefaultFont', 9), fg='gray').pack(side='left')
     
     def apply_ai_hunter_settings(self):
         """Apply AI Hunter settings to the main config"""
@@ -420,6 +488,11 @@ class AIHunterConfigGUI:
         ai_config['edge_filters']['min_text_length'] = self.min_length_var.get()
         ai_config['edge_filters']['min_length_ratio'] = self.min_ratio_var.get()
         ai_config['edge_filters']['max_length_ratio'] = self.max_ratio_var.get()
+        
+        # Language detection settings
+        ai_config['language_detection']['enabled'] = self.lang_enabled_var.get()
+        ai_config['language_detection']['target_language'] = self.target_lang_var.get()
+        ai_config['language_detection']['threshold_characters'] = self.lang_threshold_var.get()
         
         # Update main config
         self.config['ai_hunter_config'] = ai_config
@@ -489,6 +562,34 @@ class ImprovedAIHunterDetection:
                 'min_text_length': 500,
                 'max_length_ratio': 1.3,
                 'min_length_ratio': 0.7
+            },
+            'language_detection': {
+                'enabled': False,
+                'target_language': 'english',
+                'threshold_characters': 500,
+                'languages': {
+                    'english': ['en'],
+                    'japanese': ['ja', 'jp'],
+                    'korean': ['ko', 'kr'],
+                    'chinese': ['zh', 'zh-cn', 'zh-tw'],
+                    'spanish': ['es'],
+                    'french': ['fr'],
+                    'german': ['de'],
+                    'russian': ['ru'],
+                    'arabic': ['ar'],
+                    'hindi': ['hi'],
+                    'portuguese': ['pt'],
+                    'italian': ['it'],
+                    'dutch': ['nl'],
+                    'thai': ['th'],
+                    'vietnamese': ['vi'],
+                    'turkish': ['tr'],
+                    'polish': ['pl'],
+                    'swedish': ['sv'],
+                    'danish': ['da'],
+                    'norwegian': ['no'],
+                    'finnish': ['fi']
+                }
             }
         }
     
@@ -515,6 +616,19 @@ class ImprovedAIHunterDetection:
             # Preprocess text
             result_clean = self._preprocess_text(result, config['preprocessing'])
             print(f"    📄 Text length after preprocessing: {len(result_clean)} chars")
+            
+            # Check for non-target language detection
+            if config['language_detection']['enabled']:
+                non_target_detected, non_target_count = self._check_non_target_language(
+                    result_clean, config['language_detection']
+                )
+                if non_target_detected:
+                    print(f"\n    🌐 NON-TARGET LANGUAGE DETECTED!")
+                    print(f"       Non-target characters found: {non_target_count}")
+                    print(f"       Threshold: {config['language_detection']['threshold_characters']}")
+                    print(f"       Target language: {config['language_detection']['target_language']}")
+                    print(f"    ========== AI HUNTER DEBUG END ==========\n")
+                    return True, 100  # High confidence for language detection
             
             # Check edge cases
             if len(result_clean) < config['edge_filters']['min_text_length']:
@@ -1068,3 +1182,171 @@ class ImprovedAIHunterDetection:
                 score = 1.0  # Both have no numbers
         
         return score
+    
+    def _check_non_target_language(self, text, lang_config):
+        """Check if text contains too much non-target language"""
+        target_language = lang_config['target_language'].lower()
+        threshold = lang_config['threshold_characters']
+        
+        # Character ranges for different languages
+        language_ranges = {
+            'english': [  # Latin script + basic symbols
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+                (0x2000, 0x206F),  # General Punctuation
+                (0x20A0, 0x20CF),  # Currency Symbols
+                (0xFF00, 0xFFEF),  # Halfwidth and Fullwidth Forms
+            ],
+            'japanese': [
+                (0x3040, 0x309F),  # Hiragana
+                (0x30A0, 0x30FF),  # Katakana
+                (0x4E00, 0x9FAF),  # CJK Unified Ideographs
+                (0x3400, 0x4DBF),  # CJK Extension A
+                (0xFF66, 0xFF9F),  # Halfwidth Katakana
+            ],
+            'korean': [
+                (0xAC00, 0xD7AF),  # Hangul Syllables
+                (0x1100, 0x11FF),  # Hangul Jamo
+                (0x3130, 0x318F),  # Hangul Compatibility Jamo
+                (0xA960, 0xA97F),  # Hangul Jamo Extended-A
+                (0xD7B0, 0xD7FF),  # Hangul Jamo Extended-B
+            ],
+            'chinese': [
+                (0x4E00, 0x9FAF),  # CJK Unified Ideographs
+                (0x3400, 0x4DBF),  # CJK Extension A
+                (0x20000, 0x2A6DF), # CJK Extension B
+                (0x2A700, 0x2B73F), # CJK Extension C
+                (0x2B740, 0x2B81F), # CJK Extension D
+                (0x3000, 0x303F),  # CJK Symbols and Punctuation
+            ],
+            'arabic': [
+                (0x0600, 0x06FF),  # Arabic
+                (0x0750, 0x077F),  # Arabic Supplement
+                (0x08A0, 0x08FF),  # Arabic Extended-A
+                (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
+                (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
+            ],
+            'russian': [
+                (0x0400, 0x04FF),  # Cyrillic
+                (0x0500, 0x052F),  # Cyrillic Supplement
+                (0x2DE0, 0x2DFF),  # Cyrillic Extended-A
+                (0xA640, 0xA69F),  # Cyrillic Extended-B
+            ],
+            'thai': [
+                (0x0E00, 0x0E7F),  # Thai
+            ],
+            'hindi': [
+                (0x0900, 0x097F),  # Devanagari
+                (0xA8E0, 0xA8FF),  # Devanagari Extended
+            ],
+            'spanish': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'french': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'german': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'portuguese': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'italian': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'dutch': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'vietnamese': [
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+                (0x1EA0, 0x1EFF),  # Latin Extended Additional (Vietnamese)
+            ],
+            'turkish': [
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'polish': [
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'swedish': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'danish': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'norwegian': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+            'finnish': [  # Same as English (Latin script)
+                (0x0000, 0x007F),  # Basic Latin
+                (0x0080, 0x00FF),  # Latin-1 Supplement
+                (0x0100, 0x017F),  # Latin Extended-A
+                (0x0180, 0x024F),  # Latin Extended-B
+            ],
+        }
+        
+        # Get target language ranges
+        target_ranges = language_ranges.get(target_language, language_ranges['english'])
+        
+        # Count characters that are NOT in target language ranges
+        non_target_count = 0
+        total_letters = 0
+        
+        for char in text:
+            # Skip whitespace, punctuation, and numbers for counting
+            if char.isspace() or char.isdigit():
+                continue
+                
+            # Count as letter character
+            total_letters += 1
+            
+            # Check if character is in any target language range
+            char_code = ord(char)
+            is_target_char = any(start <= char_code <= end for start, end in target_ranges)
+            
+            if not is_target_char:
+                non_target_count += 1
+        
+        # Debug logging
+        if non_target_count > 0:
+            print(f"       🌐 Language detection: {non_target_count}/{total_letters} non-target chars ({target_language})")
+        
+        # Return True if non-target character count exceeds threshold
+        return non_target_count >= threshold, non_target_count
