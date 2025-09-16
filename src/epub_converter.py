@@ -1143,7 +1143,8 @@ class EPUBCompiler:
         if not os.path.exists(self.base_dir):
             return False
         
-        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
+        html_exts = ('.html', '.xhtml', '.htm')
+        html_files = [f for f in os.listdir(self.base_dir) if f.lower().endswith(html_exts)]
         response_files = [f for f in html_files if f.startswith('response_')]
         
         return len(response_files) > 0
@@ -1204,7 +1205,8 @@ class EPUBCompiler:
         # Phase 2: Try relaxed mode (any HTML files)
         self.log("\n[Phase 2] Checking for any HTML files...")
         
-        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
+        html_exts = ('.html', '.xhtml', '.htm')
+        html_files = [f for f in os.listdir(self.base_dir) if f.lower().endswith(html_exts)]
         
         if html_files:
             self.log(f"✅ Found {len(html_files)} HTML files:")
@@ -1783,45 +1785,34 @@ class EPUBCompiler:
             self.log("✅ Using authoritative chapter order from OPF/EPUB")
             self.log(f"[DEBUG] OPF entries (first 5): {list(opf_order.items())[:5]}")
             
-            # Create mapping based on core filename (no extensions, no prefixes)
+            # Create mapping based on core filename (strip response_ and strip ALL extensions)
             ordered_files = []
             unmapped_files = []
             
+            def strip_all_ext(name: str) -> str:
+                # Remove all trailing known extensions
+                core = name
+                while True:
+                    parts = core.rsplit('.', 1)
+                    if len(parts) == 2 and parts[1].lower() in ['html', 'htm', 'xhtml', 'xml']:
+                        core = parts[0]
+                    else:
+                        break
+                return core
+            
             for output_file in html_files:
-                # Get core name by stripping response_ and ALL extensions
-                core_name = output_file
-                if core_name.startswith('response_'):
-                    core_name = core_name[9:]  # Remove 'response_'
+                core_name = output_file[9:] if output_file.startswith('response_') else output_file
+                core_name = strip_all_ext(core_name)
                 
-                # Strip extension to get base name
-                core_name = core_name.rsplit('.', 1)[0]  # Remove .html
-                
-                # Now match against OPF entries
                 matched = False
                 for opf_name, chapter_order in opf_order.items():
-                    # Get OPF core name - handle .htm.xhtml case
-                    # Get OPF core name - strip all extensions
-                    # Get OPF core name - strip ALL extensions (handles .htm.xhtml case)
-                    opf_core = opf_name
-                    # Strip path if present
-                    if '/' in opf_core:
-                        opf_core = opf_core.split('/')[-1]
-
-                    # Strip ALL extensions, not just the last one
-                    while '.' in opf_core:
-                        parts = opf_core.rsplit('.', 1)
-                        # Check if what follows the dot looks like an extension
-                        if len(parts) == 2 and len(parts[1]) <= 5 and parts[1].lower() in ['html', 'htm', 'xhtml', 'xml']:
-                            opf_core = parts[0]  # Remove this extension and continue
-                        else:
-                            break  # Not an extension, stop here
-                    
+                    opf_file = opf_name.split('/')[-1]
+                    opf_core = strip_all_ext(opf_file)
                     if core_name == opf_core:
                         ordered_files.append((chapter_order, output_file))
                         self.log(f"  Mapped: {output_file} -> {opf_name} (order: {chapter_order})")
                         matched = True
                         break
-                
                 if not matched:
                     unmapped_files.append(output_file)
                     self.log(f"  ⚠️ Could not map: {output_file} (core: {core_name})")
