@@ -5381,11 +5381,29 @@ class MangaTranslationTab:
                                 # Don't update counters if translation was stopped
                                 return False
                             
-                            if result.get('interrupted', False) or not result.get('success', False):
-                                self.failed_files += 1
-                                counters['failed'] += 1
-                            else:
+                            # Check if translation actually produced valid output
+                            translation_successful = False
+                            if result.get('success', False) and not result.get('interrupted', False):
+                                # Verify there's an actual output file and translated regions
+                                output_exists = result.get('output_path') and os.path.exists(result.get('output_path', ''))
+                                has_translations = any(r.get('translated_text', '') for r in result.get('regions', []))
+                                translation_successful = output_exists and has_translations
+                            
+                            if translation_successful:
                                 self.completed_files += 1
+                                self._log(f"✅ Translation completed: {filename}", "success")
+                            else:
+                                self.failed_files += 1
+                                # Log the specific reason for failure
+                                if result.get('interrupted', False):
+                                    self._log(f"⚠️ Translation interrupted: {filename}", "warning")
+                                elif not result.get('success', False):
+                                    self._log(f"❌ Translation failed: {filename}", "error")
+                                elif not result.get('output_path') or not os.path.exists(result.get('output_path', '')):
+                                    self._log(f"❌ Output file not created: {filename}", "error")
+                                else:
+                                    self._log(f"❌ No text was translated: {filename}", "error")
+                                counters['failed'] += 1
                             counters['done'] += 1
                             self._update_progress(counters['done'], total, f"Completed {counters['done']}/{total}")
                         
@@ -5484,13 +5502,24 @@ class MangaTranslationTab:
                             self.failed_files += 1
                             if self.stop_flag.is_set():
                                 break
-                        elif result['success']:
-                            self.completed_files += 1
-                            self._log(f"✅ Successfully translated: {filename}", "success")
+                        elif result.get('success', False):
+                            # Verify translation actually produced valid output
+                            output_exists = result.get('output_path') and os.path.exists(result.get('output_path', ''))
+                            has_translations = any(r.get('translated_text', '') for r in result.get('regions', []))
+                            
+                            if output_exists and has_translations:
+                                self.completed_files += 1
+                                self._log(f"✅ Translation completed: {filename}", "success")
+                            else:
+                                self.failed_files += 1
+                                if not output_exists:
+                                    self._log(f"❌ Output file not created: {filename}", "error")
+                                else:
+                                    self._log(f"❌ No text was translated: {filename}", "error")
                         else:
                             self.failed_files += 1
-                            errors = '\n'.join(result['errors'])
-                            self._log(f"❌ Failed to translate {filename}:\n{errors}", "error")
+                            errors = '\n'.join(result.get('errors', ['Unknown error']))
+                            self._log(f"❌ Translation failed: {filename}\n{errors}", "error")
                             
                             # Check for specific error types in the error messages
                             errors_lower = errors.lower()

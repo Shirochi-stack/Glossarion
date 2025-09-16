@@ -3940,12 +3940,18 @@ class MangaTranslator:
             return cleaned
 
     def _clean_translation_text(self, text: str) -> str:
-        """Remove unnecessary quotation marks and dots from translated text"""
+        """Remove unnecessary quotation marks, dots, and invalid characters from translated text"""
         if not text:
             return text
         
         # Log what we're cleaning
         original = text
+        
+        # First, fix encoding issues
+        text = self._fix_encoding_issues(text)
+        
+        # Remove Unicode replacement characters and invalid symbols
+        text = self._sanitize_unicode_characters(text)
         
         # Remove leading and trailing whitespace
         text = text.strip()
@@ -3971,7 +3977,55 @@ class MangaTranslator:
         
         # Log if we made changes
         if text != original:
-            self._log(f"🧹 Cleaned quotes/dots: '{original}' → '{text}'", "debug")
+            self._log(f"🧹 Cleaned text: '{original}' → '{text}'", "debug")
+        
+        return text
+    
+    def _sanitize_unicode_characters(self, text: str) -> str:
+        """Remove invalid Unicode characters, replacement characters, and box symbols"""
+        if not text:
+            return text
+        
+        import re
+        original = text
+        
+        # Remove Unicode replacement character (�) and similar invalid symbols
+        text = text.replace('\ufffd', '')  # Unicode replacement character
+        text = text.replace('□', '')      # White square (often used as fallback)
+        text = text.replace('◇', '')      # White diamond
+        text = text.replace('◆', '')      # Black diamond  
+        text = text.replace('■', '')      # Black square
+        text = text.replace('▢', '')      # White square with rounded corners
+        text = text.replace('▣', '')      # White square containing black small square
+        text = text.replace('▤', '')      # Square with horizontal fill
+        text = text.replace('▥', '')      # Square with vertical fill
+        text = text.replace('▦', '')      # Square with orthogonal crosshatch fill
+        text = text.replace('▧', '')      # Square with upper left to lower right fill
+        text = text.replace('▨', '')      # Square with upper right to lower left fill
+        text = text.replace('▩', '')      # Square with diagonal crosshatch fill
+        
+        # Remove other common replacement/fallback characters
+        text = text.replace('\u25a1', '') # White square
+        text = text.replace('\u25a0', '') # Black square
+        text = text.replace('\u2b1c', '') # White large square
+        text = text.replace('\u2b1b', '') # Black large square
+        
+        # Remove invisible and zero-width characters
+        text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
+        
+        # Remove remaining control characters (except common ones like newline, tab)
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+        
+        # Remove any remaining characters that can't be properly encoded
+        try:
+            # Try to encode/decode to catch problematic characters
+            text = text.encode('utf-8', errors='ignore').decode('utf-8')
+        except UnicodeError:
+            pass
+        
+        # Log if we made changes
+        if text != original:
+            self._log(f"🔧 Sanitized Unicode: '{original}' → '{text}'", "debug")
         
         return text
     
@@ -4006,9 +4060,17 @@ class MangaTranslator:
                 except:
                     continue
         
-        # Clean up any remaining control characters
+        # Clean up any remaining control characters and replacement characters
         import re
         text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text)
+        
+        # Additional cleanup for common encoding artifacts
+        # Remove sequences that commonly appear from encoding errors
+        text = re.sub(r'\ufffd+', '', text)  # Remove multiple replacement characters
+        text = re.sub(r'[\u25a0-\u25ff]+', '', text)  # Remove geometric shapes (common fallbacks)
+        
+        # Clean up double spaces and normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
         
         return text
                 
