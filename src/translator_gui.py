@@ -15681,8 +15681,8 @@ Important rules:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
             
             # Only show message if requested
-            #if show_message:
-            #    messagebox.showinfo("Saved", "Configuration saved.")
+            if show_message:
+                messagebox.showinfo("Saved", "Configuration saved.")
                 
         except Exception as e:
             # Always show error messages regardless of show_message

@@ -18,6 +18,9 @@ from PIL import Image
 import logging
 import time
 import random
+import base64
+import io
+import requests
 
 try:
     import gptqmodel
@@ -75,13 +78,51 @@ class OCRProvider:
         self.is_installed = False
         self.is_loaded = False
         self.model = None
+        self.stop_flag = None
+        self._stopped = False
         
     def _log(self, message: str, level: str = "info"):
-        """Log message"""
+        """Log message with stop suppression"""
+        # Suppress logs when stopped (allow only essential stop confirmation messages)
+        if self._check_stop():
+            essential_stop_keywords = [
+                "⏹️ Translation stopped by user",
+                "⏹️ OCR processing stopped",
+                "cleanup", "🧹"
+            ]
+            if not any(keyword in message for keyword in essential_stop_keywords):
+                return
+        
         if self.log_callback:
             self.log_callback(message, level)
         else:
             print(f"[{level.upper()}] {message}")
+    
+    def set_stop_flag(self, stop_flag):
+        """Set the stop flag for checking interruptions"""
+        self.stop_flag = stop_flag
+        self._stopped = False
+    
+    def _check_stop(self) -> bool:
+        """Check if stop has been requested"""
+        if self._stopped:
+            return True
+        if self.stop_flag and self.stop_flag.is_set():
+            self._stopped = True
+            return True
+        # Check global manga translator cancellation
+        try:
+            from manga_translator import MangaTranslator
+            if MangaTranslator.is_globally_cancelled():
+                self._stopped = True
+                return True
+        except Exception:
+            pass
+        return False
+    
+    def reset_stop_flags(self):
+        """Reset stop flags when starting new processing"""
+        self._stopped = False
     
     def check_installation(self) -> bool:
         """Check if provider is installed"""
@@ -144,6 +185,7 @@ class CustomAPIProvider(OCRProvider):
         # Simple defaults
         self.api_format = 'openai'  # Most custom endpoints are OpenAI-compatible
         self.timeout = int(os.environ.get('CHUNK_TIMEOUT', '30'))
+        self.api_headers = {}  # Additional custom headers
         
         # Retry configuration for Custom API OCR calls
         self.max_retries = int(os.environ.get('CUSTOM_OCR_MAX_RETRIES', '3'))
@@ -447,6 +489,11 @@ class CustomAPIProvider(OCRProvider):
             ]
 
             while attempt < max_attempts:
+                # Check for stop before each attempt
+                if self._check_stop():
+                    self._log("⏹️ OCR processing stopped by user", "warning")
+                    return results
+                
                 try:
                     response = self.client.send(
                         messages=messages,
@@ -750,6 +797,11 @@ class MangaOCRProvider(OCRProvider):
         """
         results = []
         
+        # Check for stop at start
+        if self._check_stop():
+            self._log("⏹️ Manga-OCR processing stopped by user", "warning")
+            return results
+        
         try:
             if not self.is_loaded:
                 if not self.load_model():
@@ -767,6 +819,11 @@ class MangaOCRProvider(OCRProvider):
             h, w = image.shape[:2]
             
             self._log("🔍 Processing region with manga-ocr...")
+            
+            # Check for stop before inference
+            if self._check_stop():
+                self._log("⏹️ Manga-OCR inference stopped by user", "warning")
+                return results
             
             # Run OCR on the image region
             text = self._run_ocr(pil_image)
@@ -1710,6 +1767,7 @@ class OCRManager:
             'Qwen2-VL': Qwen2VL(log_callback)
         }
         self.current_provider = None
+        self.stop_flag = None
         
     def get_provider(self, name: str) -> Optional[OCRProvider]:
         """Get OCR provider by name"""
@@ -1762,3 +1820,16 @@ class OCRManager:
             return []
         
         return provider.detect_text(image, **kwargs)
+    
+    def set_stop_flag(self, stop_flag):
+        """Set stop flag for all providers"""
+        self.stop_flag = stop_flag
+        for provider in self.providers.values():
+            if hasattr(provider, 'set_stop_flag'):
+                provider.set_stop_flag(stop_flag)
+    
+    def reset_stop_flags(self):
+        """Reset stop flags for all providers"""
+        for provider in self.providers.values():
+            if hasattr(provider, 'reset_stop_flags'):
+                provider.reset_stop_flags()

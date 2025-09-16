@@ -400,6 +400,11 @@ class LocalInpainter:
             self.torch_precision = 'auto'
             self.int8_enabled = False
         
+        # Stop flag support
+        self.stop_flag = None
+        self._stopped = False
+        self.log_callback = None
+        
         # Initialize bubble detector if available
         if BUBBLE_DETECTOR_AVAILABLE:
             try:
@@ -432,6 +437,53 @@ class LocalInpainter:
         # Save
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(full_config, f, indent=2, ensure_ascii=False)
+    
+    def set_stop_flag(self, stop_flag):
+        """Set the stop flag for checking interruptions"""
+        self.stop_flag = stop_flag
+        self._stopped = False
+    
+    def set_log_callback(self, log_callback):
+        """Set log callback for GUI integration"""
+        self.log_callback = log_callback
+    
+    def _check_stop(self) -> bool:
+        """Check if stop has been requested"""
+        if self._stopped:
+            return True
+        if self.stop_flag and self.stop_flag.is_set():
+            self._stopped = True
+            return True
+        # Check global manga translator cancellation
+        try:
+            from manga_translator import MangaTranslator
+            if MangaTranslator.is_globally_cancelled():
+                self._stopped = True
+                return True
+        except Exception:
+            pass
+        return False
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log message with stop suppression"""
+        # Suppress logs when stopped (allow only essential stop confirmation messages)
+        if self._check_stop():
+            essential_stop_keywords = [
+                "⏹️ Translation stopped by user",
+                "⏹️ Inpainting stopped",
+                "cleanup", "🧹"
+            ]
+            if not any(keyword in message for keyword in essential_stop_keywords):
+                return
+        
+        if self.log_callback:
+            self.log_callback(message, level)
+        else:
+            logger.info(message) if level == 'info' else getattr(logger, level, logger.info)(message)
+    
+    def reset_stop_flags(self):
+        """Reset stop flags when starting new processing"""
+        self._stopped = False
 
     def convert_to_onnx(self, model_path: str, method: str) -> Optional[str]:
         """Convert a PyTorch model to ONNX format with FFT handling via custom operators"""
@@ -1593,8 +1645,13 @@ class LocalInpainter:
 
     def inpaint(self, image, mask, refinement='normal', _retry_attempt: int = 0):
         """Inpaint - compatible with JIT, checkpoint, and ONNX models"""
+        # Check for stop at start
+        if self._check_stop():
+            self._log("⏹️ Inpainting stopped by user", "warning")
+            return image
+        
         if not self.model_loaded:
-            logger.error("No model loaded")
+            self._log("No model loaded", "error")
             return image
         
         try:
@@ -1716,6 +1773,16 @@ class LocalInpainter:
                     # Convert to NCHW format
                     img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
                     mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                    
+                    # Check for stop before inference
+                    if self._check_stop():
+                        self._log("⏹️ ONNX inference stopped by user", "warning")
+                        return image
+                    
+                    # Check for stop before inference
+                    if self._check_stop():
+                        self._log("⏹️ ONNX inference stopped by user", "warning")
+                        return image
                     
                     # Run ONNX inference
                     ort_inputs = {

@@ -211,6 +211,11 @@ class BubbleDetector:
         # Prefer advanced.onnx_quantize; fall back to env or global quantize
         self.onnx_quantize_enabled = bool(adv_cfg.get('onnx_quantize', os.environ.get('ONNX_QUANTIZE', 'false').lower() == 'true' or self.quantize_enabled))
         
+        # Stop flag support
+        self.stop_flag = None
+        self._stopped = False
+        self.log_callback = None
+        
         logger.info(f"🗨️ BubbleDetector initialized")
         logger.info(f"   GPU: {'Available' if self.use_gpu else 'Not available'}")
         logger.info(f"   YOLO: {'Available' if YOLO_AVAILABLE else 'Not installed'}")
@@ -235,6 +240,53 @@ class BubbleDetector:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
+    
+    def set_stop_flag(self, stop_flag):
+        """Set the stop flag for checking interruptions"""
+        self.stop_flag = stop_flag
+        self._stopped = False
+    
+    def set_log_callback(self, log_callback):
+        """Set log callback for GUI integration"""
+        self.log_callback = log_callback
+    
+    def _check_stop(self) -> bool:
+        """Check if stop has been requested"""
+        if self._stopped:
+            return True
+        if self.stop_flag and self.stop_flag.is_set():
+            self._stopped = True
+            return True
+        # Check global manga translator cancellation
+        try:
+            from manga_translator import MangaTranslator
+            if MangaTranslator.is_globally_cancelled():
+                self._stopped = True
+                return True
+        except Exception:
+            pass
+        return False
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log message with stop suppression"""
+        # Suppress logs when stopped (allow only essential stop confirmation messages)
+        if self._check_stop():
+            essential_stop_keywords = [
+                "⏹️ Translation stopped by user",
+                "⏹️ Bubble detection stopped",
+                "cleanup", "🧹"
+            ]
+            if not any(keyword in message for keyword in essential_stop_keywords):
+                return
+        
+        if self.log_callback:
+            self.log_callback(message, level)
+        else:
+            logger.info(message) if level == 'info' else getattr(logger, level, logger.info)(message)
+    
+    def reset_stop_flags(self):
+        """Reset stop flags when starting new processing"""
+        self._stopped = False
         
     def load_model(self, model_path: str, force_reload: bool = False) -> bool:
         """
@@ -648,6 +700,11 @@ class BubbleDetector:
         Returns:
             List of bubble bounding boxes as (x, y, width, height) tuples
         """
+        # Check for stop at start
+        if self._check_stop():
+            self._log("⏹️ Bubble detection stopped by user", "warning")
+            return []
+        
         # Decide which model to use
         if use_rtdetr is None:
             # Auto-select: prefer RT-DETR if available
@@ -680,7 +737,12 @@ class BubbleDetector:
                 return []
             
             h, w = image.shape[:2]
-            logger.info(f"🔍 Detecting bubbles in {w}x{h} image")
+            self._log(f"🔍 Detecting bubbles in {w}x{h} image")
+            
+            # Check for stop before inference
+            if self._check_stop():
+                self._log("⏹️ Bubble detection inference stopped by user", "warning")
+                return []
             
             if self.model_type == 'yolo':
                 # YOLOv8 inference
@@ -749,8 +811,15 @@ class BubbleDetector:
         Returns:
             List of bubbles if return_all_bubbles=True, else dict with classes
         """
+        # Check for stop at start
+        if self._check_stop():
+            self._log("⏹️ RT-DETR detection stopped by user", "warning")
+            if return_all_bubbles:
+                return []
+            return {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+        
         if not self.rtdetr_loaded:
-            logger.warning("RT-DETR not loaded. Call load_rtdetr_model() first.")
+            self._log("RT-DETR not loaded. Call load_rtdetr_model() first.", "warning")
             if return_all_bubbles:
                 return []
             return {'bubbles': [], 'text_bubbles': [], 'text_free': []}

@@ -83,6 +83,12 @@ class MangaTranslator:
         with cls._global_cancel_lock:
             return cls._global_cancelled
     
+    @classmethod
+    def reset_global_flags(cls):
+        """Reset global cancellation flags when starting new translation"""
+        with cls._global_cancel_lock:
+            cls._global_cancelled = False
+    
     def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
         """Initialize with OCR configuration and API client from main GUI
         
@@ -132,6 +138,7 @@ class MangaTranslator:
         # Processing flags
         self.is_processing = False
         self.cancel_requested = False
+        self.stop_flag = None  # Initialize stop_flag attribute
 
         # Initialize batch mode attributes
         self.batch_mode = main_gui.batch_translation_var.get() if hasattr(main_gui, 'batch_translation_var') else False
@@ -194,6 +201,9 @@ class MangaTranslator:
                 from ocr_manager import OCRManager
                 self.ocr_manager = OCRManager(log_callback=log_callback)
                 print(f"Initialized OCR Manager for {self.ocr_provider}")
+                # Initialize OCR manager with stop flag awareness
+                if hasattr(self.ocr_manager, 'reset_stop_flags'):
+                    self.ocr_manager.reset_stop_flags()
             except Exception as _e:
                 self.ocr_manager = None
                 self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
@@ -300,10 +310,7 @@ class MangaTranslator:
         self.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)  # Default multiplierr
         
         #inpainting quality
-        self.inpaint_quality = config.get('manga_inpaint_quality', 'high')  # 'high' or 'fast'        
-        
-        # Stop flag for interruption
-        self.stop_flag = None
+        self.inpaint_quality = config.get('manga_inpaint_quality', 'high')  # 'high' or 'fast'
         
         self._log("\n🔧 MangaTranslator initialized with settings:")
         self._log(f"   API Delay: {self.api_delay}s")
@@ -357,6 +364,14 @@ class MangaTranslator:
         """Set the stop flag for checking interruptions"""
         self.stop_flag = stop_flag
         self.cancel_requested = False
+    
+    def reset_stop_flags(self):
+        """Reset all stop flags when starting new translation"""
+        self.cancel_requested = False
+        self.is_processing = False
+        # Reset global flags
+        self.reset_global_flags()
+        self._log("🔄 Stop flags reset for new translation", "debug")
 
     def _check_stop(self):
         """Check if stop has been requested using multiple sources"""
@@ -365,8 +380,8 @@ class MangaTranslator:
             self.cancel_requested = True
             return True
             
-        # Check local stop flag
-        if self.stop_flag and self.stop_flag.is_set():
+        # Check local stop flag (only if it exists and is set)
+        if hasattr(self, 'stop_flag') and self.stop_flag and self.stop_flag.is_set():
             self.cancel_requested = True
             return True
             
@@ -1274,12 +1289,20 @@ class MangaTranslator:
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI or console, and also to file logger.
         The file logger is configured in translator_gui._setup_file_logging().
+        Enhanced with comprehensive stop suppression.
         """
-        # Suppress logs when stop is requested (except for stop/error messages)
-        if self._check_stop() and not any(keyword in message for keyword in [
-            "⏹️", "❌", "Stopping", "stopped", "cancelled", "Error", "Failed"
-        ]):
-            return
+        # Enhanced stop suppression - allow only essential stop confirmation messages
+        if self._check_stop() or self.is_globally_cancelled():
+            # Only allow essential stop confirmation messages
+            essential_stop_keywords = [
+                "⏹️ Translation stopped by user",
+                "⏹️ Stopping translation", 
+                "cleanup", "🧹",
+                "Summary:", "Complete!", "Translation Summary"
+            ]
+            # Suppress all other messages including warnings, errors, and processing messages
+            if not any(keyword in message for keyword in essential_stop_keywords):
+                return
             
         # In batch mode, only log important messages
         if self.batch_mode:

@@ -198,6 +198,54 @@ class MangaTranslationTab:
         except ImportError:
             pass
     
+    def reset_stop_flags(self):
+        """Reset all stop flags when starting new translation"""
+        self.is_running = False
+        if hasattr(self, 'stop_flag'):
+            self.stop_flag.clear()
+        self._reset_global_cancellation()
+        self._log("🔄 Stop flags reset for new translation", "debug")
+    
+    def _distribute_stop_flags(self):
+        """Distribute stop flags to all manga translation components"""
+        if not hasattr(self, 'translator') or not self.translator:
+            return
+        
+        # Set stop flag on translator
+        if hasattr(self.translator, 'set_stop_flag'):
+            self.translator.set_stop_flag(self.stop_flag)
+        
+        # Set stop flag on OCR manager and all providers
+        if hasattr(self.translator, 'ocr_manager') and self.translator.ocr_manager:
+            if hasattr(self.translator.ocr_manager, 'set_stop_flag'):
+                self.translator.ocr_manager.set_stop_flag(self.stop_flag)
+        
+        # Set stop flag on bubble detector if available
+        if hasattr(self.translator, 'bubble_detector') and self.translator.bubble_detector:
+            if hasattr(self.translator.bubble_detector, 'set_stop_flag'):
+                self.translator.bubble_detector.set_stop_flag(self.stop_flag)
+                
+        # Set stop flag on local inpainter if available
+        if hasattr(self.translator, 'local_inpainter') and self.translator.local_inpainter:
+            if hasattr(self.translator.local_inpainter, 'set_stop_flag'):
+                self.translator.local_inpainter.set_stop_flag(self.stop_flag)
+                
+        # Also try to set on thread-local components if accessible
+        if hasattr(self.translator, '_thread_local'):
+            thread_local = self.translator._thread_local
+            # Set on thread-local bubble detector
+            if hasattr(thread_local, 'bubble_detector') and thread_local.bubble_detector:
+                if hasattr(thread_local.bubble_detector, 'set_stop_flag'):
+                    thread_local.bubble_detector.set_stop_flag(self.stop_flag)
+            
+            # Set on thread-local inpainters
+            if hasattr(thread_local, 'local_inpainters') and isinstance(thread_local.local_inpainters, dict):
+                for inpainter in thread_local.local_inpainters.values():
+                    if hasattr(inpainter, 'set_stop_flag'):
+                        inpainter.set_stop_flag(self.stop_flag)
+        
+        self._log("🔄 Stop flags distributed to all components", "debug")
+    
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox"""
         spinbox.bind("<MouseWheel>", lambda e: "break")
@@ -4593,13 +4641,20 @@ class MangaTranslationTab:
         self.selected_files.clear()
     
     def _log(self, message: str, level: str = "info"):
-        """Log message to GUI text widget or console"""
-        # Suppress logs when stop is requested (except for stop/error messages)
-        if self._is_stop_requested() and not any(keyword in message for keyword in [
-            "⏹️", "❌", "Stopping", "stopped", "cancelled", "Error", "Failed", 
-            "Translation Summary", "Complete!", "Summary:"
-        ]):
-            return
+        """Log message to GUI text widget or console with enhanced stop suppression"""
+        # Enhanced stop suppression - allow only essential stop confirmation messages
+        if self._is_stop_requested() or self.is_globally_cancelled():
+            # Only allow essential stop confirmation messages
+            essential_stop_keywords = [
+                "⏹️ Translation stopped by user",
+                "⏹️ Stopping translation", 
+                "cleanup", "🧹",
+                "Translation Summary", "Complete!", "Summary:",
+                "📊 Translation Summary:", "All tests passed!", "Some tests failed"
+            ]
+            # Suppress all other messages including warnings, errors, and processing messages
+            if not any(keyword in message for keyword in essential_stop_keywords):
+                return
             
         # Check if log_text widget exists yet
         if hasattr(self, 'log_text') and self.log_text:
@@ -4692,6 +4747,10 @@ class MangaTranslationTab:
             messagebox.showwarning("No Files", "Please select manga images to translate.")
             return
         
+        # Reset all stop flags at the start of new translation
+        self.reset_stop_flags()
+        self._log("🚀 Starting new manga translation batch", "info")
+        
         # Build OCR configuration
         ocr_config = {'provider': self.ocr_provider_var.get()}
 
@@ -4779,6 +4838,7 @@ class MangaTranslationTab:
         if needs_new_client:
             # Apply multi-key settings from config so UnifiedClient picks them up
             try:
+                import os  # Import os here
                 use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
                 mk_list = self.main_gui.config.get('multi_api_keys', [])
                 if use_mk and mk_list:
@@ -4817,13 +4877,13 @@ class MangaTranslationTab:
 
         # Set environment variables for custom-api provider
         if ocr_config['provider'] == 'custom-api':
+            import os  # Import os for environment variables
             env_vars = self.main_gui._get_environment_variables(
                 epub_path='',  # Not needed for manga
                 api_key=api_key
             )
             
             # Apply all environment variables EXCEPT SYSTEM_PROMPT
-            import os
             for key, value in env_vars.items():
                 if key == 'SYSTEM_PROMPT':
                     # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
@@ -4873,6 +4933,9 @@ class MangaTranslationTab:
                     self.ocr_manager = OCRManager(log_callback=self._log)
                     self.translator.ocr_manager = self.ocr_manager
                 
+                # Distribute stop flags to all components
+                self._distribute_stop_flags()
+                
                 # Set cloud inpainting if configured (only once!)
                 saved_api_key = self.main_gui.config.get('replicate_api_key', '')
                 if saved_api_key:
@@ -4893,6 +4956,9 @@ class MangaTranslationTab:
             if needs_new_client and hasattr(self.translator, 'client'):
                 self.translator.client = self.main_gui.client
                 self._log(f"Updated translator with new API client", "info")
+            
+            # Distribute stop flags to all components
+            self._distribute_stop_flags()
             
             # Update rendering settings
             self._apply_rendering_settings()
@@ -5605,8 +5671,9 @@ class MangaTranslationTab:
             except ImportError:
                 pass
             
-            self.stop_button.config(state=tk.DISABLED)
-            self._log("\n⏸️ Stopping translation...", "warning")
+            # Immediately reset UI state to re-enable start button
+            self._reset_ui_state()
+            self._log("\n⏹️ Translation stopped by user", "warning")
     
     def _reset_ui_state(self):
         """Reset UI to ready state - with widget existence checks"""
@@ -5618,17 +5685,20 @@ class MangaTranslationTab:
             # Reset running flag
             self.is_running = False
             
-            # Check and update start_button if it exists
+            # Check and update start_button if it exists - only if not already enabled
             if hasattr(self, 'start_button') and self.start_button and self.start_button.winfo_exists():
-                self.start_button.config(state=tk.NORMAL)
+                if str(self.start_button.cget('state')) == 'disabled':
+                    self.start_button.config(state=tk.NORMAL)
             
-            # Check and update stop_button if it exists
+            # Check and update stop_button if it exists - only if not already disabled
             if hasattr(self, 'stop_button') and self.stop_button and self.stop_button.winfo_exists():
-                self.stop_button.config(state=tk.DISABLED)
+                if str(self.stop_button.cget('state')) == 'normal':
+                    self.stop_button.config(state=tk.DISABLED)
             
             # Re-enable file modification - check if listbox exists
             if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.winfo_exists():
-                self.file_listbox.config(state=tk.NORMAL)
+                if str(self.file_listbox.cget('state')) == 'disabled':
+                    self.file_listbox.config(state=tk.NORMAL)
                 
         except tk.TclError:
             # Widget has been destroyed, nothing to do
