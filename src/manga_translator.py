@@ -1576,9 +1576,18 @@ class MangaTranslator:
                         
                         block_text = block_text.strip()
                         
+                        # CLEAN ORIGINAL OCR TEXT - Fix cube characters and encoding issues
+                        original_text = block_text
+                        block_text = self._fix_encoding_issues(block_text)
+                        block_text = self._sanitize_unicode_characters(block_text)
+                        
+                        # Log cleaning if changes were made
+                        if block_text != original_text:
+                            self._log(f"🧹 Cleaned OCR text: '{original_text[:30]}...' → '{block_text[:30]}...'", "debug")
+                        
                         # TEXT FILTERING SECTION
-                        # Skip if text is too short
-                        if len(block_text) < min_text_length:
+                        # Skip if text is too short (after cleaning)
+                        if len(block_text.strip()) < min_text_length:
                             self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
                             continue
                         
@@ -1725,15 +1734,24 @@ class MangaTranslator:
                             self._log(f"   Processing page {page_num + 1}/{len(result.analyze_result.read_results)}")
                         
                         for line in page.lines:
+                            # CLEAN ORIGINAL OCR TEXT FOR AZURE - Fix cube characters and encoding issues
+                            original_azure_text = line.text
+                            cleaned_line_text = self._fix_encoding_issues(line.text)
+                            cleaned_line_text = self._sanitize_unicode_characters(cleaned_line_text)
+                            
+                            # Log cleaning if changes were made
+                            if cleaned_line_text != original_azure_text:
+                                self._log(f"🧹 Cleaned Azure OCR text: '{original_azure_text[:30]}...' → '{cleaned_line_text[:30]}...'", "debug")
+                            
                             # TEXT FILTERING FOR AZURE
-                            # Skip if text is too short
-                            if len(line.text) < min_text_length:
-                                self._log(f"   Skipping short text ({len(line.text)} chars): {line.text}")
+                            # Skip if text is too short (after cleaning)
+                            if len(cleaned_line_text.strip()) < min_text_length:
+                                self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
                                 continue
                             
-                            # Skip if primarily English and exclude_english is enabled
-                            if exclude_english and self._is_primarily_english(line.text):
-                                self._log(f"   Skipping English text: {line.text[:50]}...")
+                            # Skip if primarily English and exclude_english is enabled (use cleaned text)
+                            if exclude_english and self._is_primarily_english(cleaned_line_text):
+                                self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
                                 continue
                             
                             # Azure provides 8-point bounding box
@@ -1783,7 +1801,7 @@ class MangaTranslator:
                             # Apply confidence threshold filtering
                             if confidence >= confidence_threshold:
                                 region = TextRegion(
-                                    text=line.text,
+                                    text=cleaned_line_text,  # Use cleaned text instead of original
                                     vertices=vertices,
                                     bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
                                     confidence=confidence,
@@ -1797,13 +1815,13 @@ class MangaTranslator:
                                 regions.append(region)
                                 total_lines += 1
                                 
-                                # More detailed logging
+                                # More detailed logging (use cleaned text)
                                 if style == 'handwriting':
-                                    self._log(f"   Found handwritten text ({confidence:.2f}): {line.text[:50]}...")
+                                    self._log(f"   Found handwritten text ({confidence:.2f}): {cleaned_line_text[:50]}...")
                                 else:
-                                    self._log(f"   Found text region ({confidence:.2f}): {line.text[:50]}...")
+                                    self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
                             else:
-                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {line.text[:30]}...")
+                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
                     
                     # Log summary statistics
                     if total_lines > 0:
@@ -2265,22 +2283,31 @@ class MangaTranslator:
 
                 # Convert OCR results to TextRegion format
                 for result in ocr_results:
-                    # Apply filtering
-                    if len(result.text) < min_text_length:
-                        self._log(f"   Skipping short text ({len(result.text)} chars): {result.text}")
+                    # CLEAN ORIGINAL OCR TEXT - Fix cube characters and encoding issues
+                    original_ocr_text = result.text
+                    cleaned_result_text = self._fix_encoding_issues(result.text)
+                    cleaned_result_text = self._sanitize_unicode_characters(cleaned_result_text)
+                    
+                    # Log cleaning if changes were made
+                    if cleaned_result_text != original_ocr_text:
+                        self._log(f"🧹 Cleaned OCR manager text: '{original_ocr_text[:30]}...' → '{cleaned_result_text[:30]}...'", "debug")
+                    
+                    # Apply filtering (use cleaned text)
+                    if len(cleaned_result_text.strip()) < min_text_length:
+                        self._log(f"   Skipping short text ({len(cleaned_result_text)} chars): {cleaned_result_text}")
                         continue
                     
-                    if exclude_english and self._is_primarily_english(result.text):
-                        self._log(f"   Skipping English text: {result.text[:50]}...")
+                    if exclude_english and self._is_primarily_english(cleaned_result_text):
+                        self._log(f"   Skipping English text: {cleaned_result_text[:50]}...")
                         continue
                     
                     if result.confidence < confidence_threshold:
-                        self._log(f"   Skipping low confidence ({result.confidence:.2f}): {result.text[:30]}...")
+                        self._log(f"   Skipping low confidence ({result.confidence:.2f}): {cleaned_result_text[:30]}...")
                         continue
                     
-                    # Create TextRegion
+                    # Create TextRegion (use cleaned text)
                     region = TextRegion(
-                        text=result.text,
+                        text=cleaned_result_text,  # Use cleaned text instead of original
                         vertices=result.vertices if result.vertices else [
                             (result.bbox[0], result.bbox[1]),
                             (result.bbox[0] + result.bbox[2], result.bbox[1]),
@@ -2292,7 +2319,7 @@ class MangaTranslator:
                         region_type='text_block'
                     )
                     regions.append(region)
-                    self._log(f"   Found text ({result.confidence:.2f}): {result.text[:50]}...")
+                    self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
             
             # MERGING SECTION (applies to all providers)
             # Check if bubble detection is enabled
