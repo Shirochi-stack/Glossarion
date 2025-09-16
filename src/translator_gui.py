@@ -12994,7 +12994,8 @@ Important rules:
         def _persist_settings():
             self.config['retain_source_extension'] = self.retain_source_extension_var.get()
             os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var.get() else '0'
-            self.save_config()
+            # Save without user-facing message when closing Other Settings
+            self.save_config(show_message=False)
             dialog._cleanup_scrolling()
             dialog.destroy()
         dialog.protocol("WM_DELETE_WINDOW", _persist_settings)

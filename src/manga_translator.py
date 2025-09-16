@@ -1293,14 +1293,14 @@ class MangaTranslator:
         """
         # Enhanced stop suppression - allow only essential stop confirmation messages
         if self._check_stop() or self.is_globally_cancelled():
-            # Only allow essential stop confirmation messages
+            # Only allow very specific stop confirmation messages - nothing else
             essential_stop_keywords = [
                 "⏹️ Translation stopped by user",
-                "⏹️ Stopping translation", 
-                "cleanup", "🧹",
-                "Summary:", "Complete!", "Translation Summary"
+                "🧹 Cleaning up models to free RAM",
+                "✅ Model cleanup complete - RAM should be freed",
+                "✅ All models cleaned up - RAM freed!"
             ]
-            # Suppress all other messages including warnings, errors, and processing messages
+            # Suppress ALL other messages when stopped - be very restrictive
             if not any(keyword in message for keyword in essential_stop_keywords):
                 return
             

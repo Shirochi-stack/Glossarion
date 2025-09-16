@@ -4644,15 +4644,14 @@ class MangaTranslationTab:
         """Log message to GUI text widget or console with enhanced stop suppression"""
         # Enhanced stop suppression - allow only essential stop confirmation messages
         if self._is_stop_requested() or self.is_globally_cancelled():
-            # Only allow essential stop confirmation messages
+            # Only allow very specific stop confirmation messages - nothing else
             essential_stop_keywords = [
                 "⏹️ Translation stopped by user",
-                "⏹️ Stopping translation", 
-                "cleanup", "🧹",
-                "Translation Summary", "Complete!", "Summary:",
-                "📊 Translation Summary:", "All tests passed!", "Some tests failed"
+                "🧹 Cleaning up models to free RAM",
+                "✅ Model cleanup complete - RAM should be freed",
+                "✅ All models cleaned up - RAM freed!"
             ]
-            # Suppress all other messages including warnings, errors, and processing messages
+            # Suppress ALL other messages when stopped - be very restrictive
             if not any(keyword in message for keyword in essential_stop_keywords):
                 return
             
@@ -4702,11 +4701,32 @@ class MangaTranslationTab:
                     if total > 0:
                         percentage = (current / total) * 100
                         self.progress_bar['value'] = percentage
-                    self.progress_label.config(text=status)
+                    
+                    # Check if this is a stopped status and style accordingly
+                    if "stopped" in status.lower() or "cancelled" in status.lower():
+                        # Make the status more prominent for stopped translations
+                        self.progress_label.config(text=f"⏹️ {status}", fg='orange')
+                    elif "complete" in status.lower() or "finished" in status.lower():
+                        # Success status
+                        self.progress_label.config(text=f"✅ {status}", fg='green')
+                    elif "error" in status.lower() or "failed" in status.lower():
+                        # Error status
+                        self.progress_label.config(text=f"❌ {status}", fg='red')
+                    else:
+                        # Normal status
+                        self.progress_label.config(text=status, fg='black')
                     
                 elif update[0] == 'current_file':
                     _, filename = update
-                    self.current_file_label.config(text=f"Current: {filename}")
+                    # Style the current file display based on the status
+                    if "stopped" in filename.lower() or "cancelled" in filename.lower():
+                        self.current_file_label.config(text=f"⏹️ {filename}", fg='orange')
+                    elif "complete" in filename.lower() or "finished" in filename.lower():
+                        self.current_file_label.config(text=f"✅ {filename}", fg='green')
+                    elif "error" in filename.lower() or "failed" in filename.lower():
+                        self.current_file_label.config(text=f"❌ {filename}", fg='red')
+                    else:
+                        self.current_file_label.config(text=f"Current: {filename}", fg='gray')
                     
         except:
             pass
@@ -5219,11 +5239,15 @@ class MangaTranslationTab:
                 total = self.total_files
                 
                 def process_single(idx, filepath):
+                    # Check stop flag at the very beginning
                     if self.stop_flag.is_set():
                         return False
                     
                     # Create an isolated translator instance per panel
                     try:
+                        # Check again before starting expensive work
+                        if self.stop_flag.is_set():
+                            return False
                         from manga_translator import MangaTranslator
                         import os
                         # Build full OCR config for this thread (mirror _start_translation)
@@ -5247,6 +5271,15 @@ class MangaTranslationTab:
                         translator = MangaTranslator(ocr_config, self.main_gui.client, self.main_gui, log_callback=self._log)
                         translator.set_stop_flag(self.stop_flag)
                         
+                        # Also propagate global cancellation to isolated translator
+                        from manga_translator import MangaTranslator as MTClass
+                        if MTClass.is_globally_cancelled():
+                            return False
+                        
+                        # Check stop flag before configuration
+                        if self.stop_flag.is_set():
+                            return False
+                            
                         # Apply inpainting and rendering options roughly matching current translator
                         try:
                             translator.constrain_to_bubble = getattr(self, 'constrain_to_bubble_var').get() if hasattr(self, 'constrain_to_bubble_var') else True
@@ -5261,6 +5294,10 @@ class MangaTranslationTab:
                             )
                         except Exception:
                             pass
+                            
+                        # Another check before path setup
+                        if self.stop_flag.is_set():
+                            return False
                         
                         # Determine output path
                         filename = os.path.basename(filepath)
@@ -5278,6 +5315,10 @@ class MangaTranslationTab:
                             counters['started'] += 1
                             self._update_progress(counters['done'], total, f"Processing {counters['started']}/{total}: {filename}")
                         
+                        # Final check before expensive processing
+                        if self.stop_flag.is_set():
+                            return False
+                            
                         # Process image
                         result = translator.process_image(filepath, output_path, batch_index=idx+1, batch_total=total)
                         
@@ -5312,12 +5353,34 @@ class MangaTranslationTab:
                             time.sleep(stagger_ms / 1000.0)
                     
                     # Handle completion and stop behavior
-                    for f in concurrent.futures.as_completed(futures):
-                        if self.stop_flag.is_set():
-                            # Best-effort cancellation (running tasks cannot be forcibly stopped)
-                            for rem in futures:
-                                rem.cancel()
-                            break
+                    try:
+                        for f in concurrent.futures.as_completed(futures):
+                            if self.stop_flag.is_set():
+                                # More aggressive cancellation
+                                for rem in futures:
+                                    rem.cancel()
+                                # Try to shutdown executor immediately
+                                try:
+                                    executor.shutdown(wait=False)
+                                except Exception:
+                                    pass
+                                break
+                            try:
+                                # Consume future result to let it raise exceptions or return
+                                f.result(timeout=0.1)  # Very short timeout
+                            except Exception:
+                                # Ignore; counters are updated inside process_single
+                                pass
+                    except Exception:
+                        # If as_completed fails due to shutdown, that's ok
+                        pass
+                    
+                    # If stopped during parallel processing, do not log panel completion
+                    if self.stop_flag.is_set():
+                        pass
+                    else:
+                        # After parallel processing, skip sequential loop
+                        pass
                 
                 # After parallel processing, skip sequential loop
                 
@@ -5427,19 +5490,20 @@ class MangaTranslationTab:
                             self._log(traceback.format_exc(), "error")
                         
             
-            # Final summary
-            self._log(f"\n{'='*60}", "info")
-            self._log(f"📊 Translation Summary:", "info")
-            self._log(f"   Total files: {self.total_files}", "info")
-            self._log(f"   ✅ Successful: {self.completed_files}", "success")
-            self._log(f"   ❌ Failed: {self.failed_files}", "error" if self.failed_files > 0 else "info")
-            self._log(f"{'='*60}\n", "info")
-            
-            self._update_progress(
-                self.total_files,
-                self.total_files,
-                f"Complete! {self.completed_files} successful, {self.failed_files} failed"
-            )
+            # Final summary - only if not stopped
+            if not self.stop_flag.is_set():
+                self._log(f"\n{'='*60}", "info")
+                self._log(f"📊 Translation Summary:", "info")
+                self._log(f"   Total files: {self.total_files}", "info")
+                self._log(f"   ✅ Successful: {self.completed_files}", "success")
+                self._log(f"   ❌ Failed: {self.failed_files}", "error" if self.failed_files > 0 else "info")
+                self._log(f"{'='*60}\n", "info")
+                
+                self._update_progress(
+                    self.total_files,
+                    self.total_files,
+                    f"Complete! {self.completed_files} successful, {self.failed_files} failed"
+                )
             
         except Exception as e:
             self._log(f"\n❌ Translation error: {str(e)}", "error")
@@ -5465,9 +5529,10 @@ class MangaTranslationTab:
                     except Exception:
                         pass
                     
-                    if is_parallel_panel:
+                    # Skip the "all parallel panels complete" message if stopped
+                    if is_parallel_panel and not self.stop_flag.is_set():
                         self._log("\n🧹 All parallel panels complete - cleaning up models to free RAM...", "info")
-                    else:
+                    elif not is_parallel_panel:
                         self._log("\n🧹 Cleaning up models to free RAM...", "info")
                     
                     # Clean up the shared translator if parallel processing was used
@@ -5670,6 +5735,26 @@ class MangaTranslationTab:
                 UnifiedClient.set_global_cancellation(True)
             except ImportError:
                 pass
+            
+            # Update progress to show stopped status
+            self._update_progress(
+                self.completed_files,
+                self.total_files, 
+                f"Stopped - {self.completed_files}/{self.total_files} completed"
+            )
+            
+            # Try to style the progress bar to indicate stopped status
+            try:
+                # Set progress bar to a distinctive value and try to change appearance
+                if hasattr(self, 'progress_bar'):
+                    # You could also set a custom style here if needed
+                    # For now, we'll rely on the text indicators
+                    pass
+            except Exception:
+                pass
+            
+            # Update current file display to show stopped
+            self._update_current_file("Translation stopped")
             
             # Immediately reset UI state to re-enable start button
             self._reset_ui_state()
