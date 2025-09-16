@@ -1277,7 +1277,8 @@ class UnifiedClient:
         
         # Check if cancelled first
         if self._cancelled:
-            logger.info(f"[Thread-{thread_name}] Operation cancelled, not waiting for key")
+            if not self._is_stop_requested():
+                logger.info(f"[Thread-{thread_name}] Operation cancelled, not waiting for key")
             return None
         
         # Get shortest cooldown time with timeout protection
@@ -2947,7 +2948,8 @@ class UnifiedClient:
                 
                 # Check for cancellation (from timeout or stop button)
                 if self._cancelled:
-                    logger.info("Operation cancelled (timeout or user stop)")
+                    if not self._is_stop_requested():
+                        logger.info("Operation cancelled (timeout or user stop)")
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # ====== UNIVERSAL EXTRACTION INTEGRATION ======
@@ -3099,7 +3101,8 @@ class UnifiedClient:
                 # Handle cancellation specially for timeout support
                 if e.error_type == "cancelled" or "cancelled" in str(e):
                     self._in_cleanup = False  # Ensure cleanup flag is set
-                    logger.info("Propagating cancellation to caller")
+                    if not self._is_stop_requested():
+                        logger.info("Propagating cancellation to caller")
                     # Re-raise so send_with_interrupt can handle it
                     raise
                 
@@ -4481,13 +4484,47 @@ class UnifiedClient:
         print("🛑 API operation cancelled")
         # Set global cancellation to affect all instances
         self.set_global_cancellation(True)
+        # Suppress httpx logging when cancelled
+        self._suppress_http_logs()
 
+    def _suppress_http_logs(self):
+        """Suppress HTTP and API logging during cancellation"""
+        import logging
+        # Suppress httpx logs (used by OpenAI client)
+        httpx_logger = logging.getLogger('httpx')
+        httpx_logger.setLevel(logging.WARNING)
+        
+        # Suppress OpenAI client logs
+        openai_logger = logging.getLogger('openai')
+        openai_logger.setLevel(logging.WARNING)
+        
+        # Suppress our own API client logs  
+        unified_logger = logging.getLogger('unified_api_client')
+        unified_logger.setLevel(logging.WARNING)
+    
+    def _reset_http_logs(self):
+        """Reset HTTP and API logging levels for new operations"""
+        import logging
+        # Reset httpx logs back to INFO
+        httpx_logger = logging.getLogger('httpx')
+        httpx_logger.setLevel(logging.INFO)
+        
+        # Reset OpenAI client logs back to INFO
+        openai_logger = logging.getLogger('openai')
+        openai_logger.setLevel(logging.INFO)
+        
+        # Reset our own API client logs back to INFO
+        unified_logger = logging.getLogger('unified_api_client')
+        unified_logger.setLevel(logging.INFO)
+    
     def reset_cleanup_state(self):
             """Reset cleanup state for new operations"""
             self._in_cleanup = False
             self._cancelled = False
             # Reset global cancellation flag for new operations
             self.set_global_cancellation(False)
+            # Reset logging levels for new operations
+            self._reset_http_logs()
 
     def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None, response_name=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
@@ -6658,9 +6695,11 @@ class UnifiedClient:
                     threshold=types.HarmBlockThreshold.BLOCK_NONE
                 ),
             ]
-            logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
+            if not self._is_stop_requested():
+                logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
         else:
-            logger.info("Using default Gemini safety settings")
+            if not self._is_stop_requested():
+                logger.info("Using default Gemini safety settings")
 
         # Define retry attempts
         attempts = self._get_max_retries()
