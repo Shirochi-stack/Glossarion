@@ -25,6 +25,13 @@ if '--run-chapter-extraction' in sys.argv:
     try:
         # Ensure UTF-8 I/O in worker mode
         os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        # Remove the flag so worker's argv aligns: argv[1]=epub, argv[2]=out, argv[3]=mode
+        try:
+            _flag_idx = sys.argv.index('--run-chapter-extraction')
+            sys.argv = [sys.argv[0]] + sys.argv[_flag_idx + 1:]
+        except ValueError:
+            # Shouldn't happen, but continue with current argv
+            pass
         from chapter_extraction_worker import main as _ce_main
         _ce_main()
     except Exception as _e:
