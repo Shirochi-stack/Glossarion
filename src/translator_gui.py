@@ -11728,6 +11728,12 @@ Important rules:
                extract_glossary_from_epub.set_stop_flag(True)
        except: pass
        
+       # Important: Reset the thread/future references so button updates properly
+       if hasattr(self, 'glossary_thread'):
+           self.glossary_thread = None
+       if hasattr(self, 'glossary_future'):
+           self.glossary_future = None
+       
        self.append_log("❌ Glossary extraction stop requested.")
        self.append_log("⏳ Please wait... stopping after current API call completes.")
        self.update_run_button()

@@ -7740,9 +7740,13 @@ class UnifiedClient:
                         params["max_tokens"] = norm_max_tokens
                     
                     # Add safety parameters for providers that support them
-                    if disable_safety and provider in ["groq", "fireworks", "together"]:
+                    # Note: Together AI doesn't support the 'moderation' parameter
+                    if disable_safety and provider in ["groq", "fireworks"]:
                         params["moderation"] = False
                         logger.info(f"🔓 Safety moderation disabled for {provider}")
+                    elif disable_safety and provider == "together":
+                        # Together AI handles safety differently - no moderation parameter
+                        logger.info(f"🔓 Safety settings note: {provider} doesn't support moderation parameter")
                     
                     # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
                     idem_key = self._get_idempotency_key()
