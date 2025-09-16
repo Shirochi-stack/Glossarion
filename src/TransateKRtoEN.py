@@ -4790,7 +4790,7 @@ class GlossaryManager:
             if not use_legacy_format:
                 csv_lines = self._convert_to_token_efficient_format(csv_lines)
             
-            # Final sanitize to prevent stray headers
+            # Final sanitize to prevent stray headers and section titles at end
             csv_lines = self._sanitize_final_glossary_lines(csv_lines, use_legacy_format)
             
             # Save
@@ -4800,6 +4800,9 @@ class GlossaryManager:
             
             print(f"\n📑 ✅ CHUNKED GLOSSARY SAVED!")
             print(f"📑 File: {glossary_path}")
+            print(f"📑 Total entries: {len(csv_lines) - 1}")
+            
+            return self._parse_csv_to_dict(csv_content)
             print(f"📑 Total entries: {len(csv_lines) - 1}")
             
             return self._parse_csv_to_dict(csv_content)
@@ -4837,17 +4840,22 @@ class GlossaryManager:
         header = csv_lines[0]
         entries = csv_lines[1:]
         
-        # Group by type
+        # Group by type (only from valid CSV lines)
+        import re as _re
         grouped = {}
         for line in entries:
             if not line.strip():
                 continue
-            parts = line.split(',', 1)
-            if len(parts) >= 2:
-                entry_type = parts[0]
-                if entry_type not in grouped:
-                    grouped[entry_type] = []
-                grouped[entry_type].append(line)
+            # Only accept proper CSV rows: at least 3 fields and a sane type token
+            parts_full = [p.strip() for p in line.split(',')]
+            if len(parts_full) < 3:
+                continue
+            entry_type = parts_full[0].lower()
+            if not _re.match(r'^[a-z_]+$', entry_type):
+                continue
+            if entry_type not in grouped:
+                grouped[entry_type] = []
+            grouped[entry_type].append(line)
         
         # Rebuild with token-efficient format
         result = []
@@ -4918,8 +4926,27 @@ class GlossaryManager:
                 sanitized.insert(0, header_norm)
             return sanitized
         else:
-            # remove any CSV header lines anywhere
-            return [ln for ln in lines if not ln.strip().lower().startswith("type,raw_name")]
+            # remove any CSV header lines anywhere and duplicate top headers/sections
+            cleaned = []
+            glossary_header_seen = False
+            for i, ln in enumerate(lines):
+                txt = ln.strip()
+                low = txt.lower()
+                # Drop CSV headers
+                if low.startswith("type,raw_name"):
+                    continue
+                # Keep only the first main glossary header
+                if low.startswith("glossary:"):
+                    if glossary_header_seen:
+                        continue
+                    glossary_header_seen = True
+                    cleaned.append(ln)
+                    continue
+                # Remove bogus section like '=== GLOSSARY: ... ==='
+                if low.startswith("=== glossary:"):
+                    continue
+                cleaned.append(ln)
+            return cleaned
     
     def _process_chunks_batch_api(self, chunks_to_process, custom_prompt, language, 
                                   min_frequency, max_names, max_titles, 
@@ -6657,15 +6684,30 @@ Text to analyze:
                 
                 if 'type,raw_name' in line.lower():
                     continue  # Skip header
+                
+                line_stripped = line.strip()
+                # Skip token-efficient lines and section/bullet markers
+                if not line_stripped or line_stripped.startswith('===') or line_stripped.startswith('*') or line_stripped.lower().startswith('glossary:'):
+                    continue
+                
                 parts = [p.strip() for p in line.split(',')]
-                if len(parts) >= 2:
-                    raw_name = parts[1]
-                    if strip_honorifics:
-                        raw_name = self._strip_honorific(raw_name, language)
-                        parts[1] = raw_name
-                    if raw_name not in existing_names:
-                        existing_lines.append(','.join(parts))
-                        existing_names.add(raw_name)
+                # Require at least 3 fields (type, raw_name, translated_name)
+                if len(parts) < 3:
+                    continue
+                
+                entry_type = parts[0].strip().lower()
+                # Only accept reasonable type tokens (letters/underscores only)
+                import re as _re
+                if not _re.match(r'^[a-z_]+$', entry_type):
+                    continue
+                
+                raw_name = parts[1]
+                if strip_honorifics:
+                    raw_name = self._strip_honorific(raw_name, language)
+                    parts[1] = raw_name
+                if raw_name not in existing_names:
+                    existing_lines.append(','.join(parts))
+                    existing_names.add(raw_name)
         
         # Check stop flag before processing new names
         if is_stop_requested():
