@@ -71,7 +71,9 @@ class ChapterExtractionManager:
         """
         try:
             # Path to worker script
-            worker_script = Path(__file__).parent / "chapter_extraction_worker.py"
+            # Resolve worker script path for frozen executables
+            base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+            worker_script = base_dir / "chapter_extraction_worker.py"
             
             # Build command
             cmd = [

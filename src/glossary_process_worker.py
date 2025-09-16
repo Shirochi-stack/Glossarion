@@ -128,6 +128,12 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
     import concurrent.futures
     import multiprocessing
     
+    # Ensure freeze support for Windows frozen executables
+    try:
+        multiprocessing.freeze_support()
+    except Exception:
+        pass
+    
     # Determine worker count
     if extraction_workers is None:
         extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))

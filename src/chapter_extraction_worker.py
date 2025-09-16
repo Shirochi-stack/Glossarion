@@ -149,4 +149,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Ensure freeze support for Windows frozen exe
+    try:
+        import multiprocessing
+        multiprocessing.freeze_support()
+    except Exception:
+        pass
     main()
