@@ -139,6 +139,10 @@ class ChapterExtractionManager:
                     self._log(f"⚠️ Encoding error reading output: {e}")
                     continue
                 
+                # Skip all processing if stop is requested to suppress logs
+                if self.stop_requested:
+                    continue
+                
                 # Parse output based on prefix
                 if line.startswith("[PROGRESS]"):
                     # Progress update
@@ -179,37 +183,47 @@ class ChapterExtractionManager:
                     pass
                 else:
                     # Regular output - only log if not too verbose
-                    if not any(skip in line for skip in ["📑     Searching for", "📑     Found", "📑   ✓", "📑   ✗"]):
+                    if not any(skip in line for skip in ["📁     Searching for", "📁     Found", "📁   ✓", "📁   ✗"]):
                         self._log(line)
             
-            # Get any remaining output
-            remaining_output, remaining_error = self.process.communicate(timeout=1)
-            
-            # Process any remaining output
-            if remaining_output:
-                for line in remaining_output.strip().split('\n'):
-                    if line and not line.startswith("["):
-                        self._log(line)
-            
-            # Check for errors
-            if remaining_error:
-                for line in remaining_error.strip().split('\n'):
-                    if line:
-                        self._log(f"⚠️ {line}")
-            
-            # Check final status
-            if self.process.returncode != 0 and not self.stop_requested:
-                self._log(f"⚠️ Process exited with code {self.process.returncode}")
+            # Get any remaining output - but only process if not stopped
+            if not self.stop_requested:
+                remaining_output, remaining_error = self.process.communicate(timeout=1)
+                
+                # Process any remaining output
+                if remaining_output:
+                    for line in remaining_output.strip().split('\n'):
+                        if line and not line.startswith("["):
+                            self._log(line)
+                
+                # Check for errors
+                if remaining_error:
+                    for line in remaining_error.strip().split('\n'):
+                        if line:
+                            self._log(f"⚠️ {line}")
+                
+                # Check final status
+                if self.process.returncode != 0:
+                    self._log(f"⚠️ Process exited with code {self.process.returncode}")
+            else:
+                # If stopped, just clean up without processing output
+                try:
+                    self.process.communicate(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass  # Ignore timeout when cleaning up
             
         except subprocess.TimeoutExpired:
-            self._log("⚠️ Subprocess communication timeout")
+            if not self.stop_requested:
+                self._log("⚠️ Subprocess communication timeout")
             self._terminate_process()
             
         except Exception as e:
-            self._log(f"❌ Subprocess error: {e}")
+            # Only log errors if not stopping (unless it's a critical error)
+            if not self.stop_requested or "Subprocess error" in str(e):
+                self._log(f"❌ Subprocess error: {e}")
             self.result = {
                 "success": False,
-                "error": str(e)
+                "error": str(e) if not self.stop_requested else "Extraction stopped by user"
             }
             
         finally:
@@ -230,10 +244,16 @@ class ChapterExtractionManager:
             
             # Ensure result is never None
             if self.result is None:
-                self.result = {
-                    "success": False,
-                    "error": "Extraction process ended unexpectedly"
-                }
+                if self.stop_requested:
+                    self.result = {
+                        "success": False,
+                        "error": "Extraction stopped by user"
+                    }
+                else:
+                    self.result = {
+                        "success": False,
+                        "error": "Extraction process ended unexpectedly"
+                    }
             
             # Call completion callback
             if completion_callback:
@@ -244,8 +264,9 @@ class ChapterExtractionManager:
         if not self.is_running:
             return False
         
-        self._log("🛑 Stopping chapter extraction...")
+        # Set stop flag first to suppress subsequent logs
         self.stop_requested = True
+        self._log("🛑 Stopping chapter extraction...")
         
         # Store process reference to avoid race condition
         process_ref = self.process
@@ -281,14 +302,23 @@ class ChapterExtractionManager:
                     process_ref.kill()
                     time.sleep(0.1)  # Brief wait after kill
                     
-                self._log("✅ Process terminated")
+                # Only log termination if not stopping (user already knows they stopped it)
+                if not self.stop_requested:
+                    self._log("✅ Process terminated")
             else:
-                self._log("✅ Process already terminated")
+                # Only log if not stopping
+                if not self.stop_requested:
+                    self._log("✅ Process already terminated")
         except Exception as e:
+            # Always log termination errors as they might indicate a problem
             self._log(f"⚠️ Error terminating process: {e}")
     
     def _log(self, message):
         """Log a message using the callback if available"""
+        # Suppress logs when stop is requested (except for stop/termination messages)
+        if self.stop_requested and not any(keyword in message for keyword in ["🛑", "✅ Process terminated", "❌ Subprocess error"]):
+            return
+            
         if self.log_callback:
             self.log_callback(message)
         else:
