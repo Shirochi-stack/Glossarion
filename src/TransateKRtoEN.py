@@ -658,12 +658,33 @@ class FileUtilities:
         # Check if this is for a text file
         is_text_file = chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
         
+        # Respect toggle: retain source extension and remove 'response_' prefix
+        retain = should_retain_source_extension()
+        
+        # Helper to compute full original extension chain (e.g., '.html.xhtml')
+        def _full_ext_from_original(ch):
+            fn = ch.get('original_filename')
+            if not fn:
+                return '.html'
+            bn = os.path.basename(fn)
+            root, ext = os.path.splitext(bn)
+            if not ext:
+                return '.html'
+            full_ext = ''
+            while ext:
+                full_ext = ext + full_ext
+                root, ext = os.path.splitext(root)
+            return full_ext or '.html'
+        
         if use_header_output and chapter.get('title'):
             safe_title = make_safe_filename(chapter['title'], actual_num or chapter.get('num', 0))
             if safe_title and safe_title != f"chapter_{actual_num or chapter.get('num', 0):03d}":
                 if is_text_file:
-                    return f"response_{safe_title}.txt"
+                    return f"{safe_title}.txt" if retain else f"response_{safe_title}.txt"
                 else:
+                    # If retaining, use full original ext chain; else default .html
+                    if retain:
+                        return f"{safe_title}{_full_ext_from_original(chapter)}"
                     return f"response_{safe_title}.html"
         
         # Check if decimal chapters are enabled
@@ -682,8 +703,10 @@ class FileUtilities:
                 base = base.replace('.', '_')
                 # Use .txt extension for text files
                 if is_text_file:
-                    return f"response_{base}.txt"
+                    return f"{base}.txt" if retain else f"response_{base}.txt"
                 else:
+                    if retain:
+                        return f"{base}{_full_ext_from_original(chapter)}"
                     return f"response_{base}.html"
             
             # Check for the special XXXX_YY decimal pattern
@@ -698,17 +721,20 @@ class FileUtilities:
                     decimal_part = second_part
                     # Create filename reflecting the decimal interpretation
                     if is_text_file:
-                        return f"response_{chapter_num:04d}_{decimal_part}.txt"
+                        return f"{chapter_num:04d}_{decimal_part}.txt" if retain else f"response_{chapter_num:04d}_{decimal_part}.txt"
                     else:
-                        return f"response_{chapter_num:04d}_{decimal_part}.html"
+                        return f"{chapter_num:04d}_{decimal_part}{_full_ext_from_original(chapter)}" if retain else f"response_{chapter_num:04d}_{decimal_part}.html"
         
         # Standard EPUB handling - use original basename
         if 'original_basename' in chapter and chapter['original_basename']:
             base = os.path.splitext(chapter['original_basename'])[0]
             # Use .txt extension for text files
             if is_text_file:
-                return f"response_{base}.txt"
+                return f"{base}.txt" if retain else f"response_{base}.txt"
             else:
+                if retain:
+                    # Preserve the full original extension chain
+                    return f"{base}{_full_ext_from_original(chapter)}"
                 return f"response_{base}.html"
         else:
             # Text file handling (no original basename)
@@ -720,14 +746,14 @@ class FileUtilities:
                 major = int(actual_num)
                 minor = int(round((actual_num - major) * 10))
                 if is_text_file:
-                    return f"response_{major:04d}_{minor}.txt"
+                    return f"{major:04d}_{minor}.txt" if retain else f"response_{major:04d}_{minor}.txt"
                 else:
-                    return f"response_{major:04d}_{minor}.html"
+                    return f"{major:04d}_{minor}.html" if retain else f"response_{major:04d}_{minor}.html"
             else:
                 if is_text_file:
-                    return f"response_{actual_num:04d}.txt"
+                    return f"{actual_num:04d}.txt" if retain else f"response_{actual_num:04d}.txt"
                 else:
-                    return f"response_{actual_num:04d}.html"
+                    return f"{actual_num:04d}.html" if retain else f"response_{actual_num:04d}.html"
 
 # =====================================================
 # UNIFIED PROGRESS MANAGER
@@ -2360,6 +2386,7 @@ class ChapterExtractor:
                     "title": chapter_title or f"Chapter {chapter_num}",
                     "body": content_html,
                     "filename": file_path,
+                    "original_filename": os.path.basename(file_path),
                     "original_basename": os.path.splitext(os.path.basename(file_path))[0],
                     "content_hash": content_hash,
                     "detection_method": detection_method if detection_method else "pending",
@@ -11132,38 +11159,42 @@ def main(log_callback=None, stop_callback=None):
         chapter_files = [f for f in os.listdir(out) if f.startswith('chapter_') and f.endswith('.html')]
 
         if not response_files and chapter_files:
-            print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
-            print("📝 Creating placeholder response files for EPUB compilation...")
-            
-            for chapter_file in chapter_files:
-                response_file = chapter_file.replace('chapter_', 'response_', 1)
-                src = os.path.join(out, chapter_file)
-                dst = os.path.join(out, response_file)
+            if should_retain_source_extension():
+                print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
+                print("ℹ️ Retain-source-extension mode is ON: skipping placeholder creation and using original files for EPUB compilation.")
+            else:
+                print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
+                print("📝 Creating placeholder response files for EPUB compilation...")
                 
-                try:
-                    with open(src, 'r', encoding='utf-8') as f:
-                        content = f.read()
+                for chapter_file in chapter_files:
+                    response_file = chapter_file.replace('chapter_', 'response_', 1)
+                    src = os.path.join(out, chapter_file)
+                    dst = os.path.join(out, response_file)
                     
-                    soup = BeautifulSoup(content, 'html.parser')
-                    notice = soup.new_tag('p')
-                    notice.string = "[Note: This chapter could not be translated - showing original content]"
-                    notice['style'] = "color: red; font-style: italic;"
-                    
-                    if soup.body:
-                        soup.body.insert(0, notice)
-                    
-                    with open(dst, 'w', encoding='utf-8') as f:
-                        f.write(str(soup))
-                        
-                except Exception as e:
-                    print(f"⚠️ Error processing {chapter_file}: {e}")
                     try:
-                        shutil.copy2(src, dst)
-                    except:
-                        pass
-            
-            print(f"✅ Created {len(chapter_files)} placeholder response files")
-            print("⚠️ Note: The EPUB will contain untranslated content")
+                        with open(src, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        
+                        soup = BeautifulSoup(content, 'html.parser')
+                        notice = soup.new_tag('p')
+                        notice.string = "[Note: This chapter could not be translated - showing original content]"
+                        notice['style'] = "color: red; font-style: italic;"
+                        
+                        if soup.body:
+                            soup.body.insert(0, notice)
+                        
+                        with open(dst, 'w', encoding='utf-8') as f:
+                            f.write(str(soup))
+                            
+                    except Exception as e:
+                        print(f"⚠️ Error processing {chapter_file}: {e}")
+                        try:
+                            shutil.copy2(src, dst)
+                        except:
+                            pass
+                
+                print(f"✅ Created {len(chapter_files)} placeholder response files")
+                print("⚠️ Note: The EPUB will contain untranslated content")
         
         print("📘 Building final EPUB…")
         try:

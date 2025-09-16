@@ -3148,7 +3148,7 @@ class AsyncProcessingDialog:
             import ebooklib
             from ebooklib import epub
             from bs4 import BeautifulSoup
-            from TransateKRtoEN import get_content_hash
+            from TransateKRtoEN import get_content_hash, should_retain_source_extension
             
             # Extract metadata
             metadata = {}
@@ -3197,6 +3197,7 @@ class AsyncProcessingDialog:
                         
                         chapter_map[chapter_num] = {
                             'original_basename': original_basename,
+                            'original_extension': os.path.splitext(original_name)[1],
                             'content_hash': content_hash,
                             'text_length': len(text),
                             'has_images': bool(soup.find_all('img'))
@@ -3206,6 +3207,7 @@ class AsyncProcessingDialog:
                             'num': chapter_num,
                             'title': element_text if 'element_text' in locals() else f"Chapter {chapter_num}",
                             'original_filename': original_name,
+                            'original_basename': original_basename,
                             'has_images': bool(soup.find_all('img')),
                             'text_length': len(text),
                             'content_hash': content_hash
@@ -3243,7 +3245,24 @@ class AsyncProcessingDialog:
                 content_hash = chapter_info.get('content_hash', hashlib.md5(f"chapter_{chapter_num}".encode()).hexdigest())
                 
                 # Save file with correct name (only once!)
-                filename = f"response_{original_basename}.html"
+                retain_ext = should_retain_source_extension()
+                # Preserve compound extensions like .htm.xhtml when retaining
+                orig_name = chapter_info.get('original_filename') or chapter_info.get('original_basename')
+                if retain_ext and orig_name:
+                    # Compute full extension suffix beyond the first dot from the left of the basename
+                    full = os.path.basename(orig_name)
+                    bn, ext1 = os.path.splitext(full)
+                    full_ext = ''
+                    while ext1:
+                        full_ext = ext1 + full_ext
+                        bn, ext1 = os.path.splitext(bn)
+                    # If no extension found, default to .html
+                    suffix = full_ext if full_ext else '.html'
+                    filename = f"{original_basename}{suffix}"
+                elif retain_ext:
+                    filename = f"{original_basename}.html"
+                else:
+                    filename = f"response_{original_basename}.html"
                 file_path = os.path.join(output_dir, filename)
                 
                 with open(file_path, 'w', encoding='utf-8') as f:

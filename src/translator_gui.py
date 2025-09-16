@@ -1274,6 +1274,12 @@ class TranslatorGUI:
         if 'force_ncx_only' not in self.config:
             self.config['force_ncx_only'] = True
             
+        # Initialize retain_source_extension env var on startup
+        try:
+            os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.config.get('retain_source_extension', False) else '0'
+        except Exception:
+            pass
+        
         if self.config.get('force_safe_ratios', False):
             self.wm._force_safe_ratios = True
             # Update button after GUI is created
@@ -3307,13 +3313,60 @@ Recent translations to summarize:
                 if output_file and output_file.strip():
                     chapter_dict['filename'] = os.path.join(output_dir, output_file)
                 else:
-                    # If no output file, try to construct from original basename
+                    # If no output file, try to discover a file based on original basename or chapter number
+                    retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                    allowed_exts = ('.html', '.xhtml', '.htm')
+                    discovered = None
+                    
                     if chapter_dict['original_basename']:
-                        chapter_dict['filename'] = os.path.join(output_dir, f"response_{chapter_dict['original_basename']}.html")
+                        base = chapter_dict['original_basename']
+                        # Scan output_dir for either response_{base}.* or {base}.*
+                        try:
+                            for f in os.listdir(output_dir):
+                                f_low = f.lower()
+                                if f_low.endswith(allowed_exts):
+                                    name_no_ext = os.path.splitext(f)[0]
+                                    if name_no_ext.startswith('response_'):
+                                        candidate_base = name_no_ext[9:]
+                                    else:
+                                        candidate_base = name_no_ext
+                                    if candidate_base == base:
+                                        discovered = f
+                                        break
+                        except Exception:
+                            pass
+                        
+                        if not discovered:
+                            # Fall back to expected naming per mode
+                            if retain:
+                                # Default to original basename with .html
+                                discovered = f"{base}.html"
+                            else:
+                                discovered = f"response_{base}.html"
                     else:
-                        # Last resort: use chapter number
+                        # Last resort: use chapter number pattern
                         chapter_num = chapter_info.get('actual_num', chapter_info.get('chapter_num', 0))
-                        chapter_dict['filename'] = os.path.join(output_dir, f"response_{chapter_num:04d}.html")
+                        num_str = f"{int(chapter_num):04d}" if isinstance(chapter_num, (int, float)) else str(chapter_num)
+                        try:
+                            for f in os.listdir(output_dir):
+                                f_low = f.lower()
+                                if f_low.endswith(allowed_exts):
+                                    name_no_ext = os.path.splitext(f)[0]
+                                    # Remove optional response_ prefix
+                                    core = name_no_ext[9:] if name_no_ext.startswith('response_') else name_no_ext
+                                    if core.startswith(num_str):
+                                        discovered = f
+                                        break
+                        except Exception:
+                            pass
+                        
+                        if not discovered:
+                            if retain:
+                                discovered = f"{num_str}.html"
+                            else:
+                                discovered = f"response_{num_str}.html"
+                    
+                    chapter_dict['filename'] = os.path.join(output_dir, discovered)
                 
                 chapters.append(chapter_dict)
             
@@ -3339,7 +3392,8 @@ Recent translations to summarize:
                 output_file = chapter_info.get("output_file", "")
                 stored_chapter_num = chapter_info.get("chapter_num", 0)
                 if output_file:
-                    match = re.search(r'response_(\d+)', output_file)
+                    # Allow filenames with or without 'response_' prefix
+                    match = re.search(r'(?:^response_)?(\d+)', output_file)
                     if match:
                         file_num = int(match.group(1))
                         if file_num == stored_chapter_num - 1:
@@ -3563,20 +3617,28 @@ Recent translations to summarize:
             if base_name.endswith('.htm'):
                 stripped_base_name = base_name[:-4]  # Remove .htm suffix
 
-            # Look for response file with exact match (both original and stripped versions)
+            # Look for translated file matching base name, with or without 'response_' and with allowed extensions
+            allowed_exts = ('.html', '.xhtml', '.htm')
             for file in os.listdir(output_dir):
-                if file.startswith('response_'):
-                    match = re.match(r'response_(.+)\.html?$', file)
-                    if match:
-                        file_base = match.group(1)
-                        # Try both original and stripped base names
-                        if file_base == base_name or file_base == stripped_base_name:
-                            expected_response = file
-                            break
+                f_low = file.lower()
+                if f_low.endswith(allowed_exts):
+                    name_no_ext = os.path.splitext(file)[0]
+                    core = name_no_ext[9:] if name_no_ext.startswith('response_') else name_no_ext
+                    # Accept matches for:
+                    # - OPF filename without last extension (base_name)
+                    # - Stripped base for .htm cases
+                    # - OPF filename as-is (e.g., 'chapter_02.htm') when the output file is 'chapter_02.htm.xhtml'
+                    if core == base_name or core == stripped_base_name or core == filename:
+                        expected_response = file
+                        break
 
-            # Fallback - use stripped version for filename
+            # Fallback - per mode, prefer OPF filename when retain mode is on
             if not expected_response:
-                expected_response = f"response_{stripped_base_name}.html"
+                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                if retain:
+                    expected_response = filename
+                else:
+                    expected_response = f"response_{stripped_base_name}.html"
             
             response_path = os.path.join(output_dir, expected_response)
             
@@ -3630,10 +3692,7 @@ Recent translations to summarize:
                 if not spine_ch['output_file']:
                     spine_ch['output_file'] = expected_response
                 
-                # FIX: Ensure output_file uses .html extension
-                if spine_ch['output_file'].endswith(('.xhtml', '.htm')):
-                    base_name = os.path.splitext(spine_ch['output_file'])[0]
-                    spine_ch['output_file'] = f"{base_name}.html"
+                # Keep original extension (html/xhtml/htm) as written on disk
                 
                 # Verify file actually exists for completed status
                 if spine_ch['status'] == 'completed':
@@ -4341,9 +4400,10 @@ Recent translations to summarize:
         file_info = []
         
         # Add HTML files
-        for file in sorted(os.listdir(output_dir)):
-            if file.endswith('.html'):
-                match = re.match(r'response_(\d+)_(.+)\.html', file)
+        for file in os.listdir(output_dir):
+            if file.startswith('response_'):
+                # Allow response_{index}_{name}.html and compound extensions like .html.xhtml
+                match = re.match(r'^response_(\d+)_([^\.]*)\.(?:html?|xhtml|htm)(?:\.xhtml)?$', file, re.IGNORECASE)
                 if match:
                     index = match.group(1)
                     base_name = match.group(2)
@@ -4654,9 +4714,9 @@ Recent translations to summarize:
             for idx, item in items_to_move:
                 try:
                     # Extract the original image name from the HTML filename
-                    # Expected format: response_001_imagename.html
+                    # Expected format: response_001_imagename.html (also accept compound extensions)
                     html_file = item['file']
-                    match = re.match(r'response_\d+_(.+)\.html', html_file)
+                    match = re.match(r'^response_\d+_([^\.]*)\.(?:html?|xhtml|htm)(?:\.xhtml)?$', html_file, re.IGNORECASE)
                     
                     if match:
                         base_name = match.group(1)
