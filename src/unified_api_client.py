@@ -5043,19 +5043,22 @@ class UnifiedClient:
                 # Reserve this slot
                 self.__class__._last_api_call_start = next_available
                 
-                print(f"⏳ [{thread_name}] Staggering API call by {sleep_time:.1f}s")
+                # Check stop flag before logging stagger message
+                if not self._is_stop_requested():
+                    print(f"⏳ [{thread_name}] Staggering API call by {sleep_time:.1f}s")
                 
                 # Sleep outside lock
                 time.sleep(sleep_time)
                 
                 # Immediately after stagger completes, indicate what is being sent
-                try:
-                    tls = self._get_thread_local_client()
-                    label = getattr(tls, 'current_request_label', None)
-                    if label:
-                        print(f"📤 [{thread_name}] Sending {label} to API...")
-                except Exception:
-                    pass
+                if not self._is_stop_requested():
+                    try:
+                        tls = self._get_thread_local_client()
+                        label = getattr(tls, 'current_request_label', None)
+                        if label:
+                            print(f"📤 [{thread_name}] Sending {label} to API...")
+                    except Exception:
+                        pass
             else:
                 # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
@@ -5539,6 +5542,18 @@ class UnifiedClient:
         Check if this is a Gemini request (native or via OpenAI endpoint)
         """
         return self._get_actual_provider() == 'gemini'
+    
+    def _is_stop_requested(self) -> bool:
+        """
+        Check if stop was requested by importing the global function
+        """
+        try:
+            # Import the stop check function from the main translation module
+            from TransateKRtoEN import is_stop_requested
+            return is_stop_requested()
+        except ImportError:
+            # Fallback if import fails
+            return False
     
     def _get_anti_duplicate_params(self, temperature):
         """Get user-configured anti-duplicate parameters from GUI settings"""
@@ -6542,9 +6557,13 @@ class UnifiedClient:
             with self._file_write_lock:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
-                print(f"Saved Gemini safety status to: {config_path}")
+                # Only log if not stopping
+                if not self._is_stop_requested():
+                    print(f"Saved Gemini safety status to: {config_path}")
         except Exception as e:
-            print(f"Failed to save Gemini safety config: {e}")
+            # Only log errors if not stopping
+            if not self._is_stop_requested():
+                print(f"Failed to save Gemini safety config: {e}")
 
     def _send_gemini(self, messages, temperature, max_tokens, response_name, image_base64=None) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
@@ -6626,22 +6645,23 @@ class UnifiedClient:
                 "CIVIC_INTEGRITY": "BLOCK_NONE"
             }
         
-        # Log to console with thinking status
-        endpoint_info = f" (via OpenAI endpoint: {gemini_endpoint})" if use_openai_endpoint else " (native API)"
-        print(f"🔒 Gemini Safety Status: {safety_status}{endpoint_info}")
-        
-        thinking_status = ""
-        if supports_thinking:
-            if thinking_budget == 0:
-                thinking_status = " (thinking disabled)"
-            elif thinking_budget == -1:
-                thinking_status = " (dynamic thinking)"
-            elif thinking_budget > 0:
-                thinking_status = f" (thinking budget: {thinking_budget})"
-        else:
-            thinking_status = " (thinking not supported)"
-        
-        print(f"🧠 Thinking Status: {thinking_status}")
+        # Log to console with thinking status - only if not stopping
+        if not self._is_stop_requested():
+            endpoint_info = f" (via OpenAI endpoint: {gemini_endpoint})" if use_openai_endpoint else " (native API)"
+            print(f"🔒 Gemini Safety Status: {safety_status}{endpoint_info}")
+            
+            thinking_status = ""
+            if supports_thinking:
+                if thinking_budget == 0:
+                    thinking_status = " (thinking disabled)"
+                elif thinking_budget == -1:
+                    thinking_status = " (dynamic thinking)"
+                elif thinking_budget > 0:
+                    thinking_status = f" (thinking budget: {thinking_budget})"
+            else:
+                thinking_status = " (thinking not supported)"
+            
+            print(f"🧠 Thinking Status: {thinking_status}")
         
         # Save configuration to file
         request_type = "IMAGE_REQUEST" if has_images else "TEXT_REQUEST"
@@ -6679,8 +6699,9 @@ class UnifiedClient:
                     **anti_dupe_params  # Add user's custom parameters
                 }
                 
-                # Log the request
-                print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}")
+                # Log the request - only if not stopping
+                if not self._is_stop_requested():
+                    print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}")
 
                 # ========== MAKE THE API CALL - DIFFERENT FOR EACH ENDPOINT ==========
                 if use_openai_endpoint and gemini_endpoint:
@@ -6738,8 +6759,8 @@ class UnifiedClient:
                                     if thinking_tokens > 0:
                                         break
                         
-                        # Display thinking tokens if found or if thinking was requested
-                        if supports_thinking:
+                        # Display thinking tokens if found or if thinking was requested - only if not stopping
+                        if supports_thinking and not self._is_stop_requested():
                             if thinking_tokens > 0:
                                 print(f"   💭 Thinking tokens used: {thinking_tokens}")
                                 thinking_tokens_displayed = True
@@ -6874,8 +6895,8 @@ class UnifiedClient:
                             }
                         )
                     
-                    # Log thinking token usage if available
-                    if hasattr(response, 'usage_metadata'):
+                    # Log thinking token usage if available - only if not stopping
+                    if hasattr(response, 'usage_metadata') and not self._is_stop_requested():
                         usage = response.usage_metadata
                         if supports_thinking and hasattr(usage, 'thoughts_token_count'):
                             if usage.thoughts_token_count and usage.thoughts_token_count > 0:
