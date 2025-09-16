@@ -8535,6 +8535,19 @@ Provide translations in the same numbered format."""
 
                 enhanced_filtering = 'smart'
                     
+        # Ensure multi-key env toggles are set early for the main translation path as well
+        try:
+            if self.config.get('use_multi_api_keys', False):
+                os.environ['USE_MULTI_KEYS'] = '1'
+            else:
+                os.environ['USE_MULTI_KEYS'] = '0'
+            if self.config.get('use_fallback_keys', False):
+                os.environ['USE_FALLBACK_KEYS'] = '1'
+            else:
+                os.environ['USE_FALLBACK_KEYS'] = '0'
+        except Exception:
+            pass
+
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var.get(),
@@ -9593,6 +9606,21 @@ Important rules:
                 if self.custom_glossary_fields:
                     env_updates['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
                 
+                # Propagate multi-key toggles so retry logic can engage
+                # Both must be enabled for main-then-fallback retry
+                try:
+                    if self.config.get('use_multi_api_keys', False):
+                        os.environ['USE_MULTI_KEYS'] = '1'
+                    else:
+                        os.environ['USE_MULTI_KEYS'] = '0'
+                    if self.config.get('use_fallback_keys', False):
+                        os.environ['USE_FALLBACK_KEYS'] = '1'
+                    else:
+                        os.environ['USE_FALLBACK_KEYS'] = '0'
+                except Exception:
+                    # Keep going even if we can't set env for some reason
+                    pass
+
                 os.environ.update(env_updates)
                 
                 chap_range = self.chapter_range_entry.get().strip()

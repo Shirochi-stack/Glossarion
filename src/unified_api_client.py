@@ -3220,6 +3220,14 @@ class UnifiedClient:
                 
                 self._apply_api_delay()
                 
+                # If the provider signaled a content filter, elevate to prohibited_content to trigger retries
+                if finish_reason == 'content_filter':
+                    raise UnifiedClientError(
+                        "Content blocked by provider",
+                        error_type="prohibited_content",
+                        http_status=400
+                    )
+                
                 # Return the response with accurate finish_reason
                 # This is CRITICAL for retry mechanisms to work
                 return extracted_content, finish_reason
