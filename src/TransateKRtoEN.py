@@ -3757,11 +3757,6 @@ class TranslationProcessor:
         if not self.config.USE_ROLLING_SUMMARY:
             return None
         
-        # Basic debug to confirm entry
-        try:
-            self._log(f"SUMMARY: Enter (chapter={chapter_num}) | mode={self.config.ROLLING_SUMMARY_MODE}")
-        except Exception:
-            print(f"SUMMARY: Enter (chapter={chapter_num}) | mode={self.config.ROLLING_SUMMARY_MODE}")
             
         current_history = history_manager.load_history()
         messages_to_include = self.config.ROLLING_SUMMARY_EXCHANGES * 2
@@ -3777,12 +3772,8 @@ class TranslationProcessor:
                     if h.get("role") == "assistant":
                         assistant_responses.append(h["content"])
         
-        # If still empty, skip with a log
+        # If still empty, skip quietly
         if not assistant_responses:
-            try:
-                self._log("SUMMARY: Skip — no source text or history to summarize")
-            except Exception:
-                print("SUMMARY: Skip — no source text or history to summarize")
             return None
         
         # Build a dedicated summary system prompt (do NOT reuse main translation system prompt)
@@ -3811,11 +3802,6 @@ class TranslationProcessor:
             {"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt}
         ]
         
-        # Pre-call debug
-        try:
-            self._log(f"SUMMARY: Sending (context=summary) | system_len={len(system_prompt)} | user_len={len(user_prompt)}")
-        except Exception:
-            print(f"SUMMARY: Sending (context=summary) | system_len={len(system_prompt)} | user_len={len(user_prompt)}")
         
         try:
             summary_resp, _ = send_with_interrupt(
@@ -8574,9 +8560,6 @@ def build_system_prompt(user_prompt, glossary_path=None):
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
     actual_glossary_path = glossary_path
     
-    print(f"[DEBUG] build_system_prompt called with glossary_path: {glossary_path}")
-    print(f"[DEBUG] APPEND_GLOSSARY: {os.getenv('APPEND_GLOSSARY', '1')}")
-    print(f"[DEBUG] append_glossary boolean: {append_glossary}")
     
     system = user_prompt if user_prompt else ""
     
@@ -8621,7 +8604,7 @@ def build_system_prompt(user_prompt, glossary_path=None):
         elif not os.path.exists(actual_glossary_path):
             print(f"[DEBUG] ❌ Glossary file does not exist: {actual_glossary_path}")
     
-    print(f"[DEBUG] 🎯 FINAL SYSTEM PROMPT LENGTH: {len(system)} characters")
+    print(f"🎯 Final system prompt length: {len(system)} characters")
     
     return system
 
@@ -10898,11 +10881,6 @@ def main(log_callback=None, stop_callback=None):
                         )
                     }]
                 msgs = current_base + summary_msgs_list + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                # Debug: show if a summary message is being sent alongside the system prompt
-                try:
-                    print(f"SUMMARY: Next system prompt len={len(current_system_content)} | summary_msg={'yes' if summary_msgs_list else 'no'}")
-                except Exception:
-                    pass
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
@@ -11102,10 +11080,6 @@ def main(log_callback=None, stop_callback=None):
             
             # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
             if config.USE_ROLLING_SUMMARY:
-                try:
-                    print(f"SUMMARY: Attempting summary for Chapter {actual_num} | mode={config.ROLLING_SUMMARY_MODE} | out={out}")
-                except Exception:
-                    pass
                 # Use the original system prompt to build the summary system prompt
                 base_system_content = original_system_prompt
                 summary_text = translation_processor.generate_rolling_summary(
@@ -11113,11 +11087,6 @@ def main(log_callback=None, stop_callback=None):
                 )
                 if summary_text:
                     last_summary_block_text = summary_text
-                    # Log that it will be included on the next chapter
-                    try:
-                        print(f"📎 Prepared rolling summary for next chapter (len={len(summary_text)})")
-                    except Exception:
-                        pass
             
             chapters_completed += 1
 
