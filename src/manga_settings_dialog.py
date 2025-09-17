@@ -2482,11 +2482,11 @@ class MangaSettingsDialog:
         ttk.Combobox(
             precision_row,
             textvariable=self.torch_precision_var,
-            values=['auto', 'fp16', 'fp32'],
+            values=['fp16'],
             state='readonly',
             width=10
         ).pack(side='left', padx=10)
-        tk.Label(precision_row, text="(auto uses FP16 on GPU when quantization is ON)", font=('Arial', 9), fg='gray').pack(side='left')
+        tk.Label(precision_row, text="(fp16 only, since fp32 is currently bugged)", font=('Arial', 9), fg='gray').pack(side='left')
         
         # Aggressive memory cleanup
         cleanup_frame = tk.LabelFrame(content_frame, text="Memory & Cleanup", padx=15, pady=10)
