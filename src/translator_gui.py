@@ -8565,7 +8565,7 @@ Provide translations in the same numbered format."""
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
             'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
-            'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
+            'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var.get()) else ("1" if self.config.get('use_rolling_summary') else "0"),
             'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
             'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var.get(),
             'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),

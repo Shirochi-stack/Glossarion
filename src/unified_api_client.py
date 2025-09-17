@@ -4399,7 +4399,13 @@ class UnifiedClient:
             response_name = f"glossary_response_{self.conversation_message_count}.txt"
         elif context == 'translation':
             # Extract chapter info if available - CRITICAL for duplicate detection
-            chapter_match = re.search(r'Chapter (\d+)', str(messages))
+            content_str = str(messages)
+            # Remove any rolling summary blocks to avoid picking previous chapter numbers
+            try:
+                content_str = re.sub(r"\[Rolling Summary of Chapter \d+\][\s\S]*?\[End of Rolling Summary\]", "", content_str, flags=re.IGNORECASE)
+            except Exception:
+                pass
+            chapter_match = re.search(r'Chapter (\d+)', content_str)
             if chapter_match:
                 chapter_num = chapter_match.group(1)
                 # Use standard naming that duplicate detection expects
@@ -6709,19 +6715,26 @@ class UnifiedClient:
     def _get_thread_directory(self):
         """Get thread-specific directory for payload storage"""
         thread_name = threading.current_thread().name
-        if 'Translation' in thread_name:
-            context = 'translation'
-        elif 'Glossary' in thread_name:
-            context = 'glossary'
+        # Prefer the client's explicit context if available
+        explicit = getattr(self, 'context', None)
+        if explicit in ('translation', 'glossary', 'summary'):
+            context = explicit
         else:
-            context = 'general'
+            if 'Translation' in thread_name:
+                context = 'translation'
+            elif 'Glossary' in thread_name:
+                context = 'glossary'
+            elif 'Summary' in thread_name:
+                context = 'summary'
+            else:
+                context = 'general'
         
         thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
         os.makedirs(thread_dir, exist_ok=True)
         return thread_dir
 
     def _save_gemini_safety_config(self, config_data: dict, response_name: str = None):
-        """Save Gemini safety configuration with proper thread organization"""
+        """Save Gemini safety configuration next to the current request payloads"""
         if not os.getenv("SAVE_PAYLOAD", "1") == "1":
             return
         
@@ -6732,21 +6745,10 @@ class UnifiedClient:
         # Sanitize response_name to ensure it's filesystem-safe
         # Remove or replace invalid characters
         import re
-        response_name = re.sub(r'[<>:"/\\|?*]', '_', str(response_name))
+        response_name = re.sub(r'[<>:\"/\\|?*]', '_', str(response_name))
         
-        # Determine context from thread name
-        thread_name = threading.current_thread().name
-        thread_id = threading.current_thread().ident
-        
-        if 'Translation' in thread_name:
-            context = 'translation'
-        elif 'Glossary' in thread_name:
-            context = 'glossary'
-        else:
-            context = 'general'
-        
-        # Use STABLE thread directory (same as other save methods)
-        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{thread_id}")
+        # Reuse the same payload directory as other saves
+        thread_dir = self._get_thread_directory()
         os.makedirs(thread_dir, exist_ok=True)
         
         # Create unique filename with timestamp

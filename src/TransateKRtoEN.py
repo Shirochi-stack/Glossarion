@@ -3749,79 +3749,109 @@ class TranslationProcessor:
         
         return score
     
-    def generate_rolling_summary(self, history_manager, idx, chunk_idx):
-        """Generate rolling summary for context continuity"""
-        if not self.config.USE_ROLLING_SUMMARY or not self.config.CONTEXTUAL:
+    def generate_rolling_summary(self, history_manager, chapter_num, base_system_content=None, source_text=None):
+        """Generate rolling summary after a chapter for context continuity.
+        Uses a dedicated summary system prompt (with glossary) distinct from translation.
+        Writes the summary to rolling_summary.txt and returns the summary string.
+        """
+        if not self.config.USE_ROLLING_SUMMARY:
             return None
+        
+        # Basic debug to confirm entry
+        try:
+            self._log(f"SUMMARY: Enter (chapter={chapter_num}) | mode={self.config.ROLLING_SUMMARY_MODE}")
+        except Exception:
+            print(f"SUMMARY: Enter (chapter={chapter_num}) | mode={self.config.ROLLING_SUMMARY_MODE}")
             
         current_history = history_manager.load_history()
-        
         messages_to_include = self.config.ROLLING_SUMMARY_EXCHANGES * 2
         
-        if len(current_history) >= 4:
-            assistant_responses = []
-            recent_messages = current_history[-messages_to_include:] if messages_to_include > 0 else current_history
-            
-            for h in recent_messages:
-                if h.get("role") == "assistant":
-                    assistant_responses.append(h["content"])
-            
-            if assistant_responses:
-                system_prompt = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", 
-                                        "Create a concise summary for context continuity.")
-                user_prompt_template = os.getenv("ROLLING_SUMMARY_USER_PROMPT",
-                                                "Summarize the key events, characters, tone, and important details from these translations. "
-                                                "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
-                                                "{translations}")
-                
-                translations_text = "\n---\n".join(assistant_responses)
-                user_prompt = user_prompt_template.replace("{translations}", translations_text)
-                
-                summary_msgs = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-                
-                try:
-                    summary_resp, _ = send_with_interrupt(
-                        summary_msgs, self.client, self.config.TEMP, 
-                        min(2000, self.config.MAX_OUTPUT_TOKENS), 
-                        self.check_stop
-                    )
-                    
-                    summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
-                    
-                    if self.config.ROLLING_SUMMARY_MODE == "append":
-                        mode = "a"
-                        with open(summary_file, mode, encoding="utf-8") as sf:
-                            sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
-                            sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                            sf.write(summary_resp.strip())
-                    else:
-                        mode = "w"
-                        with open(summary_file, mode, encoding="utf-8") as sf:
-                            sf.write(f"=== Latest Summary (Chapter {idx+1}, chunk {chunk_idx}) ===\n")
-                            sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                            sf.write(summary_resp.strip())
-                    
-                    print(f"📝 Generated rolling summary ({self.config.ROLLING_SUMMARY_MODE} mode, {self.config.ROLLING_SUMMARY_EXCHANGES} exchanges)")
-                    
-                    if self.config.ROLLING_SUMMARY_MODE == "append" and os.path.exists(summary_file):
-                        try:
-                            with open(summary_file, 'r', encoding='utf-8') as sf:
-                                content = sf.read()
-                            summary_count = content.count("=== Summary")
-                            print(f"   📚 Total summaries in memory: {summary_count}")
-                        except:
-                            pass
-                    
-                    return summary_resp.strip()
-                    
-                except Exception as e:
-                    print(f"⚠️ Failed to generate rolling summary: {e}")
-                    return None
+        # Prefer directly provided source text (e.g., just-translated chapter) when available
+        assistant_responses = []
+        if source_text and isinstance(source_text, str) and source_text.strip():
+            assistant_responses = [source_text]
+        else:
+            if len(current_history) >= 2:
+                recent_messages = current_history[-messages_to_include:] if messages_to_include > 0 else current_history
+                for h in recent_messages:
+                    if h.get("role") == "assistant":
+                        assistant_responses.append(h["content"])
         
-        return None
+        # If still empty, skip with a log
+        if not assistant_responses:
+            try:
+                self._log("SUMMARY: Skip — no source text or history to summarize")
+            except Exception:
+                print("SUMMARY: Skip — no source text or history to summarize")
+            return None
+        
+        # Build a dedicated summary system prompt (do NOT reuse main translation system prompt)
+        # Append glossary to keep terminology consistent
+        summary_system_template = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", "You create concise summaries for continuity.").strip()
+        try:
+            glossary_path = find_glossary_file(self.out_dir)
+        except Exception:
+            glossary_path = None
+        system_prompt = build_system_prompt(summary_system_template, glossary_path)
+        # Add explicit instruction for clarity
+        system_prompt += "\n\n[Instruction: Generate a concise rolling summary of the previous chapter. Use glossary terms consistently. Do not include warnings or explanations.]"
+        
+        user_prompt_template = os.getenv(
+            "ROLLING_SUMMARY_USER_PROMPT",
+            "Summarize the key events, characters, tone, and important details from these translations. "
+            "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
+            "{translations}"
+        )
+        
+        translations_text = "\n---\n".join(assistant_responses)
+        user_prompt = user_prompt_template.replace("{translations}", translations_text)
+        
+        summary_msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt}
+        ]
+        
+        # Pre-call debug
+        try:
+            self._log(f"SUMMARY: Sending (context=summary) | system_len={len(system_prompt)} | user_len={len(user_prompt)}")
+        except Exception:
+            print(f"SUMMARY: Sending (context=summary) | system_len={len(system_prompt)} | user_len={len(user_prompt)}")
+        
+        try:
+            summary_resp, _ = send_with_interrupt(
+                summary_msgs, self.client, self.config.TEMP, 
+                min(2000, self.config.MAX_OUTPUT_TOKENS), 
+                self.check_stop,
+                context='summary'
+            )
+            
+            # Save the summary to the output folder
+            summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
+            header = f"=== Rolling Summary of Chapter {chapter_num} ===\n(This is a summary of the previous chapter for context)\n"
+            
+            mode = "a" if self.config.ROLLING_SUMMARY_MODE == "append" else "w"
+            with open(summary_file, mode, encoding="utf-8") as sf:
+                if mode == "a":
+                    sf.write("\n\n")
+                sf.write(header)
+                sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
+                sf.write(summary_resp.strip())
+            
+            # Log to GUI if available, otherwise console
+            try:
+                self._log(f"📝 Generated rolling summary for Chapter {chapter_num} ({'append' if mode=='a' else 'replace'} mode)")
+                self._log(f"   ➜ Saved to: {summary_file} ({len(summary_resp.strip())} chars)")
+            except Exception:
+                print(f"📝 Generated rolling summary for Chapter {chapter_num} ({'append' if mode=='a' else 'replace'} mode)")
+                print(f"   ➜ Saved to: {summary_file} ({len(summary_resp.strip())} chars)")
+            return summary_resp.strip()
+            
+        except Exception as e:
+            try:
+                self._log(f"⚠️ Failed to generate rolling summary: {e}")
+            except Exception:
+                print(f"⚠️ Failed to generate rolling summary: {e}")
+            return None
     
     def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks):
         """Handle translation with retry logic"""
@@ -8412,8 +8442,10 @@ def cleanup_previous_extraction(output_dir):
 # =====================================================
 # API AND TRANSLATION UTILITIES
 # =====================================================
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, request_id=None):
-    """Send API request with interrupt capability and optional timeout retry"""
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, request_id=None, context=None):
+    """Send API request with interrupt capability and optional timeout retry.
+    Optional context parameter is passed through to the client to improve payload labeling.
+    """
     # Import UnifiedClientError at function level to avoid scoping issues
     from unified_api_client import UnifiedClientError
     
@@ -8435,6 +8467,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 'temperature': temperature,
                 'max_tokens': max_tokens
             }
+            # Add context if supported
+            sig = inspect.signature(client.send)
+            if 'context' in sig.parameters and context is not None:
+                send_params['context'] = context
             
             # Add request_id if the client supports it
             sig = inspect.signature(client.send)
@@ -9887,6 +9923,9 @@ def main(log_callback=None, stop_callback=None):
     glossary_path = find_glossary_file(out)
     system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path)
     base_msg = [{"role": "system", "content": system}]
+    # Preserve the original system prompt to avoid in-place mutations
+    original_system_prompt = system
+    last_summary_block_text = None  # Will hold the last rolling summary text for the NEXT chapter only
     
     image_translator = None
 
@@ -10834,17 +10873,36 @@ def main(log_callback=None, stop_callback=None):
                     trimmed = []
                     chunk_context = []
 
-                if base_msg:
-                    if not config.USE_ROLLING_SUMMARY:
-                        filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
-                        msgs = filtered_base + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                    else:
-                        msgs = base_msg + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                else:
-                    if trimmed or chunk_context:
-                        msgs = chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                    else:
-                        msgs = [{"role": "user", "content": user_prompt}]
+                # Build the current system prompt from the original each time, and append the last summary block if present
+                current_system_content = original_system_prompt
+                if config.USE_ROLLING_SUMMARY and last_summary_block_text:
+                    current_system_content = (
+                        current_system_content
+                        + "\n\n[Rolling Summary of Previous Chapter]\n"
+                        + "(For AI: Use as context only; do not include in output)\n"
+                        + last_summary_block_text
+                        + "\n[End of Rolling Summary]"
+                    )
+                current_base = [{"role": "system", "content": current_system_content}]
+                # If we have a prepared rolling summary from previous chapter, include it as a separate message (do NOT mutate system prompt)
+                summary_msgs_list = []
+                if config.USE_ROLLING_SUMMARY and last_summary_block_text:
+                    summary_msgs_list = [{
+                        "role": os.getenv("SUMMARY_ROLE", "user"),
+                        "content": (
+                            "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                            "[MEMORY] Previous context summary:\n\n"
+                            f"{last_summary_block_text}\n\n"
+                            "[END MEMORY]\n"
+                            "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                        )
+                    }]
+                msgs = current_base + summary_msgs_list + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
+                # Debug: show if a summary message is being sent alongside the system prompt
+                try:
+                    print(f"SUMMARY: Next system prompt len={len(current_system_content)} | summary_msg={'yes' if summary_msgs_list else 'no'}")
+                except Exception:
+                    pass
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
@@ -10901,33 +10959,6 @@ def main(log_callback=None, stop_callback=None):
                     config.TRANSLATION_HISTORY_ROLLING
                 )
 
-                if will_reset and config.USE_ROLLING_SUMMARY and config.CONTEXTUAL:
-                    if check_stop():
-                        print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
-                        return
-                    
-                    summary_resp = translation_processor.generate_rolling_summary(
-                        history_manager, idx, chunk_idx
-                    )
-                    
-                    if summary_resp:
-                        base_msg[:] = [msg for msg in base_msg if "[MEMORY]" not in msg.get("content", "")]
-                        
-                        summary_msg = {
-                            "role": os.getenv("SUMMARY_ROLE", "user"),
-                            "content": (
-                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
-                                "[MEMORY] Previous context summary:\n\n"
-                                f"{summary_resp}\n\n"
-                                "[END MEMORY]\n"
-                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
-                            )
-                        }
-                        
-                        if base_msg and base_msg[0].get("role") == "system":
-                            base_msg.insert(1, summary_msg)
-                        else:
-                            base_msg.insert(0, summary_msg)
 
                 history = history_manager.append_to_history(
                     user_prompt, 
@@ -11068,6 +11099,25 @@ def main(log_callback=None, stop_callback=None):
 
             progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status)
             progress_manager.save()
+            
+            # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
+            if config.USE_ROLLING_SUMMARY:
+                try:
+                    print(f"SUMMARY: Attempting summary for Chapter {actual_num} | mode={config.ROLLING_SUMMARY_MODE} | out={out}")
+                except Exception:
+                    pass
+                # Use the original system prompt to build the summary system prompt
+                base_system_content = original_system_prompt
+                summary_text = translation_processor.generate_rolling_summary(
+                    history_manager, actual_num, base_system_content, source_text=cleaned
+                )
+                if summary_text:
+                    last_summary_block_text = summary_text
+                    # Log that it will be included on the next chapter
+                    try:
+                        print(f"📎 Prepared rolling summary for next chapter (len={len(summary_text)})")
+                    except Exception:
+                        pass
             
             chapters_completed += 1
 
