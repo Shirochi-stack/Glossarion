@@ -5740,6 +5740,12 @@ class MangaTranslationTab:
                         except Exception:
                             pass
                         
+                        # Call translator shutdown to free all resources
+                        try:
+                            if translator and hasattr(translator, 'shutdown'):
+                                translator.shutdown()
+                        except Exception:
+                            pass
                         # Finally, delete the translator instance entirely
                         self.translator = None
                         self._log("✅ Translator instance reset - all memory freed!", "info")
@@ -5844,6 +5850,16 @@ class MangaTranslationTab:
             
             # Update current file display to show stopped
             self._update_current_file("Translation stopped")
+            
+            # Kick off immediate resource shutdown to free RAM
+            try:
+                tr = getattr(self, 'translator', None)
+                if tr and hasattr(tr, 'shutdown'):
+                    import threading
+                    threading.Thread(target=tr.shutdown, name="MangaTranslatorShutdown", daemon=True).start()
+                    self._log("🧹 Initiated translator resource shutdown", "info")
+            except Exception as e:
+                self._log(f"⚠️ Failed to start shutdown: {e}", "warning")
             
             # Immediately reset UI state to re-enable start button
             self._reset_ui_state()

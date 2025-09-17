@@ -212,6 +212,12 @@ class MangaTranslator:
         self.main_gui = main_gui
         self.log_callback = log_callback
         
+        # Prefer allocator that can return memory to OS (effective before torch loads)
+        try:
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        except Exception:
+            pass
+        
         # Get all settings from GUI
         self.api_delay = float(self.main_gui.delay_entry.get() if hasattr(main_gui, 'delay_entry') else 2.0)
         # Propagate API delay to unified_api_client via env var so its internal pacing/logging matches GUI
@@ -437,6 +443,11 @@ class MangaTranslator:
         if hasattr(self, '_original_print'):
             import builtins
             builtins.print = self._original_print
+        # Best-effort shutdown in case caller forgot to call shutdown()
+        try:
+            self.shutdown()
+        except Exception:
+            pass
 
     def _cleanup_thread_locals(self):
         """Aggressively release thread-local heavy objects (onnx sessions, detectors)."""
@@ -475,6 +486,105 @@ class MangaTranslator:
                             pass
         except Exception:
             # Best-effort cleanup only
+            pass
+
+    def shutdown(self):
+        """Fully release resources for MangaTranslator (models, detectors, torch caches, threads)."""
+        try:
+            # Stop memory watchdog thread if running
+            if hasattr(self, '_mem_stop_event') and getattr(self, '_mem_stop_event', None) is not None:
+                try:
+                    self._mem_stop_event.set()
+                except Exception:
+                    pass
+            # Perform deep cleanup, then try to teardown torch
+            try:
+                self._deep_cleanup_models()
+            except Exception:
+                pass
+            try:
+                self._force_torch_teardown()
+            except Exception:
+                pass
+            try:
+                self._trim_working_set()
+            except Exception:
+                pass
+            # Null out heavy references
+            for attr in [
+                'client', 'vision_client', 'local_inpainter', 'hybrid_inpainter', 'inpainter',
+                'bubble_detector', 'ocr_manager', 'history_manager', 'current_image', 'current_mask',
+                'text_regions', 'translated_regions', 'final_image'
+            ]:
+                try:
+                    if hasattr(self, attr):
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self._log(f"⚠️ shutdown() encountered: {e}", "warning")
+            except Exception:
+                pass
+
+    def _force_torch_teardown(self):
+        """Best-effort teardown of PyTorch CUDA context and caches to drop closer to baseline.
+        Safe to call even if CUDA is not available.
+        """
+        try:
+            import torch, os
+            # CUDA path
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+                # Try to clear cuBLAS workspaces (not always available)
+                try:
+                    getattr(torch._C, "_cuda_clearCublasWorkspaces")()
+                except Exception:
+                    pass
+                # Optional hard reset via CuPy if present
+                reset_done = False
+                try:
+                    import cupy
+                    try:
+                        cupy.cuda.runtime.deviceReset()
+                        reset_done = True
+                        self._log("CUDA deviceReset via CuPy", "debug")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Fallback: attempt to call cudaDeviceReset from cudart on Windows
+                if os.name == 'nt' and not reset_done:
+                    try:
+                        import ctypes
+                        candidates = [
+                            "cudart64_12.dll", "cudart64_120.dll", "cudart64_110.dll",
+                            "cudart64_102.dll", "cudart64_101.dll", "cudart64_100.dll", "cudart64_90.dll"
+                        ]
+                        for name in candidates:
+                            try:
+                                dll = ctypes.CDLL(name)
+                                dll.cudaDeviceReset.restype = ctypes.c_int
+                                rc = dll.cudaDeviceReset()
+                                self._log(f"cudaDeviceReset via {name} rc={rc}", "debug")
+                                reset_done = True
+                                break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+        except Exception:
             pass
 
     def _deep_cleanup_models(self):

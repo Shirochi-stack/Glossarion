@@ -1809,6 +1809,33 @@ class OCRManager:
         
         return provider.load_model(**kwargs)  # <-- Passes model_size and any other kwargs
     
+    def shutdown(self):
+        """Release models/processors/tokenizers for all providers and clear caches."""
+        try:
+            import gc
+            for name, provider in list(self.providers.items()):
+                try:
+                    if hasattr(provider, 'model'):
+                        provider.model = None
+                    if hasattr(provider, 'processor'):
+                        provider.processor = None
+                    if hasattr(provider, 'tokenizer'):
+                        provider.tokenizer = None
+                    if hasattr(provider, 'reader'):
+                        provider.reader = None
+                    if hasattr(provider, 'is_loaded'):
+                        provider.is_loaded = False
+                except Exception:
+                    pass
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def detect_text(self, image: np.ndarray, provider_name: str = None, **kwargs) -> List[OCRResult]:
         """Detect text using specified or current provider"""
         provider_name = provider_name or self.current_provider
