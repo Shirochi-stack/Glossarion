@@ -975,6 +975,10 @@ class ImageTranslator:
                     cleaned_translation = translation_response
                     print("   📝 Using raw translation (artifact removal disabled)")
 
+                # Normalize and sanitize to avoid squared/cubed glyphs
+                cleaned_translation = self._normalize_unicode_width(cleaned_translation)
+                cleaned_translation = self._sanitize_unicode_characters(cleaned_translation)
+
                 if not cleaned_translation:
                     print("   ❌ No text extracted from response after cleaning")
                     print("   🔄 Falling back to sequential chunk processing...")
@@ -1618,9 +1622,11 @@ class ImageTranslator:
         
         if translation:
             if self.remove_ai_artifacts:
-                return self._clean_translation_response(translation)
-            else:
-                return translation
+                translation = self._clean_translation_response(translation)
+            # Normalize and sanitize output
+            translation = self._normalize_unicode_width(translation)
+            translation = self._sanitize_unicode_characters(translation)
+            return translation
         else:
             print(f"   ❌ Translation returned empty result")
             return None
@@ -1986,6 +1992,9 @@ class ImageTranslator:
                     chunk_text = self._clean_translation_response(translation)
                 else:
                     chunk_text = translation
+                # Normalize and sanitize each chunk
+                chunk_text = self._normalize_unicode_width(chunk_text)
+                chunk_text = self._sanitize_unicode_characters(chunk_text)
                 all_translations.append(chunk_text)
                 print(f"   🔍 DEBUG: Chunk {i+1} length: {len(chunk_text)} chars")
                 if len(chunk_text) > 10000:  # Flag suspiciously large chunks
@@ -2233,6 +2242,44 @@ class ImageTranslator:
         
         return cleaned_text
 
+    def _normalize_unicode_width(self, text: str) -> str:
+        """Normalize Unicode width and compatibility forms using NFKC"""
+        if not text:
+            return text
+        try:
+            import unicodedata
+            original = text
+            text = unicodedata.normalize('NFKC', text)
+            if text != original:
+                try:
+                    if self.log_callback:
+                        self.log_callback(f"🔤 Normalized width/compat: '{original[:30]}...' → '{text[:30]}...'")
+                except Exception:
+                    pass
+            return text
+        except Exception:
+            return text
+    
+    def _sanitize_unicode_characters(self, text: str) -> str:
+        """Remove invalid Unicode characters and common fallback boxes"""
+        if not text:
+            return text
+        import re
+        original = text
+        # Replacement character and common geometric fallbacks
+        text = text.replace('\ufffd', '')
+        for ch in ['□','◇','◆','■','▢','▣','▤','▥','▦','▧','▨','▩']:
+            text = text.replace(ch, '')
+        text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+        try:
+            text = text.encode('utf-8', errors='ignore').decode('utf-8')
+        except UnicodeError:
+            pass
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    
     def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):
         print(f"   🔍 DEBUG: Creating HTML output")
         print(f"   Total translation length: {len(translated_text)} chars")

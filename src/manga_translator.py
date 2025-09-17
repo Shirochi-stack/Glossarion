@@ -2286,6 +2286,7 @@ class MangaTranslator:
                     # CLEAN ORIGINAL OCR TEXT - Fix cube characters and encoding issues
                     original_ocr_text = result.text
                     cleaned_result_text = self._fix_encoding_issues(result.text)
+                    cleaned_result_text = self._normalize_unicode_width(cleaned_result_text)
                     cleaned_result_text = self._sanitize_unicode_characters(cleaned_result_text)
                     
                     # Log cleaning if changes were made
@@ -3977,6 +3978,9 @@ class MangaTranslator:
         # First, fix encoding issues
         text = self._fix_encoding_issues(text)
         
+        # Normalize width/compatibility (e.g., fullwidth → ASCII, circled numbers → digits)
+        text = self._normalize_unicode_width(text)
+        
         # Remove Unicode replacement characters and invalid symbols
         text = self._sanitize_unicode_characters(text)
         
@@ -4055,6 +4059,24 @@ class MangaTranslator:
             self._log(f"🔧 Sanitized Unicode: '{original}' → '{text}'", "debug")
         
         return text
+    
+    def _normalize_unicode_width(self, text: str) -> str:
+        """Normalize Unicode to NFKC to 'unsquare' fullwidth/stylized forms while preserving CJK text"""
+        if not text:
+            return text
+        try:
+            import unicodedata
+            original = text
+            # NFKC folds compatibility characters (fullwidth forms, circled digits, etc.) to standard forms
+            text = unicodedata.normalize('NFKC', text)
+            if text != original:
+                try:
+                    self._log(f"🔤 Normalized width/compat: '{original[:30]}...' → '{text[:30]}...'", "debug")
+                except Exception:
+                    pass
+            return text
+        except Exception:
+            return text
     
     def _fix_encoding_issues(self, text: str) -> str:
         """Fix common encoding issues in text, especially for Korean"""
