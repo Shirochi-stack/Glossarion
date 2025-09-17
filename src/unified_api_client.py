@@ -5540,27 +5540,6 @@ class UnifiedClient:
             )
             tls.openai_clients[map_key] = client
         return client
-
-
-    def _send_chutes_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request to Chute AI"""
-        
-        # Get Chute API endpoint
-        chute_base_url = os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1")
-        
-        logger.info(f"Sending image request to Chutes AI: {self.model}")
-        
-        # Format messages with image using shared helper
-        formatted_messages = self._prepare_image_messages(messages, image_base64)
-        # Use OpenAI-compatible endpoint for images
-        return self._send_openai_compatible(
-            messages=formatted_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            base_url=chute_base_url,
-            response_name=response_name,
-            provider="chutes"
-        )
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
@@ -5648,6 +5627,7 @@ class UnifiedClient:
             'databricks': self._send_openai_provider_router,
             'huggingface': self._send_huggingface,
             'openrouter': self._send_openai_provider_router,  # OpenRouter aggregator
+            'electronhub': self._send_electronhub,  # ElectronHub aggregator (restored)
             'fireworks': self._send_openai_provider_router,
             'xai': self._send_openai_provider_router,  # xAI Grok models
             'salesforce': self._send_openai_provider_router,  # Consolidated
