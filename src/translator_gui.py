@@ -13102,6 +13102,9 @@ Important rules:
         tb.Checkbutton(update_frame, text="Check on startup", 
                      variable=self.auto_update_check_var, 
                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(10, 0))
+
+        tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
                      
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
@@ -13123,10 +13126,6 @@ Important rules:
 
         tk.Label(section_frame, text="Automatic backups are created before each config save.",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(5, 0))
-
-        tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
-
 
     def _create_response_handling_section(self, parent):
         """Create response handling section with AI Hunter additions"""
