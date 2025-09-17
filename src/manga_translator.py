@@ -215,6 +215,7 @@ class MangaTranslator:
         # Prefer allocator that can return memory to OS (effective before torch loads)
         try:
             os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         except Exception:
             pass
         
@@ -507,6 +508,10 @@ class MangaTranslator:
             except Exception:
                 pass
             try:
+                self._huggingface_teardown()
+            except Exception:
+                pass
+            try:
                 self._trim_working_set()
             except Exception:
                 pass
@@ -532,7 +537,12 @@ class MangaTranslator:
         Safe to call even if CUDA is not available.
         """
         try:
-            import torch, os
+            import torch, os, gc
+            # CPU: free cached tensors
+            try:
+                gc.collect()
+            except Exception:
+                pass
             # CUDA path
             if hasattr(torch, 'cuda') and torch.cuda.is_available():
                 try:
@@ -584,6 +594,37 @@ class MangaTranslator:
                                 continue
                     except Exception:
                         pass
+        except Exception:
+            pass
+
+    def _huggingface_teardown(self):
+        """Best-effort teardown of HuggingFace/transformers/tokenizers state.
+        - Clears on-disk model cache for known repos (via _clear_hf_cache)
+        - Optionally purges relevant modules from sys.modules (AGGRESSIVE_HF_UNLOAD=1)
+        """
+        try:
+            import os, sys, gc
+            # Clear disk cache for detectors (and any default repo) to avoid growth across runs
+            try:
+                self._clear_hf_cache()
+            except Exception:
+                pass
+            # Optional aggressive purge of modules to free Python-level caches
+            if os.getenv('AGGRESSIVE_HF_UNLOAD', '1') == '1':
+                prefixes = (
+                    'transformers',
+                    'huggingface_hub',
+                    'tokenizers',
+                    'safetensors',
+                    'accelerate',
+                )
+                to_purge = [m for m in list(sys.modules.keys()) if m.startswith(prefixes)]
+                for m in to_purge:
+                    try:
+                        del sys.modules[m]
+                    except Exception:
+                        pass
+                gc.collect()
         except Exception:
             pass
 
