@@ -8589,8 +8589,7 @@ def build_system_prompt(user_prompt, glossary_path=None):
             system += f"{custom_prompt}\n{glossary_text}"
             
             print(f"[DEBUG] ✅ Entire glossary appended!")
-            print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
-            print(f"[DEBUG] Final system prompt length: {len(system)} characters")
+            print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")           
                 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
