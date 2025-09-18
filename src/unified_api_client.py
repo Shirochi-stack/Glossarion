@@ -6271,8 +6271,25 @@ class UnifiedClient:
         logger.info(f"Tokens being sent: p-b={len(tokens.get('p-b', ''))} chars, p-lat={len(tokens.get('p-lat', ''))} chars")
         
         try:
-            # Create Poe client
-            poe_client = PoeApi(tokens=tokens)
+            # Create Poe client (try to pass proxy/headers if supported)
+            poe_kwargs = {}
+            ua = os.getenv("POE_USER_AGENT") or os.getenv("HTTP_USER_AGENT")
+            if ua:
+                poe_kwargs["headers"] = {"User-Agent": ua, "Referer": "https://poe.com/", "Origin": "https://poe.com"}
+            proxy = os.getenv("POE_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+            if proxy:
+                poe_kwargs["proxy"] = proxy
+            try:
+                poe_client = PoeApi(tokens=tokens, **poe_kwargs)
+            except TypeError:
+                # Older versions may not support headers/proxy kwargs
+                poe_client = PoeApi(tokens=tokens)
+                # Best-effort header update if client exposes httpx session
+                try:
+                    if ua and hasattr(poe_client, "session") and hasattr(poe_client.session, "headers"):
+                        poe_client.session.headers.update({"User-Agent": ua, "Referer": "https://poe.com/", "Origin": "https://poe.com"})
+                except Exception:
+                    pass
             
             # Get bot name
             requested_model = self.model.replace('poe/', '', 1)
@@ -8383,8 +8400,23 @@ class UnifiedClient:
         logger.info(f"Tokens being sent for image: p-b={len(tokens.get('p-b', ''))} chars, p-lat={len(tokens.get('p-lat', ''))} chars")
         
         try:
-            # Create Poe client
-            poe_client = PoeApi(tokens=tokens)
+            # Create Poe client (try to pass proxy/headers if supported)
+            poe_kwargs = {}
+            ua = os.getenv("POE_USER_AGENT") or os.getenv("HTTP_USER_AGENT")
+            if ua:
+                poe_kwargs["headers"] = {"User-Agent": ua, "Referer": "https://poe.com/", "Origin": "https://poe.com"}
+            proxy = os.getenv("POE_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+            if proxy:
+                poe_kwargs["proxy"] = proxy
+            try:
+                poe_client = PoeApi(tokens=tokens, **poe_kwargs)
+            except TypeError:
+                poe_client = PoeApi(tokens=tokens)
+                try:
+                    if ua and hasattr(poe_client, "session") and hasattr(poe_client.session, "headers"):
+                        poe_client.session.headers.update({"User-Agent": ua, "Referer": "https://poe.com/", "Origin": "https://poe.com"})
+                except Exception:
+                    pass
             
             # Get bot name - use vision-capable bots
             requested_model = self.model.replace('poe/', '', 1)
