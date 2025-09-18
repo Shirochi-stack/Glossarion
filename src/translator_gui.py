@@ -9762,6 +9762,16 @@ Important rules:
        self._ensure_executor()
        if self.executor:
            self.epub_future = self.executor.submit(self.run_epub_converter_direct)
+           # Ensure button state is refreshed when the future completes
+           def _epub_done_callback(f):
+               try:
+                   self.master.after(0, lambda: (setattr(self, 'epub_future', None), self.update_run_button()))
+               except Exception:
+                   pass
+           try:
+               self.epub_future.add_done_callback(_epub_done_callback)
+           except Exception:
+               pass
        else:
            self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
            self.epub_thread.start()
@@ -9856,6 +9866,13 @@ Important rules:
         finally:
             # Always reset the thread and update button state when done
             self.epub_thread = None
+            # Clear any future handle so update_run_button won't consider it running
+            if hasattr(self, 'epub_future'):
+                try:
+                    # Don't cancel; just drop the reference. Future is already done here.
+                    self.epub_future = None
+                except Exception:
+                    pass
             self.stop_requested = False
             # Schedule GUI update on main thread
             self.master.after(0, self.update_run_button)
@@ -10666,8 +10683,9 @@ Important rules:
             }
      
             def run_scan():
+                # Update UI on the main thread
                 self.master.after(0, self.update_run_button)
-                self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
+                self.master.after(0, lambda: self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger"))
                 
                 try:
                     # Extract cache configuration from qa_settings
@@ -10716,7 +10734,13 @@ Important rules:
                     self.append_log(f"❌ QA scan error: {e}")
                     self.append_log(f"Traceback: {traceback.format_exc()}")
                 finally:
+                    # Clear thread/future refs so buttons re-enable
                     self.qa_thread = None
+                    if hasattr(self, 'qa_future'):
+                        try:
+                            self.qa_future = None
+                        except Exception:
+                            pass
                     self.master.after(0, self.update_run_button)
                     self.master.after(0, lambda: self.qa_button.config(
                         text="QA Scan", 
@@ -10729,6 +10753,16 @@ Important rules:
             self._ensure_executor()
             if self.executor:
                 self.qa_future = self.executor.submit(run_scan)
+                # Ensure UI is refreshed when QA work completes
+                def _qa_done_callback(f):
+                    try:
+                        self.master.after(0, lambda: (setattr(self, 'qa_future', None), self.update_run_button()))
+                    except Exception:
+                        pass
+                try:
+                    self.qa_future.add_done_callback(_qa_done_callback)
+                except Exception:
+                    pass
             else:
                 self.qa_thread = threading.Thread(target=run_scan, daemon=True)
                 self.qa_thread.start()
