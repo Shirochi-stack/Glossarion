@@ -8688,6 +8688,9 @@ Provide translations in the same numbered format."""
             'FORCED_SOURCE_LANG': self.config.get('forced_source_lang', 'Korean'),
             'OUTPUT_LANGUAGE': self.config.get('output_language', 'English'),
             'METADATA_BATCH_PROMPT': self.config.get('metadata_batch_prompt', ''),
+            
+            # AI Hunter configuration
+            'AI_HUNTER_CONFIG': json.dumps(self.config.get('ai_hunter_config', {})),
 
             # Anti-duplicate parameters
             'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',

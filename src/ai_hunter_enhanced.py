@@ -31,6 +31,8 @@ class AIHunterConfigGUI:
         self.default_ai_hunter = {
             'enabled': True,
             'ai_hunter_max_workers': 1,
+            'retry_attempts': 6,
+            'disable_temperature_change': False,
             'sample_size': 3000,
             'thresholds': {
                 'exact': 90,
@@ -374,7 +376,9 @@ class AIHunterConfigGUI:
         
         ai_config = self.get_ai_config()
         
-        
+        # Add separator for better organization
+        ttk.Separator(general_frame, orient='horizontal').pack(fill='x', pady=(0, 10))
+
         # Sample size
         ss_frame = tk.Frame(general_frame)
         ss_frame.pack(fill='x', pady=5)
@@ -385,6 +389,29 @@ class AIHunterConfigGUI:
                   textvariable=self.sample_size_var, width=10).pack(side='left', padx=10)
         tk.Label(ss_frame, text="characters",
                 font=('TkDefaultFont', 9)).pack(side='left')
+        
+        # AI Hunter Behavior Settings
+        tk.Label(general_frame, text="AI Hunter Behavior", 
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        
+        # Retry Attempts
+        retry_frame = tk.Frame(general_frame)
+        retry_frame.pack(fill='x', pady=5)
+        
+        tk.Label(retry_frame, text="Retry attempts:", width=20, anchor='w').pack(side='left')
+        self.retry_attempts_var = tk.IntVar(value=ai_config.get('retry_attempts', 3))
+        tb.Spinbox(retry_frame, from_=1, to=10, textvariable=self.retry_attempts_var, width=10).pack(side='left', padx=10)
+        tk.Label(retry_frame, text="attempts", font=('TkDefaultFont', 9)).pack(side='left')
+        
+        # Temperature Change Toggle
+        temp_frame = tk.Frame(general_frame)
+        temp_frame.pack(fill='x', pady=10)
+        
+        self.disable_temp_change_var = tk.BooleanVar(value=ai_config.get('disable_temperature_change', False))
+        tb.Checkbutton(temp_frame, text="Disable temperature change behavior",
+                      variable=self.disable_temp_change_var, bootstyle="round-toggle").pack(anchor='w')
+        tk.Label(temp_frame, text="Prevents AI Hunter from modifying temperature settings during retries",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=(25, 0))       
         
         # Edge filters
         edge_frame = tk.LabelFrame(frame, text="Edge Case Filters", padx=20, pady=20)
@@ -494,6 +521,10 @@ class AIHunterConfigGUI:
         ai_config['language_detection']['target_language'] = self.target_lang_var.get()
         ai_config['language_detection']['threshold_characters'] = self.lang_threshold_var.get()
         
+        # Update retry attempts and temperature change settings
+        ai_config['retry_attempts'] = self.retry_attempts_var.get()
+        ai_config['disable_temperature_change'] = self.disable_temp_change_var.get()
+        
         # Update main config
         self.config['ai_hunter_config'] = ai_config
         
@@ -530,6 +561,8 @@ class ImprovedAIHunterDetection:
         self.default_ai_hunter = {
             'enabled': True,
             'lookback_chapters': 5,
+            'retry_attempts': 3,
+            'disable_temperature_change': False,
             'sample_size': 3000,
             'thresholds': {
                 'exact': 90,

@@ -3854,9 +3854,28 @@ class TranslationProcessor:
     
 
         retry_count = 0
-        max_retries = 3
+        
+        # Get retry attempts from AI Hunter config if available
+        ai_config = {}
+        try:
+            # Try to get AI Hunter config from environment variable first
+            ai_hunter_config_str = os.getenv('AI_HUNTER_CONFIG')
+            if ai_hunter_config_str:
+                ai_config = json.loads(ai_hunter_config_str)
+            else:
+                # Fallback to config attribute
+                ai_config = getattr(self.config, 'ai_hunter_config', {})
+        except (json.JSONDecodeError, AttributeError):
+            ai_config = {}
+        
+        if isinstance(ai_config, dict):
+            max_retries = ai_config.get('retry_attempts', 3)
+            max_duplicate_retries = ai_config.get('retry_attempts', 6)  # Use same setting for duplicate retries
+        else:
+            max_retries = 3
+            max_duplicate_retries = 6
+        
         duplicate_retry_count = 0
-        max_duplicate_retries = 6
         timeout_retry_count = 0
         max_timeout_retries = 2
         history_purged = False
@@ -3979,24 +3998,39 @@ class TranslationProcessor:
                             retry_reason = f"duplicate content (similarity: {similarity}%)"
                             duplicate_retry_count += 1
                             
+                            # Check if temperature change is disabled
+                            disable_temp_change = ai_config.get('disable_temperature_change', False) if isinstance(ai_config, dict) else False
+                            
                             if duplicate_retry_count >= 3 and not history_purged:
                                 print(f"    🧹 Clearing history after 3 attempts...")
                                 if 'history_manager' in c:
                                     c['history_manager'].save_history([])
                                 history_purged = True
-                                self.config.TEMP = original_temp
+                                if not disable_temp_change:
+                                    self.config.TEMP = original_temp
+                                else:
+                                    print(f"    🌡️ Temperature change disabled - keeping current temp: {self.config.TEMP}")
                             
                             elif duplicate_retry_count == 1:
-                                print(f"    🔄 First duplicate retry - same temperature")
+                                if disable_temp_change:
+                                    print(f"    🔄 First duplicate retry - temperature change disabled")
+                                else:
+                                    print(f"    🔄 First duplicate retry - same temperature")
                             
                             elif history_purged:
-                                attempts_since_purge = duplicate_retry_count - 3
-                                self.config.TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
-                                print(f"    🌡️ Post-purge temp: {self.config.TEMP}")
+                                if not disable_temp_change:
+                                    attempts_since_purge = duplicate_retry_count - 3
+                                    self.config.TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
+                                    print(f"    🌡️ Post-purge temp: {self.config.TEMP}")
+                                else:
+                                    print(f"    🌡️ Temperature change disabled - keeping temp: {self.config.TEMP}")
                             
                             else:
-                                self.config.TEMP = min(original_temp + (0.1 * (duplicate_retry_count - 1)), 1.0)
-                                print(f"    🌡️ Gradual temp increase: {self.config.TEMP}")
+                                if not disable_temp_change:
+                                    self.config.TEMP = min(original_temp + (0.1 * (duplicate_retry_count - 1)), 1.0)
+                                    print(f"    🌡️ Gradual temp increase: {self.config.TEMP}")
+                                else:
+                                    print(f"    🌡️ Temperature change disabled - keeping temp: {self.config.TEMP}")
                             
                             if duplicate_retry_count == 1:
                                 user_prompt = f"[RETRY] Chapter {c['num']}: Ensure unique translation.\n{chunk_html}"

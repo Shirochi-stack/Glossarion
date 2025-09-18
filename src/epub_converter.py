@@ -936,6 +936,9 @@ class EPUBCompiler:
         self.max_workers = int(os.environ.get("EXTRACTION_WORKERS", "4"))
         self.log(f"[INFO] Using {self.max_workers} workers for parallel processing")
         
+        # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
+        self.auxiliary_html_files: set[str] = set()
+        
         # SVG rasterization settings
         self.rasterize_svg = os.getenv('RASTERIZE_SVG_FALLBACK', '1') == '1'
         try:
@@ -1646,13 +1649,22 @@ class EPUBCompiler:
                     # Add to book
                     book.add_item(chapter)
                     spine.append(chapter)
-                    toc.append(chapter)
+
+                    # Include auxiliary files in spine but omit from TOC
+                    base_name = os.path.basename(chapter_data['filename'])
+                    if hasattr(self, 'auxiliary_html_files') and base_name in self.auxiliary_html_files:
+                        self.log(f"  🛈 Added auxiliary page to spine (not in TOC): {base_name}")
+                    else:
+                        toc.append(chapter)
                     chapters_added += 1
                     
                     if 49 <= chapter_data['num'] <= 56:
                         self.log(f"  ✅ ADDED PROBLEM CHAPTER {chapter_data['num']}: '{chapter_data['title']}'")
                     else:
-                        self.log(f"  ✅ Added chapter {chapter_data['num']}: '{chapter_data['title']}'")
+                        if base_name in getattr(self, 'auxiliary_html_files', set()):
+                            self.log(f"  ✅ Added auxiliary page (spine only): '{base_name}'")
+                        else:
+                            self.log(f"  ✅ Added chapter {chapter_data['num']}: '{chapter_data['title']}'")
                     
                 except Exception as e:
                     self.log(f"  ❌ Failed to add chapter {chapter_data['num']} to book: {e}")
@@ -1842,7 +1854,6 @@ class EPUBCompiler:
         # Try to get authoritative order from OPF/EPUB
         opf_order = self._get_chapter_order_from_opf()
         
-        # Add this right after getting opf_order (around line 15)
         if opf_order:
             self.log("✅ Using authoritative chapter order from OPF/EPUB")
             self.log(f"[DEBUG] OPF entries (first 5): {list(opf_order.items())[:5]}")
@@ -1888,6 +1899,10 @@ class EPUBCompiler:
                 if unmapped_files:
                     self.log(f"⚠️ Adding {len(unmapped_files)} unmapped files at the end")
                     final_order.extend(sorted(unmapped_files))
+                    # Mark non-response unmapped files as auxiliary (omit from TOC)
+                    self.auxiliary_html_files = {f for f in unmapped_files if not f.startswith('response_')}
+                else:
+                    self.auxiliary_html_files = set()
                 
                 self.log(f"✅ Successfully ordered {len(final_order)} chapters using OPF")
                 return final_order
@@ -1901,7 +1916,8 @@ class EPUBCompiler:
         response_files = [f for f in html_files if f.startswith('response_')]
         
         if response_files:
-            html_files = response_files
+            # Sort response_ files as primary chapters
+            main_files = list(response_files)
             self.log(f"[DEBUG] Found {len(response_files)} response_ files")
             
             # Check if files have -h- pattern
@@ -1913,7 +1929,7 @@ class EPUBCompiler:
                         return int(match.group(1))
                     return 999999
                 
-                html_files.sort(key=extract_h_number)
+                main_files.sort(key=extract_h_number)
             else:
                 # Use numeric sorting for standard response_ files
                 def extract_number(filename):
@@ -1922,10 +1938,22 @@ class EPUBCompiler:
                         return int(match.group(1))
                     return 0
                 
-                html_files.sort(key=extract_number)
+                main_files.sort(key=extract_number)
+            
+            # Append non-response files as auxiliary pages (not in TOC)
+            aux_files = sorted([f for f in html_files if not f.startswith('response_')])
+            if aux_files:
+                self.auxiliary_html_files = set(aux_files)
+                self.log(f"[DEBUG] Appending {len(aux_files)} auxiliary HTML file(s) (not in TOC): {aux_files[:5]}")
+            else:
+                self.auxiliary_html_files = set()
+            
+            return main_files + aux_files
         else:
             # Progressive sorting for non-standard files
             html_files.sort(key=self.get_robust_sort_key)
+            # No response_ files -> treat none as auxiliary
+            self.auxiliary_html_files = set()
         
         return html_files
 
