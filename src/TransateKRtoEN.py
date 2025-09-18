@@ -3484,7 +3484,7 @@ class TranslationProcessor:
             print("❌ Translation stopped by user request.")
             return True
     
-    def check_duplicate_content(self, result, idx, prog, out):
+    def check_duplicate_content(self, result, idx, prog, out, actual_num=None):
         """Check if translated content is duplicate - with mode selection"""
         
         # Get detection mode from config
@@ -3496,8 +3496,11 @@ class TranslationProcessor:
         content_hash = None
         if detection_mode == 'ai-hunter':
             # Try to get content_hash from the current chapter info
-            # The idx parameter represents the chapter index
-            chapter_key = str(actual_num)
+            # Use actual_num if provided, otherwise fallback to idx+1
+            if actual_num is not None:
+                chapter_key = str(actual_num)
+            else:
+                chapter_key = str(idx + 1)
             if chapter_key in prog.get("chapters", {}):
                 chapter_info = prog["chapters"][chapter_key]
                 content_hash = chapter_info.get("content_hash")
@@ -3990,7 +3993,9 @@ class TranslationProcessor:
                         idx = c.get('__index', 0)
                         prog = c.get('__progress', {})
                         print(f"    🔍 Checking for duplicate content...")
-                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir)
+                        # Get actual chapter number for duplicate detection
+                        actual_num = c.get('actual_chapter_num', c.get('num', idx + 1))
+                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir, actual_num)
                         
                         if is_duplicate:
                             retry_needed = True
