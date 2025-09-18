@@ -531,11 +531,47 @@ class XHTMLConverter:
                 return tag_content
             
             html_content = re.sub(r'<[^>]*?=""[^>]*?>', fix_broken_attributes_only, html_content)
+
+            # Sanitize attributes that contain a colon (:) but are NOT valid namespaces.
+            # Example: <status effects:="" high="" temperature="" unconscious=""></status>
+            # becomes: <status data-effects="" high="" temperature="" unconscious=""></status>
+            def _sanitize_colon_attributes_in_tags(text: str) -> str:
+                # Process only inside start tags; skip closing tags, comments, doctypes, processing instructions
+                def _process_tag(tag_match):
+                    tag = tag_match.group(0)
+                    if tag.startswith('</') or tag.startswith('<!') or tag.startswith('<?'):
+                        return tag
+                    
+                    def _attr_repl(m):
+                        before, name, eqval = m.group(1), m.group(2), m.group(3)
+                        lname = name.lower()
+                        # Preserve known namespace attributes
+                        if (
+                            lname.startswith('xml:') or lname.startswith('xlink:') or lname.startswith('epub:') or
+                            lname == 'xmlns' or lname.startswith('xmlns:')
+                        ):
+                            return m.group(0)
+                        if ':' not in name:
+                            return m.group(0)
+                        # Replace colon(s) with dashes and prefix with data-
+                        safe = re.sub(r'[:]+', '-', name).strip('-')
+                        safe = re.sub(r'[^A-Za-z0-9_.-]', '-', safe) or 'attr'
+                        if not safe.startswith('data-'):
+                            safe = 'data-' + safe
+                        return f'{before}{safe}{eqval}'
+                    
+                    # Replace attributes with colon in the name (handles both single and double quoted values)
+                    tag = re.sub(r'(\s)([A-Za-z_:][A-Za-z0-9_.:-]*:[A-Za-z0-9_.:-]*)(\s*=\s*(?:"[^"]*"|\'[^\']*\'))', _attr_repl, tag)
+                    return tag
+                
+                return re.sub(r'<[^>]+>', _process_tag, text)
+            
+            html_content = _sanitize_colon_attributes_in_tags(html_content)
             
             # Convert only "story tags" whose TAG NAME contains a colon (e.g., <System:Message>),
             # but DO NOT touch valid HTML/SVG tags where colons appear in attributes (e.g., style="color:red" or xlink:href)
             # and DO NOT touch namespaced tags like <svg:rect>.
-            allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns"}
+            allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
 
             def _escape_story_tag(match):
                 full_tag = match.group(0)   # Entire <...> or </...>
@@ -687,6 +723,32 @@ class XHTMLConverter:
             content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
         except re.error:
             pass  # Skip if regex fails      
+
+        # Sanitize invalid colon-containing attribute names (preserve XML/xlink/epub/xmlns)
+        def _sanitize_colon_attrs_in_content(text: str) -> str:
+            def _process_tag(m):
+                tag = m.group(0)
+                if tag.startswith('</') or tag.startswith('<!') or tag.startswith('<?'):
+                    return tag
+                def _attr_repl(am):
+                    before, name, eqval = am.group(1), am.group(2), am.group(3)
+                    lname = name.lower()
+                    if (
+                        lname.startswith('xml:') or lname.startswith('xlink:') or lname.startswith('epub:') or
+                        lname == 'xmlns' or lname.startswith('xmlns:')
+                    ):
+                        return am.group(0)
+                    if ':' not in name:
+                        return am.group(0)
+                    safe = re.sub(r'[:]+', '-', name).strip('-')
+                    safe = re.sub(r'[^A-Za-z0-9_.-]', '-', safe) or 'attr'
+                    if not safe.startswith('data-'):
+                        safe = 'data-' + safe
+                    return f'{before}{safe}{eqval}'
+                return re.sub(r'(\s)([A-Za-z_:][A-Za-z0-9_.:-]*:[A-Za-z0-9_.:-]*)(\s*=\s*(?:"[^"]*"|\'[^\']*\'))', _attr_repl, tag)
+            return re.sub(r'<[^>]+>', _process_tag, text)
+
+        content = _sanitize_colon_attrs_in_content(content)
             
         # Clean for XML
         content = XMLValidator.clean_for_xml(content)
