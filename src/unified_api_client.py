@@ -5380,8 +5380,7 @@ class UnifiedClient:
                 retry_after_val = resp.headers.get('Retry-After', '')
                 retry_secs = self._parse_retry_after(retry_after_val)
                 if retry_secs:
-                    cap = int(os.getenv("RETRY_AFTER_MAX_WAIT", "120"))
-                    sleep_for = min(retry_secs, cap) + random.uniform(0, 1)
+                    sleep_for = retry_secs + random.uniform(0, 1)
                 else:
                     base_delay = 5.0
                     sleep_for = min(base_delay * (2 ** attempt) + random.uniform(0, 1), 60.0)

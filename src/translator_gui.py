@@ -8611,7 +8611,6 @@ Provide translations in the same numbered format."""
             'READ_TIMEOUT': str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180')))),
             'HTTP_POOL_CONNECTIONS': str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))),
             'HTTP_POOL_MAXSIZE': str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))),
-            'RETRY_AFTER_MAX_WAIT': str(self.config.get('retry_after_max_wait', os.environ.get('RETRY_AFTER_MAX_WAIT', '120'))),
             'MAX_RETRIES': str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))),
             'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
             'BATCH_SIZE': self.batch_size_var.get(),
@@ -13374,8 +13373,6 @@ Important rules:
             self.http_pool_connections_var = tk.StringVar(value=str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))))
         if not hasattr(self, 'http_pool_maxsize_var'):
             self.http_pool_maxsize_var = tk.StringVar(value=str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))))
-        if not hasattr(self, 'retry_after_max_wait_var'):
-            self.retry_after_max_wait_var = tk.StringVar(value=str(self.config.get('retry_after_max_wait', os.environ.get('RETRY_AFTER_MAX_WAIT', '120'))))
 
         # Layout columns
         http_grid.grid_columnconfigure(0, weight=0)
@@ -13396,11 +13393,8 @@ Important rules:
         tk.Label(http_grid, text="Pool max size:").grid(row=1, column=3, sticky='w', padx=(12, 6), pady=2)
         tb.Entry(http_grid, width=6, textvariable=self.http_pool_maxsize_var).grid(row=1, column=4, sticky='w', pady=2)
 
-        # Row 2: Retry-After cap
-        tk.Label(http_grid, text="Retry-After max wait (s):").grid(row=2, column=0, sticky='w', padx=(0, 6), pady=(2, 4))
-        tb.Entry(http_grid, width=6, textvariable=self.retry_after_max_wait_var).grid(row=2, column=1, sticky='w', pady=(2, 4))
 
-        tk.Label(section_frame, text="Controls network behavior to reduce 500/503s: connection establishment timeout, read timeout,\nHTTP connection pool sizes, and cap on honoring Retry-After headers.",
+        tk.Label(section_frame, text="Controls network behavior to reduce 500/503s: connection establishment timeout, read timeout,\nHTTP connection pool sizes.",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 5))
         
         # Separator
@@ -14823,7 +14817,6 @@ Important rules:
                     'read_timeout': safe_float(self.read_timeout_var.get() if hasattr(self, 'read_timeout_var') else os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', 180)), 180.0),
                     'http_pool_connections': safe_int(self.http_pool_connections_var.get() if hasattr(self, 'http_pool_connections_var') else os.environ.get('HTTP_POOL_CONNECTIONS', 20), 20),
                     'http_pool_maxsize': safe_int(self.http_pool_maxsize_var.get() if hasattr(self, 'http_pool_maxsize_var') else os.environ.get('HTTP_POOL_MAXSIZE', 50), 50),
-                    'retry_after_max_wait': safe_int(self.retry_after_max_wait_var.get() if hasattr(self, 'retry_after_max_wait_var') else os.environ.get('RETRY_AFTER_MAX_WAIT', 120), 120),
                     'max_retries': safe_int(self.max_retries_var.get() if hasattr(self, 'max_retries_var') else os.environ.get('MAX_RETRIES', 7), 7),
 
                     'reinforcement_frequency': safe_int(self.reinforcement_freq_var.get(), 10),
@@ -14925,7 +14918,6 @@ Important rules:
                     "READ_TIMEOUT": str(self.config['read_timeout']),
                     "HTTP_POOL_CONNECTIONS": str(self.config['http_pool_connections']),
                     "HTTP_POOL_MAXSIZE": str(self.config['http_pool_maxsize']),
-                    "RETRY_AFTER_MAX_WAIT": str(self.config['retry_after_max_wait']),
                     "MAX_RETRIES": str(self.config['max_retries']),
                     "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
