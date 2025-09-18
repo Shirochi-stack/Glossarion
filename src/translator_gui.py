@@ -13364,6 +13364,18 @@ Important rules:
         http_frame = tk.Frame(section_frame)
         http_frame.pack(anchor=tk.W, padx=20, pady=(5, 0), fill=tk.X)
 
+        # Master toggle to enable/disable all HTTP tuning fields (disabled by default)
+        if not hasattr(self, 'enable_http_tuning_var'):
+            self.enable_http_tuning_var = tk.BooleanVar(value=self.config.get('enable_http_tuning', False))
+        self.http_tuning_checkbox = tb.Checkbutton(
+            http_frame,
+            text="Enable HTTP timeout/pooling overrides",
+            variable=self.enable_http_tuning_var,
+            command=getattr(self, '_toggle_http_tuning_controls', None) or (lambda: None),
+            bootstyle="round-toggle"
+        )
+        self.http_tuning_checkbox.pack(anchor=tk.W, pady=(0, 6))
+
         # Build a compact grid so fields align nicely
         http_grid = tk.Frame(http_frame)
         http_grid.pack(anchor=tk.W, fill=tk.X)
@@ -13388,22 +13400,33 @@ Important rules:
         # Optional toggle: ignore server Retry-After header
         if not hasattr(self, 'ignore_retry_after_var'):
             self.ignore_retry_after_var = tk.BooleanVar(value=bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1')))
-        tb.Checkbutton(http_frame, text="Ignore server Retry-After header (use local backoff)", 
-                      variable=self.ignore_retry_after_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(6, 0))
+        self.ignore_retry_after_checkbox = tb.Checkbutton(
+            http_frame,
+            text="Ignore server Retry-After header (use local backoff)", 
+            variable=self.ignore_retry_after_var,
+            bootstyle="round-toggle"
+        )
+        self.ignore_retry_after_checkbox.pack(anchor=tk.W, pady=(6, 0))
 
         # Row 0: Timeouts
         tk.Label(http_grid, text="Connect timeout (s):").grid(row=0, column=0, sticky='w', padx=(0, 6), pady=2)
-        tb.Entry(http_grid, width=6, textvariable=self.connect_timeout_var).grid(row=0, column=1, sticky='w', pady=2)
+        self.connect_timeout_entry = tb.Entry(http_grid, width=6, textvariable=self.connect_timeout_var)
+        self.connect_timeout_entry.grid(row=0, column=1, sticky='w', pady=2)
         tk.Label(http_grid, text="Read timeout (s):").grid(row=0, column=3, sticky='w', padx=(12, 6), pady=2)
-        tb.Entry(http_grid, width=6, textvariable=self.read_timeout_var).grid(row=0, column=4, sticky='w', pady=2)
+        self.read_timeout_entry = tb.Entry(http_grid, width=6, textvariable=self.read_timeout_var)
+        self.read_timeout_entry.grid(row=0, column=4, sticky='w', pady=2)
 
         # Row 1: Pool sizes
         tk.Label(http_grid, text="Pool connections:").grid(row=1, column=0, sticky='w', padx=(0, 6), pady=2)
-        tb.Entry(http_grid, width=6, textvariable=self.http_pool_connections_var).grid(row=1, column=1, sticky='w', pady=2)
+        self.http_pool_connections_entry = tb.Entry(http_grid, width=6, textvariable=self.http_pool_connections_var)
+        self.http_pool_connections_entry.grid(row=1, column=1, sticky='w', pady=2)
         tk.Label(http_grid, text="Pool max size:").grid(row=1, column=3, sticky='w', padx=(12, 6), pady=2)
-        tb.Entry(http_grid, width=6, textvariable=self.http_pool_maxsize_var).grid(row=1, column=4, sticky='w', pady=2)
+        self.http_pool_maxsize_entry = tb.Entry(http_grid, width=6, textvariable=self.http_pool_maxsize_var)
+        self.http_pool_maxsize_entry.grid(row=1, column=4, sticky='w', pady=2)
 
+        # Apply initial enable/disable state
+        if hasattr(self, '_toggle_http_tuning_controls'):
+            self._toggle_http_tuning_controls()
 
         tk.Label(section_frame, text="Controls network behavior to reduce 500/503s: connection establishment timeout, read timeout,\nHTTP connection pool sizes.",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 5))
@@ -14322,6 +14345,25 @@ Important rules:
                                 child.config(state=state)
                             except tk.TclError:
                                 pass
+
+    def _toggle_http_tuning_controls(self):
+        """Enable/disable the HTTP timeout/pooling controls as a group"""
+        enabled = bool(self.enable_http_tuning_var.get()) if hasattr(self, 'enable_http_tuning_var') else False
+        state = 'normal' if enabled else 'disabled'
+        # Entries
+        for attr in ['connect_timeout_entry', 'read_timeout_entry', 'http_pool_connections_entry', 'http_pool_maxsize_entry']:
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except tk.TclError:
+                    pass
+        # Retry-After checkbox
+        if hasattr(self, 'ignore_retry_after_checkbox') and self.ignore_retry_after_checkbox is not None:
+            try:
+                self.ignore_retry_after_checkbox.configure(state=state)
+            except tk.TclError:
+                pass
                                 
     def _reset_anti_duplicate_defaults(self):
         """Reset all anti-duplicate parameters to their default values"""
@@ -14821,8 +14863,9 @@ Important rules:
                     'max_retry_tokens': safe_int(self.max_retry_tokens_var.get(), 16384),
                     'retry_duplicate_bodies': self.retry_duplicate_var.get(),
                     'duplicate_lookback_chapters': safe_int(self.duplicate_lookback_var.get(), 5),
-                    'retry_timeout': self.retry_timeout_var.get(),
+'retry_timeout': self.retry_timeout_var.get(),
                     'chunk_timeout': safe_int(self.chunk_timeout_var.get(), 900),
+                    'enable_http_tuning': bool(self.enable_http_tuning_var.get()) if hasattr(self, 'enable_http_tuning_var') else False,
                     # New network/HTTP controls
                     'connect_timeout': safe_float(self.connect_timeout_var.get() if hasattr(self, 'connect_timeout_var') else os.environ.get('CONNECT_TIMEOUT', 10), 10.0),
                     'read_timeout': safe_float(self.read_timeout_var.get() if hasattr(self, 'read_timeout_var') else os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', 180)), 180.0),
@@ -14926,6 +14969,7 @@ Important rules:
                     "RETRY_TIMEOUT": "1" if self.retry_timeout_var.get() else "0",
                     "CHUNK_TIMEOUT": str(self.config['chunk_timeout']),
                     # New network/HTTP controls
+                    "ENABLE_HTTP_TUNING": '1' if self.config.get('enable_http_tuning', False) else '0',
                     "CONNECT_TIMEOUT": str(self.config['connect_timeout']),
                     "READ_TIMEOUT": str(self.config['read_timeout']),
                     "HTTP_POOL_CONNECTIONS": str(self.config['http_pool_connections']),

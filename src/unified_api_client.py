@@ -5269,7 +5269,14 @@ class UnifiedClient:
                 self.__class__._last_api_call_start = current_time
 
     def _get_timeouts(self):
-        """Return (connect_timeout, read_timeout) from environment, with sane defaults."""
+        """Return (connect_timeout, read_timeout) from environment, with sane defaults.
+        Respects master toggle ENABLE_HTTP_TUNING (defaults to disabled)."""
+        enabled = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+        if not enabled:
+            # Use conservative, very high read timeout to avoid request timeouts (e.g., Gemini)
+            connect = 10.0
+            read = float(os.getenv("CHUNK_TIMEOUT", "900"))
+            return (connect, read)
         connect = float(os.getenv("CONNECT_TIMEOUT", "10"))
         read = float(os.getenv("READ_TIMEOUT", os.getenv("CHUNK_TIMEOUT", "180")))
         return (connect, read)
@@ -5334,7 +5341,7 @@ class UnifiedClient:
                 raise UnifiedClientError("Operation cancelled")
             
             # Toggle to ignore server-provided Retry-After headers
-            ignore_retry_after = os.getenv("IGNORE_RETRY_AFTER", "0") == "1"
+            ignore_retry_after = (os.getenv("ENABLE_HTTP_TUNING", "0") == "1") and (os.getenv("IGNORE_RETRY_AFTER", "0") == "1")
             try:
                 if use_session:
                     # Reuse pooled session based on the base URL
