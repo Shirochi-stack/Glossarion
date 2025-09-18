@@ -583,10 +583,19 @@ class XHTMLConverter:
                 # Otherwise, treat as a story/fake tag and replace angle brackets with Chinese brackets
                 return full_tag.replace('<', '《').replace('>', '》')
 
-            # Open tags with colon in the TAG NAME (not attributes)
-            html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]+)(?:\s[^>]*)?>', _escape_story_tag, html_content)
-            # Closing tags with colon in the TAG NAME
-            html_content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]+)\s*>', _escape_story_tag, html_content)
+            # Escape invalid story tags (tag names containing ':') so they render literally with angle brackets.
+            allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
+            def _escape_story_tag_entities(m):
+                tagname = m.group(1)
+                prefix = tagname.split(':', 1)[0].lower()
+                if prefix in allowed_ns_prefixes:
+                    return m.group(0)
+                tag_text = m.group(0)
+                return tag_text.replace('<', '&lt;').replace('>', '&gt;')
+            # Apply in order: self-closing, opening, closing
+            html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)/>', _escape_story_tag_entities, html_content)
+            html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)>', _escape_story_tag_entities, html_content)
+            html_content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]*)\s*>', _escape_story_tag_entities, html_content)
             
             # Parse with lxml
             from lxml import html as lxml_html, etree
@@ -749,6 +758,20 @@ class XHTMLConverter:
             return re.sub(r'<[^>]+>', _process_tag, text)
 
         content = _sanitize_colon_attrs_in_content(content)
+            
+        # Escape invalid story tags so they render literally with angle brackets in output
+        allowed_ns_prefixes = {"svg", "math", "xlink", "xml", "xmlns", "epub"}
+        def _escape_story_tag_entities(m):
+            tagname = m.group(1)
+            prefix = tagname.split(':', 1)[0].lower()
+            if prefix in allowed_ns_prefixes:
+                return m.group(0)
+            tag_text = m.group(0)
+            return tag_text.replace('<', '&lt;').replace('>', '&gt;')
+        # Apply in order: self-closing, opening, closing
+        content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)/>', _escape_story_tag_entities, content)
+        content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)>', _escape_story_tag_entities, content)
+        content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]*)\s*>', _escape_story_tag_entities, content)
             
         # Clean for XML
         content = XMLValidator.clean_for_xml(content)
