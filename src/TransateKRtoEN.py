@@ -3508,7 +3508,12 @@ class TranslationProcessor:
         
         if detection_mode == 'ai-hunter':
             print("    🤖 DEBUG: Routing to AI Hunter detection...")
-            return self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
+            # Check if AI Hunter method is available (injected by the wrapper)
+            if hasattr(self, '_check_duplicate_ai_hunter'):
+                return self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
+            else:
+                print("    ⚠️ AI Hunter method not available, falling back to basic detection")
+                return self._check_duplicate_basic(result, idx, prog, out)
         elif detection_mode == 'cascading':
             print("    🔄 DEBUG: Routing to Cascading detection...")
             return self._check_duplicate_cascading(result, idx, prog, out)
@@ -3566,10 +3571,12 @@ class TranslationProcessor:
         # Step 2: If basic detection finds moderate similarity, use AI Hunter
         if similarity_basic >= 60:  # Configurable threshold
             print(f"    🤖 Moderate similarity ({similarity_basic}%) - running AI Hunter analysis...")
-            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out)
-            
-            if is_duplicate_ai:
-                return True, similarity_ai
+            if hasattr(self, '_check_duplicate_ai_hunter'):
+                is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out)
+                if is_duplicate_ai:
+                    return True, similarity_ai
+            else:
+                print("    ⚠️ AI Hunter method not available for cascading analysis")
         
         return False, max(similarity_basic, 0)
 
@@ -10396,18 +10403,17 @@ def main(log_callback=None, stop_callback=None):
                                     break
                         except Exception as e:
                             print(f"⚠️ Failed to load config from {config_path}: {e}")
-                
-                # Create and inject the improved AI Hunter
-                ai_hunter = ImprovedAIHunterDetection(main_config)
+            
+            # Always create and inject the improved AI Hunter when ai-hunter mode is selected
+            ai_hunter = ImprovedAIHunterDetection(main_config)
 
-                # The TranslationProcessor class has a method that checks for duplicates
-                # We need to replace it with our enhanced AI Hunter
-                
-                # Create a wrapper to match the expected signature
-                def enhanced_duplicate_check(self, result, idx, prog, out):
-                    # Try to get the actual chapter number from progress
-                    actual_num = None
-                    
+            # The TranslationProcessor class has a method that checks for duplicates
+            # We need to replace it with our enhanced AI Hunter
+            
+            # Create a wrapper to match the expected signature
+            def enhanced_duplicate_check(self, result, idx, prog, out, actual_num=None):
+                # If actual_num is not provided, try to get it from progress
+                if actual_num is None:
                     # Look for the chapter being processed
                     for ch_key, ch_info in prog.get("chapters", {}).items():
                         if ch_info.get("chapter_idx") == idx:
@@ -10415,17 +10421,15 @@ def main(log_callback=None, stop_callback=None):
                             break
                     
                     # Fallback to idx+1 if not found
-                    if not actual_num:
+                    if actual_num is None:
                         actual_num = idx + 1
-                    
-                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, actual_num)
                 
-                # Bind the enhanced method to the processor instance
-                translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
-                
-                print("🤖 AI Hunter: Using enhanced detection with configurable thresholds")
-            else:
-                print("⚠️ AI Hunter: Config file not found, using default detection")
+                return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, actual_num)
+            
+            # Bind the enhanced method to the processor instance
+            translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
+            
+            print("🤖 AI Hunter: Using enhanced detection with configurable thresholds")
                 
         # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
