@@ -8611,6 +8611,7 @@ Provide translations in the same numbered format."""
             'READ_TIMEOUT': str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180')))),
             'HTTP_POOL_CONNECTIONS': str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))),
             'HTTP_POOL_MAXSIZE': str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))),
+            'IGNORE_RETRY_AFTER': '1' if (hasattr(self, 'ignore_retry_after_var') and self.ignore_retry_after_var.get()) else '0',
             'MAX_RETRIES': str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))),
             'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
             'BATCH_SIZE': self.batch_size_var.get(),
@@ -13381,6 +13382,13 @@ Important rules:
         http_grid.grid_columnconfigure(3, weight=0)
         http_grid.grid_columnconfigure(4, weight=0)
 
+        # Optional toggle: ignore server Retry-After header
+        if not hasattr(self, 'ignore_retry_after_var'):
+            self.ignore_retry_after_var = tk.BooleanVar(value=bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1')))
+        tb.Checkbutton(http_frame, text="Ignore server Retry-After header (use local backoff)", 
+                      variable=self.ignore_retry_after_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(6, 0))
+
         # Row 0: Timeouts
         tk.Label(http_grid, text="Connect timeout (s):").grid(row=0, column=0, sticky='w', padx=(0, 6), pady=2)
         tb.Entry(http_grid, width=6, textvariable=self.connect_timeout_var).grid(row=0, column=1, sticky='w', pady=2)
@@ -14817,6 +14825,7 @@ Important rules:
                     'read_timeout': safe_float(self.read_timeout_var.get() if hasattr(self, 'read_timeout_var') else os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', 180)), 180.0),
                     'http_pool_connections': safe_int(self.http_pool_connections_var.get() if hasattr(self, 'http_pool_connections_var') else os.environ.get('HTTP_POOL_CONNECTIONS', 20), 20),
                     'http_pool_maxsize': safe_int(self.http_pool_maxsize_var.get() if hasattr(self, 'http_pool_maxsize_var') else os.environ.get('HTTP_POOL_MAXSIZE', 50), 50),
+                    'ignore_retry_after': bool(self.ignore_retry_after_var.get()) if hasattr(self, 'ignore_retry_after_var') else (str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1'),
                     'max_retries': safe_int(self.max_retries_var.get() if hasattr(self, 'max_retries_var') else os.environ.get('MAX_RETRIES', 7), 7),
 
                     'reinforcement_frequency': safe_int(self.reinforcement_freq_var.get(), 10),
@@ -14918,6 +14927,7 @@ Important rules:
                     "READ_TIMEOUT": str(self.config['read_timeout']),
                     "HTTP_POOL_CONNECTIONS": str(self.config['http_pool_connections']),
                     "HTTP_POOL_MAXSIZE": str(self.config['http_pool_maxsize']),
+                    "IGNORE_RETRY_AFTER": '1' if self.config.get('ignore_retry_after', False) else '0',
                     "MAX_RETRIES": str(self.config['max_retries']),
                     "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",

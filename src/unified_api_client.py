@@ -5332,6 +5332,9 @@ class UnifiedClient:
         for attempt in range(max_retries):
             if self._cancelled:
                 raise UnifiedClientError("Operation cancelled")
+            
+            # Toggle to ignore server-provided Retry-After headers
+            ignore_retry_after = os.getenv("IGNORE_RETRY_AFTER", "0") == "1"
             try:
                 if use_session:
                     # Reuse pooled session based on the base URL
@@ -5363,7 +5366,10 @@ class UnifiedClient:
             if status == 429:
                 retry_after_val = resp.headers.get('Retry-After', '')
                 retry_secs = self._parse_retry_after(retry_after_val)
-                wait_time = retry_secs if retry_secs > 0 else api_delay * 10
+                if ignore_retry_after:
+                    wait_time = api_delay * 10
+                else:
+                    wait_time = retry_secs if retry_secs > 0 else api_delay * 10
                 if attempt < max_retries - 1:
                     print(f"{provider} rate limit ({status}), waiting {wait_time}s")
                     waited = 0.0
@@ -5379,6 +5385,8 @@ class UnifiedClient:
             if status in (500, 502, 503, 504) and attempt < max_retries - 1:
                 retry_after_val = resp.headers.get('Retry-After', '')
                 retry_secs = self._parse_retry_after(retry_after_val)
+                if ignore_retry_after:
+                    retry_secs = 0
                 if retry_secs:
                     sleep_for = retry_secs + random.uniform(0, 1)
                 else:
@@ -5626,6 +5634,7 @@ class UnifiedClient:
             'databricks': self._send_openai_provider_router,
             'huggingface': self._send_huggingface,
             'openrouter': self._send_openai_provider_router,  # OpenRouter aggregator
+            'poe': self._send_poe,  # POE platform (restored)
             'electronhub': self._send_electronhub,  # ElectronHub aggregator (restored)
             'fireworks': self._send_openai_provider_router,
             'xai': self._send_openai_provider_router,  # xAI Grok models
@@ -6193,6 +6202,50 @@ class UnifiedClient:
             # This ensures subsequent calls work correctly
             self.model = original_model
  
+    def _parse_poe_tokens(self, key_str: str) -> dict:
+        """Parse POE cookies from a single string.
+        Returns a dict that always includes 'p-b' (required) and may include 'p-lat' and any
+        other cookies present (e.g., 'cf_clearance', '__cf_bm'). Unknown cookies are forwarded as-is.
+        
+        Accepted input formats:
+        - "p-b:AAA|p-lat:BBB"
+        - "p-b=AAA; p-lat=BBB"
+        - Raw cookie header with or without the "Cookie:" prefix
+        - Just the p-b value (long string) when no delimiter is present
+        """
+        import re
+        s = (key_str or "").strip()
+        if s.lower().startswith("cookie:"):
+            s = s.split(":", 1)[1].strip()
+        tokens: dict = {}
+        # Split on | ; , or newlines
+        parts = re.split(r"[|;,\n]+", s)
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if ":" in part:
+                k, v = part.split(":", 1)
+            elif "=" in part:
+                k, v = part.split("=", 1)
+            else:
+                # If no delimiter and p-b not set, treat entire string as p-b
+                if 'p-b' not in tokens and len(part) > 20:
+                    tokens['p-b'] = part
+                continue
+            k = k.strip().lower()
+            v = v.strip()
+            # Normalize key names
+            if k in ("p-b", "p_b", "pb", "p.b"):
+                tokens['p-b'] = v
+            elif k in ("p-lat", "p_lat", "plat", "p.lat"):
+                tokens['p-lat'] = v
+            else:
+                # Forward any additional cookie that looks valid
+                if re.match(r"^[a-z0-9_\-\.]+$", k):
+                    tokens[k] = v
+        return tokens
+
     def _send_poe(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request using poe-api-wrapper"""
         try:
@@ -6202,23 +6255,18 @@ class UnifiedClient:
                 "poe-api-wrapper not installed. Run: pip install poe-api-wrapper"
             )
         
-        # Parse cookies
-        tokens = {}
-        if '|' in self.api_key:
-            for pair in self.api_key.split('|'):
-                if ':' in pair:
-                    k, v = pair.split(':', 1)
-                    tokens[k.strip()] = v.strip()
-        elif ':' in self.api_key:
-            k, v = self.api_key.split(':', 1)
-            tokens[k.strip()] = v.strip()
-        else:
-            tokens['p-b'] = self.api_key.strip()
+        # Parse cookies using robust parser
+        tokens = self._parse_poe_tokens(self.api_key)
+        if 'p-b' not in tokens or not tokens['p-b']:
+            raise UnifiedClientError(
+                "POE tokens missing. Provide cookies as 'p-b:VALUE|p-lat:VALUE' or 'p-b=VALUE; p-lat=VALUE'",
+                error_type="auth_error"
+            )
         
-        # If no p-lat provided, add empty string (some versions of poe-api-wrapper need this)
+        # Some wrapper versions require p-lat present (empty is allowed but may reduce success rate)
         if 'p-lat' not in tokens:
+            logger.info("No p-lat cookie provided; proceeding without it")
             tokens['p-lat'] = ''
-            logger.info("No p-lat cookie provided, using empty string")
         
         logger.info(f"Tokens being sent: p-b={len(tokens.get('p-b', ''))} chars, p-lat={len(tokens.get('p-lat', ''))} chars")
         
@@ -6267,6 +6315,9 @@ class UnifiedClient:
             # Get the final text
             final_text = chunk.get('text', full_response) if 'chunk' in locals() else full_response
             
+            if not final_text:
+                raise UnifiedClientError("POE returned empty response", error_type="empty")
+            
             return UnifiedResponse(
                 content=final_text,
                 finish_reason="stop",
@@ -6277,16 +6328,16 @@ class UnifiedClient:
             print(f"Poe API error details: {str(e)}")
             # Check for specific errors
             error_str = str(e).lower()
-            if "rate limit" in error_str:
+            if "403" in error_str or "forbidden" in error_str or "auth" in error_str or "unauthorized" in error_str:
+                raise UnifiedClientError(
+                    "POE authentication failed (403). Your cookies may be invalid or expired. "
+                    "Copy fresh cookies (p-b and p-lat) from an active poe.com session.",
+                    error_type="auth_error"
+                )
+            if "rate limit" in error_str or "429" in error_str:
                 raise UnifiedClientError(
                     "POE rate limit exceeded. Please wait before trying again.",
                     error_type="rate_limit"
-                )
-            elif "auth" in error_str or "unauthorized" in error_str:
-                raise UnifiedClientError(
-                    "POE authentication failed. Your cookies may be expired. "
-                    "Please get fresh cookies from poe.com.",
-                    error_type="auth_error"
                 )
             raise UnifiedClientError(f"Poe API error: {e}")
             
@@ -8318,22 +8369,16 @@ class UnifiedClient:
                 "poe-api-wrapper not installed. Run: pip install poe-api-wrapper"
             )
         
-        # Parse cookies (same as _send_poe)
-        tokens = {}
-        if '|' in self.api_key:
-            for pair in self.api_key.split('|'):
-                if ':' in pair:
-                    k, v = pair.split(':', 1)
-                    tokens[k.strip()] = v.strip()
-        elif ':' in self.api_key:
-            k, v = self.api_key.split(':', 1)
-            tokens[k.strip()] = v.strip()
-        else:
-            tokens['p-b'] = self.api_key.strip()
-        
+        # Parse cookies using robust parser
+        tokens = self._parse_poe_tokens(self.api_key)
+        if 'p-b' not in tokens or not tokens['p-b']:
+            raise UnifiedClientError(
+                "POE tokens missing. Provide cookies as 'p-b:VALUE|p-lat:VALUE' or 'p-b=VALUE; p-lat=VALUE'",
+                error_type="auth_error"
+            )
         if 'p-lat' not in tokens:
             tokens['p-lat'] = ''
-            logger.info("No p-lat cookie provided, using empty string")
+            logger.info("No p-lat cookie provided; proceeding without it")
         
         logger.info(f"Tokens being sent for image: p-b={len(tokens.get('p-b', ''))} chars, p-lat={len(tokens.get('p-lat', ''))} chars")
         
