@@ -1046,6 +1046,13 @@ class UnifiedClient:
                     print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
+                # Release previous thread assignment to avoid stale usage tracking
+                if hasattr(self._api_key_pool, 'release_thread_assignment'):
+                    try:
+                        self._api_key_pool.release_thread_assignment(thread_id)
+                    except Exception:
+                        pass
+                
                 # Get a key using thread-safe method with timeout
                 key_info = None
                 
@@ -2934,6 +2941,18 @@ class UnifiedClient:
         # Use appropriate context default
         if context is None:
             context = 'image_translation' if is_image_request else 'translation'
+        
+        # Always ensure per-request key assignment/rotation for multi-key mode
+        # This guarantees forced rotation when rotation_frequency == 1
+        if getattr(self, '_multi_key_mode', False):
+            try:
+                self._ensure_thread_client()
+            except UnifiedClientError:
+                # Propagate known client errors
+                raise
+            except Exception as e:
+                # Normalize unexpected failures
+                raise UnifiedClientError(f"Failed to acquire API key for thread: {e}", error_type="no_keys")
         
         # Handle refactored mode with disabled internal retry
         if getattr(self, '_disable_internal_retry', False):
