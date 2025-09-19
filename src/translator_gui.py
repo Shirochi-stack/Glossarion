@@ -10148,123 +10148,94 @@ Important rules:
                 }
             ]
             
-            # Create mode cards
-            for idx, mode in enumerate(mode_data):
-                # Main card frame with initial background
-                card = tk.Frame(modes_container, 
-                               bg=mode["bg_color"],
-                               highlightbackground=mode["border_color"],
-                               highlightthickness=2,
-                               relief='flat')
-                card.grid(row=0, column=idx, padx=10, pady=5, sticky='nsew')  # Minimal padding
-                modes_container.columnconfigure(idx, weight=1)
+            # Restore original single-row layout (four cards across)
+            if selected_mode_value is None:
+                # Make each column share space evenly
+                for col in range(len(mode_data)):
+                    modes_container.columnconfigure(col, weight=1)
+                # Keep row height stable
+                modes_container.rowconfigure(0, weight=0)
                 
-                # Configure row to not expand too much
-                modes_container.rowconfigure(0, weight=0)  # Don't expand row vertically
-                
-                # Content frame
-                content_frame = tk.Frame(card, bg=mode["bg_color"], cursor='hand2')
-                content_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)  # Further reduced padding
-                
-                # Emoji
-                emoji_label = tk.Label(content_frame, text=mode["emoji"], 
-                                      font=('Arial', 48), bg=mode["bg_color"])  # Further reduced
-                emoji_label.pack(pady=(0, 5))  # Minimal padding
-                
-                # Title
-                title_label = tk.Label(content_frame, text=mode["title"], 
-                                      font=('Arial', 24, 'bold'),  # Further reduced
-                                      fg='white', bg=mode["bg_color"])
-                title_label.pack()
-                
-                # Subtitle
-                tk.Label(content_frame, text=mode["subtitle"], 
-                        font=('Arial', 14), fg=mode["accent_color"],  # Further reduced
-                        bg=mode["bg_color"]).pack(pady=(3, 10))  # Minimal padding
-                
-                # Features
-                features_frame = tk.Frame(content_frame, bg=mode["bg_color"])
-                features_frame.pack(fill=tk.X)
-                
-                for feature in mode["features"]:
-                    feature_label = tk.Label(features_frame, text=feature, 
-                                           font=('Arial', 11), fg='#e0e0e0',  # Further reduced from 12
-                                           bg=mode["bg_color"], justify=tk.LEFT)
-                    feature_label.pack(anchor=tk.W, pady=1)  # Minimal padding
-                
-                # Recommendation badge if present
-                if mode["recommendation"]:
-                    rec_frame = tk.Frame(content_frame, bg=mode["accent_color"])
-                    rec_frame.pack(pady=(10, 0), fill=tk.X)  # Further reduced
+                for idx, mi in enumerate(mode_data):
+                    # Main card frame with initial background
+                    card = tk.Frame(
+                        modes_container,
+                        bg=mi["bg_color"],
+                        highlightbackground=mi["border_color"],
+                        highlightthickness=2,
+                        relief='flat'
+                    )
+                    card.grid(row=0, column=idx, padx=10, pady=5, sticky='nsew')
                     
-                    rec_label = tk.Label(rec_frame, text=mode["recommendation"],
-                                       font=('Arial', 11, 'bold'),  # Further reduced
-                                       fg='white', bg=mode["accent_color"],
-                                       padx=8, pady=4)  # Minimal padding
-                    rec_label.pack()
-                
-                # Click handler
-                def make_click_handler(mode_value):
-                    def handler(event=None):
-                        nonlocal selected_mode_value
-                        selected_mode_value = mode_value
-                        mode_dialog.destroy()
-                    return handler
-                
-                click_handler = make_click_handler(mode["value"])
-                
-                # Hover effects function
-                def create_hover_handlers(card_widget, content_widget, mode_info, all_widgets):
-                    def on_enter(event=None):
-                        # Apply hover color to ALL widgets
-                        for widget in all_widgets:
-                            try:
-                                if hasattr(widget, 'config'):
-                                    widget.config(bg=mode_info["hover_color"])
-                            except:
-                                pass
+                    # Content frame
+                    content_frame = tk.Frame(card, bg=mi["bg_color"], cursor='hand2')
+                    content_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
                     
-                    def on_leave(event=None):
-                        # Restore original color to ALL widgets
-                        for widget in all_widgets:
-                            try:
-                                if hasattr(widget, 'config'):
-                                    widget.config(bg=mode_info["bg_color"])
-                            except:
-                                pass
+                    # Emoji
+                    emoji_label = tk.Label(content_frame, text=mi["emoji"], font=('Arial', 48), bg=mi["bg_color"]) 
+                    emoji_label.pack(pady=(0, 5))
                     
-                    return on_enter, on_leave
-
-                # Collect ALL widgets that need background color changes
-                all_widgets = []
-                all_widgets.append(emoji_label)
-                all_widgets.append(title_label)
-                all_widgets.append(content_frame)
-                all_widgets.extend([child for child in content_frame.winfo_children() if isinstance(child, (tk.Label, tk.Frame))])
-                all_widgets.append(features_frame)
-                all_widgets.extend([child for child in features_frame.winfo_children() if isinstance(child, tk.Label)])
-                if mode["recommendation"]:
-                    all_widgets.append(rec_frame)
-                    all_widgets.append(rec_label)
-
-                # Get handlers for this specific card with ALL widgets captured
-                on_enter, on_leave = create_hover_handlers(card, content_frame, mode, all_widgets)
-
-                # Bind events to all interactive elements
-                interactive_widgets = [card, content_frame, emoji_label, title_label, features_frame] + list(features_frame.winfo_children())
-                for widget in interactive_widgets:
-                    widget.bind("<Enter>", on_enter)
-                    widget.bind("<Leave>", on_leave)
-                    widget.bind("<Button-1>", click_handler)
-                    if hasattr(widget, 'config'):
-                        widget.config(cursor='hand2')
-                
-                # Make features clickable too
-                for child in features_frame.winfo_children():
-                    child.bind("<Enter>", on_enter)
-                    child.bind("<Leave>", on_leave)
-                    child.bind("<Button-1>", click_handler)
-                    child.config(cursor='hand2')
+                    # Title
+                    title_label = tk.Label(content_frame, text=mi["title"], font=('Arial', 24, 'bold'), fg='white', bg=mi["bg_color"]) 
+                    title_label.pack()
+                    
+                    # Subtitle
+                    tk.Label(content_frame, text=mi["subtitle"], font=('Arial', 14), fg=mi["accent_color"], bg=mi["bg_color"]).pack(pady=(3, 10))
+                    
+                    # Features
+                    features_frame = tk.Frame(content_frame, bg=mi["bg_color"]) 
+                    features_frame.pack(fill=tk.X)
+                    for feature in mi["features"]:
+                        tk.Label(features_frame, text=feature, font=('Arial', 11), fg='#e0e0e0', bg=mi["bg_color"], justify=tk.LEFT).pack(anchor=tk.W, pady=1)
+                    
+                    # Recommendation badge if present
+                    rec_frame = None
+                    rec_label = None
+                    if mi["recommendation"]:
+                        rec_frame = tk.Frame(content_frame, bg=mi["accent_color"]) 
+                        rec_frame.pack(pady=(10, 0), fill=tk.X)
+                        rec_label = tk.Label(rec_frame, text=mi["recommendation"], font=('Arial', 11, 'bold'), fg='white', bg=mi["accent_color"], padx=8, pady=4)
+                        rec_label.pack()
+                    
+                    # Click handler
+                    def make_click_handler(mode_value):
+                        def handler(event=None):
+                            nonlocal selected_mode_value
+                            selected_mode_value = mode_value
+                            mode_dialog.destroy()
+                        return handler
+                    click_handler = make_click_handler(mi["value"]) 
+                    
+                    # Hover effects for this card only
+                    def create_hover_handlers(md, widgets):
+                        def on_enter(event=None):
+                            for w in widgets:
+                                try:
+                                    w.config(bg=md["hover_color"])
+                                except Exception:
+                                    pass
+                        def on_leave(event=None):
+                            for w in widgets:
+                                try:
+                                    w.config(bg=md["bg_color"])
+                                except Exception:
+                                    pass
+                        return on_enter, on_leave
+                    
+                    all_widgets = [content_frame, emoji_label, title_label, features_frame]
+                    all_widgets += [child for child in features_frame.winfo_children() if isinstance(child, tk.Label)]
+                    if rec_frame is not None:
+                        all_widgets += [rec_frame, rec_label]
+                    on_enter, on_leave = create_hover_handlers(mi, all_widgets)
+                    
+                    for widget in [card, content_frame, emoji_label, title_label, features_frame] + list(features_frame.winfo_children()):
+                        widget.bind("<Enter>", on_enter)
+                        widget.bind("<Leave>", on_leave)
+                        widget.bind("<Button-1>", click_handler)
+                        try:
+                            widget.config(cursor='hand2')
+                        except Exception:
+                            pass
             
             if selected_mode_value is None:
                 # Add separator line before buttons
@@ -10654,10 +10625,12 @@ Important rules:
                     epub_base = os.path.splitext(os.path.basename(epub_path))[0]
                     # Build candidate output folders where scripts typically live
                     script_dir = os.path.dirname(os.path.abspath(__file__))
+                    project_root = os.path.dirname(script_dir)  # one level up from src
                     candidates = [
-                        os.path.join(os.getcwd(), epub_base),  # current working directory
+                        os.path.join(os.getcwd(), epub_base),                      # current working directory
                         os.path.join(getattr(self, 'base_dir', os.getcwd()), epub_base),  # app base dir
-                        os.path.join(script_dir, epub_base)  # physical script location
+                        os.path.join(script_dir, epub_base),                      # src directory
+                        os.path.join(project_root, epub_base)                     # project root (same folder as scripts)
                     ]
                     for c in candidates:
                         if os.path.isdir(c):
@@ -11958,65 +11931,111 @@ Important rules:
             sys.exit(0)
 
     def append_log(self, message):
-       """Append message to log with special formatting for memory"""
+       """Append message to log with safety checks (fallback to print if GUI is gone)."""
        def _append():
-           at_bottom = self.log_text.yview()[1] >= 0.98
-           is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
-           
-           if is_memory:
-               self.log_text.insert(tk.END, message + "\n", "memory")
-               if "memory" not in self.log_text.tag_names():
-                   self.log_text.tag_config("memory", foreground="#4CAF50", font=('TkDefaultFont', 10, 'italic'))
-           else:
-               self.log_text.insert(tk.END, message + "\n")
-           
-           if at_bottom:
-               self.log_text.see(tk.END)
+           try:
+               # Bail out if the widget no longer exists
+               if not hasattr(self, 'log_text'):
+                   print(message)
+                   return
+               try:
+                   exists = bool(self.log_text.winfo_exists())
+               except Exception:
+                   exists = False
+               if not exists:
+                   print(message)
+                   return
+               
+               at_bottom = False
+               try:
+                   at_bottom = self.log_text.yview()[1] >= 0.98
+               except Exception:
+                   at_bottom = False
+               
+               is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
+               
+               if is_memory:
+                   self.log_text.insert(tk.END, message + "\n", "memory")
+                   if "memory" not in self.log_text.tag_names():
+                       self.log_text.tag_config("memory", foreground="#4CAF50", font=('TkDefaultFont', 10, 'italic'))
+               else:
+                   self.log_text.insert(tk.END, message + "\n")
+               
+               if at_bottom:
+                   self.log_text.see(tk.END)
+           except Exception:
+               # As a last resort, print to stdout to avoid crashing callbacks
+               try:
+                   print(message)
+               except Exception:
+                   pass
        
        if threading.current_thread() is threading.main_thread():
            _append()
        else:
-           self.master.after(0, _append)
+           try:
+               self.master.after(0, _append)
+           except Exception:
+               # If the master window is gone, just print
+               try:
+                   print(message)
+               except Exception:
+                   pass
 
     def update_status_line(self, message, progress_percent=None):
-       """Update a status line in the log"""
+       """Update a status line in the log safely (fallback to print)."""
        def _update():
-           content = self.log_text.get("1.0", "end-1c")
-           lines = content.split('\n')
-           
-           status_markers = ['⏳', '📊', '✅', '❌', '🔄']
-           is_status_line = False
-           
-           if lines and any(lines[-1].strip().startswith(marker) for marker in status_markers):
-               is_status_line = True
-           
-           if progress_percent is not None:
-               bar_width = 10
-               filled = int(bar_width * progress_percent / 100)
-               bar = "▓" * filled + "░" * (bar_width - filled)
-               status_msg = f"⏳ {message} [{bar}] {progress_percent:.1f}%"
-           else:
-               status_msg = f"📊 {message}"
-           
-           if is_status_line and lines[-1].strip().startswith(('⏳', '📊')):
-               start_pos = f"{len(lines)}.0"
-               self.log_text.delete(f"{start_pos} linestart", "end")
-               if len(lines) > 1:
-                   self.log_text.insert("end", "\n" + status_msg)
+           try:
+               if not hasattr(self, 'log_text') or not self.log_text.winfo_exists():
+                   print(message)
+                   return
+               content = self.log_text.get("1.0", "end-1c")
+               lines = content.split('\n')
+               
+               status_markers = ['⏳', '📊', '✅', '❌', '🔄']
+               is_status_line = False
+               
+               if lines and any(lines[-1].strip().startswith(marker) for marker in status_markers):
+                   is_status_line = True
+               
+               if progress_percent is not None:
+                   bar_width = 10
+                   filled = int(bar_width * progress_percent / 100)
+                   bar = "▓" * filled + "░" * (bar_width - filled)
+                   status_msg = f"⏳ {message} [{bar}] {progress_percent:.1f}%"
                else:
-                   self.log_text.insert("end", status_msg)
-           else:
-               if content and not content.endswith('\n'):
-                   self.log_text.insert("end", "\n" + status_msg)
+                   status_msg = f"📊 {message}"
+               
+               if is_status_line and lines[-1].strip().startswith(('⏳', '📊')):
+                   start_pos = f"{len(lines)}.0"
+                   self.log_text.delete(f"{start_pos} linestart", "end")
+                   if len(lines) > 1:
+                       self.log_text.insert("end", "\n" + status_msg)
+                   else:
+                       self.log_text.insert("end", status_msg)
                else:
-                   self.log_text.insert("end", status_msg + "\n")
-           
-           self.log_text.see("end")
+                   if content and not content.endswith('\n'):
+                       self.log_text.insert("end", "\n" + status_msg)
+                   else:
+                       self.log_text.insert("end", status_msg + "\n")
+               
+               self.log_text.see("end")
+           except Exception:
+               try:
+                   print(message)
+               except Exception:
+                   pass
        
        if threading.current_thread() is threading.main_thread():
            _update()
        else:
-           self.master.after(0, _update)
+           try:
+               self.master.after(0, _update)
+           except Exception:
+               try:
+                   print(message)
+               except Exception:
+                   pass
 
     def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="", 
                            overall_current=None, overall_total=None, extra_info=None):
