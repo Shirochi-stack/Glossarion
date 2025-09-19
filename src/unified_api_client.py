@@ -3286,13 +3286,18 @@ class UnifiedClient:
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
                     return fallback_content, 'error'
+                
+                # Check for retryable server errors (500, 502, 503, 504)
                 http_status = getattr(e, 'http_status', None)
-                if http_status == 500 or "500" in error_str or "api_error" in error_str:
+                retryable_errors = ["500", "502", "503", "504", "api_error", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]
+                
+                if (http_status in [500, 502, 503, 504] or 
+                    any(err in error_str for err in retryable_errors)):
                     if attempt < internal_retries - 1:
                         # Exponential backoff with jitter
                         delay = self._compute_backoff(attempt, base_delay, 60)  # Max 60 seconds
                         
-                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        print(f"🔄 Server error ({http_status or 'API error'}) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
                         # Wait with cancellation check
                         wait_start = time.time()
@@ -3300,15 +3305,46 @@ class UnifiedClient:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)  # Check every 0.5 seconds
-                        continue
+                        continue  # Retry the attempt
                     else:
-                        print(f"❌ Server error (500) - exhausted {internal_retries} retries")
+                        print(f"❌ Server error ({http_status or 'API error'}) - exhausted {internal_retries} retries")
                 
-                # Save failed request and return fallback
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
+                # Check for other retryable errors (timeouts, connection issues)
+                timeout_errors = ["timeout", "timed out", "connection reset", "connection aborted", "connection error", "network error"]
+                if any(err in error_str for err in timeout_errors):
+                    if attempt < internal_retries - 1:
+                        delay = self._compute_backoff(attempt, base_delay/2, 30)  # Shorter delay for timeouts
+                        
+                        print(f"🔄 Network/timeout error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        continue  # Retry the attempt
+                    else:
+                        print(f"❌ Network/timeout error - exhausted {internal_retries} retries")
+                
+                # If we get here, this is the last attempt or a non-retryable error
+                # Save failed request and return fallback only if we've exhausted retries
+                if attempt >= internal_retries - 1:
+                    print(f"❌ Final attempt failed, returning fallback response")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                else:
+                    # For other errors, try again with a short delay
+                    delay = self._compute_backoff(attempt, base_delay/4, 15)  # Short delay for other errors
+                    print(f"🔄 API error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries}): {str(e)[:100]}")
+                    
+                    wait_start = time.time()
+                    while time.time() - wait_start < delay:
+                        if self._cancelled:
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        time.sleep(0.5)
+                    continue  # Retry the attempt
                 
             except Exception as e:
                 # COMPREHENSIVE ERROR HANDLING FOR NoneType and other issues
@@ -3362,42 +3398,56 @@ class UnifiedClient:
                     fallback_content = self._handle_empty_result(messages, context, str(e))
                     return fallback_content, 'error'
                 
-                # Check for 500 errors in unexpected exceptions
-                if "500" in error_str or "internal server error" in error_str:
+                # Check for retryable server errors
+                retryable_server_errors = ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]
+                if any(err in error_str for err in retryable_server_errors):
                     if attempt < internal_retries - 1:
                         # Exponential backoff with jitter
                         delay = self._compute_backoff(attempt, base_delay, 60)  # Max 60 seconds
                         
-                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        print(f"🔄 Server error - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
-                        continue
+                        continue  # Retry the attempt
                 
                 # Check for other transient errors with exponential backoff
-                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
+                transient_errors = ["connection reset", "connection aborted", "connection error", "network error", "timeout", "timed out"]
                 if any(err in error_str for err in transient_errors):
                     if attempt < internal_retries - 1:
                         # Use a slightly less aggressive backoff for transient errors
                         delay = self._compute_backoff(attempt, base_delay/2, 30)  # Max 30 seconds
                         
-                        print(f"🔄 Transient error - retrying in {delay:.1f}s")
+                        print(f"🔄 Transient error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
                         wait_start = time.time()
                         while time.time() - wait_start < delay:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
-                        continue
+                        continue  # Retry the attempt
                 
-                # Save failed request and return fallback for other errors
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
+                # If we get here, either we've exhausted retries or it's a non-retryable error
+                if attempt >= internal_retries - 1:
+                    print(f"❌ Unexpected error - final attempt failed, returning fallback")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                else:
+                    # For other unexpected errors, try again with a short delay
+                    delay = self._compute_backoff(attempt, base_delay/4, 15)  # Short delay
+                    print(f"🔄 Unexpected error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries}): {str(e)[:100]}")
+                    
+                    wait_start = time.time()
+                    while time.time() - wait_start < delay:
+                        if self._cancelled:
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        time.sleep(0.5)
+                    continue  # Retry the attempt
 
                     
     def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
