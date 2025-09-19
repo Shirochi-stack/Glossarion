@@ -3771,7 +3771,7 @@ def process_html_file_batch(args):
     return batch_results
 
 
-def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None):
+def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
     """
@@ -3863,6 +3863,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Get HTML files
     html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".html")])
+    
+    # If specific files were selected, filter to those (by basename)
+    if selected_files:
+        try:
+            selected_basenames = {os.path.basename(p) for p in selected_files}
+            html_files = [f for f in html_files if f in selected_basenames]
+            log(f"📄 Limited scan to {len(html_files)} selected file(s)")
+        except Exception:
+            pass
     log(f"🔍 Found {len(html_files)} HTML files. Starting parallel scan...")
     
     # Determine number of workers

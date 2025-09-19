@@ -2153,7 +2153,11 @@ Recent translations to summarize:
             ('append_glossary_var', 'append_glossary', False),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
+            # NEW: QA scanning helpers
+            ('qa_auto_search_output_var', 'qa_auto_search_output', True),
+            ('scan_phase_enabled_var', 'scan_phase_enabled', False),
             ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', True),
+            # Keep existing variables intact
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),
             # REMOVED: ('comprehensive_extraction_var', 'comprehensive_extraction', False),
@@ -2196,7 +2200,9 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
-            ('compression_factor_var', 'compression_factor', '1.0') 
+            ('compression_factor_var', 'compression_factor', '1.0'),
+            # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
+            ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan') 
         ]
         
         for var_name, key, default in str_vars:
@@ -2251,6 +2257,18 @@ Recent translations to summarize:
         self.on_profile_select()
         self.append_log("🚀 Glossarion v4.4.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
+        
+        # Restore last selected input files if available
+        try:
+            last_files = self.config.get('last_input_files', []) if hasattr(self, 'config') else []
+            if isinstance(last_files, list) and last_files:
+                existing = [p for p in last_files if isinstance(p, str) and os.path.exists(p)]
+                if existing:
+                    # Populate the entry and internal state using shared handler
+                    self._handle_file_selection(existing)
+                    self.append_log(f"📁 Restored last selection: {len(existing)} file(s)")
+        except Exception:
+            pass
     
     def create_file_section(self):
         """Create file selection section with multi-file support"""
@@ -7445,6 +7463,16 @@ Provide translations in the same numbered format."""
             # Now run the actual translation
             self.run_translation_direct()
             
+            # If scanning phase toggle is enabled, launch scanner after translation
+            try:
+                if getattr(self, 'scan_phase_enabled_var', None) and self.scan_phase_enabled_var.get():
+                    mode = self.scan_phase_mode_var.get() if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
+                    self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode (post-translation)...")
+                    # Non-interactive: skip dialogs and use auto-search
+                    self.master.after(0, lambda: self.run_qa_scan(mode_override=mode, non_interactive=True))
+            except Exception:
+                pass
+            
         except Exception as e:
             self.append_log(f"❌ Translation error: {e}")
             import traceback
@@ -9879,7 +9907,7 @@ Important rules:
             self.master.after(0, self.update_run_button)
 
                 
-    def run_qa_scan(self):
+    def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
             """Run QA scan with mode selection and settings"""
             # Create a small loading window with icon
             loading_window = self.wm.create_simple_dialog(
@@ -10001,43 +10029,47 @@ Important rules:
             print(f"[DEBUG] QA Settings: {qa_settings}")
             print(f"[DEBUG] Word count check enabled: {qa_settings.get('check_word_count_ratio', False)}")
             
-            # ALWAYS show mode selection dialog with settings
-            mode_dialog = self.wm.create_simple_dialog(
-                self.master,
-                "Select QA Scanner Mode",
-                width=1500,  # Optimal width for 4 cards
-                height=650,  # Compact height to ensure buttons are visible
-                hide_initially=True
-            )
+            # Optionally skip mode dialog if a mode override was provided (e.g., scanning phase)
+            selected_mode_value = mode_override if mode_override else None
+            if selected_mode_value is None:
+                # Show mode selection dialog with settings
+                mode_dialog = self.wm.create_simple_dialog(
+                    self.master,
+                    "Select QA Scanner Mode",
+                    width=1500,  # Optimal width for 4 cards
+                    height=650,  # Compact height to ensure buttons are visible
+                    hide_initially=True
+                )
             
-            # Set minimum size to prevent dialog from being too small
-            mode_dialog.minsize(1200, 600)
-            
-            # Variables
-            selected_mode_value = None
-            
-            # Main container with constrained expansion
-            main_container = tk.Frame(mode_dialog)
-            main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)  # Add padding
-            
-            # Content with padding
-            main_frame = tk.Frame(main_container, padx=30, pady=20)  # Reduced padding
-            main_frame.pack(fill=tk.X)  # Only fill horizontally, don't expand
-            
-            # Title with subtitle
-            title_frame = tk.Frame(main_frame)
-            title_frame.pack(pady=(0, 15))  # Further reduced
-            
-            tk.Label(title_frame, text="Select Detection Mode", 
-                     font=('Arial', 28, 'bold'), fg='#f0f0f0').pack()  # Further reduced
-            tk.Label(title_frame, text="Choose how sensitive the duplicate detection should be",
-                     font=('Arial', 16), fg='#d0d0d0').pack(pady=(3, 0))  # Further reduced
-            
-            # Mode cards container - don't expand vertically to leave room for buttons
-            modes_container = tk.Frame(main_frame)
-            modes_container.pack(fill=tk.X, pady=(0, 10))  # Reduced bottom padding
-                    
-            mode_data = [
+            if selected_mode_value is None:
+                # Set minimum size to prevent dialog from being too small
+                mode_dialog.minsize(1200, 600)
+                
+                # Variables
+                # selected_mode_value already set above
+                
+                # Main container with constrained expansion
+                main_container = tk.Frame(mode_dialog)
+                main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)  # Add padding
+                
+                # Content with padding
+                main_frame = tk.Frame(main_container, padx=30, pady=20)  # Reduced padding
+                main_frame.pack(fill=tk.X)  # Only fill horizontally, don't expand
+                
+                # Title with subtitle
+                title_frame = tk.Frame(main_frame)
+                title_frame.pack(pady=(0, 15))  # Further reduced
+                
+                tk.Label(title_frame, text="Select Detection Mode", 
+                         font=('Arial', 28, 'bold'), fg='#f0f0f0').pack()  # Further reduced
+                tk.Label(title_frame, text="Choose how sensitive the duplicate detection should be",
+                         font=('Arial', 16), fg='#d0d0d0').pack(pady=(3, 0))  # Further reduced
+                
+                # Mode cards container - don't expand vertically to leave room for buttons
+                modes_container = tk.Frame(main_frame)
+                modes_container.pack(fill=tk.X, pady=(0, 10))  # Reduced bottom padding
+                        
+                mode_data = [
                 {
                     "value": "ai-hunter",
                     "emoji": "🤖",
@@ -10234,60 +10266,73 @@ Important rules:
                     child.bind("<Button-1>", click_handler)
                     child.config(cursor='hand2')
             
-            # Add separator line before buttons
-            separator = tk.Frame(main_frame, height=1, bg='#cccccc')  # Thinner separator
-            separator.pack(fill=tk.X, pady=(10, 0))
-            
-            # Add settings button at the bottom
-            button_frame = tk.Frame(main_frame)
-            button_frame.pack(fill=tk.X, pady=(10, 5))  # Reduced padding
-            
-            # Create inner frame for centering buttons
-            button_inner = tk.Frame(button_frame)
-            button_inner.pack()
-            
-            def show_qa_settings():
-                """Show QA Scanner settings dialog"""
-                self.show_qa_scanner_settings(mode_dialog, qa_settings)
-            
-            settings_btn = tb.Button(
-                button_inner,
-                text="⚙️  Scanner Settings",  # Added extra space
-                command=show_qa_settings,
-                bootstyle="info-outline",  # Changed to be more visible
-                width=18,  # Slightly smaller
-                padding=(8, 10)  # Reduced padding
-            )
-            settings_btn.pack(side=tk.LEFT, padx=10)
-            
-            cancel_btn = tb.Button(
-                button_inner,
-                text="Cancel",
-                command=lambda: mode_dialog.destroy(),
-                bootstyle="danger",  # Changed from outline to solid
-                width=12,  # Smaller
-                padding=(8, 10)  # Reduced padding
-            )
-            cancel_btn.pack(side=tk.LEFT, padx=10)
-            
-            # Handle window close (X button)
-            def on_close():
-                nonlocal selected_mode_value
-                selected_mode_value = None
-                mode_dialog.destroy()
-            
-            mode_dialog.protocol("WM_DELETE_WINDOW", on_close)
-            
-            # Show dialog
-            mode_dialog.deiconify()
-            mode_dialog.update_idletasks()  # Force geometry update
-            mode_dialog.wait_window()
-            
-            # Check if user selected a mode
             if selected_mode_value is None:
-                self.append_log("⚠️ QA scan canceled.")
-                return
+                # Add separator line before buttons
+                separator = tk.Frame(main_frame, height=1, bg='#cccccc')  # Thinner separator
+                separator.pack(fill=tk.X, pady=(10, 0))
+                
+                # Add settings button at the bottom
+                button_frame = tk.Frame(main_frame)
+                button_frame.pack(fill=tk.X, pady=(10, 5))  # Reduced padding
+                
+                # Create inner frame for centering buttons
+                button_inner = tk.Frame(button_frame)
+                button_inner.pack()
+                
+                def show_qa_settings():
+                    """Show QA Scanner settings dialog"""
+                    self.show_qa_scanner_settings(mode_dialog, qa_settings)
+                
+                settings_btn = tb.Button(
+                    button_inner,
+                    text="⚙️  Scanner Settings",  # Added extra space
+                    command=show_qa_settings,
+                    bootstyle="info-outline",  # Changed to be more visible
+                    width=18,  # Slightly smaller
+                    padding=(8, 10)  # Reduced padding
+                )
+                settings_btn.pack(side=tk.LEFT, padx=10)
+                
+                # Auto-search checkbox next to Scanner Settings
+                if not hasattr(self, 'qa_auto_search_output_var'):
+                    self.qa_auto_search_output_var = tk.BooleanVar(value=self.config.get('qa_auto_search_output', True))
+                tb.Checkbutton(
+                    button_inner,
+                    text="Auto-search output folder",
+                    variable=self.qa_auto_search_output_var,
+                    bootstyle="round-toggle"
+                ).pack(side=tk.LEFT, padx=10)
+                
+                cancel_btn = tb.Button(
+                    button_inner,
+                    text="Cancel",
+                    command=lambda: mode_dialog.destroy(),
+                    bootstyle="danger",  # Changed from outline to solid
+                    width=12,  # Smaller
+                    padding=(8, 10)  # Reduced padding
+                )
+                cancel_btn.pack(side=tk.LEFT, padx=10)
+                
+                # Handle window close (X button)
+                def on_close():
+                    nonlocal selected_mode_value
+                    selected_mode_value = None
+                    mode_dialog.destroy()
+                
+                mode_dialog.protocol("WM_DELETE_WINDOW", on_close)
+                
+                # Show dialog
+                mode_dialog.deiconify()
+                mode_dialog.update_idletasks()  # Force geometry update
+                mode_dialog.wait_window()
+                
+                # Check if user selected a mode
+                if selected_mode_value is None:
+                    self.append_log("⚠️ QA scan canceled.")
+                    return
 
+            # End of optional mode dialog
+            
             # Show custom settings dialog if custom mode is selected
 
             # Show custom settings dialog if custom mode is selected
@@ -10589,8 +10634,49 @@ Important rules:
                         qa_settings = qa_settings.copy()
                         qa_settings['check_word_count_ratio'] = False
                         self.append_log("ℹ️ Proceeding without word count analysis.")
-            # Now get the folder
-            folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+            # Persist latest auto-search preference
+            try:
+                self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_var.get())
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+            
+            # Try to auto-detect output folder based on EPUB
+            folder_path = None
+            auto_search_enabled = self.config.get('qa_auto_search_output', True)
+            try:
+                if hasattr(self, 'qa_auto_search_output_var'):
+                    auto_search_enabled = bool(self.qa_auto_search_output_var.get())
+            except Exception:
+                pass
+            if auto_search_enabled and epub_path:
+                try:
+                    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                    # Build candidate output folders where scripts typically live
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    candidates = [
+                        os.path.join(os.getcwd(), epub_base),  # current working directory
+                        os.path.join(getattr(self, 'base_dir', os.getcwd()), epub_base),  # app base dir
+                        os.path.join(script_dir, epub_base)  # physical script location
+                    ]
+                    for c in candidates:
+                        if os.path.isdir(c):
+                            folder_path = c
+                            self.append_log(f"📁 Auto-selected output folder: {folder_path}")
+                            break
+                except Exception:
+                    folder_path = None
+            
+            # Fallback behavior
+            if not folder_path:
+                if auto_search_enabled:
+                    # Do NOT prompt when auto-search is enabled; cancel politely
+                    self.append_log("⚠️ Auto-search enabled but no matching output folder found — canceling scan")
+                    return
+                if non_interactive:
+                    self.append_log("⚠️ Scanning phase: No matching output folder found — skipping scan")
+                    return
+                folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
             if not folder_path:
                 self.append_log("⚠️ QA scan canceled.")
                 return
@@ -10657,6 +10743,28 @@ Important rules:
                         self.append_log(f"⚠️ Warning: EPUB/folder name mismatch - {epub_name} vs {folder_name}")
             
             mode = selected_mode_value
+            # Optional: limit to specific HTML files
+            selected_files = None
+            try:
+                if preselected_files:
+                    selected_files = list(preselected_files)
+                elif (not non_interactive) and (not auto_search_enabled):
+                    choose_files = messagebox.askyesno(
+                        "Select Specific Files?",
+                        "Do you want to choose specific HTML files to scan?\nIf No, all files in the folder will be scanned.",
+                        icon='question'
+                    )
+                    if choose_files:
+                        files = filedialog.askopenfilenames(
+                            title="Select HTML files to scan",
+                            initialdir=folder_path,
+                            filetypes=[("HTML files", "*.html"), ("All files", "*.*")]
+                        )
+                        if files:
+                            selected_files = list(files)
+            except Exception:
+                pass
+            
             self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
             self.stop_requested = False
  
@@ -10716,7 +10824,8 @@ Important rules:
                         stop_flag=lambda: self.stop_requested, 
                         mode=mode,
                         qa_settings=qa_settings,  # Keep existing qa_settings parameter
-                        epub_path=epub_path
+                        epub_path=epub_path,
+                        selected_files=selected_files
                     )
                     
                     # If show_stats is enabled, log cache statistics
@@ -12149,6 +12258,12 @@ Important rules:
         self.selected_files = []
         self.file_path = None
         self.current_file_index = 0
+        # Persist clear state
+        try:
+            self.config['last_input_files'] = []
+            self.save_config(show_message=False)
+        except Exception:
+            pass
         self.append_log("🗑️ Cleared file selection")
 
 
@@ -12182,6 +12297,13 @@ Important rules:
         # Store the list of selected files (using processed paths)
         self.selected_files = processed_paths
         self.current_file_index = 0
+        
+        # Persist last selection to config for next session
+        try:
+            self.config['last_input_files'] = processed_paths
+            self.save_config(show_message=False)
+        except Exception:
+            pass
         
         # Update the entry field
         self.entry_epub.delete(0, tk.END)
@@ -12245,6 +12367,14 @@ Important rules:
             if len(epub_files) == 1:
                 # Single EPUB - auto-load glossary
                 self.auto_load_glossary_for_file(epub_files[0])
+                # Persist EPUB path for QA defaults
+                try:
+                    self.selected_epub_path = epub_files[0]
+                    self.config['last_epub_path'] = epub_files[0]
+                    os.environ['EPUB_PATH'] = epub_files[0]
+                    self.save_config(show_message=False)
+                except Exception:
+                    pass
             elif len(epub_files) > 1:
                 # Multiple EPUBs - clear glossary
                 if hasattr(self, 'auto_loaded_glossary_path'):
@@ -13488,6 +13618,18 @@ Important rules:
         tk.Label(section_frame, text="Number of times to retry failed API requests before giving up.\nApplies to all API providers (OpenAI, Gemini, Anthropic, etc.)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 10))
         
+        # Enable/disable combobox based on toggle
+        def _toggle_scan_mode_state(*args):
+            try:
+                if self.scan_phase_enabled_var.get():
+                    scan_mode_combo.config(state="readonly")
+                else:
+                    scan_mode_combo.config(state="disabled")
+            except Exception:
+                pass
+        _toggle_scan_mode_state()
+        self.scan_phase_enabled_var.trace('w', lambda *a: _toggle_scan_mode_state())
+        
         # Indefinite Rate Limit Retry toggle
         tb.Checkbutton(section_frame, text="Indefinite Rate Limit Retry", 
                       variable=self.indefinite_rate_limit_retry_var,
@@ -13945,6 +14087,22 @@ Important rules:
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))    
                 
         # Add separator before API safety settings
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
+
+        # Post-Translation Scanning Phase
+        scan_phase_frame = tk.Frame(section_frame)
+        scan_phase_frame.pack(anchor=tk.W, fill=tk.X, pady=(10, 0))
+        
+        tb.Checkbutton(scan_phase_frame, text="Enable post-translation Scanning phase",
+                      variable=self.scan_phase_enabled_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        # Mode selector
+        tk.Label(scan_phase_frame, text="Mode:").pack(side=tk.LEFT, padx=(15, 5))
+        scan_modes = ["quick-scan", "aggressive", "ai-hunter", "custom"]
+        scan_mode_combo = ttk.Combobox(scan_phase_frame, textvariable=self.scan_phase_mode_var, values=scan_modes, state="readonly", width=12)
+        scan_mode_combo.pack(side=tk.LEFT)
+        
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
         
         # API Safety Settings subsection
@@ -14898,7 +15056,7 @@ Important rules:
                 self.config.update({
                     'use_rolling_summary': self.rolling_summary_var.get(),
                     'summary_role': self.summary_role_var.get(),
-'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
+                    'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
                     'retain_source_extension': self.retain_source_extension_var.get(),
                     'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
                     'rolling_summary_mode': self.rolling_summary_mode_var.get(),
@@ -14906,7 +15064,11 @@ Important rules:
                     'max_retry_tokens': safe_int(self.max_retry_tokens_var.get(), 16384),
                     'retry_duplicate_bodies': self.retry_duplicate_var.get(),
                     'duplicate_lookback_chapters': safe_int(self.duplicate_lookback_var.get(), 5),
-'retry_timeout': self.retry_timeout_var.get(),
+                    'retry_timeout': self.retry_timeout_var.get(),
+                    # New QA-related config
+                    'qa_auto_search_output': bool(self.qa_auto_search_output_var.get()) if hasattr(self, 'qa_auto_search_output_var') else self.config.get('qa_auto_search_output', True),
+                    'scan_phase_enabled': bool(self.scan_phase_enabled_var.get()) if hasattr(self, 'scan_phase_enabled_var') else self.config.get('scan_phase_enabled', False),
+                    'scan_phase_mode': self.scan_phase_mode_var.get() if hasattr(self, 'scan_phase_mode_var') else self.config.get('scan_phase_mode', 'quick-scan'),
                     'chunk_timeout': safe_int(self.chunk_timeout_var.get(), 900),
                     'enable_http_tuning': bool(self.enable_http_tuning_var.get()) if hasattr(self, 'enable_http_tuning_var') else False,
                     # New network/HTTP controls
@@ -15020,6 +15182,8 @@ Important rules:
                     "HTTP_POOL_MAXSIZE": str(self.config['http_pool_maxsize']),
                     "IGNORE_RETRY_AFTER": '1' if self.config.get('ignore_retry_after', False) else '0',
                     "MAX_RETRIES": str(self.config['max_retries']),
+                    # Persist auto-search preference for child dialogs
+                    "QA_AUTO_SEARCH_OUTPUT": '1' if self.config.get('qa_auto_search_output', True) else '0',
                     "INDEFINITE_RATE_LIMIT_RETRY": "1" if self.indefinite_rate_limit_retry_var.get() else "0",
                     "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
