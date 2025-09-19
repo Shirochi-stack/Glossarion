@@ -2153,6 +2153,7 @@ Recent translations to summarize:
             ('append_glossary_var', 'append_glossary', False),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
+            ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', True),
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),
             # REMOVED: ('comprehensive_extraction_var', 'comprehensive_extraction', False),
@@ -13485,7 +13486,15 @@ Important rules:
         tk.Label(retries_frame, text="(default: 7)").pack(side=tk.LEFT)
         
         tk.Label(section_frame, text="Number of times to retry failed API requests before giving up.\nApplies to all API providers (OpenAI, Gemini, Anthropic, etc.)",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 5))
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(2, 10))
+        
+        # Indefinite Rate Limit Retry toggle
+        tb.Checkbutton(section_frame, text="Indefinite Rate Limit Retry", 
+                      variable=self.indefinite_rate_limit_retry_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, padx=20)
+        
+        tk.Label(section_frame, text="When enabled, rate limit errors (429) will retry indefinitely with exponential backoff.\nWhen disabled, rate limits count against the maximum retry attempts above.",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=40, pady=(2, 5))
         
                 
     def toggle_gemini_endpoint(self):
@@ -14907,6 +14916,7 @@ Important rules:
                     'http_pool_maxsize': safe_int(self.http_pool_maxsize_var.get() if hasattr(self, 'http_pool_maxsize_var') else os.environ.get('HTTP_POOL_MAXSIZE', 50), 50),
                     'ignore_retry_after': bool(self.ignore_retry_after_var.get()) if hasattr(self, 'ignore_retry_after_var') else (str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1'),
                     'max_retries': safe_int(self.max_retries_var.get() if hasattr(self, 'max_retries_var') else os.environ.get('MAX_RETRIES', 7), 7),
+                    'indefinite_rate_limit_retry': self.indefinite_rate_limit_retry_var.get(),
 
                     'reinforcement_frequency': safe_int(self.reinforcement_freq_var.get(), 10),
                     'translate_book_title': self.translate_book_title_var.get(),
@@ -15010,6 +15020,7 @@ Important rules:
                     "HTTP_POOL_MAXSIZE": str(self.config['http_pool_maxsize']),
                     "IGNORE_RETRY_AFTER": '1' if self.config.get('ignore_retry_after', False) else '0',
                     "MAX_RETRIES": str(self.config['max_retries']),
+                    "INDEFINITE_RATE_LIMIT_RETRY": "1" if self.indefinite_rate_limit_retry_var.get() else "0",
                     "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
                     "BOOK_TITLE_PROMPT": self.book_title_prompt,

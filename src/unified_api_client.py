@@ -2494,7 +2494,7 @@ class UnifiedClient:
                    context: Optional[str] = None,
                    image_data: Any = None) -> Tuple[str, Optional[str]]:
         """
-        Unified front for send and send_image. Minimal wrapper that selects the internal path.
+        Unified front for send and send_image. Includes multi-key retry wrapper.
         """
         batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
         if not batch_mode:
@@ -2505,10 +2505,87 @@ class UnifiedClient:
             self._log_pre_stagger(messages, context or ('image_translation' if image_data else 'translation'))
             self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
-            if image_data is None:
-                return self._send_internal(messages, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
+            
+            # Multi-key retry wrapper
+            if self._multi_key_mode:
+                # Check if indefinite retry is enabled for multi-key mode too
+                indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                last_error = None
+                attempt = 0
+                
+                while True:  # Indefinite retry loop when enabled
+                    try:
+                        if image_data is None:
+                            return self._send_internal(messages, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
+                        else:
+                            return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
+                    
+                    except UnifiedClientError as e:
+                        last_error = e
+                        
+                        # Handle rate limit errors with key rotation
+                        if e.error_type == "rate_limit" or self._is_rate_limit_error(e):
+                            attempt += 1
+                            
+                            if indefinite_retry_enabled:
+                                print(f"🔄 Multi-key mode: Rate limit hit, attempting key rotation (indefinite retry, attempt {attempt})")
+                            else:
+                                # Limited retry mode - respect max attempts per key
+                                num_keys = len(self._api_key_pool.keys) if self._api_key_pool else 3
+                                max_attempts = num_keys * 2  # Allow 2 attempts per key
+                                print(f"🔄 Multi-key mode: Rate limit hit, attempting key rotation (attempt {attempt}/{max_attempts})")
+                                
+                                if attempt >= max_attempts:
+                                    print(f"❌ Multi-key mode: Exhausted {max_attempts} attempts, giving up")
+                                    raise
+                            
+                            try:
+                                # Rotate to next key
+                                self._handle_rate_limit_for_thread()
+                                
+                                # Check if we have any available keys left after rotation
+                                available_keys = self._count_available_keys()
+                                if available_keys == 0:
+                                    print(f"🔄 Multi-key mode: All keys rate-limited, waiting for cooldown...")
+                                    # Wait a bit before trying again
+                                    wait_time = min(60 + random.uniform(1, 10), 120)  # 60-70 seconds
+                                    print(f"🔄 Multi-key mode: Waiting {wait_time:.1f}s for keys to cool down")
+                                    
+                                    wait_start = time.time()
+                                    while time.time() - wait_start < wait_time:
+                                        if self._cancelled:
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        time.sleep(0.5)
+                                
+                                # Continue to next attempt with rotated key
+                                continue
+                                
+                            except Exception as rotation_error:
+                                print(f"❌ Multi-key mode: Key rotation failed: {rotation_error}")
+                                # If rotation fails, we can't continue with multi-key retry
+                                if indefinite_retry_enabled:
+                                    # In indefinite mode, try to continue with any available key
+                                    print(f"🔄 Multi-key mode: Key rotation failed, but indefinite retry enabled - continuing...")
+                                    time.sleep(5)  # Brief pause before trying again
+                                    continue
+                                else:
+                                    break
+                        else:
+                            # Non-rate-limit error, don't retry with different keys
+                            raise
+                
+                # This point is only reached in non-indefinite mode when giving up
+                if last_error:
+                    print(f"❌ Multi-key mode: All retry attempts failed")
+                    raise last_error
+                else:
+                    raise UnifiedClientError("All multi-key attempts failed", error_type="no_keys")
             else:
-                return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
+                # Single key mode - direct call
+                if image_data is None:
+                    return self._send_internal(messages, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
+                else:
+                    return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
             if not batch_mode:
                 self._sequential_send_lock.release()
@@ -3262,10 +3339,48 @@ class UnifiedClient:
                 
                 print(f"UnifiedClient error: {e}")
                 
-                # Check if it's a rate limit error and re-raise for retry logic
+                # Check if it's a rate limit error - handle according to mode
                 error_str = str(e).lower()
                 if self._is_rate_limit_error(e):
-                    raise
+                    # In multi-key mode, always re-raise to let _send_core handle key rotation
+                    if self._multi_key_mode:
+                        print(f"🔄 Rate limit error - multi-key mode active, re-raising for key rotation")
+                        raise
+                    
+                    # In single-key mode, check if indefinite retry is enabled
+                    indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                    
+                    if indefinite_retry_enabled:
+                        # Calculate wait time from Retry-After header if available
+                        retry_after_seconds = 60  # Default wait time
+                        if hasattr(e, 'http_status') and e.http_status == 429:
+                            # Try to extract Retry-After from the error if it contains header info
+                            error_details = str(e)
+                            if 'retry-after' in error_details.lower():
+                                import re
+                                match = re.search(r'retry-after[:\s]+([0-9]+)', error_details.lower())
+                                if match:
+                                    retry_after_seconds = int(match.group(1))
+                        
+                        # Add some jitter and cap the wait time
+                        wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
+                        
+                        print(f"🔄 Rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        # Wait with cancellation check
+                        wait_start = time.time()
+                        while time.time() - wait_start < wait_time:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        
+                        # For rate limit errors, continue retrying without counting against max retries
+                        # Reset attempt counter to avoid exhausting retries on rate limits
+                        attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
+                        continue  # Retry the attempt
+                    else:
+                        print(f"❌ Rate limit error - single-key mode, indefinite retry disabled, re-raising")
+                        raise
                 
                 # Check for prohibited content - check BOTH error_type AND error string
                 if e.error_type == "prohibited_content" or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
@@ -3372,9 +3487,47 @@ class UnifiedClient:
                     # Re-raise timeout errors so the retry logic can handle them
                     raise UnifiedClientError(f"Request timed out: {e}", error_type="timeout")
                 
-                # Check if it's a rate limit error
+                # Check if it's a rate limit error - handle according to mode
                 if self._is_rate_limit_error(e):
-                    raise  # Re-raise for multi-key retry logic
+                    # In multi-key mode, always re-raise to let _send_core handle key rotation
+                    if self._multi_key_mode:
+                        print(f"🔄 Unexpected rate limit error - multi-key mode active, re-raising for key rotation")
+                        raise
+                    
+                    # In single-key mode, check if indefinite retry is enabled
+                    indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                    
+                    if indefinite_retry_enabled:
+                        # Calculate wait time from Retry-After header if available
+                        retry_after_seconds = 60  # Default wait time
+                        if hasattr(e, 'http_status') and e.http_status == 429:
+                            # Try to extract Retry-After from the error if it contains header info
+                            error_details = str(e)
+                            if 'retry-after' in error_details.lower():
+                                import re
+                                match = re.search(r'retry-after[:\s]+([0-9]+)', error_details.lower())
+                                if match:
+                                    retry_after_seconds = int(match.group(1))
+                        
+                        # Add some jitter and cap the wait time
+                        wait_time = min(retry_after_seconds + random.uniform(1, 10), 300)  # Max 5 minutes
+                        
+                        print(f"🔄 Unexpected rate limit error - single-key indefinite retry, waiting {wait_time:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        # Wait with cancellation check
+                        wait_start = time.time()
+                        while time.time() - wait_start < wait_time:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        
+                        # For rate limit errors, continue retrying without counting against max retries
+                        # Reset attempt counter to avoid exhausting retries on rate limits
+                        attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
+                        continue  # Retry the attempt
+                    else:
+                        print(f"❌ Unexpected rate limit error - single-key mode, indefinite retry disabled, re-raising")
+                        raise  # Re-raise for higher-level handling
                 
                 # Check for prohibited content in unexpected errors
                 if self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
@@ -5440,14 +5593,34 @@ class UnifiedClient:
 
             # Rate limit handling (429)
             if status == 429:
+                # Check if indefinite rate limit retry is enabled
+                indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
+                
                 retry_after_val = resp.headers.get('Retry-After', '')
                 retry_secs = self._parse_retry_after(retry_after_val)
                 if ignore_retry_after:
                     wait_time = api_delay * 10
                 else:
                     wait_time = retry_secs if retry_secs > 0 else api_delay * 10
-                if attempt < max_retries - 1:
-                    print(f"{provider} rate limit ({status}), waiting {wait_time}s")
+                
+                # Add jitter and cap wait time
+                wait_time = min(wait_time + random.uniform(1, 5), 300)  # Max 5 minutes
+                
+                if indefinite_retry_enabled:
+                    # For indefinite retry, don't count against max_retries
+                    print(f"{provider} rate limit ({status}), indefinite retry enabled - waiting {wait_time:.1f}s")
+                    waited = 0.0
+                    while waited < wait_time:
+                        if self._cancelled:
+                            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                        time.sleep(0.5)
+                        waited += 0.5
+                    # Don't increment attempt counter for rate limits when indefinite retry is enabled
+                    attempt = max(0, attempt - 1)
+                    continue
+                elif attempt < max_retries - 1:
+                    # Standard retry behavior when indefinite retry is disabled
+                    print(f"{provider} rate limit ({status}), waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
                     waited = 0.0
                     while waited < wait_time:
                         if self._cancelled:
@@ -5455,6 +5628,8 @@ class UnifiedClient:
                         time.sleep(0.5)
                         waited += 0.5
                     continue
+                
+                # If we reach here, indefinite retry is disabled and we've exhausted max_retries
                 raise UnifiedClientError(f"{provider} rate limit: {resp.text}", error_type="rate_limit", http_status=429)
 
             # Transient server errors with optional Retry-After
