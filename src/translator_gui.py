@@ -10725,67 +10725,46 @@ Important rules:
                     self.append_log("⚠️ Skipping scan")
                     return
                 
-                # Ask user if they want to scan multiple folders
-                bulk_scan = messagebox.askyesno(
-                    "Bulk Scanning",
-                    "Do you want to scan multiple folders at once?\n\n" +
-                    "• YES - Select multiple folders for bulk scanning\n" +
-                    "• NO - Select a single folder",
-                    icon='question'
-                )
+                # Clean single folder selection - no messageboxes, no harassment
+                self.append_log("📁 Select folder to scan...")
                 
-                if bulk_scan:
-                    # Multiple folder selection
-                    self.append_log("📁 Select folders to scan (press Cancel when done)...")
-                    while True:
-                        folder = filedialog.askdirectory(
-                            title=f"Select Folder #{len(folders_to_scan) + 1} (Cancel when done)"
-                        )
-                        if not folder:
-                            break  # User canceled or finished selecting
-                        if folder not in folders_to_scan:
-                            folders_to_scan.append(folder)
-                            self.append_log(f"  ✓ Added folder: {os.path.basename(folder)}")
-                        else:
-                            self.append_log(f"  ⚠️ Folder already selected: {os.path.basename(folder)}")
-                    
-                    if not folders_to_scan:
-                        self.append_log("⚠️ No folders selected for bulk scan.")
-                        return
-                    
-                    self.append_log(f"📋 Selected {len(folders_to_scan)} folders for bulk scanning")
-                else:
-                    # Single folder selection
-                    folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
-                    if not folder_path:
-                        self.append_log("⚠️ QA scan canceled.")
-                        return
-                    folders_to_scan = [folder_path]
+                folders_to_scan = []
+                
+                # Simply select one folder - clean and simple
+                selected_folder = filedialog.askdirectory(title="Select Folder with HTML Files")
+                if not selected_folder:
+                    self.append_log("⚠️ QA scan canceled - no folder selected.")
+                    return
+                
+                folders_to_scan.append(selected_folder)
+                self.append_log(f"  ✓ Selected folder: {os.path.basename(selected_folder)}")
+                self.append_log(f"📁 Single folder scan mode - scanning: {os.path.basename(folders_to_scan[0])}")
 
             mode = selected_mode_value
+            
+            # Initialize epub_path for use in run_scan() function
+            # This ensures epub_path is always defined even when manually selecting folders
+            epub_path = None
+            if epub_files_to_scan:
+                epub_path = epub_files_to_scan[0]  # Use first EPUB if multiple
+                self.append_log(f"📚 Using EPUB from scan list: {os.path.basename(epub_path)}")
+            elif hasattr(self, 'selected_epub_path') and self.selected_epub_path:
+                epub_path = self.selected_epub_path
+                self.append_log(f"📚 Using stored EPUB: {os.path.basename(epub_path)}")
+            elif primary_epub_path:
+                epub_path = primary_epub_path
+                self.append_log(f"📚 Using primary EPUB: {os.path.basename(epub_path)}")
+            else:
+                self.append_log("ℹ️ No EPUB file configured (word count analysis will be disabled if needed)")
             
             # Initialize global selected_files that applies to single-folder scans
             global_selected_files = None
             if len(folders_to_scan) == 1 and preselected_files:
                 global_selected_files = list(preselected_files)
             elif len(folders_to_scan) == 1 and (not non_interactive) and (not auto_search_enabled):
-                # Only ask about specific files for single folder scans
-                try:
-                    choose_files = messagebox.askyesno(
-                        "Select Specific Files?",
-                        "Do you want to choose specific HTML files to scan?\nIf No, all files in the folder will be scanned.",
-                        icon='question'
-                    )
-                    if choose_files:
-                        files = filedialog.askopenfilenames(
-                            title="Select HTML files to scan",
-                            initialdir=folders_to_scan[0],
-                            filetypes=[("HTML files", "*.html"), ("All files", "*.*")]
-                        )
-                        if files:
-                            global_selected_files = list(files)
-                except Exception:
-                    pass
+                # Scan all files in the folder - no messageboxes asking about specific files
+                # User can set up file preselection if they need specific files
+                pass
             
             # Log bulk scan start
             if len(folders_to_scan) == 1:

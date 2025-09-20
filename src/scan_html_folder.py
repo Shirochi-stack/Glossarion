@@ -3861,8 +3861,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         log("   🎯 Designed specifically for catching AI retranslations of the same content")
         log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - but now with PARALLEL PROCESSING!")
     
-    # Get HTML files
-    html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".html")])
+    # Get HTML files (including .xhtml)
+    html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
     
     # If specific files were selected, filter to those (by basename)
     if selected_files:
