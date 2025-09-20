@@ -4363,7 +4363,7 @@ Recent translations to summarize:
                 if os.path.exists(output_dir) and os.path.isdir(output_dir):
                     # Look for HTML files
                     for file in os.listdir(output_dir):
-                        if file.endswith('.html') and base_name in file:
+                        if file.lower().endswith(('.html', '.xhtml', '.htm')) and base_name in file:
                             found_translations.append((output_dir, file))
             
             if found_translations:
@@ -4522,7 +4522,7 @@ Recent translations to summarize:
                 elif os.path.isdir(possible_dir):
                     try:
                         files = os.listdir(possible_dir)
-                        if any(f.endswith('.html') for f in files):
+                        if any(f.lower().endswith(('.html', '.xhtml', '.htm')) for f in files):
                             output_dir = possible_dir
                             print(f"Found output directory with HTML files: {output_dir}")
                             break
@@ -10557,39 +10557,33 @@ Important rules:
             epub_files_to_scan = []
             primary_epub_path = None
             
+            # ALWAYS populate epub_files_to_scan for auto-search, regardless of word count checking
+            # First check if current selection actually contains EPUBs
+            current_epub_files = []
+            if hasattr(self, 'selected_files') and self.selected_files:
+                current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+                print(f"[DEBUG] Current selection contains {len(current_epub_files)} EPUB files")
+            
+            if current_epub_files:
+                # Use EPUBs from current selection
+                epub_files_to_scan = current_epub_files
+                print(f"[DEBUG] Using {len(epub_files_to_scan)} EPUB files from current selection")
+            else:
+                # No EPUBs in current selection - check if we have stored EPUBs
+                primary_epub_path = self.get_current_epub_path()
+                print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
+                
+                if primary_epub_path:
+                    epub_files_to_scan = [primary_epub_path]
+                    print(f"[DEBUG] Using stored EPUB file for auto-search")
+            
+            # Now handle word count specific logic if enabled
             if check_word_count:
-                print("[DEBUG] Word count check is enabled, looking for EPUB...")
+                print("[DEBUG] Word count check is enabled, validating EPUB availability...")
                 
-                # First check if current selection actually contains EPUBs
-                current_epub_files = []
-                if hasattr(self, 'selected_files') and self.selected_files:
-                    current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
-                    print(f"[DEBUG] Current selection contains {len(current_epub_files)} EPUB files")
-                
-                if current_epub_files:
-                    # Use EPUBs from current selection
-                    epub_files_to_scan = current_epub_files
-                    print(f"[DEBUG] Using {len(epub_files_to_scan)} EPUB files from current selection")
-                else:
-                    # No EPUBs in current selection - check if we have stored EPUBs and warn
-                    primary_epub_path = self.get_current_epub_path()
-                    print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
-                    
-                    if primary_epub_path and non_interactive:
-                        print(f"[DEBUG] Warning: Current selection has no EPUBs but found stored EPUB path")
-                        print(f"[DEBUG] This suggests input files don't match the stored EPUB configuration")
-                        # Skip word count analysis since we're not translating the EPUB
-                        qa_settings = qa_settings.copy()
-                        qa_settings['check_word_count_ratio'] = False
-                        epub_files_to_scan = []
-                        self.append_log("ℹ️ Skipping word count analysis - current input doesn't contain EPUB files")
-                    elif primary_epub_path:
-                        epub_files_to_scan = [primary_epub_path]
-                        print(f"[DEBUG] Using stored EPUB file for scanning")
-                    else:
-                        epub_files_to_scan = []
-                    
+                # Check if we have EPUBs for word count analysis
                 if not epub_files_to_scan:
+                    # No EPUBs available for word count analysis
                     result = messagebox.askyesnocancel(
                         "No Source EPUB Selected",
                         "Word count cross-reference is enabled but no source EPUB file is selected.\n\n" +
@@ -10660,11 +10654,17 @@ Important rules:
             
             if auto_search_enabled and epub_files_to_scan:
                 # Process each EPUB file to find its corresponding output folder
+                self.append_log(f"🔍 DEBUG: Auto-search running with {len(epub_files_to_scan)} EPUB files")
                 for epub_path in epub_files_to_scan:
+                    self.append_log(f"🔍 DEBUG: Processing EPUB: {epub_path}")
                     try:
                         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
                         current_dir = os.getcwd()
                         script_dir = os.path.dirname(os.path.abspath(__file__))
+                        
+                        self.append_log(f"🔍 DEBUG: EPUB base name: '{epub_base}'")
+                        self.append_log(f"🔍 DEBUG: Current dir: {current_dir}")
+                        self.append_log(f"🔍 DEBUG: Script dir: {script_dir}")
                         
                         # Check the most common locations in order of priority
                         candidates = [
@@ -10676,23 +10676,33 @@ Important rules:
                         folder_found = None
                         for i, candidate in enumerate(candidates):
                             exists = os.path.isdir(candidate)
-                            if non_interactive:
-                                self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
+                            self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
                             
                             if exists:
-                                folder_found = candidate
-                                self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
-                                break
+                                # Verify the folder actually contains HTML/XHTML files
+                                try:
+                                    files = os.listdir(candidate)
+                                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                                    if html_files:
+                                        folder_found = candidate
+                                        self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
+                                        self.append_log(f"   Found {len(html_files)} HTML/XHTML files to scan")
+                                        break
+                                    else:
+                                        self.append_log(f"  [{epub_base}] Folder exists but contains no HTML/XHTML files: {candidate}")
+                                except Exception as e:
+                                    self.append_log(f"  [{epub_base}] Error checking files in {candidate}: {e}")
                         
                         if folder_found:
                             folders_to_scan.append(folder_found)
+                            self.append_log(f"🔍 DEBUG: Added to folders_to_scan: {folder_found}")
                         else:
-                            if non_interactive:
-                                self.append_log(f"  ⚠️ No output folder found for {epub_base}")
+                            self.append_log(f"  ⚠️ No output folder found for {epub_base}")
                                 
                     except Exception as e:
-                        if non_interactive:
-                            self.append_log(f"  ❌ Error processing {epub_base}: {e}")
+                        self.append_log(f"  ❌ Error processing {epub_base}: {e}")
+                
+                self.append_log(f"🔍 DEBUG: Final folders_to_scan: {folders_to_scan}")
             
             # Fallback behavior - if no folders found through auto-detection
             if not folders_to_scan:

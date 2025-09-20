@@ -465,7 +465,7 @@ import re
 
 def check_html_structure(file_path):
     """Check if an HTML file has proper HTML tags"""
-    if not file_path.lower().endswith('.html'):
+    if not file_path.lower().endswith(('.html', '.xhtml', '.htm')):
         return True
         
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -3682,7 +3682,7 @@ def process_html_file_batch(args):
                     
         # HTML tag check
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
-        if check_missing_html_tag and filename.lower().endswith('.html'):
+        if check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
             # Create a dummy log function for the worker
             def dummy_log(msg):
                 pass
