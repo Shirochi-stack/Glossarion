@@ -10554,14 +10554,42 @@ Important rules:
                     return
             # Check if word count cross-reference is enabled but no EPUB is selected
             check_word_count = qa_settings.get('check_word_count_ratio', False)
-            epub_path = None
+            epub_files_to_scan = []
+            primary_epub_path = None
             
             if check_word_count:
                 print("[DEBUG] Word count check is enabled, looking for EPUB...")
-                epub_path = self.get_current_epub_path()
-                print(f"[DEBUG] get_current_epub_path returned: {epub_path}")
+                
+                # First check if current selection actually contains EPUBs
+                current_epub_files = []
+                if hasattr(self, 'selected_files') and self.selected_files:
+                    current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+                    print(f"[DEBUG] Current selection contains {len(current_epub_files)} EPUB files")
+                
+                if current_epub_files:
+                    # Use EPUBs from current selection
+                    epub_files_to_scan = current_epub_files
+                    print(f"[DEBUG] Using {len(epub_files_to_scan)} EPUB files from current selection")
+                else:
+                    # No EPUBs in current selection - check if we have stored EPUBs and warn
+                    primary_epub_path = self.get_current_epub_path()
+                    print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
                     
-                if not epub_path:
+                    if primary_epub_path and non_interactive:
+                        print(f"[DEBUG] Warning: Current selection has no EPUBs but found stored EPUB path")
+                        print(f"[DEBUG] This suggests input files don't match the stored EPUB configuration")
+                        # Skip word count analysis since we're not translating the EPUB
+                        qa_settings = qa_settings.copy()
+                        qa_settings['check_word_count_ratio'] = False
+                        epub_files_to_scan = []
+                        self.append_log("ℹ️ Skipping word count analysis - current input doesn't contain EPUB files")
+                    elif primary_epub_path:
+                        epub_files_to_scan = [primary_epub_path]
+                        print(f"[DEBUG] Using stored EPUB file for scanning")
+                    else:
+                        epub_files_to_scan = []
+                    
+                if not epub_files_to_scan:
                     result = messagebox.askyesnocancel(
                         "No Source EPUB Selected",
                         "Word count cross-reference is enabled but no source EPUB file is selected.\n\n" +
@@ -10596,15 +10624,18 @@ Important rules:
                                 qa_settings = qa_settings.copy()
                                 qa_settings['check_word_count_ratio'] = False
                                 self.append_log("ℹ️ Proceeding without word count analysis.")
+                                epub_files_to_scan = []
                         else:
                             self.selected_epub_path = epub_path
                             self.config['last_epub_path'] = epub_path
                             self.save_config(show_message=False)
                             self.append_log(f"✅ Selected EPUB: {os.path.basename(epub_path)}")
+                            epub_files_to_scan = [epub_path]
                     else:  # Yes - Continue without word count
                         qa_settings = qa_settings.copy()
                         qa_settings['check_word_count_ratio'] = False
                         self.append_log("ℹ️ Proceeding without word count analysis.")
+                        epub_files_to_scan = []
             # Persist latest auto-search preference
             try:
                 self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_var.get())
@@ -10612,116 +10643,134 @@ Important rules:
             except Exception:
                 pass
             
-            # Try to auto-detect output folder based on EPUB
-            folder_path = None
+            # Try to auto-detect output folders based on EPUB files
+            folders_to_scan = []
             auto_search_enabled = self.config.get('qa_auto_search_output', True)
             try:
                 if hasattr(self, 'qa_auto_search_output_var'):
                     auto_search_enabled = bool(self.qa_auto_search_output_var.get())
             except Exception:
                 pass
-            if auto_search_enabled and epub_path:
-                try:
-                    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-                    # Build candidate output folders where scripts typically live
-                    script_dir = os.path.dirname(os.path.abspath(__file__))
-                    project_root = os.path.dirname(script_dir)  # one level up from src
-                    candidates = [
-                        os.path.join(os.getcwd(), epub_base),                      # current working directory
-                        os.path.join(getattr(self, 'base_dir', os.getcwd()), epub_base),  # app base dir
-                        os.path.join(script_dir, epub_base),                      # src directory
-                        os.path.join(project_root, epub_base)                     # project root (same folder as scripts)
-                    ]
-                    for c in candidates:
-                        if os.path.isdir(c):
-                            folder_path = c
-                            self.append_log(f"📁 Auto-selected output folder: {folder_path}")
-                            break
-                except Exception:
-                    folder_path = None
             
-            # Fallback behavior
-            if not folder_path:
+            # Debug output for scanning phase
+            if non_interactive:
+                self.append_log(f"📝 Debug: auto_search_enabled = {auto_search_enabled}")
+                self.append_log(f"📝 Debug: epub_files_to_scan = {len(epub_files_to_scan)} files")
+                self.append_log(f"📝 Debug: Will run folder detection = {auto_search_enabled and epub_files_to_scan}")
+            
+            if auto_search_enabled and epub_files_to_scan:
+                # Process each EPUB file to find its corresponding output folder
+                for epub_path in epub_files_to_scan:
+                    try:
+                        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                        current_dir = os.getcwd()
+                        script_dir = os.path.dirname(os.path.abspath(__file__))
+                        
+                        # Check the most common locations in order of priority
+                        candidates = [
+                            os.path.join(current_dir, epub_base),        # current working directory
+                            os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
+                            os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
+                        ]
+                        
+                        folder_found = None
+                        for i, candidate in enumerate(candidates):
+                            exists = os.path.isdir(candidate)
+                            if non_interactive:
+                                self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
+                            
+                            if exists:
+                                folder_found = candidate
+                                self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
+                                break
+                        
+                        if folder_found:
+                            folders_to_scan.append(folder_found)
+                        else:
+                            if non_interactive:
+                                self.append_log(f"  ⚠️ No output folder found for {epub_base}")
+                                
+                    except Exception as e:
+                        if non_interactive:
+                            self.append_log(f"  ❌ Error processing {epub_base}: {e}")
+            
+            # Fallback behavior - if no folders found through auto-detection
+            if not folders_to_scan:
                 if auto_search_enabled:
                     # Do NOT prompt when auto-search is enabled; cancel politely
                     self.append_log("⚠️ Auto-search enabled but no matching output folder found — canceling scan")
                     return
                 if non_interactive:
-                    self.append_log("⚠️ Scanning phase: No matching output folder found — skipping scan")
-                    return
-                folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
-            if not folder_path:
-                self.append_log("⚠️ QA scan canceled.")
-                return
-
-            # Check for EPUB/folder name mismatch
-            if epub_path and qa_settings.get('check_word_count_ratio', False) and qa_settings.get('warn_name_mismatch', True):
-                epub_name = os.path.splitext(os.path.basename(epub_path))[0]
-                folder_name = os.path.basename(folder_path.rstrip('/\\'))
-                
-                if not check_epub_folder_match(epub_name, folder_name, qa_settings.get('custom_output_suffixes', '')):
-                    result = messagebox.askyesnocancel(
-                        "EPUB/Folder Name Mismatch",
-                        f"The source EPUB and output folder names don't match:\n\n" +
-                        f"📖 EPUB: {epub_name}\n" +
-                        f"📁 Folder: {folder_name}\n\n" +
-                        "This might mean you're comparing the wrong files.\n" +
-                        "Common issues:\n" +
-                        "• 'Novel123' vs 'Novel124' (different books)\n" +
-                        "• 'Book_1' vs 'Book_2' (different volumes)\n\n" +
-                        "Would you like to:\n" +
-                        "• YES - Continue anyway (I'm sure these match)\n" +
-                        "• NO - Select a different EPUB file\n" +
-                        "• CANCEL - Select a different folder",
-                        icon='warning'
-                    )
-                    
-                    if result is None:  # Cancel - select different folder
-                        new_folder_path = filedialog.askdirectory(
-                            title="Select Different Folder with HTML Files"
-                        )
-                        if new_folder_path:
-                            folder_path = new_folder_path
-                        else:
-                            self.append_log("⚠️ QA scan canceled.")
-                            return
-                            
-                    elif result is False:  # No - select different EPUB
-                        new_epub_path = filedialog.askopenfilename(
-                            title="Select Different Source EPUB File",
-                            filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
-                        )
+                    # Add debug info for scanning phase
+                    if epub_files_to_scan:
+                        self.append_log(f"⚠️ Scanning phase: No matching output folders found for {len(epub_files_to_scan)} EPUB file(s)")
+                        for epub_path in epub_files_to_scan:
+                            epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                            current_dir = os.getcwd()
+                            expected_folder = os.path.join(current_dir, epub_base)
+                            self.append_log(f"  [{epub_base}] Expected: {expected_folder}")
+                            self.append_log(f"  [{epub_base}] Exists: {os.path.isdir(expected_folder)}")
                         
-                        if new_epub_path:
-                            epub_path = new_epub_path
-                            self.selected_epub_path = epub_path
-                            self.config['last_epub_path'] = epub_path
-                            self.save_config(show_message=False)
-                        else:
-                            proceed = messagebox.askyesno(
-                                "No File Selected",
-                                "No EPUB file was selected.\n\n" +
-                                "Continue scan without word count analysis?",
-                                icon='question'
-                            )
-                            if not proceed:
-                                self.append_log("⚠️ QA scan canceled.")
-                                return
-                            else:
-                                qa_settings = qa_settings.copy()
-                                qa_settings['check_word_count_ratio'] = False
-                                epub_path = None
-                                self.append_log("ℹ️ Proceeding without word count analysis.")
+                        # List actual folders in current directory for debugging
+                        try:
+                            current_dir = os.getcwd()
+                            actual_folders = [d for d in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, d)) and not d.startswith('.')]
+                            if actual_folders:
+                                self.append_log(f"  Available folders: {', '.join(actual_folders[:10])}{'...' if len(actual_folders) > 10 else ''}")
+                        except Exception:
+                            pass
                     else:
-                        self.append_log(f"⚠️ Warning: EPUB/folder name mismatch - {epub_name} vs {folder_name}")
-            
+                        self.append_log("⚠️ Scanning phase: No EPUB files available for folder detection")
+                    
+                    self.append_log("⚠️ Skipping scan")
+                    return
+                
+                # Ask user if they want to scan multiple folders
+                bulk_scan = messagebox.askyesno(
+                    "Bulk Scanning",
+                    "Do you want to scan multiple folders at once?\n\n" +
+                    "• YES - Select multiple folders for bulk scanning\n" +
+                    "• NO - Select a single folder",
+                    icon='question'
+                )
+                
+                if bulk_scan:
+                    # Multiple folder selection
+                    self.append_log("📁 Select folders to scan (press Cancel when done)...")
+                    while True:
+                        folder = filedialog.askdirectory(
+                            title=f"Select Folder #{len(folders_to_scan) + 1} (Cancel when done)"
+                        )
+                        if not folder:
+                            break  # User canceled or finished selecting
+                        if folder not in folders_to_scan:
+                            folders_to_scan.append(folder)
+                            self.append_log(f"  ✓ Added folder: {os.path.basename(folder)}")
+                        else:
+                            self.append_log(f"  ⚠️ Folder already selected: {os.path.basename(folder)}")
+                    
+                    if not folders_to_scan:
+                        self.append_log("⚠️ No folders selected for bulk scan.")
+                        return
+                    
+                    self.append_log(f"📋 Selected {len(folders_to_scan)} folders for bulk scanning")
+                else:
+                    # Single folder selection
+                    folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+                    if not folder_path:
+                        self.append_log("⚠️ QA scan canceled.")
+                        return
+                    folders_to_scan = [folder_path]
+
             mode = selected_mode_value
-            # Optional: limit to specific HTML files
-            selected_files = None
-            try:
-                if preselected_files:
-                    selected_files = list(preselected_files)
-                elif (not non_interactive) and (not auto_search_enabled):
+            
+            # Initialize global selected_files that applies to single-folder scans
+            global_selected_files = None
+            if len(folders_to_scan) == 1 and preselected_files:
+                global_selected_files = list(preselected_files)
+            elif len(folders_to_scan) == 1 and (not non_interactive) and (not auto_search_enabled):
+                # Only ask about specific files for single folder scans
+                try:
                     choose_files = messagebox.askyesno(
                         "Select Specific Files?",
                         "Do you want to choose specific HTML files to scan?\nIf No, all files in the folder will be scanned.",
@@ -10730,15 +10779,20 @@ Important rules:
                     if choose_files:
                         files = filedialog.askopenfilenames(
                             title="Select HTML files to scan",
-                            initialdir=folder_path,
+                            initialdir=folders_to_scan[0],
                             filetypes=[("HTML files", "*.html"), ("All files", "*.*")]
                         )
                         if files:
-                            selected_files = list(files)
-            except Exception:
-                pass
+                            global_selected_files = list(files)
+                except Exception:
+                    pass
             
-            self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
+            # Log bulk scan start
+            if len(folders_to_scan) == 1:
+                self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folders_to_scan[0]}")
+            else:
+                self.append_log(f"🔍 Starting bulk QA scan in {mode.upper()} mode for {len(folders_to_scan)} folders")
+            
             self.stop_requested = False
  
             # Extract cache configuration from qa_settings
@@ -10790,16 +10844,164 @@ Important rules:
                     from scan_html_folder import configure_qa_cache
                     configure_qa_cache(cache_config)
                     
-                    # Pass the QA settings to scan_html_folder (without custom_settings)
-                    scan_html_folder(
-                        folder_path, 
-                        log=self.append_log, 
-                        stop_flag=lambda: self.stop_requested, 
-                        mode=mode,
-                        qa_settings=qa_settings,  # Keep existing qa_settings parameter
-                        epub_path=epub_path,
-                        selected_files=selected_files
-                    )
+                    # Loop through all selected folders for bulk scanning
+                    successful_scans = 0
+                    failed_scans = 0
+                    
+                    for i, current_folder in enumerate(folders_to_scan):
+                        if self.stop_requested:
+                            self.append_log(f"⚠️ Bulk scan stopped by user at folder {i+1}/{len(folders_to_scan)}")
+                            break
+                        
+                        folder_name = os.path.basename(current_folder)
+                        if len(folders_to_scan) > 1:
+                            self.append_log(f"\n📁 [{i+1}/{len(folders_to_scan)}] Scanning folder: {folder_name}")
+                        
+                        # Determine the correct EPUB path for this specific folder
+                        current_epub_path = epub_path
+                        current_qa_settings = qa_settings.copy()
+                        
+                        # For bulk scanning, try to find a matching EPUB for each folder
+                        if len(folders_to_scan) > 1 and current_qa_settings.get('check_word_count_ratio', False):
+                            # Try to find EPUB file matching this specific folder
+                            folder_basename = os.path.basename(current_folder.rstrip('/\\'))
+                            
+                            # Look for EPUB in various locations
+                            folder_parent = os.path.dirname(current_folder)
+                            
+                            # Strip common output suffixes to find base name
+                            base_name = folder_basename
+                            common_suffixes = ['_output', '_translated', '_trans', '_en', '_english', '_done', '_complete', '_final']
+                            for suffix in common_suffixes:
+                                if base_name.endswith(suffix):
+                                    base_name = base_name[:-len(suffix)]
+                                    break
+                            
+                            potential_epub_paths = [
+                                # Exact match with folder name
+                                os.path.join(folder_parent, f"{folder_basename}.epub"),
+                                # Base name without suffixes
+                                os.path.join(folder_parent, f"{base_name}.epub"),
+                                # In the folder itself
+                                os.path.join(current_folder, f"{folder_basename}.epub"),
+                                os.path.join(current_folder, f"{base_name}.epub"),
+                                # One level up from folder parent
+                                os.path.join(os.path.dirname(folder_parent), f"{folder_basename}.epub"),
+                                os.path.join(os.path.dirname(folder_parent), f"{base_name}.epub"),
+                                # In a common 'epubs' or 'source' directory
+                                os.path.join(os.path.dirname(current_folder), "epubs", f"{base_name}.epub"),
+                                os.path.join(os.path.dirname(current_folder), "source", f"{base_name}.epub"),
+                                os.path.join(os.path.dirname(current_folder), "originals", f"{base_name}.epub")
+                            ]
+                            
+                            # Find the first existing EPUB
+                            folder_epub_path = None
+                            for potential_path in potential_epub_paths:
+                                if os.path.isfile(potential_path):
+                                    folder_epub_path = potential_path
+                                    break
+                            
+                            if folder_epub_path:
+                                current_epub_path = folder_epub_path
+                                if len(folders_to_scan) > 1:  # Only log for bulk scans
+                                    self.append_log(f"  📖 Using EPUB: {current_epub_path}")
+                            elif current_epub_path:  # Fallback to global EPUB
+                                if len(folders_to_scan) > 1:
+                                    self.append_log(f"  📖 Using global EPUB: {current_epub_path} (no folder-specific EPUB found)")
+                            else:
+                                # No EPUB available for word count analysis
+                                if len(folders_to_scan) > 1:
+                                    self.append_log(f"  ⚠️ No EPUB found for word count analysis")
+                                current_qa_settings = current_qa_settings.copy()
+                                current_qa_settings['check_word_count_ratio'] = False
+                        
+                        # Check for EPUB/folder name mismatch
+                        if current_epub_path and current_qa_settings.get('check_word_count_ratio', False) and current_qa_settings.get('warn_name_mismatch', True):
+                            epub_name = os.path.splitext(os.path.basename(current_epub_path))[0]
+                            folder_name_for_check = os.path.basename(current_folder.rstrip('/\\'))
+                            
+                            if not check_epub_folder_match(epub_name, folder_name_for_check, current_qa_settings.get('custom_output_suffixes', '')):
+                                if len(folders_to_scan) == 1:
+                                    # Interactive dialog for single folder scans
+                                    result = messagebox.askyesnocancel(
+                                        "EPUB/Folder Name Mismatch",
+                                        f"The source EPUB and output folder names don't match:\n\n" +
+                                        f"📖 EPUB: {epub_name}\n" +
+                                        f"📁 Folder: {folder_name_for_check}\n\n" +
+                                        "This might mean you're comparing the wrong files.\n" +
+                                        "Would you like to:\n" +
+                                        "• YES - Continue anyway (I'm sure these match)\n" +
+                                        "• NO - Select a different EPUB file\n" +
+                                        "• CANCEL - Cancel the scan",
+                                        icon='warning'
+                                    )
+                                    
+                                    if result is None:  # Cancel
+                                        self.append_log("⚠️ QA scan canceled due to EPUB/folder mismatch.")
+                                        return
+                                    elif result is False:  # No - select different EPUB
+                                        new_epub_path = filedialog.askopenfilename(
+                                            title="Select Different Source EPUB File",
+                                            filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+                                        )
+                                        
+                                        if new_epub_path:
+                                            current_epub_path = new_epub_path
+                                            self.selected_epub_path = new_epub_path
+                                            self.config['last_epub_path'] = new_epub_path
+                                            self.save_config(show_message=False)
+                                            self.append_log(f"✅ Updated EPUB: {os.path.basename(new_epub_path)}")
+                                        else:
+                                            proceed = messagebox.askyesno(
+                                                "No File Selected",
+                                                "No EPUB file was selected.\n\n" +
+                                                "Continue scan without word count analysis?",
+                                                icon='question'
+                                            )
+                                            if not proceed:
+                                                self.append_log("⚠️ QA scan canceled.")
+                                                return
+                                            else:
+                                                current_qa_settings = current_qa_settings.copy()
+                                                current_qa_settings['check_word_count_ratio'] = False
+                                                current_epub_path = None
+                                                self.append_log("ℹ️ Proceeding without word count analysis.")
+                                    # If YES, just continue with warning
+                                else:
+                                    # For bulk scans, just warn and continue
+                                    self.append_log(f"  ⚠️ Warning: EPUB/folder name mismatch - {epub_name} vs {folder_name_for_check}")
+                        
+                        try:
+                            # Determine selected_files for this folder
+                            current_selected_files = None
+                            if global_selected_files and len(folders_to_scan) == 1:
+                                current_selected_files = global_selected_files
+                            
+                            # Pass the QA settings to scan_html_folder
+                            scan_html_folder(
+                                current_folder, 
+                                log=self.append_log, 
+                                stop_flag=lambda: self.stop_requested, 
+                                mode=mode,
+                                qa_settings=current_qa_settings,
+                                epub_path=current_epub_path,
+                                selected_files=current_selected_files
+                            )
+                            
+                            successful_scans += 1
+                            if len(folders_to_scan) > 1:
+                                self.append_log(f"✅ Folder '{folder_name}' scan completed successfully")
+                        
+                        except Exception as folder_error:
+                            failed_scans += 1
+                            self.append_log(f"❌ Folder '{folder_name}' scan failed: {folder_error}")
+                            if len(folders_to_scan) == 1:
+                                # Re-raise for single folder scans
+                                raise
+                    
+                    # Final summary for bulk scans
+                    if len(folders_to_scan) > 1:
+                        self.append_log(f"\n📋 Bulk scan summary: {successful_scans} successful, {failed_scans} failed")
                     
                     # If show_stats is enabled, log cache statistics
                     if qa_settings.get('cache_show_stats', False):
@@ -10811,7 +11013,10 @@ Important rules:
                                 hit_rate = info.hits / (info.hits + info.misses) if (info.hits + info.misses) > 0 else 0
                                 self.append_log(f"  {name}: {info.hits} hits, {info.misses} misses ({hit_rate:.1%} hit rate)")
                     
-                    self.append_log("✅ QA scan completed successfully.")
+                    if len(folders_to_scan) == 1:
+                        self.append_log("✅ QA scan completed successfully.")
+                    else:
+                        self.append_log("✅ Bulk QA scan completed.")
         
                 except Exception as e:
                     self.append_log(f"❌ QA scan error: {e}")
@@ -11070,13 +11275,24 @@ Important rules:
             epub_frame = tk.Frame(wordcount_section)
             epub_frame.pack(anchor=tk.W, pady=(10, 5))
 
-            current_epub = self.get_current_epub_path()
-            if current_epub:
-                status_text = f"📖 Current EPUB: {os.path.basename(current_epub)}"
+            # Get EPUBs from actual current selection (not stored config)
+            current_epub_files = []
+            if hasattr(self, 'selected_files') and self.selected_files:
+                current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+            
+            if len(current_epub_files) > 1:
+                # Multiple EPUBs in current selection
+                primary_epub = os.path.basename(current_epub_files[0])
+                status_text = f"📖 {len(current_epub_files)} EPUB files selected (Primary: {primary_epub})"
+                status_color = 'green'
+            elif len(current_epub_files) == 1:
+                # Single EPUB in current selection
+                status_text = f"📖 Current EPUB: {os.path.basename(current_epub_files[0])}"
                 status_color = 'green'
             else:
-                status_text = "📖 No EPUB file selected"
-                status_color = 'red'
+                # No EPUB files in current selection
+                status_text = "📖 No EPUB in current selection"
+                status_color = 'orange'
 
             status_label = tk.Label(
                 epub_frame,
@@ -11096,6 +11312,11 @@ Important rules:
                     self.selected_epub_path = epub_path
                     self.config['last_epub_path'] = epub_path
                     self.save_config(show_message=False)
+                    
+                    # Clear multiple EPUB tracking when manually selecting a single EPUB
+                    if hasattr(self, 'selected_epub_files'):
+                        self.selected_epub_files = [epub_path]
+                    
                     status_label.config(
                         text=f"📖 Current EPUB: {os.path.basename(epub_path)}",
                         fg='green'
@@ -12277,9 +12498,17 @@ Important rules:
         self.selected_files = []
         self.file_path = None
         self.current_file_index = 0
+        
+        # Clear EPUB tracking
+        if hasattr(self, 'selected_epub_path'):
+            self.selected_epub_path = None
+        if hasattr(self, 'selected_epub_files'):
+            self.selected_epub_files = []
+        
         # Persist clear state
         try:
             self.config['last_input_files'] = []
+            self.config['last_epub_path'] = None
             self.save_config(show_message=False)
         except Exception:
             pass
@@ -12389,18 +12618,33 @@ Important rules:
                 # Persist EPUB path for QA defaults
                 try:
                     self.selected_epub_path = epub_files[0]
+                    self.selected_epub_files = [epub_files[0]]  # Track single EPUB in list format
                     self.config['last_epub_path'] = epub_files[0]
                     os.environ['EPUB_PATH'] = epub_files[0]
                     self.save_config(show_message=False)
                 except Exception:
                     pass
             elif len(epub_files) > 1:
-                # Multiple EPUBs - clear glossary
+                # Multiple EPUBs - clear glossary but update EPUB path tracking
                 if hasattr(self, 'auto_loaded_glossary_path'):
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
-                    self.append_log("📑 Multiple files selected - glossary auto-loading disabled")
+                    self.append_log("📁 Multiple files selected - glossary auto-loading disabled")
+                
+                # For multiple EPUBs, set the selected_epub_path to the first one
+                # but track all EPUBs for word count analysis
+                try:
+                    self.selected_epub_path = epub_files[0]  # Use first EPUB as primary
+                    self.selected_epub_files = epub_files  # Track all EPUBs
+                    self.config['last_epub_path'] = epub_files[0]
+                    os.environ['EPUB_PATH'] = epub_files[0]
+                    self.save_config(show_message=False)
+                    
+                    # Log that multiple EPUBs are selected
+                    self.append_log(f"📖 {len(epub_files)} EPUB files selected - using '{os.path.basename(epub_files[0])}' as primary for word count analysis")
+                except Exception:
+                    pass
 
     def _convert_json_to_txt(self, json_path):
         """Convert a JSON file to TXT format for translation."""

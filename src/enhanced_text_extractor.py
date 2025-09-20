@@ -94,6 +94,10 @@ class EnhancedTextExtractor:
         "'": '␤',   # Alternative closing quote
     }
     
+    # Image tag protection markers (using ASCII to survive html2text processing)
+    IMG_PROTECTION_START = "__IMGPROTECT__"
+    IMG_PROTECTION_END = "__ENDIMGPROTECT__"
+    
     def __init__(self, filtering_mode: str = "smart", preserve_structure: bool = True):
         """Initialize the enhanced text extractor"""
         if not html2text:
@@ -106,6 +110,7 @@ class EnhancedTextExtractor:
         self.preserve_structure = preserve_structure
         self.h2t = None
         self.detected_language = None
+        self.protected_images = {}  # Store protected image tags
         
         self._configure_html2text()
     
@@ -256,6 +261,56 @@ class EnhancedTextExtractor:
             text = text.replace(marker, original)
         return text
     
+    def _protect_img_tags(self, html_content: str) -> str:
+        """Protect HTML img tags from html2text conversion"""
+        import re
+        
+        # Clear previous protections
+        self.protected_images = {}
+        
+        # Find all img tags (including self-closing and regular)
+        img_pattern = r'<img[^>]*(?:/>|>(?:</img>)?)'  # Matches both <img.../> and <img...></img>
+        
+        def protect_img(match):
+            img_tag = match.group(0)
+            img_id = len(self.protected_images)
+            placeholder = f"{self.IMG_PROTECTION_START}{img_id}{self.IMG_PROTECTION_END}"
+            
+            # Store the original img tag
+            self.protected_images[img_id] = img_tag
+            
+            return placeholder
+        
+        # Replace img tags with placeholders
+        protected_html = re.sub(img_pattern, protect_img, html_content, flags=re.IGNORECASE | re.DOTALL)
+        
+        print(f"🖼️ Protected {len(self.protected_images)} image tags from html2text conversion")
+        
+        return protected_html
+    
+    def _restore_img_tags(self, text: str) -> str:
+        """Restore protected HTML img tags"""
+        restored_text = text
+        
+        for img_id, img_tag in self.protected_images.items():
+            # html2text escapes underscores, so we need to handle both escaped and unescaped versions
+            placeholder = f"{self.IMG_PROTECTION_START}{img_id}{self.IMG_PROTECTION_END}"
+            escaped_placeholder = placeholder.replace('_', '\\_')  # html2text escapes underscores
+            
+            # Try both versions
+            if placeholder in restored_text:
+                restored_text = restored_text.replace(placeholder, img_tag)
+            elif escaped_placeholder in restored_text:
+                restored_text = restored_text.replace(escaped_placeholder, img_tag)
+        
+        if self.protected_images:
+            print(f"✅ Restored {len(self.protected_images)} HTML image tags")
+        
+        # Clear the protection dict
+        self.protected_images = {}
+        
+        return restored_text
+    
     def _preprocess_html_for_quotes(self, html_content: str) -> str:
         """Pre-process HTML to protect quotes from conversion"""
         def protect_quotes_in_text(match):
@@ -268,7 +323,7 @@ class EnhancedTextExtractor:
     
     def _protect_quotes_in_soup(self, soup: BeautifulSoup) -> None:
         """Protect quotes in BeautifulSoup object before processing"""
-        for element in soup.find_all(text=True):
+        for element in soup.find_all(string=True):
             if element.parent.name not in ['script', 'style', 'noscript']:
                 original_text = str(element)
                 protected_text = self._protect_quotes(original_text)
@@ -404,6 +459,9 @@ class EnhancedTextExtractor:
             # Pre-process HTML to protect quotes
             html_content = self._preprocess_html_for_quotes(html_content)
             
+            # Protect HTML img tags before html2text processing
+            html_content = self._protect_img_tags(html_content)
+            
             # Pre-process HTML to decode all entities
             html_content = self._decode_entities(html_content)
             
@@ -473,6 +531,9 @@ class EnhancedTextExtractor:
             # Restore protected quotes
             clean_text = self._restore_quotes(clean_text)
             
+            # Restore protected HTML img tags
+            clean_text = self._restore_img_tags(clean_text)
+            
             # For enhanced mode, both display and translation content are the same
             return clean_text, clean_text, chapter_title
                 
@@ -495,7 +556,7 @@ def test_cjk_preservation():
             <p>"응애! 응애! 응애!"</p>
             <p>"미안하구나. 모든 죄는 내가 짊어지고 사마."</p>
         </body>
-        </html>''',
+        </html>'''
         
         # Japanese test with quotes
         '''<html>
@@ -537,7 +598,7 @@ def test_cjk_preservation():
                 ('"', 'Western double quotes'),
                 ('「', 'Japanese left bracket'),
                 ('」', 'Japanese right bracket'),
-                ('"', 'Chinese double quote'),
+                ('“', 'Chinese double quote'),
             ]
             
             print("Quote preservation check:")
@@ -552,6 +613,14 @@ def test_cjk_preservation():
                 print("  ❌ No quotes found!")
             else:
                 print("  ✅ Quotes preserved successfully!")
+            
+            # Check for image tag preservation
+            img_count = content.count('<img')
+            if img_count > 0:
+                print(f"  ✓ Found {img_count} HTML img tags preserved")
+                print("  ✅ Image tags preserved successfully!")
+            else:
+                print("  ℹ️ No images in this test case")
                 
         except Exception as e:
             print(f"Error processing test case {i}: {e}")
