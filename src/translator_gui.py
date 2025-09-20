@@ -10254,6 +10254,16 @@ Important rules:
                     """Show QA Scanner settings dialog"""
                     self.show_qa_scanner_settings(mode_dialog, qa_settings)
                 
+                # Auto-search checkbox - moved to left side of Scanner Settings
+                if not hasattr(self, 'qa_auto_search_output_var'):
+                    self.qa_auto_search_output_var = tk.BooleanVar(value=self.config.get('qa_auto_search_output', True))
+                tb.Checkbutton(
+                    button_inner,
+                    text="Auto-search output",  # Renamed from "Auto-search output folder"
+                    variable=self.qa_auto_search_output_var,
+                    bootstyle="round-toggle"
+                ).pack(side=tk.LEFT, padx=10)
+                
                 settings_btn = tb.Button(
                     button_inner,
                     text="⚙️  Scanner Settings",  # Added extra space
@@ -10263,16 +10273,6 @@ Important rules:
                     padding=(8, 10)  # Reduced padding
                 )
                 settings_btn.pack(side=tk.LEFT, padx=10)
-                
-                # Auto-search checkbox next to Scanner Settings
-                if not hasattr(self, 'qa_auto_search_output_var'):
-                    self.qa_auto_search_output_var = tk.BooleanVar(value=self.config.get('qa_auto_search_output', True))
-                tb.Checkbutton(
-                    button_inner,
-                    text="Auto-search output folder",
-                    variable=self.qa_auto_search_output_var,
-                    bootstyle="round-toggle"
-                ).pack(side=tk.LEFT, padx=10)
                 
                 cancel_btn = tb.Button(
                     button_inner,
