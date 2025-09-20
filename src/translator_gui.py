@@ -1207,7 +1207,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.4.8"
+        __version__ = "4.5.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -2255,7 +2255,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.4.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.5.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -10707,9 +10707,28 @@ Important rules:
             # Fallback behavior - if no folders found through auto-detection
             if not folders_to_scan:
                 if auto_search_enabled:
-                    # Do NOT prompt when auto-search is enabled; cancel politely
-                    self.append_log("⚠️ Auto-search enabled but no matching output folder found — canceling scan")
-                    return
+                    # Auto-search failed, offer manual selection as fallback
+                    self.append_log("⚠️ Auto-search enabled but no matching output folder found")
+                    self.append_log("📁 Falling back to manual folder selection...")
+                    
+                    selected_folder = filedialog.askdirectory(title="Auto-search failed - Select Output Folder to Scan")
+                    if not selected_folder:
+                        self.append_log("⚠️ QA scan canceled - no folder selected.")
+                        return
+                    
+                    # Verify the selected folder contains scannable files
+                    try:
+                        files = os.listdir(selected_folder)
+                        html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                        if html_files:
+                            folders_to_scan.append(selected_folder)
+                            self.append_log(f"✓ Manual selection: {os.path.basename(selected_folder)} ({len(html_files)} HTML/XHTML files)")
+                        else:
+                            self.append_log(f"❌ Selected folder contains no HTML/XHTML files: {selected_folder}")
+                            return
+                    except Exception as e:
+                        self.append_log(f"❌ Error checking selected folder: {e}")
+                        return
                 if non_interactive:
                     # Add debug info for scanning phase
                     if epub_files_to_scan:
@@ -16666,7 +16685,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v4.4.8...")
+    print("🚀 Starting Glossarion v4.5.0...")
     
     # Initialize splash screen
     splash_manager = None
