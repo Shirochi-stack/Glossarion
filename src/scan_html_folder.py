@@ -240,9 +240,22 @@ def extract_semantic_fingerprint_impl(text):
     characters = [name for name, count in name_freq.items() 
                   if count >= 3 and name not in COMMON_WORDS]
     
-    # Dialogue density
-    dialogue_count = len(re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text))
+    # Dialogue analysis
+    dialogue_matches = re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text)
+    dialogue_count = len(dialogue_matches)
     dialogue_density = dialogue_count / max(1, len(words)) if words else 0
+    dialogue_lengths = [len(d) for d in dialogue_matches[:30]]  # First 30 dialogue lengths
+    
+    # Character frequencies (sorted list)
+    character_frequencies = [count for _, count in name_freq.most_common()]
+    
+    # Speaker sequence extraction
+    speaker_patterns = re.findall(r'(\w+)\s+(?:said|asked|replied|shouted|whispered|spoke)', cache_text.lower())
+    speaker_sequence = speaker_patterns[:50]  # First 50 speakers
+    
+    # Paragraph structure (lengths of each paragraph)
+    paragraphs = [p for p in cache_text.split('\n\n') if p.strip()]
+    paragraph_structure = [len(p) for p in paragraphs[:50]]  # First 50 paragraph lengths
     
     # Action words density
     action_words = len(re.findall(r'\b(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)\b', cache_text))
@@ -258,6 +271,12 @@ def extract_semantic_fingerprint_impl(text):
     signature = {
         'characters': characters[:20],  # Top 20 characters
         'dialogue_density': dialogue_density,
+        'dialogue_count': dialogue_count,
+        'dialogue_lengths': dialogue_lengths,
+        'character_frequencies': character_frequencies,
+        'speaker_sequence': speaker_sequence,
+        'paragraph_structure': paragraph_structure,
+        'total_words': len(words),
         'action_density': action_density,
         'numbers': numbers[:50],  # First 50 numbers
         'text_length': len(cache_text)
@@ -745,9 +764,22 @@ def extract_semantic_fingerprint(text):
     characters = [name for name, count in name_freq.items() 
                   if count >= 3 and name not in COMMON_WORDS]
     
-    # Dialogue density
-    dialogue_count = len(re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text))
+    # Dialogue analysis
+    dialogue_matches = re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text)
+    dialogue_count = len(dialogue_matches)
     dialogue_density = dialogue_count / max(1, len(words)) if words else 0
+    dialogue_lengths = [len(d) for d in dialogue_matches[:30]]  # First 30 dialogue lengths
+    
+    # Character frequencies (sorted list)
+    character_frequencies = [count for _, count in name_freq.most_common()]
+    
+    # Speaker sequence extraction
+    speaker_patterns = re.findall(r'(\w+)\s+(?:said|asked|replied|shouted|whispered|spoke)', cache_text.lower())
+    speaker_sequence = speaker_patterns[:50]  # First 50 speakers
+    
+    # Paragraph structure (lengths of each paragraph)
+    paragraphs = [p for p in cache_text.split('\n\n') if p.strip()]
+    paragraph_structure = [len(p) for p in paragraphs[:50]]  # First 50 paragraph lengths
     
     # Action words density
     action_words = len(re.findall(r'\b(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)\b', cache_text))
@@ -763,6 +795,12 @@ def extract_semantic_fingerprint(text):
     signature = {
         'characters': characters[:20],  # Top 20 characters
         'dialogue_density': dialogue_density,
+        'dialogue_count': dialogue_count,
+        'dialogue_lengths': dialogue_lengths,
+        'character_frequencies': character_frequencies,
+        'speaker_sequence': speaker_sequence,
+        'paragraph_structure': paragraph_structure,
+        'total_words': len(words),
         'action_density': action_density,
         'numbers': numbers[:50],  # First 50 numbers
         'text_length': len(cache_text)
@@ -1420,10 +1458,7 @@ def _calculate_structural_similarity_cached(struct1_json, struct2_json):
 # Apply caching ONLY to the implementation function, NOT the wrapper
 _calculate_structural_similarity_cached = lru_cache(maxsize=get_cache_size("structural_similarity") or 5000)(_calculate_structural_similarity_cached)
 
-# Configure cache sizes for helper functions
-extract_semantic_fingerprint = lru_cache(maxsize=get_cache_size("semantic_fingerprint"))(extract_semantic_fingerprint)
-extract_structural_signature = lru_cache(maxsize=get_cache_size("structural_signature"))(extract_structural_signature)
-extract_content_fingerprint = lru_cache(maxsize=get_cache_size("content_fingerprint"))(extract_content_fingerprint)
+# Note: cache configurations are already applied earlier in the file
 
 def extract_chapter_title(text):
     """Extract chapter title from text"""
