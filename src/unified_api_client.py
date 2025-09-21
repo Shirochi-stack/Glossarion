@@ -1634,23 +1634,11 @@ class UnifiedClient:
     
     def _apply_individual_key_endpoint_if_needed(self):
         """Apply individual key endpoint if configured (multi-key mode) - works independently of global toggle"""
-        print(f"[DEBUG] _apply_individual_key_endpoint_if_needed() called")
-        
-        # Debug current state
-        print(f"[DEBUG] hasattr current_key_azure_endpoint: {hasattr(self, 'current_key_azure_endpoint')}")
-        print(f"[DEBUG] hasattr current_key_use_individual_endpoint: {hasattr(self, 'current_key_use_individual_endpoint')}")
-        if hasattr(self, 'current_key_azure_endpoint'):
-            print(f"[DEBUG] current_key_azure_endpoint value: '{self.current_key_azure_endpoint}'")
-        if hasattr(self, 'current_key_use_individual_endpoint'):
-            print(f"[DEBUG] current_key_use_individual_endpoint value: {self.current_key_use_individual_endpoint}")
-        
         # Check if this key has an individual endpoint enabled AND configured
         has_individual_endpoint = (hasattr(self, 'current_key_azure_endpoint') and 
                                  hasattr(self, 'current_key_use_individual_endpoint') and 
                                  self.current_key_use_individual_endpoint and 
                                  self.current_key_azure_endpoint)
-        
-        print(f"[DEBUG] has_individual_endpoint: {has_individual_endpoint}")
         
         if has_individual_endpoint:
             # Use individual endpoint - works independently of global custom endpoint toggle
@@ -1673,10 +1661,6 @@ class UnifiedClient:
             
             try:
                 import openai
-                print(f"[DEBUG] Creating OpenAI client with:")
-                print(f"[DEBUG]   api_key: {self.api_key[:8]}...{self.api_key[-4:]}")
-                print(f"[DEBUG]   base_url: {individual_endpoint}")
-                print(f"[DEBUG]   client_type changed from {original_client_type} to openai")
                 
                 # CRITICAL FIX: Check if this is an Azure endpoint and create AzureOpenAI client
                 if '.azure.com' in individual_endpoint or '.cognitiveservices' in individual_endpoint:
@@ -1691,9 +1675,9 @@ class UnifiedClient:
                     api_version = getattr(self, 'current_key_azure_api_version', None) or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
                     
                     print(f"🔷 Individual Azure endpoint detected")
-                    print(f"   Endpoint: {azure_endpoint}")
-                    print(f"   Deployment: {deployment}")
-                    print(f"   API Version: {api_version}")
+                    print(f"Endpoint: {azure_endpoint}")
+                    print(f"Deployment: {deployment}")
+                    print(f"API Version: {api_version}")
                     
                     # Create AzureOpenAI client (same as working custom endpoint logic)
                     self.openai_client = AzureOpenAI(
@@ -1708,15 +1692,12 @@ class UnifiedClient:
                         base_url=individual_endpoint
                     )
                 
-                print(f"[DEBUG] Individual key endpoint: Successfully created OpenAI client")
-                print(f"[DEBUG] Client base_url: {getattr(self.openai_client, 'base_url', 'N/A')}")
                 return  # Individual endpoint applied - don't check global custom endpoint
             except ImportError:
-                print(f"[ERROR] OpenAI library not installed, cannot use individual endpoint")
                 self.client_type = original_client_type  # Restore original type
                 return
             except Exception as e:
-                print(f"[ERROR] Failed to create OpenAI client with individual endpoint: {e}")
+                print(f"[ERROR] Failed to create individual endpoint client: {e}")
                 self.client_type = original_client_type  # Restore original type
                 return
         
