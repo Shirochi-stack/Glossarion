@@ -9223,13 +9223,42 @@ class UnifiedClient:
             raise UnifiedClientError(error_msg)
 
     def _send_google_translate(self, messages, temperature=None, max_tokens=None, response_name=None):
-        """Send messages to Google Translate API"""
+        """Send messages to Google Translate API with markdown/HTML structure fixes"""
         
         if not GOOGLE_TRANSLATE_AVAILABLE:
             raise UnifiedClientError(
                 "Google Cloud Translate not installed. Run: pip install google-cloud-translate\n"
                 "Also ensure you have Google Cloud credentials configured."
             )
+        
+        # Import HTML output fixer for Google Translate's structured HTML
+        try:
+            from translate_output_fix import fix_google_translate_html
+        except ImportError:
+            # Fallback: create inline HTML structure fix
+            import re
+            def fix_google_translate_html(html_content):
+                """Simple fallback: fix HTML structure issues where everything is in one header tag"""
+                if not html_content:
+                    return html_content
+                
+                # Check if everything is wrapped in a single header tag
+                single_header = re.match(r'^<(h[1-6])>(.*?)</\1>$', html_content.strip(), re.DOTALL)
+                if single_header:
+                    tag = single_header.group(1)
+                    content = single_header.group(2).strip()
+                    
+                    # Simple pattern: "Number. Title Name was/were..." -> "Number. Title" + "Name was/were..."
+                    chapter_match = re.match(r'^(\d+\.\s+[^A-Z]*[A-Z][^A-Z]*?)\s+([A-Z][a-z]+\s+(?:was|were|had|did|is|are)\s+.*)$', content, re.DOTALL)
+                    if chapter_match:
+                        title = chapter_match.group(1).strip()
+                        body = chapter_match.group(2).strip()
+                        # Create properly structured HTML
+                        paragraphs = re.split(r'\n\s*\n', body)
+                        formatted_paragraphs = [f'<p>{p.strip()}</p>' for p in paragraphs if p.strip()]
+                        return f'<{tag}>{title}</{tag}>\n\n' + '\n\n'.join(formatted_paragraphs)
+                
+                return html_content
         
         try:
             # Check for Google Cloud credentials with better error messages
@@ -9306,20 +9335,25 @@ class UnifiedClient:
             # Perform translation
             start_time = time.time()
             
-            # Google Translate API call
+            # Google Translate API call - force text format for markdown content
+            # Detect if this is markdown from html2text (starts with #)
+            is_markdown = text_to_translate.strip().startswith('#')
+            translate_format = 'text' if is_markdown else ('html' if '<' in text_to_translate else 'text')
+            
+            
             if source_lang:
                 result = translate_client.translate(
                     text_to_translate,
                     source_language=source_lang,
                     target_language=target_lang,
-                    format_='html' if '<' in text_to_translate else 'text'
+                    format_=translate_format
                 )
             else:
                 # Auto-detect source language
                 result = translate_client.translate(
                     text_to_translate,
                     target_language=target_lang,
-                    format_='html' if '<' in text_to_translate else 'text'
+                    format_=translate_format
                 )
             
             elapsed_time = time.time() - start_time
@@ -9330,6 +9364,54 @@ class UnifiedClient:
             
             translated_text = result.get('translatedText', '')
             detected_lang = result.get('detectedSourceLanguage', source_lang)
+            
+            import re
+            
+            # Fix markdown structure issues in Google Translate text output
+            original_text = translated_text
+            
+            if is_markdown and translate_format == 'text':
+                # Google Translate in text mode removes line breaks from markdown
+                # Need to restore proper markdown structure
+                
+                # Pattern: "#6. Title Content goes here" -> "#6. Title\n\nContent goes here"
+                markdown_fix = re.match(r'^(#{1,6}[^\n]*?)([A-Z][^#]+)$', translated_text.strip(), re.DOTALL)
+                if markdown_fix:
+                    header_part = markdown_fix.group(1).strip()
+                    content_part = markdown_fix.group(2).strip()
+                    
+                    # Try to split header from content intelligently
+                    # Look for patterns like "6. Title Name was" -> "6. Title" + "Name was"
+                    title_content_match = re.match(r'^(.*?)([A-Z][a-z]+\s+(?:was|were|had|did|is|are)\s+.*)$', content_part, re.DOTALL)
+                    if title_content_match:
+                        title_end = title_content_match.group(1).strip()
+                        content_start = title_content_match.group(2).strip()
+                        
+                        # Restore paragraph structure in the content
+                        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', content_start)
+                        formatted_content = '\n\n'.join(paragraphs)
+                        
+                        translated_text = f"{header_part} {title_end}\n\n{formatted_content}"
+                    else:
+                        # Fallback: try to split at reasonable word boundary
+                        words = content_part.split()
+                        if len(words) > 3:
+                            for i in range(2, min(6, len(words)-2)):
+                                if words[i][0].isupper():
+                                    title_words = ' '.join(words[:i])
+                                    content_words = ' '.join(words[i:])
+                                    
+                                    # Restore paragraph structure in the content
+                                    paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', content_words)
+                                    formatted_content = '\n\n'.join(paragraphs)
+                                    
+                                    translated_text = f"{header_part} {title_words}\n\n{formatted_content}"
+                                    break
+            
+            if translate_format == 'html':
+                # Apply HTML structure fixes for HTML mode
+                translated_text = fix_google_translate_html(translated_text)
+            
             
             # Create UnifiedResponse object
             response = UnifiedResponse(
