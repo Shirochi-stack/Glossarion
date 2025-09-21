@@ -1175,9 +1175,7 @@ class UnifiedClient:
                     self._setup_client()
                     
                     # CRITICAL FIX: Apply individual key's Azure endpoint like single-key mode does
-                    print(f"[DEBUG] About to call _apply_individual_key_endpoint_if_needed()")
                     self._apply_individual_key_endpoint_if_needed()
-                    print(f"[DEBUG] Finished calling _apply_individual_key_endpoint_if_needed()")
                     return
                 else:
                     # No keys available
@@ -1623,11 +1621,12 @@ class UnifiedClient:
             
             try:
                 import openai
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=custom_base_url
-                )
-                print(f"[DEBUG] Custom endpoint enabled: Overriding {original_client_type} model to use OpenAI client with: {custom_base_url}")
+                # MICROSECOND LOCK: Create custom endpoint client with thread safety
+                with self._model_lock:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=custom_base_url
+                    )
             except ImportError:
                 print(f"[ERROR] OpenAI library not installed, cannot use custom endpoint")
                 self.client_type = original_client_type  # Restore original type
@@ -1643,55 +1642,38 @@ class UnifiedClient:
         if has_individual_endpoint:
             # Use individual endpoint - works independently of global custom endpoint toggle
             individual_endpoint = self.current_key_azure_endpoint
-            print(f"[DEBUG] Individual endpoint detected: {individual_endpoint}")
             
             if not individual_endpoint.startswith(('http://', 'https://')):
                 individual_endpoint = 'https://' + individual_endpoint
-            
-            print(f"[DEBUG] Final individual endpoint: {individual_endpoint}")
             
             # Don't override Gemini models - they have their own separate endpoint toggle
             if self.client_type == 'gemini':
                 # Only log if Gemini OpenAI endpoint is not also enabled
                 use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
                 if not use_gemini_endpoint:
-                    print(f"[DEBUG] Gemini model detected, not overriding with individual endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)")
+                    self._log_once("Gemini model detected, not overriding with individual endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)", is_debug=True)
                 return
-            
             # Override other model types to use OpenAI client when individual endpoint is configured
             original_client_type = self.client_type
             self.client_type = 'openai'
-            print(f"[DEBUG] Overriding client type from {original_client_type} to openai")
             
             try:
                 import openai
-                # EXACT COPY of global custom endpoint logic - use current API key directly
-                print(f"[DEBUG] Creating OpenAI client with:")
-                print(f"  - api_key: {self.api_key}")
-                print(f"  - base_url: {individual_endpoint}")
                 
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=individual_endpoint
-                )
-                
-                # Verify the client was created correctly
-                print(f"[DEBUG] Client created successfully:")
-                print(f"  - Client type: {type(self.openai_client)}")
-                print(f"  - Client._base_url: {getattr(self.openai_client, '_base_url', 'NOT_FOUND')}")
-                print(f"  - Client.base_url: {getattr(self.openai_client, 'base_url', 'NOT_FOUND')}")
-                print(f"[DEBUG] Individual endpoint enabled: Overriding {original_client_type} model to use OpenAI client with: {individual_endpoint}")
-                print(f"[DEBUG] Created client - object ID: {id(self.openai_client)}")
-                print(f"[DEBUG] Created client - base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
-                print(f"[DEBUG] Created client - api_key: {getattr(self.openai_client, 'api_key', 'UNKNOWN')}")
+                # MICROSECOND LOCK: Create individual endpoint client with thread safety
+                with self._model_lock:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=individual_endpoint
+                    )
                 
                 # Set flag to prevent _setup_client from overriding this client
                 self._individual_endpoint_applied = True
                 
                 # CRITICAL: Update thread-local storage with our correct client
                 tls = self._get_thread_local_client()
-                print(f"[DEBUG] UPDATING TLS with individual endpoint client - base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
-                tls.openai_client = self.openai_client
+                with self._model_lock:
+                    tls.openai_client = self.openai_client
                 
                 return  # Individual endpoint applied - don't check global custom endpoint
             except ImportError:
@@ -2926,18 +2908,15 @@ class UnifiedClient:
         if self.client_type == 'openai':
             # Skip if individual endpoint already applied
             if hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied:
-                print(f"[DEBUG] Skipping OpenAI client creation - individual endpoint already applied")
                 return
                 
             # MICROSECOND LOCK for OpenAI client
             with self._model_lock:
                 # Use regular OpenAI client - individual endpoint will be set later
-                print(f"[DEBUG] _setup_client creating DEFAULT OpenAI client (THIS WILL OVERRIDE OLLAMA!)")
                 self.openai_client = openai.OpenAI(
                     api_key=self.api_key,
                     base_url='https://api.openai.com/v1'  # Default, will be overridden by individual endpoint
                 )
-                print(f"[DEBUG] _setup_client created client with base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
         
         elif self.client_type == 'gemini':
             if use_gemini_endpoint and gemini_endpoint:
@@ -3075,7 +3054,6 @@ class UnifiedClient:
             with self._model_lock:
                 tls.client_type = self.client_type
                 if hasattr(self, 'openai_client'):
-                    print(f"[DEBUG] THREAD-LOCAL: Assigning openai_client to TLS - base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
                     tls.openai_client = self.openai_client
                 if hasattr(self, 'gemini_client'):
                     tls.gemini_client = self.gemini_client
@@ -3086,7 +3064,6 @@ class UnifiedClient:
         else:
             tls.client_type = self.client_type
             if hasattr(self, 'openai_client'):
-                print(f"[DEBUG] NON-MULTIKEY TLS: Assigning openai_client to TLS - base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
                 tls.openai_client = self.openai_client
             if hasattr(self, 'gemini_client'):
                 tls.gemini_client = self.gemini_client
@@ -6046,8 +6023,6 @@ class UnifiedClient:
         # CRITICAL: If individual endpoint is applied, use our existing client instead of creating new one
         if (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and 
             hasattr(self, 'openai_client') and self.openai_client):
-            print(f"[DEBUG] _get_openai_client: Using existing individual endpoint client instead of creating new one")
-            print(f"[DEBUG] Individual client base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
             return self.openai_client
             
         tls = self._get_thread_local_client()
@@ -6068,7 +6043,6 @@ class UnifiedClient:
             except Exception:
                 _, read = self._get_timeouts()
                 timeout_obj = float(read)
-            print(f"[DEBUG] _get_openai_client: Creating new client with base_url: {base_url}")
             client = openai.OpenAI(
                 api_key=api_key,
                 base_url=base_url,
@@ -6994,12 +6968,6 @@ class UnifiedClient:
                 # Log the request for debugging
                 logger.debug(f"OpenAI request - Model: {self.model}, Params: {list(params.keys())}")
                 
-                # DEBUG: Check which client we're actually using vs what we created
-                print(f"[DEBUG] About to make API call:")
-                print(f"  - Client object: {self.openai_client}")
-                print(f"  - Client object ID: {id(self.openai_client)}")
-                print(f"  - Client base_url: {getattr(self.openai_client, 'base_url', 'UNKNOWN')}")
-                print(f"  - Client api_key: {getattr(self.openai_client, 'api_key', 'UNKNOWN')}")
                 
                 # Make the API call
                 resp = self.openai_client.chat.completions.create(
@@ -8496,7 +8464,6 @@ class UnifiedClient:
             hasattr(self, 'openai_client') and self.openai_client):
             individual_base_url = getattr(self.openai_client, 'base_url', None)
             if individual_base_url:
-                print(f"[DEBUG] _send_openai: Using individual endpoint: {individual_base_url}")
                 base_url = str(individual_base_url).rstrip('/')
             else:
                 base_url = 'https://api.openai.com/v1'

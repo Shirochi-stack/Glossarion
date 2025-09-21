@@ -97,6 +97,7 @@ app_files = [
 	('enhanced_text_extractor.py', '.'),	
 	
 	('multi_api_key_manager.py', '.'),	
+	('individual_endpoint_dialog.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -135,6 +136,7 @@ app_modules = [
 	'metadata_batch_translator',
 	'enhanced_text_extractor.py',
 	'multi_api_key_manager.py',
+	'individual_endpoint_dialog.py',
 	'bubble_detector', 
 	'local_inpainter',  	
 	'ocr_manager',

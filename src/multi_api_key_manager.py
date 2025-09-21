@@ -16,6 +16,12 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from datetime import datetime, timedelta
 import logging
+# Dialog for configuring per-key endpoint
+try:
+    from individual_endpoint_dialog import IndividualEndpointDialog
+except Exception:
+    IndividualEndpointDialog = None
+
 logger = logging.getLogger(__name__)
 class RateLimitCache:
     """Thread-safe rate limit cache"""
@@ -1908,6 +1914,24 @@ class MultiAPIKeyDialog:
                                command=self._change_model_for_selected)
             
             menu.add_separator()
+            
+            # Individual Endpoint options
+            index = self.tree.index(item)
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                endpoint_enabled = getattr(key, 'use_individual_endpoint', False)
+                endpoint_url = getattr(key, 'azure_endpoint', '')
+                
+                if endpoint_enabled and endpoint_url:
+                    menu.add_command(label="✅ Individual Endpoint", 
+                                   command=lambda: self._configure_individual_endpoint(index))
+                    menu.add_command(label="Disable Individual Endpoint", 
+                                   command=lambda: self._toggle_individual_endpoint(index, False))
+                else:
+                    menu.add_command(label="🔧 Configure Individual Endpoint", 
+                                   command=lambda: self._configure_individual_endpoint(index))
+            
+            menu.add_separator()
             menu.add_command(label="Test", command=self._test_selected)
             menu.add_command(label="Enable", command=self._enable_selected)
             menu.add_command(label="Disable", command=self._disable_selected)
@@ -1993,6 +2017,43 @@ class MultiAPIKeyDialog:
         dialog.bind('<Return>', apply_change)
         model_combo.bind('<Return>', apply_change)
         dialog.bind('<Escape>', lambda e: dialog.destroy())
+    
+    def _configure_individual_endpoint(self, key_index):
+        """Configure individual endpoint for a specific key"""
+        if key_index >= len(self.key_pool.keys):
+            return
+        
+        key = self.key_pool.keys[key_index]
+        
+        # Create individual endpoint dialog using the class
+        if IndividualEndpointDialog is None:
+            messagebox.showerror("Error", "IndividualEndpointDialog is not available.")
+            return
+        IndividualEndpointDialog(self.dialog, self.translator_gui, key, self._refresh_key_list, self._show_status)
+    
+    def _toggle_endpoint_fields(self, enable_var, endpoint_entry, version_combo):
+        """Toggle endpoint configuration fields based on enable state"""
+        if enable_var.get():
+            endpoint_entry.config(state='normal')
+            version_combo.config(state='readonly')
+        else:
+            endpoint_entry.config(state='disabled')
+            version_combo.config(state='disabled')
+    
+    def _toggle_individual_endpoint(self, key_index, enabled):
+        """Quick toggle individual endpoint on/off"""
+        if key_index >= len(self.key_pool.keys):
+            return
+        
+        key = self.key_pool.keys[key_index]
+        key.use_individual_endpoint = enabled
+        
+        # Refresh display
+        self._refresh_key_list()
+        
+        # Show status
+        status = "enabled" if enabled else "disabled"
+        self._show_status(f"Individual endpoint {status} for {key.model}")
 
     # Additional helper method to swap keys programmatically
     def swap_keys(self, index1: int, index2: int):
