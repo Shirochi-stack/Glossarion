@@ -7522,11 +7522,13 @@ Provide translations in the same numbered format."""
             os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
             
             # Now run the actual translation
-            self.run_translation_direct()
+            translation_completed = self.run_translation_direct()
             
             # If scanning phase toggle is enabled, launch scanner after translation
+            # BUT only if translation completed successfully (not stopped by user)
             try:
-                if getattr(self, 'scan_phase_enabled_var', None) and self.scan_phase_enabled_var.get():
+                if (getattr(self, 'scan_phase_enabled_var', None) and self.scan_phase_enabled_var.get() and 
+                    translation_completed and not self.stop_requested):
                     mode = self.scan_phase_mode_var.get() if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
                     self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode (post-translation)...")
                     # Non-interactive: skip dialogs and use auto-search
@@ -7558,18 +7560,18 @@ Provide translations in the same numbered format."""
         try:
             # Check stop at the very beginning
             if self.stop_requested:
-                return
+                return False
             
             # DON'T CALL _lazy_load_modules HERE!
             # Modules are already loaded in the wrapper
             # Just verify they're loaded
             if not self._modules_loaded:
                 self.append_log("❌ Translation modules not loaded")
-                return
+                return False
 
             # Check stop after verification
             if self.stop_requested:
-                return
+                return False
 
             # SET GLOSSARY IN ENVIRONMENT
             if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
@@ -7601,7 +7603,7 @@ Provide translations in the same numbered format."""
             if len(image_files) > 1:
                 # Check stop before creating directories
                 if self.stop_requested:
-                    return
+                    return False
                     
                 # Get the common parent directory name or use timestamp
                 parent_dir = os.path.dirname(self.selected_files[0])
@@ -7664,7 +7666,7 @@ Provide translations in the same numbered format."""
             # Check stop before final summary
             if self.stop_requested:
                 self.append_log(f"\n⏹️ Translation stopped - processed {successful} of {total_files} files")
-                return
+                return False
                 
             # Final summary
             if total_files > 1:
@@ -7694,10 +7696,13 @@ Provide translations in the same numbered format."""
                 
                 self.append_log(f"{'='*60}")
             
+            return True  # Translation completed successfully
+            
         except Exception as e:
             self.append_log(f"❌ Translation setup error: {e}")
             import traceback
             self.append_log(f"❌ Full error: {traceback.format_exc()}")
+            return False
         
         finally:
             self.stop_requested = False
