@@ -2275,18 +2275,27 @@ class ChapterExtractor:
                             content_html = html_content
                             content_text = soup.get_text(strip=True)
                     
-                    # Extract title
+                    # Extract title (with ignore settings support)
                     chapter_title = None
-                    if soup.title and soup.title.string:
+                    
+                    # Check ignore settings for batch translation
+                    batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                    ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                    ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                    
+                    # Extract from title tag if not ignored
+                    if not ignore_title_tag and soup.title and soup.title.string:
                         chapter_title = soup.title.string.strip()
                     
-                    if not chapter_title:
+                    # Extract from header tags if not ignored and no title found
+                    if not chapter_title and not ignore_header_tags:
                         for header_tag in ['h1', 'h2', 'h3']:
                             header = soup.find(header_tag)
                             if header:
                                 chapter_title = header.get_text(strip=True)
                                 break
                     
+                    # Fallback to filename if nothing found
                     if not chapter_title:
                         chapter_title = os.path.splitext(os.path.basename(file_path))[0]
                 
@@ -2736,21 +2745,27 @@ class ChapterExtractor:
         
         # Try content if not found in filename
         if not chapter_num:
+            # Check ignore settings for batch translation
+            batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+            ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+            ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+            
             # Prepare all text sources to check in parallel
             text_sources = []
             
-            # Add title tag
-            if soup.title and soup.title.string:
+            # Add title tag if not ignored
+            if not ignore_title_tag and soup.title and soup.title.string:
                 title_text = soup.title.string.strip()
                 text_sources.append(("title", title_text, True))  # True means this can be chapter_title
             
-            # Add headers
-            for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                headers = soup.find_all(header_tag)
-                for header in headers[:3]:  # Limit to first 3 of each type
-                    header_text = header.get_text(strip=True)
-                    if header_text:
-                        text_sources.append((f"header_{header_tag}", header_text, True))
+            # Add headers if not ignored
+            if not ignore_header_tags:
+                for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    headers = soup.find_all(header_tag)
+                    for header in headers[:3]:  # Limit to first 3 of each type
+                        header_text = header.get_text(strip=True)
+                        if header_text:
+                            text_sources.append((f"header_{header_tag}", header_text, True))
             
             # Add first paragraphs
             first_elements = soup.find_all(['p', 'div'])[:5]
@@ -2835,17 +2850,26 @@ class ChapterExtractor:
                             detection_method = "filename_number"
                             break
         
-        # Extract title if not already found
+        # Extract title if not already found (with ignore settings support)
         if not chapter_title:
-            if soup.title and soup.title.string:
+            # Check ignore settings for batch translation
+            batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+            ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+            ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+            
+            # Try title tag if not ignored
+            if not ignore_title_tag and soup.title and soup.title.string:
                 chapter_title = soup.title.string.strip()
-            else:
+            
+            # Try header tags if not ignored and no title found
+            if not chapter_title and not ignore_header_tags:
                 for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     header = soup.find(header_tag)
                     if header:
                         chapter_title = header.get_text(strip=True)
                         break
             
+            # Final fallback
             if not chapter_title:
                 chapter_title = f"Chapter {chapter_num}" if chapter_num else None
         

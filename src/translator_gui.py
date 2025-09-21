@@ -1463,6 +1463,8 @@ Text to analyze:
         self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '400'))
         self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
         self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
+        self.ignore_header_var = tk.BooleanVar(value=self.config.get('ignore_header', False))
+        self.ignore_title_var = tk.BooleanVar(value=self.config.get('ignore_title', False))
         self.attach_css_to_chapters_var = tk.BooleanVar(value=self.config.get('attach_css_to_chapters', False)) 
         
         # Retain exact source extension and disable 'response_' prefix
@@ -14178,9 +14180,29 @@ Important rules:
                       variable=self.save_header_translations_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT, padx=(20, 0))
         
+        # Additional ignore header option
+        ignore_frame = tk.Frame(section_frame)
+        ignore_frame.pack(anchor=tk.W, fill=tk.X, padx=20, pady=(5, 0))
+        
+        tb.Checkbutton(ignore_frame, text="Ignore header tags", 
+                      variable=self.ignore_header_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tb.Checkbutton(ignore_frame, text="Ignore title tag", 
+                      variable=self.ignore_title_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(15, 0))
+        
+        # Delete translated_headers.txt button
+        tb.Button(ignore_frame, text="🗑️ Delete Headers Files", 
+                 command=self.delete_translated_headers_file,
+                 bootstyle="danger-outline", width=20).pack(side=tk.LEFT, padx=(20, 0))
+        
         tk.Label(section_frame, 
                 text="• OFF: Use existing headers from translated chapters\n"
-                     "• ON: Extract all headers → Translate in batch → Update files",
+                     "• ON: Extract all headers → Translate in batch → Update files\n"
+                     "• Ignore header tags: Skip h1/h2/h3 tags (prevents re-translation of visible headers)\n"
+                     "• Ignore title tag: Skip <title> tag (prevents re-translation of document titles)\n"
+                     "• Delete button: Removes translated_headers.txt files for all selected EPUBs",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
         
         # EPUB Validation (keep existing)
@@ -15448,6 +15470,8 @@ Important rules:
                     'headers_per_batch': safe_int(self.headers_per_batch_var.get(), 500),
                     'update_html_headers': self.update_html_headers_var.get(),
                     'save_header_translations': self.save_header_translations_var.get(),
+                    'ignore_header': self.ignore_header_var.get(),
+                    'ignore_title': self.ignore_title_var.get(),
                     
                 })
                 
@@ -15472,7 +15496,7 @@ Important rules:
                 env_updates = {
                     "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
                     "SUMMARY_ROLE": self.summary_role_var.get(),
-"ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
+                    "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
                     "RETAIN_SOURCE_EXTENSION": "1" if self.retain_source_extension_var.get() else "0",
                     "ROLLING_SUMMARY_EXCHANGES": str(self.config['rolling_summary_exchanges']),
                     "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
@@ -15552,6 +15576,8 @@ Important rules:
                     'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 800)),
                     'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
                     'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
+                    'IGNORE_HEADER': "1" if self.ignore_header_var.get() else "0",
+                    'IGNORE_TITLE': "1" if self.ignore_title_var.get() else "0",
                     # EXTRACTION_MODE:
                     "TEXT_EXTRACTION_METHOD": self.text_extraction_method_var.get() if hasattr(self, 'text_extraction_method_var') else 'standard',
                     "FILE_FILTERING_LEVEL": self.file_filtering_level_var.get() if hasattr(self, 'file_filtering_level_var') else 'smart',
@@ -15591,6 +15617,148 @@ Important rules:
 
         tb.Button(button_container, text="❌ Cancel", command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
                  bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)       
+
+    def delete_translated_headers_file(self):
+        """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
+        try:
+            # Get all selected EPUB files using the same logic as QA scanner
+            epub_files_to_process = []
+            
+            # First check if current selection actually contains EPUBs
+            if hasattr(self, 'selected_files') and self.selected_files:
+                current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+                if current_epub_files:
+                    epub_files_to_process = current_epub_files
+                    self.append_log(f"📚 Found {len(epub_files_to_process)} EPUB files in current selection")
+            
+            # If no EPUBs in selection, try single EPUB methods
+            if not epub_files_to_process:
+                epub_path = self.get_current_epub_path()
+                if not epub_path:
+                    entry_path = self.entry_epub.get().strip()
+                    if entry_path and entry_path != "No file selected" and os.path.exists(entry_path):
+                        epub_path = entry_path
+                
+                if epub_path:
+                    epub_files_to_process = [epub_path]
+            
+            if not epub_files_to_process:
+                messagebox.showerror("Error", "No EPUB file(s) selected. Please select EPUB file(s) first.")
+                return
+            
+            # Process each EPUB file to find and delete translated_headers.txt
+            files_found = []
+            files_not_found = []
+            files_deleted = []
+            errors = []
+            
+            current_dir = os.getcwd()
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # First pass: scan for files
+            for epub_path in epub_files_to_process:
+                try:
+                    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                    self.append_log(f"🔍 Processing EPUB: {epub_base}")
+                    
+                    # Check the most common locations in order of priority (same as QA scanner)
+                    candidates = [
+                        os.path.join(current_dir, epub_base),        # current working directory
+                        os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
+                        os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
+                    ]
+                    
+                    output_dir = None
+                    for candidate in candidates:
+                        if os.path.isdir(candidate):
+                            # Verify the folder actually contains HTML/XHTML files
+                            try:
+                                files = os.listdir(candidate)
+                                html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                                if html_files:
+                                    output_dir = candidate
+                                    break
+                            except Exception:
+                                continue
+                    
+                    if not output_dir:
+                        self.append_log(f"  ⚠️ No output directory found for {epub_base}")
+                        files_not_found.append((epub_base, "No output directory found"))
+                        continue
+                    
+                    # Look for translated_headers.txt in the output directory
+                    headers_file = os.path.join(output_dir, "translated_headers.txt")
+                    
+                    if os.path.exists(headers_file):
+                        files_found.append((epub_base, headers_file))
+                        self.append_log(f"  ✓ Found translated_headers.txt in {os.path.basename(output_dir)}")
+                    else:
+                        files_not_found.append((epub_base, "translated_headers.txt not found"))
+                        self.append_log(f"  ⚠️ No translated_headers.txt in {os.path.basename(output_dir)}")
+                        
+                except Exception as e:
+                    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                    errors.append((epub_base, str(e)))
+                    self.append_log(f"  ❌ Error processing {epub_base}: {e}")
+            
+            # Show summary and get user confirmation
+            if not files_found and not files_not_found and not errors:
+                messagebox.showinfo("No Files", "No EPUB files were processed.")
+                return
+            
+            summary_text = f"Summary for {len(epub_files_to_process)} EPUB file(s):\n\n"
+            
+            if files_found:
+                summary_text += f"✅ Files to delete ({len(files_found)}):\n"
+                for epub_base, file_path in files_found:
+                    summary_text += f"  • {epub_base}\n"
+                summary_text += "\n"
+            
+            if files_not_found:
+                summary_text += f"⚠️ Files not found ({len(files_not_found)}):\n"
+                for epub_base, reason in files_not_found:
+                    summary_text += f"  • {epub_base}: {reason}\n"
+                summary_text += "\n"
+            
+            if errors:
+                summary_text += f"❌ Errors ({len(errors)}):\n"
+                for epub_base, error in errors:
+                    summary_text += f"  • {epub_base}: {error}\n"
+                summary_text += "\n"
+            
+            if files_found:
+                summary_text += "This will allow headers to be re-translated on the next run."
+                
+                # Confirm deletion
+                result = messagebox.askyesno("Confirm Deletion", summary_text)
+                
+                if result:
+                    # Delete the files
+                    for epub_base, headers_file in files_found:
+                        try:
+                            os.remove(headers_file)
+                            files_deleted.append(epub_base)
+                            self.append_log(f"✅ Deleted translated_headers.txt from {epub_base}")
+                        except Exception as e:
+                            errors.append((epub_base, f"Delete failed: {e}"))
+                            self.append_log(f"❌ Failed to delete translated_headers.txt from {epub_base}: {e}")
+                    
+                    # Show final results
+                    if files_deleted:
+                        success_msg = f"Successfully deleted {len(files_deleted)} file(s):\n"
+                        success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
+                        if errors:
+                            success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."
+                        messagebox.showinfo("Success", success_msg)
+                    else:
+                        messagebox.showerror("Error", "No files were successfully deleted.")
+            else:
+                # No files to delete
+                messagebox.showinfo("No Files to Delete", summary_text)
+            
+        except Exception as e:
+            self.append_log(f"❌ Error deleting translated_headers.txt: {e}")
+            messagebox.showerror("Error", f"Failed to delete file: {e}")
 
     def validate_epub_structure_gui(self):
         """GUI wrapper for EPUB structure validation"""
