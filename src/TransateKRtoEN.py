@@ -2360,6 +2360,28 @@ class ChapterExtractor:
                             detection_method = f"{extraction_mode}_sequential_fallback" if extraction_mode == "enhanced" else "sequential_fallback"
                             print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
                 
+                # Filter content_html for ignore settings (before processing)
+                batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                
+                if (ignore_title_tag or ignore_header_tags) and content_html and not enhanced_extraction_used:
+                    # Parse the content HTML to remove ignored tags
+                    content_soup = BeautifulSoup(content_html, self.parser)
+                    
+                    # Remove title tags if ignored
+                    if ignore_title_tag:
+                        for title_tag in content_soup.find_all('title'):
+                            title_tag.decompose()
+                    
+                    # Remove header tags if ignored
+                    if ignore_header_tags:
+                        for header_tag in content_soup.find_all(['h1', 'h2', 'h3']):
+                            header_tag.decompose()
+                    
+                    # Update content_html with filtered version
+                    content_html = str(content_soup)
+                
                 # Process images and metadata (same for all modes)
                 protected_html = self.protect_angle_brackets_with_korean(html_content)
                 soup = BeautifulSoup(protected_html, self.parser)
@@ -10727,6 +10749,26 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress")
                 progress_manager.save()
 
+                # Apply ignore filtering to the content before chunk splitting
+                batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                
+                if (ignore_title_tag or ignore_header_tags) and c["body"]:
+                    from bs4 import BeautifulSoup
+                    content_soup = BeautifulSoup(c["body"], 'html.parser')
+                    
+                    # Remove title tags if ignored
+                    if ignore_title_tag:
+                        for title_tag in content_soup.find_all('title'):
+                            title_tag.decompose()
+                    
+                    # Remove header tags if ignored
+                    if ignore_header_tags:
+                        for header_tag in content_soup.find_all(['h1', 'h2', 'h3']):
+                            header_tag.decompose()
+                    
+                    c["body"] = str(content_soup)  # Update the chapter body
 
                 # Check if this chapter is already a chunk from text file splitting
                 if c.get('is_chunk', False):

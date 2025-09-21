@@ -7516,6 +7516,11 @@ Provide translations in the same numbered format."""
                     # If we can't check, just continue
                     pass
             
+            # Set essential environment variables from current config before translation
+            os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
+            os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
+            os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
+            
             # Now run the actual translation
             self.run_translation_direct()
             

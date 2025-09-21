@@ -1796,23 +1796,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 soup = BeautifulSoup(content, 'html.parser')
                 
                 current_title = None
-                # Check if header/title tags should be ignored
-                batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
-                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
-                
-                # Build tag list based on ignore settings
-                tag_names = []
-                if not ignore_header_tags:
-                    tag_names.extend(['h1', 'h2', 'h3'])
-                if not ignore_title_tag:
-                    tag_names.append('title')
-                
-                # If all tags are ignored, use empty list (will fall back to paragraph)
-                if not tag_names:
-                    tag_names = []
-                
-                for tag_name in tag_names:
+                for tag_name in ['h1', 'h2', 'h3', 'title']:
                     tag = soup.find(tag_name)
                     if tag:
                         text = tag.get_text().strip()
@@ -1845,23 +1829,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 soup = BeautifulSoup(content, 'html.parser')
                 
                 current_title = None
-                # Check if header/title tags should be ignored
-                batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
-                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
-                
-                # Build tag list based on ignore settings
-                tag_names = []
-                if not ignore_header_tags:
-                    tag_names.extend(['h1', 'h2', 'h3'])
-                if not ignore_title_tag:
-                    tag_names.append('title')
-                
-                # If all tags are ignored, use empty list (will fall back to paragraph)
-                if not tag_names:
-                    tag_names = []
-                
-                for tag_name in tag_names:
+                for tag_name in ['h1', 'h2', 'h3', 'title']:
                     tag = soup.find(tag_name)
                     if tag:
                         text = tag.get_text().strip()
@@ -1994,23 +1962,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
                     title = None
-                    # Check if header/title tags should be ignored
-                    batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-                    ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
-                    ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
-                    
-                    # Build tag list based on ignore settings
-                    tag_names = []
-                    if not ignore_header_tags:
-                        tag_names.extend(['h1', 'h2', 'h3'])
-                    if not ignore_title_tag:
-                        tag_names.append('title')
-                    
-                    # If all tags are ignored, use empty list (will fall back to paragraph)
-                    if not tag_names:
-                        tag_names = []
-                    
-                    for tag_name in tag_names:
+                    for tag_name in ['h1', 'h2', 'h3', 'title']:
                         tag = soup.find(tag_name)
                         if tag:
                             text = tag.get_text().strip()
