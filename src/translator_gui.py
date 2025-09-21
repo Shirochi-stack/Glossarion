@@ -2286,8 +2286,7 @@ Recent translations to summarize:
         
         # Create browse menu
         self.browse_menu = tk.Menu(self.master, tearoff=0, font=('Arial', 12))
-        self.browse_menu.add_command(label="📄 Select Single File", command=self.browse_file)
-        self.browse_menu.add_command(label="📑 Select Multiple Files", command=self.browse_multiple_files)
+        self.browse_menu.add_command(label="📄 Select Files", command=self.browse_files)
         self.browse_menu.add_command(label="📁 Select Folder", command=self.browse_folder)
         self.browse_menu.add_separator()
         self.browse_menu.add_command(label="🗑️ Clear Selection", command=self.clear_file_selection)
@@ -12478,10 +12477,10 @@ Important rules:
         return False
 
     # File Selection Methods
-    def browse_file(self):
-        """Select a single file"""
-        path = filedialog.askopenfilename(
-            title="Select File",
+    def browse_files(self):
+        """Select one or more files - automatically handles single/multiple selection"""
+        paths = filedialog.askopenfilenames(
+            title="Select File(s) - Hold Ctrl/Shift to select multiple",
             filetypes=[
                 ("Supported files", "*.epub;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("EPUB files", "*.epub"),
@@ -12492,21 +12491,6 @@ Important rules:
                 ("GIF files", "*.gif"),
                 ("BMP files", "*.bmp"),
                 ("WebP files", "*.webp"),
-                ("All files", "*.*")
-            ]
-        )
-        if path:
-            self._handle_file_selection([path])
-
-    def browse_multiple_files(self):
-        """Select multiple files at once"""
-        paths = filedialog.askopenfilenames(
-            title="Select Multiple Files (Ctrl+Click or Shift+Click)",
-            filetypes=[
-                ("Supported files", "*.epub;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
-                ("EPUB files", "*.epub"),
-                ("Text files", "*.txt;*.json"),
-                ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("All files", "*.*")
             ]
         )
