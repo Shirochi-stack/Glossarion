@@ -1207,7 +1207,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.5.0"
+        __version__ = "4.6.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -2255,7 +2255,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.5.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.6.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -4105,15 +4105,17 @@ Recent translations to summarize:
             if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
                 return
             
-            # Process chapters - JUST DELETE THE FILES
+            # Process chapters - DELETE FILES AND UPDATE PROGRESS
             deleted_count = 0
             marked_count = 0
+            qa_cleared_count = 0
+            progress_updated = False
 
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
                 
                 if ch_info['status'] != 'not_translated':
-                    # Delete existing file ONLY
+                    # Delete existing file
                     if output_file:
                         output_path = os.path.join(data['output_dir'], output_file)
                         try:
@@ -4123,19 +4125,64 @@ Recent translations to summarize:
                                 print(f"Deleted: {output_path}")
                         except Exception as e:
                             print(f"Failed to delete {output_path}: {e}")
+                    
+                    # If this is a qa_failed chapter, clean up the progress tracker
+                    if ch_info['status'] == 'qa_failed':
+                        target_output_file = ch_info['output_file']
+                        chapter_key = None
+                        
+                        # Search through all chapters to find the one with matching output_file
+                        for key, ch_data in data['prog']["chapters"].items():
+                            if ch_data.get('output_file') == target_output_file:
+                                chapter_key = key
+                                break
+                        
+                        # Update the chapter status if we found the key
+                        if chapter_key and chapter_key in data['prog']["chapters"]:
+                            print(f"Clearing QA failed status for chapter key {chapter_key} (output file: {target_output_file})")
+                            
+                            # Reset status to pending for retranslation
+                            data['prog']["chapters"][chapter_key]["status"] = "pending"
+                            
+                            # Remove all QA-related fields
+                            fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]
+                            for field in fields_to_remove:
+                                if field in data['prog']["chapters"][chapter_key]:
+                                    del data['prog']["chapters"][chapter_key][field]
+                            
+                            qa_cleared_count += 1
+                            progress_updated = True
+                        else:
+                            print(f"WARNING: Could not find chapter key for QA failed output file: {target_output_file}")
                 else:
                     # Just marking for translation (no file to delete)
                     marked_count += 1
             
-            if deleted_count > 0 and marked_count > 0:
-                messagebox.showinfo("Success", 
-                    f"Deleted {deleted_count} files and marked {marked_count} missing chapters for translation.\n\nTotal {len(selected)} chapters ready for translation.")
-            elif deleted_count > 0:
-                messagebox.showinfo("Success", 
-                    f"Deleted {deleted_count} files and cleared {len(selected)} chapters from tracking.")
+            # Save the updated progress if we made changes
+            if progress_updated:
+                try:
+                    with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                        json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                    print(f"Updated progress tracking file - cleared {qa_cleared_count} QA failed entries")
+                except Exception as e:
+                    print(f"Failed to update progress file: {e}")
+            
+            # Build success message
+            success_parts = []
+            if deleted_count > 0:
+                success_parts.append(f"Deleted {deleted_count} files")
+            if marked_count > 0:
+                success_parts.append(f"marked {marked_count} missing chapters for translation")
+            if qa_cleared_count > 0:
+                success_parts.append(f"cleared {qa_cleared_count} QA failed entries")
+            
+            if success_parts:
+                success_msg = "Successfully " + ", ".join(success_parts) + "."
+                if deleted_count > 0 or marked_count > 0:
+                    success_msg += f"\n\nTotal {len(selected)} chapters ready for translation."
+                messagebox.showinfo("Success", success_msg)
             else:
-                messagebox.showinfo("Success", 
-                    f"Marked {marked_count} missing chapters for translation.")
+                messagebox.showinfo("Info", "No changes made.")
             
             if data.get('dialog'):
                 data['dialog'].destroy()
@@ -16685,7 +16732,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v4.5.0...")
+    print("🚀 Starting Glossarion v4.6.0...")
     
     # Initialize splash screen
     splash_manager = None
