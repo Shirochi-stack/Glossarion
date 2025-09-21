@@ -8711,19 +8711,33 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             print(f"📚 Book title translation disabled - keeping original")
             return title
         
-        book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
-            "Translate this book title to English while retaining any acronyms:")
+        # Check if we're using a translation service (not AI)
+        client_type = getattr(client, 'client_type', '')
+        is_translation_service = client_type in ['deepl', 'google_translate']
         
-        # Get the system prompt for book titles, with fallback to default
-        book_title_system_prompt = os.getenv("BOOK_TITLE_SYSTEM_PROMPT", 
-            "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content.")
-        
-        messages = [
-            {"role": "system", "content": book_title_system_prompt},
-            {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
-        ]
-        max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
-        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
+        if is_translation_service:
+            # For translation services, send only the text without AI prompts
+            print(f"📚 Using translation service ({client_type}) - sending text directly")
+            messages = [
+                {"role": "user", "content": title}
+            ]
+            max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+            translated_title, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
+        else:
+            # For AI services, use prompts as before
+            book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
+                "Translate this book title to English while retaining any acronyms:")
+            
+            # Get the system prompt for book titles, with fallback to default
+            book_title_system_prompt = os.getenv("BOOK_TITLE_SYSTEM_PROMPT", 
+                "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content.")
+            
+            messages = [
+                {"role": "system", "content": book_title_system_prompt},
+                {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
+            ]
+            max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+            translated_title, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
         
         print(f"[DEBUG] Raw API response: '{translated_title}'")
         print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
@@ -9698,10 +9712,22 @@ def main(log_callback=None, stop_callback=None):
                                 field_prompt = field_prompt.replace('English', output_language)
                                 field_prompt = field_prompt.replace('{field_value}', str(original_value))
                                 
-                                messages = [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": f"{field_prompt}\n\n{original_value}"}
-                                ]
+                                # Check if we're using a translation service (not AI)
+                                client_type = getattr(client, 'client_type', '')
+                                is_translation_service = client_type in ['deepl', 'google_translate']
+                                
+                                if is_translation_service:
+                                    # For translation services, send only the field value without AI prompts
+                                    print(f"🌐 Using translation service ({client_type}) - sending field directly")
+                                    messages = [
+                                        {"role": "user", "content": str(original_value)}
+                                    ]
+                                else:
+                                    # For AI services, use prompts as before
+                                    messages = [
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": f"{field_prompt}\n\n{original_value}"}
+                                    ]
                                 
                                 try:
                                     # Add delay using the config instance from main()

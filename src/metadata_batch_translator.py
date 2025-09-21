@@ -1361,11 +1361,25 @@ class MetadataTranslator:
         
         user_prompt = prompt_template + f"\n\nFields to translate:\n{json.dumps(fields_to_send, ensure_ascii=False, indent=2)}"
         
+        # Check if we're using a translation service (not AI)
+        client_type = getattr(self.client, 'client_type', '')
+        is_translation_service = client_type in ['deepl', 'google_translate']
+        
         try:
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+            if is_translation_service:
+                # For translation services, send only the field values without AI prompts
+                print(f"🌐 Using translation service ({client_type}) - sending fields directly")
+                # Convert fields to a simple text format
+                field_text = "\n".join([f"{field}: {value}" for field, value in fields_to_send.items()])
+                messages = [
+                    {"role": "user", "content": field_text}
+                ]
+            else:
+                # For AI services, use prompts as before
+                messages = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
             
             # Get temperature and max_tokens from environment or config
             temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
@@ -1472,11 +1486,22 @@ class MetadataTranslator:
         # Clean up double spaces
         prompt = ' '.join(prompt.split())
         
+        # Check if we're using a translation service (not AI)
+        client_type = getattr(self.client, 'client_type', '')
+        is_translation_service = client_type in ['deepl', 'google_translate']
+        
         try:
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": f"{prompt}\n\n{field_value}"}
-            ]
+            if is_translation_service:
+                # For translation services, send only the field value without AI prompts
+                messages = [
+                    {"role": "user", "content": field_value}
+                ]
+            else:
+                # For AI services, use prompts as before
+                messages = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": f"{prompt}\n\n{field_value}"}
+                ]
             
             # Get temperature and max_tokens from environment or config
             temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))

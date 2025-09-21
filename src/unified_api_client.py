@@ -315,6 +315,7 @@ class UnifiedClient:
                                 return url.split(',', 1)[1]
                             return url
         return None
+    
 
     def _get_timeout_config(self) -> Tuple[bool, int]:
         enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
@@ -9147,27 +9148,24 @@ class UnifiedClient:
             # Initialize DeepL translator
             translator = deepl.Translator(deepl_api_key)
             
-            # Extract text to translate from messages
+            # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""
             source_lang = None
             target_lang = "EN-US"  # Default to US English
             
+            # Extract only user messages, ignore system prompts completely
             for msg in messages:
-                if msg['role'] == 'system':
-                    # Try to detect language hints from system prompt
-                    content_lower = msg['content'].lower()
-                    if 'korean' in content_lower or 'kr' in content_lower:
-                        source_lang = 'KO'
-                    elif 'japanese' in content_lower or 'jp' in content_lower:
-                        source_lang = 'JA'
-                    elif 'chinese' in content_lower or 'zh' in content_lower:
-                        source_lang = 'ZH'
-                    
-                    # Check for target language preference
-                    if 'british english' in content_lower:
-                        target_lang = "EN-GB"
-                elif msg['role'] == 'user':
+                if msg['role'] == 'user':
                     text_to_translate = msg['content']
+                    # Simple language detection from content patterns
+                    if any(ord(char) >= 0xAC00 and ord(char) <= 0xD7AF for char in text_to_translate[:100]):
+                        source_lang = 'KO'  # Korean
+                    elif any(ord(char) >= 0x3040 and ord(char) <= 0x309F for char in text_to_translate[:100]) or \
+                         any(ord(char) >= 0x30A0 and ord(char) <= 0x30FF for char in text_to_translate[:100]):
+                        source_lang = 'JA'  # Japanese
+                    elif any(ord(char) >= 0x4E00 and ord(char) <= 0x9FFF for char in text_to_translate[:100]):
+                        source_lang = 'ZH'  # Chinese
+                    break  # Take only the first user message
             
             if not text_to_translate:
                 raise UnifiedClientError("No text to translate found in messages")
@@ -9296,27 +9294,24 @@ class UnifiedClient:
             # Initialize the client
             translate_client = google_translate.Client()
             
-            # Extract text and detect language from messages
+            # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""
             source_lang = None
             target_lang = 'en'  # Default to English
             
+            # Extract only user messages, ignore system prompts completely
             for msg in messages:
-                if msg['role'] == 'system':
-                    # Try to detect language hints from system prompt
-                    content_lower = msg['content'].lower()
-                    if 'korean' in content_lower or 'kr' in content_lower:
-                        source_lang = 'ko'
-                    elif 'japanese' in content_lower or 'jp' in content_lower:
-                        source_lang = 'ja'
-                    elif 'chinese simplified' in content_lower:
-                        source_lang = 'zh-CN'
-                    elif 'chinese traditional' in content_lower:
-                        source_lang = 'zh-TW'
-                    elif 'chinese' in content_lower or 'zh' in content_lower:
-                        source_lang = 'zh'
-                elif msg['role'] == 'user':
+                if msg['role'] == 'user':
                     text_to_translate = msg['content']
+                    # Simple language detection from content patterns
+                    if any(ord(char) >= 0xAC00 and ord(char) <= 0xD7AF for char in text_to_translate[:100]):
+                        source_lang = 'ko'  # Korean
+                    elif any(ord(char) >= 0x3040 and ord(char) <= 0x309F for char in text_to_translate[:100]) or \
+                         any(ord(char) >= 0x30A0 and ord(char) <= 0x30FF for char in text_to_translate[:100]):
+                        source_lang = 'ja'  # Japanese
+                    elif any(ord(char) >= 0x4E00 and ord(char) <= 0x9FFF for char in text_to_translate[:100]):
+                        source_lang = 'zh'  # Chinese
+                    break  # Take only the first user message
             
             if not text_to_translate:
                 # Return empty response instead of error
