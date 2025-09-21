@@ -827,6 +827,15 @@ class UnifiedClient:
         
         # Store Google Cloud credentials path if available
         self.google_creds_path = None
+        # Store current key's Google credentials, Azure endpoint, and Google region
+        self.current_key_google_creds = None
+        self.current_key_azure_endpoint = None
+        self.current_key_google_region = None
+        
+        # Azure-specific flags
+        self.is_azure = False
+        self.azure_endpoint = None
+        self.azure_api_version = None
 
         self.translator_config = {
             'use_fallback_keys': os.getenv('USE_FALLBACK_KEYS', '0') == '1',
@@ -1095,6 +1104,10 @@ class UnifiedClient:
                     tls.model = key.model
                     tls.key_index = key_index
                     tls.key_identifier = key_id
+                    tls.google_credentials = getattr(key, 'google_credentials', None)
+                    tls.azure_endpoint = getattr(key, 'azure_endpoint', None)
+                    tls.azure_api_version = getattr(key, 'azure_api_version', None)
+                    tls.google_region = getattr(key, 'google_region', None)
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -1105,6 +1118,10 @@ class UnifiedClient:
                         self.model = tls.model
                         self.key_identifier = tls.key_identifier
                         self.current_key_index = key_index
+                        self.current_key_google_creds = tls.google_credentials
+                        self.current_key_azure_endpoint = tls.azure_endpoint
+                        self.current_key_azure_api_version = tls.azure_api_version
+                        self.current_key_google_region = tls.google_region
                     
                     # Log key assignment - FIX: Add None check for api_key
                     if self.api_key and len(self.api_key) > 12:
@@ -1131,6 +1148,10 @@ class UnifiedClient:
                         self.model = tls.model
                         self.key_identifier = tls.key_identifier
                         self.current_key_index = getattr(tls, 'key_index', None)
+                        self.current_key_google_creds = getattr(tls, 'google_credentials', None)
+                        self.current_key_azure_endpoint = getattr(tls, 'azure_endpoint', None)
+                        self.current_key_azure_api_version = getattr(tls, 'azure_api_version', None)
+                        self.current_key_google_region = getattr(tls, 'google_region', None)
         
         # Single key mode
         elif not tls.initialized:
@@ -2695,28 +2716,39 @@ class UnifiedClient:
             if openai is None:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai")
             
-            # Check if custom endpoints are enabled
-            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-            
-            # Initialize base_url with default value
-            base_url = 'https://api.openai.com/v1'  # Default OpenAI endpoint
-            
-            # Check for custom base URL
-            if use_custom_endpoint:
-                custom_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
-                if custom_url:  # Only override if custom URL is provided
-                    base_url = custom_url
-                    
-                    # Validate URL has protocol
-                    if not base_url.startswith(('http://', 'https://')):
-                        print(f"[WARNING] Custom base URL missing protocol, adding https://")
-                        base_url = 'https://' + base_url
-                    print(f"[DEBUG] Custom endpoints enabled, using: {base_url}")
-                else:
-                    print(f"[DEBUG] Custom endpoints enabled but no URL provided, using default")
+            # Check if this key has an Azure endpoint (multi-key mode)
+            if hasattr(self, 'current_key_azure_endpoint') and self.current_key_azure_endpoint:
+                base_url = self.current_key_azure_endpoint
+                if not base_url.startswith(('http://', 'https://')):
+                    print(f"[WARNING] Key-specific Azure endpoint missing protocol, adding https://")
+                    base_url = 'https://' + base_url
+                print(f"[DEBUG] Using key-specific Azure endpoint: {base_url}")
+                # Also log the per-key Azure API version if available
+                if hasattr(self, 'current_key_azure_api_version') and self.current_key_azure_api_version:
+                    print(f"[DEBUG] Using key-specific Azure API version: {self.current_key_azure_api_version}")
             else:
-                # Use default endpoint when toggle is off
-                print(f"[DEBUG] Custom endpoints disabled, using default OpenAI endpoint")
+                # Check if custom endpoints are enabled (global setting)
+                use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                
+                # Initialize base_url with default value
+                base_url = 'https://api.openai.com/v1'  # Default OpenAI endpoint
+                
+                # Check for custom base URL
+                if use_custom_endpoint:
+                    custom_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
+                    if custom_url:  # Only override if custom URL is provided
+                        base_url = custom_url
+                        
+                        # Validate URL has protocol
+                        if not base_url.startswith(('http://', 'https://')):
+                            print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                            base_url = 'https://' + base_url
+                        print(f"[DEBUG] Custom endpoints enabled, using: {base_url}")
+                    else:
+                        print(f"[DEBUG] Custom endpoints enabled but no URL provided, using default")
+                else:
+                    # Use default endpoint when toggle is off
+                    print(f"[DEBUG] Custom endpoints disabled, using default OpenAI endpoint")
             
             print(f"[DEBUG] Will use base URL: {base_url}")
             
@@ -2846,13 +2878,63 @@ class UnifiedClient:
             if base_url is None:
                 base_url = 'https://api.openai.com/v1'
             
+            # Check if this is an Azure endpoint
+            is_azure_endpoint = ('.azure.com' in base_url.lower() or 
+                               '.cognitiveservices' in base_url.lower() or
+                               'azure' in base_url.lower())
+            
             # MICROSECOND LOCK for OpenAI client
             with self._model_lock:
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=base_url
-                )
-            print(f"[DEBUG] OpenAI client created with base_url: {base_url}")
+                if is_azure_endpoint:
+                    # Azure OpenAI requires special client configuration
+                    # Use per-key API version if available, otherwise fall back to environment or default
+                    api_version = getattr(self, 'current_key_azure_api_version', None) or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
+                    
+                    # Extract resource name from Azure endpoint
+                    if '://' in base_url:
+                        # Remove protocol and extract base URL
+                        clean_url = base_url.split('://', 1)[1]
+                        if clean_url.endswith('/openai/deployments'):
+                            clean_url = clean_url.replace('/openai/deployments', '')
+                        elif clean_url.endswith('/openai/'):
+                            clean_url = clean_url.replace('/openai/', '')
+                        elif clean_url.endswith('/'):
+                            clean_url = clean_url.rstrip('/')
+                        
+                        azure_endpoint = f"https://{clean_url}"
+                    else:
+                        azure_endpoint = base_url
+                    
+                    try:
+                        # Use AzureOpenAI client if available
+                        from openai import AzureOpenAI
+                        
+                        # Store Azure-specific info for later use
+                        self.is_azure = True
+                        self.azure_endpoint = azure_endpoint
+                        self.azure_api_version = api_version
+                        
+                        self.openai_client = AzureOpenAI(
+                            api_key=self.api_key,
+                            azure_endpoint=azure_endpoint,
+                            api_version=api_version
+                        )
+                        print(f"[DEBUG] Azure OpenAI client created with endpoint: {azure_endpoint}, api_version: {api_version}")
+                        print(f"[DEBUG] Model/Deployment name: {self.model}")
+                    except ImportError:
+                        # Fallback to regular OpenAI client with base_url
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=base_url
+                        )
+                        print(f"[DEBUG] Using regular OpenAI client for Azure endpoint: {base_url}")
+                else:
+                    # Regular OpenAI or compatible endpoint
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                    print(f"[DEBUG] OpenAI client created with base_url: {base_url}")
         
         elif self.client_type == 'gemini':
             if use_gemini_endpoint and gemini_endpoint:
@@ -2871,6 +2953,17 @@ class UnifiedClient:
                 print(f"[DEBUG] Gemini using OpenAI-compatible endpoint: {base_url}")
             else:
                 # MICROSECOND LOCK for native Gemini client
+                # Check if this key has Google credentials (multi-key mode)
+                google_creds = None
+                if hasattr(self, 'current_key_google_creds') and self.current_key_google_creds:
+                    google_creds = self.current_key_google_creds
+                    print(f"[DEBUG] Using key-specific Google credentials: {os.path.basename(google_creds)}")
+                    # Set environment variable for this request
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                elif hasattr(self, 'google_creds_path') and self.google_creds_path:
+                    google_creds = self.google_creds_path
+                    print(f"[DEBUG] Using default Google credentials: {os.path.basename(google_creds)}")
+                
                 with self._model_lock:
                     self.gemini_client = genai.Client(api_key=self.api_key)
                 if hasattr(tls, 'model'):
@@ -3387,16 +3480,34 @@ class UnifiedClient:
                 if e.error_type == "prohibited_content" or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
                     
-                    # Attempt main key retry once, then fall through to fallback
-                    if not main_key_attempted:
-                        main_key_attempted = True
-                        retry_res = self._maybe_retry_main_key_on_prohibited(
-                            messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
-                        )
-                        if retry_res:
-                            res_content, res_fr = retry_res
-                            if res_content and res_content.strip():
-                                return res_content, res_fr
+                    # Different behavior based on mode
+                    if self._multi_key_mode:
+                        # Multi-key mode: Attempt main key retry once, then fall through to fallback
+                        if not main_key_attempted:
+                            main_key_attempted = True
+                            retry_res = self._maybe_retry_main_key_on_prohibited(
+                                messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                            )
+                            if retry_res:
+                                res_content, res_fr = retry_res
+                                if res_content and res_content.strip():
+                                    return res_content, res_fr
+                    else:
+                        # Single-key mode: Check if fallback keys are enabled
+                        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                        if use_fallback_keys:
+                            print(f"[SINGLE-KEY MODE] Fallback keys enabled - skipping main key retry, going straight to fallback keys")
+                            # Try fallback keys directly without retrying main key
+                            retry_res = self._try_fallback_keys_direct(
+                                messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                            )
+                            if retry_res:
+                                res_content, res_fr = retry_res
+                                if res_content and res_content.strip():
+                                    return res_content, res_fr
+                        else:
+                            print(f"[SINGLE-KEY MODE] Fallback keys disabled - no retry available")
+                    
                     # Fallthrough: record and return generic fallback
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
@@ -3675,6 +3786,9 @@ class UnifiedClient:
                         fallback_keys.append({
                             'api_key': fb.get('api_key'),
                             'model': fb.get('model'),
+                            'google_credentials': fb.get('google_credentials'),
+                            'azure_endpoint': fb.get('azure_endpoint'),
+                            'google_region': fb.get('google_region'),
                             'label': 'FALLBACK KEY'
                         })
                 except Exception as e:
@@ -3688,6 +3802,9 @@ class UnifiedClient:
                 label = fallback_data.get('label', 'Fallback')
                 fallback_key = fallback_data.get('api_key')
                 fallback_model = fallback_data.get('model')
+                fallback_google_creds = fallback_data.get('google_credentials')
+                fallback_azure_endpoint = fallback_data.get('azure_endpoint')
+                fallback_google_region = fallback_data.get('google_region')
                 
                 print(f"[{label} {idx+1}/{max_attempts}] Trying {fallback_model}")
                 print(f"[{label} {idx+1}] Failed multi-key model was: {self.model}")
@@ -3699,16 +3816,39 @@ class UnifiedClient:
                         model=fallback_model,   
                         output_dir=self.output_dir
                     )
+                    
+                    # Set key-specific credentials for the temp client
+                    if fallback_google_creds:
+                        temp_client.current_key_google_creds = fallback_google_creds
+                        temp_client.google_creds_path = fallback_google_creds
+                        print(f"[{label} {idx+1}] Using fallback Google credentials: {os.path.basename(fallback_google_creds)}")
+                    
+                    if fallback_google_region:
+                        temp_client.current_key_google_region = fallback_google_region
+                        print(f"[{label} {idx+1}] Using fallback Google region: {fallback_google_region}")
+                    
+                    if fallback_azure_endpoint:
+                        temp_client.current_key_azure_endpoint = fallback_azure_endpoint
+                        # Set up Azure-specific configuration
+                        temp_client.is_azure = True
+                        temp_client.azure_endpoint = fallback_azure_endpoint
+                        temp_client.azure_api_version = os.getenv('AZURE_API_VERSION', '2024-08-01-preview')
+                        print(f"[{label} {idx+1}] Using fallback Azure endpoint: {fallback_azure_endpoint}")
+                        print(f"[{label} {idx+1}] Azure API version: {temp_client.azure_api_version}")
 
-                    if hasattr(self, 'base_url') and self.base_url:
+                    # Don't override with main client's base_url if we have fallback Azure endpoint
+                    if hasattr(self, 'base_url') and self.base_url and not fallback_azure_endpoint:
                         temp_client.base_url = self.base_url
                         temp_client.openai_base_url = self.base_url
                         
-                    if hasattr(self, 'api_version'):
+                    if hasattr(self, 'api_version') and not fallback_azure_endpoint:
                         temp_client.api_version = self.api_version
                         
-                    if hasattr(self, 'is_azure') and self.is_azure:
+                    # Only inherit Azure settings if fallback doesn't have its own Azure endpoint
+                    if hasattr(self, 'is_azure') and self.is_azure and not fallback_azure_endpoint:
                         temp_client.is_azure = self.is_azure
+                        temp_client.azure_endpoint = getattr(self, 'azure_endpoint', None)
+                        temp_client.azure_api_version = getattr(self, 'azure_api_version', '2024-08-01-preview')
                         
                     # Force the client to reinitialize with Azure settings
                     temp_client._setup_client()
@@ -3798,6 +3938,129 @@ class UnifiedClient:
         finally:
             # ALWAYS clear the thread-local flag
             setattr(tls, retry_flag, False)
+    
+    def _try_fallback_keys_direct(self, messages, temperature=None, max_tokens=None, 
+                                  max_completion_tokens=None, context=None,
+                                  request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
+        """
+        Try fallback keys directly in single-key mode without retrying main key.
+        Used when fallback keys are enabled in single-key mode.
+        """
+        # Check if fallback keys are enabled
+        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        if not use_fallback_keys:
+            print(f"[FALLBACK DIRECT] Fallback keys not enabled, skipping")
+            return None
+        
+        # Load fallback keys from environment
+        fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
+        if fallback_keys_json == '[]':
+            print(f"[FALLBACK DIRECT] No fallback keys configured")
+            return None
+        
+        try:
+            configured_fallbacks = json.loads(fallback_keys_json)
+            print(f"[FALLBACK DIRECT] Loaded {len(configured_fallbacks)} fallback keys")
+            
+            # Try each fallback key
+            max_attempts = min(len(configured_fallbacks), 3)  # Limit attempts
+            for idx, fb in enumerate(configured_fallbacks[:max_attempts]):
+                fallback_key = fb.get('api_key')
+                fallback_model = fb.get('model')
+                fallback_google_creds = fb.get('google_credentials')
+                fallback_azure_endpoint = fb.get('azure_endpoint')
+                fallback_google_region = fb.get('google_region')
+                fallback_azure_api_version = fb.get('azure_api_version')
+                
+                if not fallback_key or not fallback_model:
+                    print(f"[FALLBACK DIRECT {idx+1}] Invalid key data, skipping")
+                    continue
+                
+                print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
+                
+                try:
+                    # Create temporary client for fallback key
+                    temp_client = UnifiedClient(
+                        api_key=fallback_key,  
+                        model=fallback_model,   
+                        output_dir=self.output_dir
+                    )
+                    
+                    # Set key-specific credentials
+                    if fallback_google_creds:
+                        temp_client.current_key_google_creds = fallback_google_creds
+                        temp_client.google_creds_path = fallback_google_creds
+                        print(f"[FALLBACK DIRECT {idx+1}] Using Google credentials: {os.path.basename(fallback_google_creds)}")
+                    
+                    if fallback_google_region:
+                        temp_client.current_key_google_region = fallback_google_region
+                        print(f"[FALLBACK DIRECT {idx+1}] Using Google region: {fallback_google_region}")
+                    
+                    if fallback_azure_endpoint:
+                        temp_client.current_key_azure_endpoint = fallback_azure_endpoint
+                        # Set up Azure-specific configuration
+                        temp_client.is_azure = True
+                        temp_client.azure_endpoint = fallback_azure_endpoint
+                        # Use per-key Azure API version, fallback to environment, then default
+                        temp_client.azure_api_version = fallback_azure_api_version or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
+                        print(f"[FALLBACK DIRECT {idx+1}] Using Azure endpoint: {fallback_azure_endpoint}")
+                        print(f"[FALLBACK DIRECT {idx+1}] Azure API version: {temp_client.azure_api_version}")
+                    
+                    # Force single-key mode
+                    temp_client._multi_key_mode = False
+                    temp_client.key_identifier = f"FALLBACK KEY ({fallback_model})"
+                    temp_client._is_retry_client = True
+                    
+                    # Setup the client
+                    temp_client._setup_client()
+                    
+                    # Copy relevant state
+                    temp_client.context = context
+                    temp_client._cancelled = False
+                    temp_client._in_cleanup = False
+                    temp_client.current_session_context = self.current_session_context
+                    temp_client.conversation_message_count = self.conversation_message_count
+                    temp_client.request_timeout = self.request_timeout
+                    
+                    print(f"[FALLBACK DIRECT {idx+1}] Sending request...")
+                    
+                    # Use internal method to avoid nested retry loops
+                    result = temp_client._send_internal(
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        max_completion_tokens=max_completion_tokens,
+                        context=context,
+                        retry_reason=f"single_key_fallback_{idx+1}",
+                        request_id=request_id,
+                        image_data=image_data
+                    )
+                    
+                    # Check the result
+                    if result and isinstance(result, tuple):
+                        content, finish_reason = result
+                        
+                        # Check if content is valid
+                        if content and "[AI RESPONSE UNAVAILABLE]" not in content and len(content) > 50:
+                            print(f"[FALLBACK DIRECT {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
+                            return content, finish_reason
+                        else:
+                            print(f"[FALLBACK DIRECT {idx+1}] ❌ Content too short or error: {len(content) if content else 0} chars")
+                            continue
+                    else:
+                        print(f"[FALLBACK DIRECT {idx+1}] ❌ Unexpected result type: {type(result)}")
+                        continue
+                        
+                except Exception as e:
+                    print(f"[FALLBACK DIRECT {idx+1}] ❌ Failed: {e}")
+                    continue
+            
+            print(f"[FALLBACK DIRECT] All fallback keys failed")
+            return None
+            
+        except Exception as e:
+            print(f"[FALLBACK DIRECT] Failed to parse fallback keys: {e}")
+            return None
     
     # Image handling methods
     def send_image(self, messages: List[Dict[str, Any]], image_data: Any,

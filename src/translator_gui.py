@@ -1326,7 +1326,11 @@ class TranslatorGUI:
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
-        self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2024-08-01-preview'))
+        self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2025-01-01-preview'))
+        # Set initial Azure API version environment variable
+        azure_version = self.config.get('azure_api_version', '2025-01-01-preview')
+        os.environ['AZURE_API_VERSION'] = azure_version
+        print(f"🔧 Initial Azure API Version set: {azure_version}")
         self.use_fallback_keys_var = tk.BooleanVar(value=self.config.get('use_fallback_keys', False))
 
         # Initialize fuzzy threshold variable
@@ -15016,8 +15020,23 @@ Important rules:
         
         tb.Label(self.azure_version_frame, text="Azure API Version:").pack(side=tk.LEFT, padx=(5, 5))
         
-        self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2024-08-01-preview'))
-        versions = ['2024-08-01-preview', '2024-02-01', '2023-12-01-preview', '2023-05-15']
+        # Update the existing azure_api_version_var with current config and add trace
+        self.azure_api_version_var.set(self.config.get('azure_api_version', '2024-08-01-preview'))
+        # Add trace to update env var immediately when changed
+        self.azure_api_version_var.trace('w', self._update_azure_api_version_env)
+        versions = [
+            '2025-01-01-preview',  # Latest preview
+            '2024-12-01-preview',
+            '2024-10-01-preview', 
+            '2024-08-01-preview',  # Current default
+            '2024-06-01',         # Stable release
+            '2024-05-01-preview',
+            '2024-04-01-preview',
+            '2024-02-01',         # Older stable
+            '2023-12-01-preview',
+            '2023-10-01-preview',
+            '2023-05-15'          # Legacy
+        ]
         self.azure_version_combo = ttk.Combobox(
             self.azure_version_frame, 
             textvariable=self.azure_api_version_var,
@@ -15145,6 +15164,16 @@ Important rules:
             # Hide Azure version frame
             if hasattr(self, 'azure_version_frame'):
                 self.azure_version_frame.pack_forget()
+                
+    def _update_azure_api_version_env(self, *args):
+        """Update the AZURE_API_VERSION environment variable when the setting changes"""
+        try:
+            api_version = self.azure_api_version_var.get()
+            if api_version:
+                os.environ['AZURE_API_VERSION'] = api_version
+                print(f"✅ Updated Azure API Version in environment: {api_version}")
+        except Exception as e:
+            print(f"❌ Error updating Azure API Version environment variable: {e}")
 
     def toggle_gemini_endpoint(self):
         """Enable/disable Gemini endpoint entry based on toggle"""

@@ -5,7 +5,7 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import ttkbootstrap as tb
 import json
 import os
@@ -61,11 +61,17 @@ class RateLimitCache:
 
 class APIKeyEntry:
     """Enhanced API key entry with thread-safe operations"""
-    def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True):
+    def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True, 
+                 google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
+                 azure_api_version: str = None):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
         self.enabled = enabled
+        self.google_credentials = google_credentials  # Path to Google service account JSON
+        self.azure_endpoint = azure_endpoint  # Azure endpoint URL
+        self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
+        self.azure_api_version = azure_api_version or '2025-01-01-preview'  # Azure API version
         self.last_error_time = None
         self.error_count = 0
         self.success_count = 0
@@ -118,7 +124,11 @@ class APIKeyEntry:
             'api_key': self.api_key,
             'model': self.model,
             'cooldown': self.cooldown,
-            'enabled': self.enabled
+            'enabled': self.enabled,
+            'google_credentials': self.google_credentials,
+            'azure_endpoint': self.azure_endpoint,
+            'google_region': self.google_region,
+            'azure_api_version': self.azure_api_version
         }
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
@@ -147,7 +157,11 @@ class APIKeyPool:
                     api_key=key_data.get('api_key', ''),
                     model=key_data.get('model', ''),
                     cooldown=key_data.get('cooldown', 60),
-                    enabled=key_data.get('enabled', True)
+                    enabled=key_data.get('enabled', True),
+                    google_credentials=key_data.get('google_credentials'),
+                    azure_endpoint=key_data.get('azure_endpoint'),
+                    google_region=key_data.get('google_region'),
+                    azure_api_version=key_data.get('azure_api_version')
                 )
                 self.keys.append(entry)
                 # Create a lock for each key
@@ -524,10 +538,6 @@ class MultiAPIKeyDialog:
         # Load existing keys into tree
         self._refresh_key_list()
         
-        # Apply initial visibility state
-        if not self.enabled_var.get():
-            self.fallback_container.pack_forget()
-        
         # Center dialog
         self.dialog.transient(self.parent)
         
@@ -539,9 +549,8 @@ class MultiAPIKeyDialog:
         # Container that can be hidden
         self.fallback_container = tk.Frame(parent)
         
-        # Only show if multi-key mode is enabled
-        if self.enabled_var.get():
-            self.fallback_container.pack(fill=tk.X, pady=(10, 0))
+        # Always show fallback section (works in both single and multi-key mode)
+        self.fallback_container.pack(fill=tk.X, pady=(10, 0))
         
         # Separator
         ttk.Separator(self.fallback_container, orient='horizontal').pack(fill=tk.X, pady=(0, 10))
@@ -556,7 +565,8 @@ class MultiAPIKeyDialog:
         tk.Label(fallback_frame, 
                 text="Configure fallback keys that will be used when content is blocked.\n"
                      "These should use different API keys or models that are less restrictive.\n"
-                     "Fallback keys are tried in order when the main rotation encounters prohibited content.",
+                     "In Multi-Key Mode: tried when main rotation encounters prohibited content.\n"
+                     "In Single-Key Mode: tried directly when main key fails, bypassing main key retry.",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
         
         # Enable fallback checkbox
@@ -570,11 +580,13 @@ class MultiAPIKeyDialog:
         add_fallback_frame = tk.Frame(fallback_frame)
         add_fallback_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Configure grid
+        # Configure grid for more columns
         add_fallback_frame.columnconfigure(1, weight=1)
         add_fallback_frame.columnconfigure(3, weight=1)
+        add_fallback_frame.columnconfigure(5, weight=1)
+        # Column 6 for Azure API version dropdown
         
-        # Fallback API Key
+        # Row 0: Fallback API Key and Model
         tk.Label(add_fallback_frame, text="Fallback API Key:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=5)
         self.fallback_key_var = tk.StringVar()
         self.fallback_key_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_key_var, show='*')
@@ -595,6 +607,54 @@ class MultiAPIKeyDialog:
         tb.Button(add_fallback_frame, text="Add Fallback Key", 
                  command=self._add_fallback_key,
                  bootstyle="info").grid(row=0, column=5, sticky=tk.E, padx=(10, 0), pady=5)
+        
+        # Row 1: Google Credentials (optional, discretely styled)
+        tk.Label(add_fallback_frame, text="Google Creds:", font=('TkDefaultFont', 8), 
+                fg='gray').grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.fallback_google_creds_var = tk.StringVar()
+        self.fallback_google_creds_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_google_creds_var,
+                                                   font=('TkDefaultFont', 7), state='normal')
+        self.fallback_google_creds_entry.grid(row=1, column=1, sticky=tk.EW, pady=2)
+        
+        # Google credentials browse button (moved closer)
+        tb.Button(add_fallback_frame, text="📁", width=3, 
+                 command=self._browse_fallback_google_credentials,
+                 bootstyle="secondary-outline").grid(row=1, column=2, padx=(5, 0), pady=2)
+        
+        # Google region field for fallback
+        tk.Label(add_fallback_frame, text="Region:", font=('TkDefaultFont', 7), 
+                fg='gray').grid(row=1, column=3, sticky=tk.W, padx=(10, 5), pady=2)
+        self.fallback_google_region_var = tk.StringVar(value='us-east5')  # Default region
+        self.fallback_google_region_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_google_region_var,
+                                                    font=('TkDefaultFont', 7), state='normal', width=10)
+        self.fallback_google_region_entry.grid(row=1, column=4, sticky=tk.W, pady=2)
+        
+        # Row 2: Azure Endpoint (optional, discretely styled)
+        tk.Label(add_fallback_frame, text="Azure Endpoint:", font=('TkDefaultFont', 8), 
+                fg='gray').grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.fallback_azure_endpoint_var = tk.StringVar()
+        self.fallback_azure_endpoint_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_azure_endpoint_var,
+                                                     font=('TkDefaultFont', 7), state='normal')
+        self.fallback_azure_endpoint_entry.grid(row=2, column=1, columnspan=3, sticky=tk.EW, pady=2)
+        
+        # Azure API Version for fallback (small dropdown)
+        tk.Label(add_fallback_frame, text="API Ver:", font=('TkDefaultFont', 7), 
+                fg='gray').grid(row=2, column=4, sticky=tk.W, padx=(10, 5), pady=2)
+        self.fallback_azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
+        fallback_azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview', 
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.fallback_azure_api_version_combo = ttk.Combobox(add_fallback_frame, 
+                                                            textvariable=self.fallback_azure_api_version_var,
+                                                            values=fallback_azure_versions, width=18, 
+                                                            state='normal', font=('TkDefaultFont', 7))
+        self.fallback_azure_api_version_combo.grid(row=2, column=5, sticky=tk.W, pady=2)
         
         # Fallback keys list
         self._create_fallback_list(fallback_frame)
@@ -927,9 +987,13 @@ class MultiAPIKeyDialog:
         self.fallback_tree.tag_configure('failed', foreground='red')
 
     def _add_fallback_key(self):
-        """Add a new fallback key"""
+        """Add a new fallback key with optional Google credentials and Azure endpoint"""
         api_key = self.fallback_key_var.get().strip()
         model = self.fallback_model_var.get().strip()
+        google_credentials = self.fallback_google_creds_var.get().strip() or None
+        azure_endpoint = self.fallback_azure_endpoint_var.get().strip() or None
+        google_region = self.fallback_google_region_var.get().strip() or None
+        azure_api_version = self.fallback_azure_api_version_var.get().strip() or None
         
         if not api_key or not model:
             messagebox.showerror("Error", "Please enter both API key and model name")
@@ -938,10 +1002,14 @@ class MultiAPIKeyDialog:
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
-        # Add new key
+        # Add new key with additional fields
         fallback_keys.append({
             'api_key': api_key,
-            'model': model
+            'model': model,
+            'google_credentials': google_credentials,
+            'azure_endpoint': azure_endpoint,
+            'google_region': google_region,
+            'azure_api_version': azure_api_version
         })
         
         # Save to config
@@ -951,12 +1019,23 @@ class MultiAPIKeyDialog:
         # Clear inputs
         self.fallback_key_var.set("")
         self.fallback_model_var.set("")
+        self.fallback_google_creds_var.set("")
+        self.fallback_azure_endpoint_var.set("")
+        self.fallback_google_region_var.set("us-east5")
+        self.fallback_azure_api_version_var.set('2025-01-01-preview')
         
         # Reload list
         self._load_fallback_keys()
         
         # Show success
-        self._show_status(f"Added fallback key for model: {model}")
+        extras = []
+        if google_credentials:
+            extras.append(f"Google: {os.path.basename(google_credentials)}")
+        if azure_endpoint:
+            extras.append(f"Azure: {azure_endpoint[:30]}...")
+        
+        extra_info = f" ({', '.join(extras)})" if extras else ""
+        self._show_status(f"Added fallback key for model: {model}{extra_info}")
 
     def _move_fallback_key(self, direction):
         """Move selected fallback key up or down"""
@@ -1120,6 +1199,9 @@ class MultiAPIKeyDialog:
             # Enable input widgets
             self.fallback_key_entry.config(state=state)
             self.fallback_model_entry.config(state=state)
+            self.fallback_google_creds_entry.config(state=state)
+            self.fallback_google_region_entry.config(state=state)
+            self.fallback_azure_endpoint_entry.config(state=state)
             self.show_fallback_btn.config(state=state)
             
             # Enable add button
@@ -1141,6 +1223,9 @@ class MultiAPIKeyDialog:
             # Disable input widgets
             self.fallback_key_entry.config(state=state)
             self.fallback_model_entry.config(state=state)
+            self.fallback_google_creds_entry.config(state=state)
+            self.fallback_google_region_entry.config(state=state)
+            self.fallback_azure_endpoint_entry.config(state=state)
             self.show_fallback_btn.config(state=state)
             
             # Disable add button
@@ -1326,15 +1411,17 @@ class MultiAPIKeyDialog:
         self.stats_label.pack(side=tk.RIGHT)
  
     def _create_add_key_section(self, parent):
-        """Create the add key section"""
+        """Create the add key section with Google credentials and Azure endpoint support"""
         add_frame = tk.LabelFrame(parent, text="Add New API Key", padx=15, pady=15)
         add_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Grid configuration
+        # Grid configuration - expand for more columns
         add_frame.columnconfigure(1, weight=1)
         add_frame.columnconfigure(3, weight=1)
+        add_frame.columnconfigure(5, weight=1)
+        # Column 6 for Azure API version dropdown
         
-        # API Key
+        # Row 0: API Key and Model
         tk.Label(add_frame, text="API Key:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=5)
         self.api_key_var = tk.StringVar()
         self.api_key_entry = tb.Entry(add_frame, textvariable=self.api_key_var, show='*')
@@ -1351,7 +1438,7 @@ class MultiAPIKeyDialog:
         self.model_entry = tb.Entry(add_frame, textvariable=self.model_var)
         self.model_entry.grid(row=0, column=4, sticky=tk.EW, pady=5)
         
-        # Cooldown
+        # Row 1: Cooldown and optional credentials
         tk.Label(add_frame, text="Cooldown (seconds):").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=5)
         self.cooldown_var = tk.IntVar(value=60)
         cooldown_frame = tk.Frame(add_frame)
@@ -1362,15 +1449,65 @@ class MultiAPIKeyDialog:
         tk.Label(cooldown_frame, text="(10-3600)", font=('TkDefaultFont', 9), 
                 fg='gray').pack(side=tk.LEFT, padx=(10, 0))
         
-        # Add button
-        tb.Button(add_frame, text="Add Key", command=self._add_key,
-                 bootstyle="success").grid(row=1, column=4, sticky=tk.E, pady=5)
+        # Add button and Copy Current Key button
+        button_frame = tk.Frame(add_frame)
+        button_frame.grid(row=1, column=4, sticky=tk.E, pady=5)
         
-        # Copy from current button
-        tb.Button(add_frame, text="Copy Current Settings", 
+        tb.Button(button_frame, text="Add Key", command=self._add_key,
+                 bootstyle="success").pack(side=tk.LEFT, padx=(0, 5))
+        
+        tb.Button(button_frame, text="Copy Current Key", 
                  command=self._copy_current_settings,
-                 bootstyle="info-outline").grid(row=1, column=3, columnspan=2, 
-                                               sticky=tk.W, padx=(20, 0), pady=5)
+                 bootstyle="info-outline").pack(side=tk.LEFT)
+        
+        # Row 2: Google Credentials (optional, discretely styled)
+        tk.Label(add_frame, text="Google Creds:", font=('TkDefaultFont', 9), 
+                fg='gray').grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.google_creds_var = tk.StringVar()
+        self.google_creds_entry = tb.Entry(add_frame, textvariable=self.google_creds_var,
+                                          font=('TkDefaultFont', 8), state='normal')
+        self.google_creds_entry.grid(row=2, column=1, sticky=tk.EW, pady=2)
+        
+        # Google credentials browse button (moved closer)
+        tb.Button(add_frame, text="📁", width=3, 
+                 command=self._browse_google_credentials,
+                 bootstyle="secondary-outline").grid(row=2, column=2, padx=(5, 0), pady=2)
+        
+        # Google region field
+        tk.Label(add_frame, text="Region:", font=('TkDefaultFont', 8), 
+                fg='gray').grid(row=2, column=3, sticky=tk.W, padx=(10, 5), pady=2)
+        self.google_region_var = tk.StringVar(value='us-east5')  # Default region
+        self.google_region_entry = tb.Entry(add_frame, textvariable=self.google_region_var,
+                                           font=('TkDefaultFont', 8), state='normal', width=12)
+        self.google_region_entry.grid(row=2, column=4, sticky=tk.W, pady=2)
+        
+        # Row 3: Azure Endpoint (optional, discretely styled)
+        tk.Label(add_frame, text="Azure Endpoint:", font=('TkDefaultFont', 9), 
+                fg='gray').grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.azure_endpoint_var = tk.StringVar()
+        self.azure_endpoint_entry = tb.Entry(add_frame, textvariable=self.azure_endpoint_var,
+                                            font=('TkDefaultFont', 8), state='normal')
+        self.azure_endpoint_entry.grid(row=3, column=1, columnspan=3, sticky=tk.EW, pady=2)
+        
+        # Azure API Version (small dropdown)
+        tk.Label(add_frame, text="API Ver:", font=('TkDefaultFont', 8), 
+                fg='gray').grid(row=3, column=4, sticky=tk.W, padx=(10, 5), pady=2)
+        self.azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
+        azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview', 
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.azure_api_version_combo = ttk.Combobox(add_frame, textvariable=self.azure_api_version_var,
+                                                   values=azure_versions, width=18, state='normal',
+                                                   font=('TkDefaultFont', 7))
+        self.azure_api_version_combo.grid(row=3, column=5, sticky=tk.W, pady=2)
+        
+        # Row 4: (Copy Current Key button moved up next to Add Key)
     
     def _move_key(self, direction):
         """Move selected key in the specified direction"""
@@ -1859,6 +1996,52 @@ class MultiAPIKeyDialog:
         tb.Button(button_frame, text="Export", command=self._export_keys,
                  bootstyle="info-outline").pack(side=tk.LEFT)
     
+    def _browse_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file"""
+        filename = filedialog.askopenfilename(
+            title="Select Google Cloud Credentials JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                # Validate it's a valid Google Cloud credentials file
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if 'type' in creds_data and 'project_id' in creds_data:
+                        self.google_creds_var.set(filename)
+                        self._show_status(f"Selected Google credentials: {os.path.basename(filename)}")
+                    else:
+                        messagebox.showerror(
+                            "Error", 
+                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                        )
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
+    
+    def _browse_fallback_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file for fallback keys"""
+        filename = filedialog.askopenfilename(
+            title="Select Google Cloud Credentials JSON for Fallback",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                # Validate it's a valid Google Cloud credentials file
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if 'type' in creds_data and 'project_id' in creds_data:
+                        self.fallback_google_creds_var.set(filename)
+                        self._show_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
+                    else:
+                        messagebox.showerror(
+                            "Error", 
+                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                        )
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
+    
     def _toggle_key_visibility(self):
         """Toggle API key visibility"""
         if self.api_key_entry.cget('show') == '*':
@@ -1876,16 +2059,8 @@ class MultiAPIKeyDialog:
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
         
-        # Show/hide fallback section
-        if enabled:
-            # Only reference button_frame if it exists
-            if hasattr(self, 'button_frame'):
-                self.fallback_container.pack(fill=tk.X, pady=(10, 0), before=self.button_frame)
-            else:
-                # If button_frame doesn't exist yet, just pack normally
-                self.fallback_container.pack(fill=tk.X, pady=(10, 0))
-        else:
-            self.fallback_container.pack_forget()
+        # Fallback section is always visible now (works in both modes)
+        # No need to show/hide fallback section based on multi-key mode
         
         # Update other UI elements
         for widget in [self.api_key_entry, self.model_entry]:
@@ -1932,29 +2107,48 @@ class MultiAPIKeyDialog:
             self.model_var.set(self.translator_gui.model_var.get())
     
     def _add_key(self):
-        """Add a new API key"""
+        """Add a new API key with optional Google credentials and Azure endpoint"""
         api_key = self.api_key_var.get().strip()
         model = self.model_var.get().strip()
         cooldown = self.cooldown_var.get()
+        google_credentials = self.google_creds_var.get().strip() or None
+        azure_endpoint = self.azure_endpoint_var.get().strip() or None
+        google_region = self.google_region_var.get().strip() or None
+        azure_api_version = self.azure_api_version_var.get().strip() or None
         
         if not api_key or not model:
             messagebox.showerror("Error", "Please enter both API key and model name")
             return
         
-        # Add to pool
-        key_entry = APIKeyEntry(api_key, model, cooldown)
+        # Add to pool with new fields
+        key_entry = APIKeyEntry(api_key, model, cooldown, enabled=True, 
+                               google_credentials=google_credentials, 
+                               azure_endpoint=azure_endpoint,
+                               google_region=google_region,
+                               azure_api_version=azure_api_version)
         self.key_pool.add_key(key_entry)
         
         # Clear inputs
         self.api_key_var.set("")
         self.model_var.set("")
         self.cooldown_var.set(60)
+        self.google_creds_var.set("")
+        self.azure_endpoint_var.set("")
+        self.google_region_var.set("us-east5")
+        self.azure_api_version_var.set('2025-01-01-preview')
         
         # Refresh list
         self._refresh_key_list()
         
         # Show success
-        self._show_status(f"Added key for model: {model}")
+        extras = []
+        if google_credentials:
+            extras.append(f"Google: {os.path.basename(google_credentials)}")
+        if azure_endpoint:
+            extras.append(f"Azure: {azure_endpoint[:30]}...")
+        
+        extra_info = f" ({', '.join(extras)})" if extras else ""
+        self._show_status(f"Added key for model: {model}{extra_info}")
     
     def _refresh_key_list(self):
         """Refresh the key list display"""
