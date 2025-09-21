@@ -4107,7 +4107,7 @@ Recent translations to summarize:
             # Process chapters - DELETE FILES AND UPDATE PROGRESS
             deleted_count = 0
             marked_count = 0
-            qa_cleared_count = 0
+            status_reset_count = 0
             progress_updated = False
 
             for ch_info in selected_chapters:
@@ -4125,8 +4125,8 @@ Recent translations to summarize:
                         except Exception as e:
                             print(f"Failed to delete {output_path}: {e}")
                     
-                    # If this is a qa_failed chapter, clean up the progress tracker
-                    if ch_info['status'] == 'qa_failed':
+                    # Reset status for any completed or qa_failed chapters
+                    if ch_info['status'] in ['completed', 'qa_failed']:
                         target_output_file = ch_info['output_file']
                         chapter_key = None
                         
@@ -4138,21 +4138,29 @@ Recent translations to summarize:
                         
                         # Update the chapter status if we found the key
                         if chapter_key and chapter_key in data['prog']["chapters"]:
-                            print(f"Clearing QA failed status for chapter key {chapter_key} (output file: {target_output_file})")
+                            old_status = ch_info['status']
+                            print(f"Resetting {old_status} status to pending for chapter key {chapter_key} (output file: {target_output_file})")
                             
                             # Reset status to pending for retranslation
                             data['prog']["chapters"][chapter_key]["status"] = "pending"
                             
-                            # Remove all QA-related fields
-                            fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]
+                            # Remove completion-related fields if they exist
+                            fields_to_remove = []
+                            if old_status == 'qa_failed':
+                                # Remove QA-related fields for qa_failed chapters
+                                fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]
+                            elif old_status == 'completed':
+                                # Remove completion-related fields if any exist for completed chapters
+                                fields_to_remove = ["completion_timestamp", "final_word_count", "translation_quality_score"]
+                            
                             for field in fields_to_remove:
                                 if field in data['prog']["chapters"][chapter_key]:
                                     del data['prog']["chapters"][chapter_key][field]
                             
-                            qa_cleared_count += 1
+                            status_reset_count += 1
                             progress_updated = True
                         else:
-                            print(f"WARNING: Could not find chapter key for QA failed output file: {target_output_file}")
+                            print(f"WARNING: Could not find chapter key for {old_status} output file: {target_output_file}")
                 else:
                     # Just marking for translation (no file to delete)
                     marked_count += 1
@@ -4162,7 +4170,7 @@ Recent translations to summarize:
                 try:
                     with open(data['progress_file'], 'w', encoding='utf-8') as f:
                         json.dump(data['prog'], f, ensure_ascii=False, indent=2)
-                    print(f"Updated progress tracking file - cleared {qa_cleared_count} QA failed entries")
+                    print(f"Updated progress tracking file - reset {status_reset_count} chapter statuses to pending")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
             
@@ -4172,8 +4180,8 @@ Recent translations to summarize:
                 success_parts.append(f"Deleted {deleted_count} files")
             if marked_count > 0:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
-            if qa_cleared_count > 0:
-                success_parts.append(f"cleared {qa_cleared_count} QA failed entries")
+            if status_reset_count > 0:
+                success_parts.append(f"reset {status_reset_count} chapter statuses to pending")
             
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
