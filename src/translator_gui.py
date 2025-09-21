@@ -14176,7 +14176,7 @@ Important rules:
                       variable=self.update_html_headers_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT)
         
-        tb.Checkbutton(update_frame, text="Save translations to .txt file", 
+        tb.Checkbutton(update_frame, text="Save translations to .txt", 
                       variable=self.save_header_translations_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT, padx=(20, 0))
         
@@ -14184,24 +14184,24 @@ Important rules:
         ignore_frame = tk.Frame(section_frame)
         ignore_frame.pack(anchor=tk.W, fill=tk.X, padx=20, pady=(5, 0))
         
-        tb.Checkbutton(ignore_frame, text="Ignore header tags", 
+        tb.Checkbutton(ignore_frame, text="Ignore header", 
                       variable=self.ignore_header_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT)
         
-        tb.Checkbutton(ignore_frame, text="Ignore title tag", 
+        tb.Checkbutton(ignore_frame, text="Ignore title", 
                       variable=self.ignore_title_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT, padx=(15, 0))
         
         # Delete translated_headers.txt button
-        tb.Button(ignore_frame, text="🗑️ Delete Headers Files", 
+        tb.Button(ignore_frame, text="🗑️Delete Header Files", 
                  command=self.delete_translated_headers_file,
-                 bootstyle="danger-outline", width=20).pack(side=tk.LEFT, padx=(20, 0))
+                 bootstyle="danger-outline", width=21).pack(side=tk.LEFT, padx=(20, 0))
         
         tk.Label(section_frame, 
                 text="• OFF: Use existing headers from translated chapters\n"
                      "• ON: Extract all headers → Translate in batch → Update files\n"
-                     "• Ignore header tags: Skip h1/h2/h3 tags (prevents re-translation of visible headers)\n"
-                     "• Ignore title tag: Skip <title> tag (prevents re-translation of document titles)\n"
+                     "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)\n"
+                     "• Ignore title: Skip <title> tag (prevents re-translation of document titles)\n"
                      "• Delete button: Removes translated_headers.txt files for all selected EPUBs",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
         
