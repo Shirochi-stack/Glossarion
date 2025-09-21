@@ -63,15 +63,16 @@ class APIKeyEntry:
     """Enhanced API key entry with thread-safe operations"""
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True, 
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
-                 azure_api_version: str = None):
+                 azure_api_version: str = None, use_individual_endpoint: bool = False):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
         self.enabled = enabled
         self.google_credentials = google_credentials  # Path to Google service account JSON
-        self.azure_endpoint = azure_endpoint  # Azure endpoint URL
+        self.azure_endpoint = azure_endpoint  # Azure endpoint URL (only used if use_individual_endpoint is True)
         self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
         self.azure_api_version = azure_api_version or '2025-01-01-preview'  # Azure API version
+        self.use_individual_endpoint = use_individual_endpoint  # Toggle to enable/disable individual endpoint
         self.last_error_time = None
         self.error_count = 0
         self.success_count = 0
@@ -128,7 +129,8 @@ class APIKeyEntry:
             'google_credentials': self.google_credentials,
             'azure_endpoint': self.azure_endpoint,
             'google_region': self.google_region,
-            'azure_api_version': self.azure_api_version
+            'azure_api_version': self.azure_api_version,
+            'use_individual_endpoint': self.use_individual_endpoint
         }
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
@@ -161,7 +163,8 @@ class APIKeyPool:
                     google_credentials=key_data.get('google_credentials'),
                     azure_endpoint=key_data.get('azure_endpoint'),
                     google_region=key_data.get('google_region'),
-                    azure_api_version=key_data.get('azure_api_version')
+                    azure_api_version=key_data.get('azure_api_version'),
+                    use_individual_endpoint=key_data.get('use_individual_endpoint', False)
                 )
                 self.keys.append(entry)
                 # Create a lock for each key
@@ -1479,17 +1482,27 @@ class MultiAPIKeyDialog:
                                            font=('TkDefaultFont', 8), state='normal', width=12)
         self.google_region_entry.grid(row=2, column=4, sticky=tk.W, pady=2)
         
-        # Row 3: Azure Endpoint (optional, discretely styled)
-        tk.Label(add_frame, text="Azure Endpoint:", font=('TkDefaultFont', 9), 
-                fg='gray').grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        # Row 3: Individual Endpoint Toggle
+        self.use_individual_endpoint_var = tk.BooleanVar(value=False)
+        individual_endpoint_toggle = tb.Checkbutton(add_frame, text="Use Individual Endpoint", 
+                                                   variable=self.use_individual_endpoint_var,
+                                                   bootstyle="round-toggle",
+                                                   command=self._toggle_individual_endpoint_fields)
+        individual_endpoint_toggle.grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=(0, 10), pady=5)
+        
+        # Row 4: Individual Endpoint (initially hidden)
+        self.individual_endpoint_label = tk.Label(add_frame, text="Individual Endpoint:", font=('TkDefaultFont', 9), 
+                                                fg='gray')
+        self.individual_endpoint_label.grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=2)
         self.azure_endpoint_var = tk.StringVar()
         self.azure_endpoint_entry = tb.Entry(add_frame, textvariable=self.azure_endpoint_var,
-                                            font=('TkDefaultFont', 8), state='normal')
-        self.azure_endpoint_entry.grid(row=3, column=1, columnspan=2, sticky=tk.EW, pady=2)
+                                            font=('TkDefaultFont', 8), state='disabled')
+        self.azure_endpoint_entry.grid(row=4, column=1, columnspan=2, sticky=tk.EW, pady=2)
         
-        # Azure API Version (small dropdown)
-        tk.Label(add_frame, text="API Ver:", font=('TkDefaultFont', 11), 
-                fg='gray').grid(row=3, column=3, sticky=tk.W, padx=(10, 5), pady=2)
+        # Individual Endpoint API Version (small dropdown, initially hidden)
+        self.individual_api_version_label = tk.Label(add_frame, text="API Ver:", font=('TkDefaultFont', 11), 
+                                                    fg='gray')
+        self.individual_api_version_label.grid(row=4, column=3, sticky=tk.W, padx=(10, 5), pady=2)
         self.azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
         azure_versions = [
             '2025-01-01-preview',
@@ -1501,11 +1514,40 @@ class MultiAPIKeyDialog:
             '2023-12-01-preview'
         ]
         self.azure_api_version_combo = ttk.Combobox(add_frame, textvariable=self.azure_api_version_var,
-                                                   values=azure_versions, width=18, state='normal',
+                                                   values=azure_versions, width=18, state='disabled',
                                                    font=('TkDefaultFont', 7))
-        self.azure_api_version_combo.grid(row=3, column=4, sticky=tk.W, pady=2)
+        self.azure_api_version_combo.grid(row=4, column=4, sticky=tk.W, pady=2)
         
-        # Row 4: (Copy Current Key button moved up next to Add Key)
+        # Initially hide the endpoint fields
+        self._toggle_individual_endpoint_fields()
+        
+        # Row 5: (Copy Current Key button moved up next to Add Key)
+    
+    def _toggle_individual_endpoint_fields(self):
+        """Toggle visibility and state of individual endpoint fields"""
+        enabled = self.use_individual_endpoint_var.get()
+        
+        if enabled:
+            # Show and enable endpoint fields
+            state = tk.NORMAL
+            self.individual_endpoint_label.grid()
+            self.azure_endpoint_entry.grid()
+            self.individual_api_version_label.grid() 
+            self.azure_api_version_combo.grid()
+            
+            self.azure_endpoint_entry.config(state=state)
+            self.azure_api_version_combo.config(state='readonly')
+        else:
+            # Hide and disable endpoint fields
+            state = tk.DISABLED
+            self.individual_endpoint_label.grid_remove()
+            self.azure_endpoint_entry.grid_remove()
+            self.individual_api_version_label.grid_remove()
+            self.azure_api_version_combo.grid_remove()
+            
+            # Clear the fields when disabled
+            self.azure_endpoint_var.set("")
+            self.azure_api_version_var.set('2025-01-01-preview')
     
     def _move_key(self, direction):
         """Move selected key in the specified direction"""
@@ -2105,14 +2147,17 @@ class MultiAPIKeyDialog:
             self.model_var.set(self.translator_gui.model_var.get())
     
     def _add_key(self):
-        """Add a new API key with optional Google credentials and Azure endpoint"""
+        """Add a new API key with optional Google credentials and individual endpoint"""
         api_key = self.api_key_var.get().strip()
         model = self.model_var.get().strip()
         cooldown = self.cooldown_var.get()
         google_credentials = self.google_creds_var.get().strip() or None
-        azure_endpoint = self.azure_endpoint_var.get().strip() or None
         google_region = self.google_region_var.get().strip() or None
-        azure_api_version = self.azure_api_version_var.get().strip() or None
+        
+        # Only use individual endpoint if toggle is enabled
+        use_individual_endpoint = self.use_individual_endpoint_var.get()
+        azure_endpoint = self.azure_endpoint_var.get().strip() if use_individual_endpoint else None
+        azure_api_version = self.azure_api_version_var.get().strip() if use_individual_endpoint else None
         
         if not api_key or not model:
             messagebox.showerror("Error", "Please enter both API key and model name")
@@ -2123,7 +2168,8 @@ class MultiAPIKeyDialog:
                                google_credentials=google_credentials, 
                                azure_endpoint=azure_endpoint,
                                google_region=google_region,
-                               azure_api_version=azure_api_version)
+                               azure_api_version=azure_api_version,
+                               use_individual_endpoint=use_individual_endpoint)
         self.key_pool.add_key(key_entry)
         
         # Clear inputs
@@ -2134,6 +2180,9 @@ class MultiAPIKeyDialog:
         self.azure_endpoint_var.set("")
         self.google_region_var.set("us-east5")
         self.azure_api_version_var.set('2025-01-01-preview')
+        self.use_individual_endpoint_var.set(False)
+        # Update the UI to hide endpoint fields
+        self._toggle_individual_endpoint_fields()
         
         # Refresh list
         self._refresh_key_list()
