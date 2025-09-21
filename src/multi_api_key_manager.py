@@ -622,8 +622,8 @@ class MultiAPIKeyDialog:
                  bootstyle="secondary-outline").grid(row=1, column=2, padx=(5, 0), pady=2)
         
         # Google region field for fallback
-        tk.Label(add_fallback_frame, text="Region:", font=('TkDefaultFont', 7), 
-                fg='gray').grid(row=1, column=3, sticky=tk.W, padx=(10, 5), pady=2)
+        tk.Label(add_fallback_frame, text="Region:", font=('TkDefaultFont', 8), 
+                fg='gray').grid(row=1, column=3, sticky=tk.W, padx=(10, 2), pady=2)
         self.fallback_google_region_var = tk.StringVar(value='us-east5')  # Default region
         self.fallback_google_region_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_google_region_var,
                                                     font=('TkDefaultFont', 7), state='normal', width=10)
@@ -638,8 +638,8 @@ class MultiAPIKeyDialog:
         self.fallback_azure_endpoint_entry.grid(row=2, column=1, columnspan=3, sticky=tk.EW, pady=2)
         
         # Azure API Version for fallback (small dropdown)
-        tk.Label(add_fallback_frame, text="API Ver:", font=('TkDefaultFont', 7), 
-                fg='gray').grid(row=2, column=4, sticky=tk.W, padx=(10, 5), pady=2)
+        tk.Label(add_fallback_frame, text="API Ver:", font=('TkDefaultFont', 8), 
+                fg='gray').grid(row=2, column=4, sticky=tk.W, padx=(10, 2), pady=2)
         self.fallback_azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
         fallback_azure_versions = [
             '2025-01-01-preview',
@@ -1474,8 +1474,8 @@ class MultiAPIKeyDialog:
                  bootstyle="secondary-outline").grid(row=2, column=2, padx=(5, 0), pady=2)
         
         # Google region field
-        tk.Label(add_frame, text="Region:", font=('TkDefaultFont', 8), 
-                fg='gray').grid(row=2, column=3, sticky=tk.W, padx=(10, 5), pady=2)
+        tk.Label(add_frame, text="Region:", font=('TkDefaultFont', 9), 
+                fg='gray').grid(row=2, column=3, sticky=tk.W, padx=(10, 2), pady=2)
         self.google_region_var = tk.StringVar(value='us-east5')  # Default region
         self.google_region_entry = tb.Entry(add_frame, textvariable=self.google_region_var,
                                            font=('TkDefaultFont', 8), state='normal', width=12)
@@ -1490,8 +1490,8 @@ class MultiAPIKeyDialog:
         self.azure_endpoint_entry.grid(row=3, column=1, columnspan=3, sticky=tk.EW, pady=2)
         
         # Azure API Version (small dropdown)
-        tk.Label(add_frame, text="API Ver:", font=('TkDefaultFont', 8), 
-                fg='gray').grid(row=3, column=4, sticky=tk.W, padx=(10, 5), pady=2)
+        tk.Label(add_frame, text="API Ver:", font=('TkDefaultFont', 9), 
+                fg='gray').grid(row=3, column=4, sticky=tk.W, padx=(10, 2), pady=2)
         self.azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
         azure_versions = [
             '2025-01-01-preview',
