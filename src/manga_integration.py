@@ -1801,6 +1801,17 @@ class MangaTranslationTab:
         # Initialize the label with the loaded value
         self._update_opacity_label(self.bg_opacity_var.get())
 
+        # Free text only background opacity toggle (applies BG opacity only to free-text regions)
+        ft_only_frame = tk.Frame(render_frame)
+        ft_only_frame.pack(fill=tk.X, pady=(0, 5))
+        tb.Checkbutton(
+            ft_only_frame,
+            text="Free text only background opacity",
+            variable=self.free_text_only_bg_opacity_var,
+            bootstyle="round-toggle",
+            command=self._apply_rendering_settings
+        ).pack(anchor='w')
+
         # Background style selection
         style_frame = tk.Frame(render_frame)
         style_frame.pack(fill=tk.X, pady=5)
@@ -2837,6 +2848,8 @@ class MangaTranslationTab:
         
         # Initialize with defaults
         self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
+        # Free-text-only background opacity (default off)
+        self.free_text_only_bg_opacity_var = tk.BooleanVar(value=config.get('manga_free_text_only_bg_opacity', False))
         self.bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace right after creation
         
         self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'circle'))
@@ -4649,35 +4662,112 @@ class MangaTranslationTab:
                 break 
             
     def _add_files(self):
-        """Add image files to the list"""
+        """Add image files (and CBZ archives) to the list"""
         files = filedialog.askopenfilenames(
-            title="Select Manga Images",
+            title="Select Manga Images or CBZ",
             filetypes=[
+                ("Images / CBZ", "*.png *.jpg *.jpeg *.gif *.bmp *.webp *.cbz"),
                 ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("Comic Book Zip", "*.cbz"),
                 ("All files", "*.*")
             ]
         )
         
-        for file in files:
-            if file not in self.selected_files:
-                self.selected_files.append(file)
-                self.file_listbox.insert(tk.END, os.path.basename(file))
+        if not files:
+            return
+        
+        # Ensure temp root for CBZ extraction lives for the session
+        cbz_temp_root = getattr(self, 'cbz_temp_root', None)
+        if cbz_temp_root is None:
+            try:
+                import tempfile
+                cbz_temp_root = tempfile.mkdtemp(prefix='glossarion_cbz_')
+                self.cbz_temp_root = cbz_temp_root
+            except Exception:
+                cbz_temp_root = None
+        
+        for path in files:
+            lower = path.lower()
+            if lower.endswith('.cbz'):
+                # Extract images from CBZ and add them in natural sort order
+                try:
+                    import zipfile, shutil
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    extract_dir = os.path.join(self.cbz_temp_root or os.path.dirname(path), base)
+                    os.makedirs(extract_dir, exist_ok=True)
+                    with zipfile.ZipFile(path, 'r') as zf:
+                        members = [m for m in zf.namelist() if m.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'))]
+                        # Preserve order by natural sort
+                        members.sort()
+                        for m in members:
+                            target_path = os.path.join(extract_dir, os.path.basename(m))
+                            if not os.path.exists(target_path):
+                                with zf.open(m) as src, open(target_path, 'wb') as dst:
+                                    shutil.copyfileobj(src, dst)
+                            if target_path not in self.selected_files:
+                                self.selected_files.append(target_path)
+                                self.file_listbox.insert(tk.END, os.path.basename(target_path))
+                                added += 1
+                    self._log(f"📦 Added {added} images from CBZ: {os.path.basename(path)}", "info")
+                except Exception as e:
+                    self._log(f"❌ Failed to read CBZ {os.path.basename(path)}: {e}", "error")
+            else:
+                if path not in self.selected_files:
+                    self.selected_files.append(path)
+                    self.file_listbox.insert(tk.END, os.path.basename(path))
     
     def _add_folder(self):
-        """Add all images from a folder"""
-        folder = filedialog.askdirectory(title="Select Folder with Manga Images")
+        """Add all images (and CBZ archives) from a folder"""
+        folder = filedialog.askdirectory(title="Select Folder with Manga Images or CBZ")
         if not folder:
             return
         
-        # Find all image files in folder
+        # Extensions
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+        cbz_ext = '.cbz'
+        
+        # Ensure temp root for CBZ extraction lives for the session
+        cbz_temp_root = getattr(self, 'cbz_temp_root', None)
+        if cbz_temp_root is None:
+            try:
+                import tempfile
+                cbz_temp_root = tempfile.mkdtemp(prefix='glossarion_cbz_')
+                self.cbz_temp_root = cbz_temp_root
+            except Exception:
+                cbz_temp_root = None
         
         for filename in sorted(os.listdir(folder)):
-            if any(filename.lower().endswith(ext) for ext in image_extensions):
-                filepath = os.path.join(folder, filename)
+            filepath = os.path.join(folder, filename)
+            if not os.path.isfile(filepath):
+                continue
+            lower = filename.lower()
+            if any(lower.endswith(ext) for ext in image_extensions):
                 if filepath not in self.selected_files:
                     self.selected_files.append(filepath)
                     self.file_listbox.insert(tk.END, filename)
+            elif lower.endswith(cbz_ext):
+                # Extract images from CBZ archive
+                try:
+                    import zipfile, shutil
+                    base = os.path.splitext(os.path.basename(filepath))[0]
+                    extract_dir = os.path.join(self.cbz_temp_root or folder, base)
+                    os.makedirs(extract_dir, exist_ok=True)
+                    with zipfile.ZipFile(filepath, 'r') as zf:
+                        members = [m for m in zf.namelist() if m.lower().endswith(tuple(image_extensions))]
+                        members.sort()
+                        added = 0
+                        for m in members:
+                            target_path = os.path.join(extract_dir, os.path.basename(m))
+                            if not os.path.exists(target_path):
+                                with zf.open(m) as src, open(target_path, 'wb') as dst:
+                                    shutil.copyfileobj(src, dst)
+                            if target_path not in self.selected_files:
+                                self.selected_files.append(target_path)
+                                self.file_listbox.insert(tk.END, os.path.basename(target_path))
+                                added += 1
+                    self._log(f"📦 Added {added} images from CBZ: {filename}", "info")
+                except Exception as e:
+                    self._log(f"❌ Failed to read CBZ {filename}: {e}", "error")
     
     def _remove_selected(self):
         """Remove selected files from the list"""
@@ -5284,7 +5374,14 @@ class MangaTranslationTab:
                 custom_prompt=self.full_page_context_prompt
             )
             
-            # Update logging to include new settings
+        # Update logging to include new settings
+            # Persist free-text-only BG opacity setting to config as well
+            try:
+                if hasattr(self, 'free_text_only_bg_opacity_var'):
+                    self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_var.get())
+            except Exception:
+                pass
+
             self._log(f"Applied rendering settings:", "info")
             self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
             self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
@@ -5304,6 +5401,10 @@ class MangaTranslationTab:
             
             self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
             self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
+            try:
+                self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_var').get() else 'Disabled'}", "info")
+            except Exception:
+                pass
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
     
     def _translation_worker(self):

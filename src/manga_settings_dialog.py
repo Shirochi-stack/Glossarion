@@ -698,11 +698,12 @@ class MangaSettingsDialog:
         self.preprocessing_controls.append(chunk_frame)
         
         # Chunk height
+        self.chunk_frame = chunk_frame
         chunk_height_frame = tk.Frame(chunk_frame)
         chunk_height_frame.pack(fill='x', pady=5)
-        chunk_height_label = tk.Label(chunk_height_frame, text="Chunk Height:", width=20, anchor='w')
-        chunk_height_label.pack(side='left')
-        self.preprocessing_controls.append(chunk_height_label)
+        self.chunk_height_label = tk.Label(chunk_height_frame, text="Chunk Height:", width=20, anchor='w')
+        self.chunk_height_label.pack(side='left')
+        self.preprocessing_controls.append(self.chunk_height_label)
         
         self.chunk_height = tk.IntVar(value=self.settings['preprocessing']['chunk_height'])
         self.chunk_height_spinbox = tb.Spinbox(
@@ -716,14 +717,16 @@ class MangaSettingsDialog:
         self.chunk_height_spinbox.pack(side='left', padx=10)
         self.preprocessing_controls.append(self.chunk_height_spinbox)
         
-        tk.Label(chunk_height_frame, text="pixels").pack(side='left')
+        self.chunk_height_unit_label = tk.Label(chunk_height_frame, text="pixels")
+        self.chunk_height_unit_label.pack(side='left')
+        self.preprocessing_controls.append(self.chunk_height_unit_label)
         
         # Chunk overlap
         chunk_overlap_frame = tk.Frame(chunk_frame)
         chunk_overlap_frame.pack(fill='x', pady=5)
-        chunk_overlap_label = tk.Label(chunk_overlap_frame, text="Chunk Overlap:", width=20, anchor='w')
-        chunk_overlap_label.pack(side='left')
-        self.preprocessing_controls.append(chunk_overlap_label)
+        self.chunk_overlap_label = tk.Label(chunk_overlap_frame, text="Chunk Overlap:", width=20, anchor='w')
+        self.chunk_overlap_label.pack(side='left')
+        self.preprocessing_controls.append(self.chunk_overlap_label)
         
         self.chunk_overlap = tk.IntVar(value=self.settings['preprocessing']['chunk_overlap'])
         self.chunk_overlap_spinbox = tb.Spinbox(
@@ -737,12 +740,15 @@ class MangaSettingsDialog:
         self.chunk_overlap_spinbox.pack(side='left', padx=10)
         self.preprocessing_controls.append(self.chunk_overlap_spinbox)
         
-        tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
+        self.chunk_overlap_unit_label = tk.Label(chunk_overlap_frame, text="pixels")
+        self.chunk_overlap_unit_label.pack(side='left')
+        self.preprocessing_controls.append(self.chunk_overlap_unit_label)
 
         # Inpainting Tiling section (add after the "Large Image Processing" section)
-        tiling_frame = tk.LabelFrame(content_frame, text="Inpainting Tiling", padx=15, pady=10)
-        tiling_frame.pack(fill='x', padx=20, pady=(10, 0))
-        self.preprocessing_controls.append(tiling_frame)
+        self.tiling_frame = tk.LabelFrame(content_frame, text="Inpainting Tiling", padx=15, pady=10)
+        self.tiling_frame.pack(fill='x', padx=20, pady=(10, 0))
+        tiling_frame = self.tiling_frame
+        self.preprocessing_controls.append(self.tiling_frame)
 
         # Enable tiling
         # Prefer values from legacy 'tiling' section if present, otherwise use 'preprocessing'
@@ -1301,40 +1307,36 @@ class MangaSettingsDialog:
         """Enable/disable preprocessing controls based on main toggle"""
         enabled = self.preprocess_enabled.get()
         
-        # Store tiling controls to keep them always enabled
-        tiling_controls_to_skip = [
-            self.inpaint_tiling_enabled,
-            self.tile_size_spinbox,
-            self.tile_overlap_spinbox,
-            self.inpaint_tile_size,
-            self.inpaint_tile_overlap
-        ]
+        # Widgets that must remain enabled regardless of toggle (widgets only, not Tk variables)
+        always_on = []
+        for name in [
+            'tiling_frame',
+            'tile_size_spinbox', 'tile_overlap_spinbox',
+            'chunk_frame', 'chunk_height_spinbox', 'chunk_overlap_spinbox',
+            'chunk_height_label', 'chunk_overlap_label',
+            'chunk_height_unit_label', 'chunk_overlap_unit_label'
+        ]:
+            if hasattr(self, name):
+                always_on.append(getattr(self, name))
         
         for control in self.preprocessing_controls:
-            # Skip tiling controls - they should always be enabled
-            if hasattr(control, 'winfo_class'):
-                # Check if this is one of the tiling controls
-                try:
-                    if any(control is tc for tc in tiling_controls_to_skip if hasattr(self, tc.__name__ if hasattr(tc, '__name__') else '')):
-                        continue
-                except:
-                    pass
+            try:
+                if control in always_on:
+                    # Ensure enabled
+                    if isinstance(control, (tk.Scale, tb.Spinbox, tb.Checkbutton)):
+                        control.config(state='normal')
+                    elif isinstance(control, tk.LabelFrame):
+                        control.config(fg='white')
+                        self._toggle_frame_children(control, True)
+                    elif isinstance(control, tk.Label):
+                        control.config(fg='white')
+                    elif isinstance(control, tk.Frame):
+                        self._toggle_frame_children(control, True)
+                    continue
+            except Exception:
+                pass
             
-            # Check if control is the tiling frame itself
-            if hasattr(control, 'winfo_children'):
-                # Check if this is the tiling frame by looking at its text
-                if isinstance(control, tk.LabelFrame):
-                    try:
-                        if 'Tiling' in control.cget('text'):
-                            # Keep tiling frame always enabled
-                            control.config(fg='white')
-                            # Enable all children of tiling frame
-                            self._toggle_frame_children(control, True)
-                            continue
-                    except:
-                        pass
-            
-            # Normal enable/disable logic for non-tiling controls
+            # Normal enable/disable logic for other controls
             if isinstance(control, (tk.Scale, tb.Spinbox, tb.Checkbutton)):
                 control.config(state='normal' if enabled else 'disabled')
             elif isinstance(control, tk.LabelFrame):
@@ -1343,7 +1345,23 @@ class MangaSettingsDialog:
                 control.config(fg='white' if enabled else 'gray')
             elif isinstance(control, tk.Frame):
                 self._toggle_frame_children(control, enabled)
-
+        
+        # Final enforcement for always-on widgets (in case they were not in list)
+        try:
+            if hasattr(self, 'chunk_height_spinbox'):
+                self.chunk_height_spinbox.config(state='normal')
+            if hasattr(self, 'chunk_overlap_spinbox'):
+                self.chunk_overlap_spinbox.config(state='normal')
+            if hasattr(self, 'chunk_height_label'):
+                self.chunk_height_label.config(fg='white')
+            if hasattr(self, 'chunk_overlap_label'):
+                self.chunk_overlap_label.config(fg='white')
+            if hasattr(self, 'chunk_height_unit_label'):
+                self.chunk_height_unit_label.config(fg='white')
+            if hasattr(self, 'chunk_overlap_unit_label'):
+                self.chunk_overlap_unit_label.config(fg='white')
+        except Exception:
+            pass
     def _toggle_frame_children(self, frame, enabled):
         """Recursively enable/disable all children of a frame"""
         for child in frame.winfo_children():

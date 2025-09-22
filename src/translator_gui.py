@@ -12506,8 +12506,10 @@ Important rules:
         paths = filedialog.askopenfilenames(
             title="Select File(s) - Hold Ctrl/Shift to select multiple",
             filetypes=[
-                ("Supported files", "*.epub;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("Supported files", "*.epub;*.cbz;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("EPUB/CBZ", "*.epub;*.cbz"),
                 ("EPUB files", "*.epub"),
+                ("Comic Book Zip", "*.cbz"),
                 ("Text files", "*.txt;*.json"),
                 ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("PNG files", "*.png"),
@@ -12528,7 +12530,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.txt', '.json', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            supported_extensions = {'.epub', '.cbz', '.txt', '.json', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -12591,7 +12593,8 @@ Important rules:
         processed_paths = []
         
         for path in paths:
-            if path.lower().endswith('.json'):
+            lower = path.lower()
+            if lower.endswith('.json'):
                 # Convert JSON to TXT
                 txt_path = self._convert_json_to_txt(path)
                 if txt_path:
@@ -12601,8 +12604,32 @@ Important rules:
                     self.append_log(f"📄 Converted JSON to TXT: {os.path.basename(path)}")
                 else:
                     self.append_log(f"❌ Failed to convert JSON: {os.path.basename(path)}")
+            elif lower.endswith('.cbz'):
+                # Extract images from CBZ (ZIP) to a temp folder and add them
+                try:
+                    import zipfile, tempfile, shutil
+                    temp_root = getattr(self, 'cbz_temp_root', None)
+                    if not temp_root:
+                        temp_root = tempfile.mkdtemp(prefix='glossarion_cbz_')
+                        self.cbz_temp_root = temp_root
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    extract_dir = os.path.join(temp_root, base)
+                    os.makedirs(extract_dir, exist_ok=True)
+                    with zipfile.ZipFile(path, 'r') as zf:
+                        members = [m for m in zf.namelist() if m.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'))]
+                        # Preserve order by natural sort
+                        members.sort()
+                        for m in members:
+                            target_path = os.path.join(extract_dir, os.path.basename(m))
+                            if not os.path.exists(target_path):
+                                with zf.open(m) as src, open(target_path, 'wb') as dst:
+                                    shutil.copyfileobj(src, dst)
+                            processed_paths.append(target_path)
+                    self.append_log(f"📦 Extracted {len([p for p in processed_paths if p.startswith(extract_dir)])} images from {os.path.basename(path)}")
+                except Exception as e:
+                    self.append_log(f"❌ Failed to read CBZ: {os.path.basename(path)} - {e}")
             else:
-                # Non-JSON files pass through unchanged
+                # Non-JSON/CBZ files pass through unchanged
                 processed_paths.append(path)
         
         # Store the list of selected files (using processed paths)

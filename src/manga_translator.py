@@ -4324,7 +4324,7 @@ class MangaTranslator:
                     free_text_iterations = 0
                     self._log("📏 Auto iterations (B&W): text=2, empty=2, free=0", "info")
                 else:
-                    text_bubble_iterations = 3
+                    text_bubble_iterations = 2
                     empty_bubble_iterations = 3
                     free_text_iterations = 3
                     self._log("📏 Auto iterations (Color): all=3", "info")
@@ -5180,8 +5180,14 @@ class MangaTranslator:
                 total_height = len(lines) * line_height
                 start_y = y + (h - total_height) // 2
                 
-                # Draw background if opacity > 0
-                if self.text_bg_opacity > 0:
+                # Draw background if opacity > 0 (optionally only for free text)
+                draw_bg = self.text_bg_opacity > 0
+                try:
+                    if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
+                        draw_bg = self._is_free_text_region(region)
+                except Exception:
+                    pass
+                if draw_bg:
                     self._draw_text_background(region_draw, x, y, w, h, lines, font, 
                                              font_size, start_y)
                 
@@ -5254,8 +5260,14 @@ class MangaTranslator:
                 total_height = len(lines) * line_height
                 start_y = y + (h - total_height) // 2
                 
-                # Draw opaque background
-                if self.text_bg_opacity > 0:
+                # Draw opaque background (optionally only for free text)
+                draw_bg = self.text_bg_opacity > 0
+                try:
+                    if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
+                        draw_bg = self._is_free_text_region(region)
+                except Exception:
+                    pass
+                if draw_bg:
                     self._draw_text_background(draw, x, y, w, h, lines, font, 
                                              font_size, start_y)
                 
@@ -5287,6 +5299,24 @@ class MangaTranslator:
         self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
         return result
     
+    def _is_free_text_region(self, region) -> bool:
+        """Heuristic: determine if the region is free text (not a bubble).
+        Uses bubble_type when available; otherwise falls back to aspect ratio heuristics.
+        """
+        try:
+            if hasattr(region, 'bubble_type') and region.bubble_type:
+                return region.bubble_type == 'free_text'
+            # Fallback heuristic
+            x, y, w, h = region.bounding_box
+            w, h = int(w), int(h)
+            if h <= 0:
+                return True
+            aspect = w / max(1, h)
+            # Wider, shorter regions are often free text
+            return aspect >= 2.5 or h < 50
+        except Exception:
+            return False
+
     def _draw_text_background(self, draw: ImageDraw, x: int, y: int, w: int, h: int,
                             lines: List[str], font: ImageFont, font_size: int, 
                             start_y: int):
