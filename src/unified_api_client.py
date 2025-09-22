@@ -3511,7 +3511,7 @@ class UnifiedClient:
                         # Single-key mode: Check if fallback keys are enabled
                         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
                         if use_fallback_keys:
-                            print(f"[SINGLE-KEY MODE] Fallback keys enabled - skipping main key retry, going straight to fallback keys")
+                            print(f"[FALLBACK DIRECT] Using fallback keys")
                             # Try fallback keys directly without retrying main key
                             retry_res = self._try_fallback_keys_direct(
                                 messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data

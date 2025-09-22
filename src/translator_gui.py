@@ -13583,12 +13583,18 @@ Important rules:
         row1.pack(fill=tk.X, pady=(0, 10))
 
         tk.Label(row1, text="Role:").pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Combobox(row1, textvariable=self.summary_role_var,
-                   values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 30))
+        role_combo = ttk.Combobox(row1, textvariable=self.summary_role_var,
+                   values=["user", "system"], state="readonly", width=10)
+        role_combo.pack(side=tk.LEFT, padx=(0, 30))
+        # Prevent accidental changes from mouse wheel while scrolling
+        UIHelper.disable_spinbox_mousewheel(role_combo)
 
         tk.Label(row1, text="Mode:").pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Combobox(row1, textvariable=self.rolling_summary_mode_var,
-                   values=["append", "replace"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 10))
+        mode_combo = ttk.Combobox(row1, textvariable=self.rolling_summary_mode_var,
+                   values=["append", "replace"], state="readonly", width=10)
+        mode_combo.pack(side=tk.LEFT, padx=(0, 10))
+        # Prevent accidental changes from mouse wheel while scrolling
+        UIHelper.disable_spinbox_mousewheel(mode_combo)
 
         row2 = tk.Frame(settings_frame)
         row2.pack(fill=tk.X, pady=(0, 10))
@@ -14485,6 +14491,8 @@ Important rules:
         scan_modes = ["quick-scan", "aggressive", "ai-hunter", "custom"]
         scan_mode_combo = ttk.Combobox(scan_phase_frame, textvariable=self.scan_phase_mode_var, values=scan_modes, state="readonly", width=12)
         scan_mode_combo.pack(side=tk.LEFT)
+        # Prevent accidental changes from mouse wheel while scrolling
+        UIHelper.disable_spinbox_mousewheel(scan_mode_combo)
         
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
         
