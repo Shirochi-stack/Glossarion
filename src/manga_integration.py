@@ -1465,6 +1465,10 @@ class MangaTranslationTab:
         )
         provider_combo.pack(side=tk.LEFT, padx=10)
         provider_combo.bind('<<ComboboxSelected>>', self._on_ocr_provider_change)
+        # Prevent mouse wheel from changing selection while scrolling the page
+        provider_combo.bind("<MouseWheel>", lambda e: "break")
+        provider_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
+        provider_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
 
         # Provider status indicator with more detail
         self.provider_status_label = tk.Label(
@@ -2850,6 +2854,8 @@ class MangaTranslationTab:
         self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
         # Free-text-only background opacity (default off)
         self.free_text_only_bg_opacity_var = tk.BooleanVar(value=config.get('manga_free_text_only_bg_opacity', False))
+        # Persist on change like other controls
+        self.free_text_only_bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())
         self.bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace right after creation
         
         self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'circle'))
@@ -3038,6 +3044,13 @@ class MangaTranslationTab:
                 self.main_gui.config['manga_bg_style'] = self.bg_style_var.get()
             if hasattr(self, 'bg_reduction_var'):
                 self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_var.get()
+            
+            # Save free-text-only background opacity toggle
+            if hasattr(self, 'free_text_only_bg_opacity_var'):
+                try:
+                    self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_var.get())
+                except tk.TclError:
+                    pass
             
             # CRITICAL: Font size settings - validate before saving
             if hasattr(self, 'font_size_var'):
@@ -4809,28 +4822,91 @@ class MangaTranslationTab:
         self.selected_files.clear()
     
     def _finalize_cbz_jobs(self):
-        """Package translated outputs back into .cbz for each imported CBZ."""
+        """Package translated outputs back into .cbz for each imported CBZ.
+        - Always creates a CLEAN archive with only final translated pages.
+        - If save_intermediate is enabled in settings, also creates a DEBUG archive that
+          contains the same final pages at root plus debug/raw artifacts under subfolders.
+        """
         try:
             if not hasattr(self, 'cbz_jobs') or not self.cbz_jobs:
                 return
             import zipfile
+            # Read debug flag from settings
+            save_debug = False
+            try:
+                save_debug = bool(self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('save_intermediate', False))
+            except Exception:
+                save_debug = False
+            image_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+            text_exts = ('.txt', '.json', '.csv', '.log')
+            excluded_patterns = ('_mask', '_overlay', '_debug', '_raw', '_ocr', '_regions', '_chunk', '_clean', '_cleaned', '_inpaint', '_inpainted')
+
             for cbz_path, job in self.cbz_jobs.items():
                 out_dir = job.get('out_dir')
                 if not out_dir or not os.path.isdir(out_dir):
                     continue
                 parent = os.path.dirname(cbz_path)
                 base = os.path.splitext(os.path.basename(cbz_path))[0]
-                zip_target = os.path.join(parent, f"{base}_translated.cbz")
-                count = 0
-                with zipfile.ZipFile(zip_target, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for root, _, files in os.walk(out_dir):
-                        for fn in files:
-                            if fn.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
-                                fp = os.path.join(root, fn)
-                                arcname = os.path.relpath(fp, out_dir)
-                                zf.write(fp, arcname)
-                                count += 1
-                self._log(f"📦 Compiled {count} images into {os.path.basename(zip_target)}", "success")
+
+                # Compute original basenames from extracted images mapping
+                original_basenames = set()
+                try:
+                    if hasattr(self, 'cbz_image_to_job'):
+                        for img_path, job_path in self.cbz_image_to_job.items():
+                            if job_path == cbz_path:
+                                original_basenames.add(os.path.basename(img_path))
+                except Exception:
+                    pass
+
+                # Helper to iterate files in out_dir
+                all_files = []
+                for root, _, files in os.walk(out_dir):
+                    for fn in files:
+                        fp = os.path.join(root, fn)
+                        rel = os.path.relpath(fp, out_dir)
+                        all_files.append((fp, rel, fn))
+
+                # 1) CLEAN ARCHIVE: only final images matching original basenames
+                clean_zip = os.path.join(parent, f"{base}_translated.cbz")
+                clean_count = 0
+                with zipfile.ZipFile(clean_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for fp, rel, fn in all_files:
+                        fn_lower = fn.lower()
+                        if not fn_lower.endswith(image_exts):
+                            continue
+                        if original_basenames and fn not in original_basenames:
+                            # Only include pages corresponding to original entries
+                            continue
+                        # Also skip obvious debug artifacts by pattern (extra safeguard)
+                        if any(p in fn_lower for p in excluded_patterns):
+                            continue
+                        zf.write(fp, fn)  # place at root with page filename
+                        clean_count += 1
+                self._log(f"📦 Compiled CLEAN {clean_count} pages into {os.path.basename(clean_zip)}", "success")
+
+                # 2) DEBUG ARCHIVE: include final pages + extras under subfolders
+                if save_debug:
+                    debug_zip = os.path.join(parent, f"{base}_translated_debug.cbz")
+                    dbg_count = 0
+                    raw_count = 0
+                    page_count = 0
+                    with zipfile.ZipFile(debug_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for fp, rel, fn in all_files:
+                            fn_lower = fn.lower()
+                            # Final pages at root
+                            if fn_lower.endswith(image_exts) and (not original_basenames or fn in original_basenames) and not any(p in fn_lower for p in excluded_patterns):
+                                zf.write(fp, fn)
+                                page_count += 1
+                                continue
+                            # Raw text/logs
+                            if fn_lower.endswith(text_exts):
+                                zf.write(fp, os.path.join('raw', rel))
+                                raw_count += 1
+                                continue
+                            # Other images or artifacts -> debug/
+                            zf.write(fp, os.path.join('debug', rel))
+                            dbg_count += 1
+                    self._log(f"📦 Compiled DEBUG archive: pages={page_count}, debug_files={dbg_count}, raw={raw_count} -> {os.path.basename(debug_zip)}", "info")
         except Exception as e:
             self._log(f"⚠️ Failed to compile CBZ packages: {e}", "warning")
 
