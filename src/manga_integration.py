@@ -2826,8 +2826,8 @@ class MangaTranslationTab:
         inpaint_settings = manga_settings.get('inpainting', {})
         
         # Load inpaint method from the correct location
-        self.inpaint_method_var = tk.StringVar(value=inpaint_settings.get('method', 'cloud'))
-        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'lama'))
+        self.inpaint_method_var = tk.StringVar(value=inpaint_settings.get('method', 'local'))
+        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'anime'))
         
         # Load model paths
         for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local']:
@@ -4986,6 +4986,36 @@ class MangaTranslationTab:
             )
             
             self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
+
+            # Ensure AI bubble detection is enabled with RT-DETR by default
+            try:
+                ms = self.main_gui.config.setdefault('manga_settings', {})
+                ocr_set = ms.setdefault('ocr', {})
+                changed = False
+                if not ocr_set.get('bubble_detection_enabled', False):
+                    ocr_set['bubble_detection_enabled'] = True
+                    changed = True
+                if ocr_set.get('detector_type') != 'rtdetr':
+                    ocr_set['detector_type'] = 'rtdetr'
+                    changed = True
+                if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                    # Default RT-DETR model on HF
+                    ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                    changed = True
+                if changed and hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+
+                # Pre-download/load RT-DETR so first run is fast
+                try:
+                    from bubble_detector import BubbleDetector
+                    self._log("📥 Ensuring RT-DETR is downloaded/loaded for custom-api OCR", "info")
+                    self._preloaded_bd = BubbleDetector()
+                    model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
+                    self._preloaded_bd.load_rtdetr_model(model_id=model_id)
+                except Exception:
+                    self._preloaded_bd = None
+            except Exception:
+                self._preloaded_bd = None
         
         # Initialize translator if needed (or if it was reset)
         if not self.translator or not hasattr(self, 'translator'):
@@ -5005,11 +5035,19 @@ class MangaTranslationTab:
                     from ocr_manager import OCRManager
                     self.ocr_manager = OCRManager(log_callback=self._log)
                     self.translator.ocr_manager = self.ocr_manager
-                
-                # Distribute stop flags to all components
-                self._distribute_stop_flags()
-                
-                # Set cloud inpainting if configured (only once!)
+                    
+                    # Attach preloaded RT-DETR if available
+                    try:
+                        if hasattr(self, '_preloaded_bd') and self._preloaded_bd:
+                            self.translator.bubble_detector = self._preloaded_bd
+                            self._log("🤖 RT-DETR preloaded and attached to translator", "debug")
+                    except Exception:
+                        pass
+                    
+                    # Distribute stop flags to all components
+                    self._distribute_stop_flags()
+                    
+                    # Set cloud inpainting if configured (only once!)
                 saved_api_key = self.main_gui.config.get('replicate_api_key', '')
                 if saved_api_key:
                     self.translator.use_cloud_inpainting = True

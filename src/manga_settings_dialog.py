@@ -87,7 +87,7 @@ class MangaSettingsDialog:
             'max_workers': 4,
             'parallel_panel_translation': False,
             'panel_max_workers': 2,
-            'auto_cleanup_models': True,  # NEW: Auto cleanup models after translation
+            'auto_cleanup_models': False,  # Less aggressive by default
             'auto_convert_to_onnx': True,
             'auto_convert_to_onnx_background': True,
             'quantize_models': False,
@@ -102,7 +102,9 @@ class MangaSettingsDialog:
             },
             'inpainting': {
                 'batch_size': 1,
-                'enable_cache': True
+                'enable_cache': True,
+                'method': 'local',
+                'local_method': 'anime'
             },
             'font_sizing': {
             'algorithm': 'smart',  # 'smart', 'conservative', 'aggressive'
@@ -812,13 +814,26 @@ class MangaSettingsDialog:
         mask_frame = tk.LabelFrame(content_frame, text="Mask Settings", padx=15, pady=10)
         mask_frame.pack(fill='x', padx=20, pady=(20, 10))
         
+        # Auto toggle (affects both mask dilation and iterations)
+        auto_global_frame = tk.Frame(mask_frame)
+        auto_global_frame.pack(fill='x', pady=(0, 5))
+        if not hasattr(self, 'auto_iterations_var'):
+            self.auto_iterations_var = tk.BooleanVar(value=self.settings.get('auto_iterations', True))
+        tb.Checkbutton(
+            auto_global_frame,
+            text="Auto (affects mask dilation and iterations)",
+            variable=self.auto_iterations_var,
+            command=self._toggle_iteration_controls,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+
         # Mask dilation size
         dilation_frame = tk.Frame(mask_frame)
         dilation_frame.pack(fill='x', pady=5)
         
         tk.Label(dilation_frame, text="Mask Dilation:", width=15, anchor='w').pack(side='left')
         self.mask_dilation_var = tk.IntVar(value=self.settings.get('mask_dilation', 15))
-        dilation_spinbox = tb.Spinbox(
+        self.mask_dilation_spinbox = tb.Spinbox(
             dilation_frame,
             from_=0,
             to=50,
@@ -826,7 +841,7 @@ class MangaSettingsDialog:
             increment=5,
             width=10
         )
-        dilation_spinbox.pack(side='left', padx=10)
+        self.mask_dilation_spinbox.pack(side='left', padx=10)
         tk.Label(dilation_frame, text="pixels (expand mask beyond text)").pack(side='left')
         
         # Per-Text-Type Iterations - EXPANDED SECTION
@@ -836,6 +851,18 @@ class MangaSettingsDialog:
         # All Iterations Master Control (NEW)
         all_iter_frame = tk.Frame(iterations_label_frame)
         all_iter_frame.pack(fill='x', pady=5)
+        
+        # Auto-iterations toggle (secondary control reflects the same setting)
+        if not hasattr(self, 'auto_iterations_var'):
+            self.auto_iterations_var = tk.BooleanVar(value=self.settings.get('auto_iterations', True))
+        auto_iter_checkbox = tb.Checkbutton(
+            all_iter_frame,
+            text="Auto (set by image: B&W vs Color)",
+            variable=self.auto_iterations_var,
+            command=self._toggle_iteration_controls,
+            bootstyle="round-toggle"
+        )
+        auto_iter_checkbox.pack(side='left', padx=(0, 10))
         
         # Checkbox to enable/disable uniform iterations
         self.use_all_iterations_var = tk.BooleanVar(value=self.settings.get('use_all_iterations', True))
@@ -847,6 +874,7 @@ class MangaSettingsDialog:
             bootstyle="round-toggle"
         )
         all_iter_checkbox.pack(side='left', padx=(0, 10))
+        self.use_all_iterations_checkbox = all_iter_checkbox
         
         self.all_iterations_var = tk.IntVar(value=self.settings.get('all_iterations', 2))
         self.all_iterations_spinbox = tb.Spinbox(
@@ -1038,18 +1066,56 @@ class MangaSettingsDialog:
         ).pack(anchor='w')
 
     def _toggle_iteration_controls(self):
-        """Enable/disable individual iteration controls based on 'use all' checkbox"""
+        """Enable/disable iteration controls based on Auto and 'Use Same For All' toggles"""
+        auto_on = getattr(self, 'auto_iterations_var', tk.BooleanVar(value=True)).get()
         use_all = self.use_all_iterations_var.get()
         
-        # Enable/disable the all iterations spinbox
-        self.all_iterations_spinbox.config(state='normal' if use_all else 'disabled')
+        if auto_on:
+            # Disable everything when auto is on
+            try:
+                self.all_iterations_spinbox.config(state='disabled')
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'use_all_iterations_checkbox'):
+                    self.use_all_iterations_checkbox.config(state='disabled')
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'mask_dilation_spinbox'):
+                    self.mask_dilation_spinbox.config(state='disabled')
+            except Exception:
+                pass
+            for label, spinbox in getattr(self, 'individual_iteration_controls', []):
+                try:
+                    spinbox.config(state='disabled')
+                    label.config(fg='gray')
+                except Exception:
+                    pass
+            return
         
-        # Enable/disable individual controls
-        for label, spinbox in self.individual_iteration_controls:
+        # Auto off -> respect 'use all'
+        try:
+            self.all_iterations_spinbox.config(state='normal' if use_all else 'disabled')
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'use_all_iterations_checkbox'):
+                self.use_all_iterations_checkbox.config(state='normal')
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'mask_dilation_spinbox'):
+                self.mask_dilation_spinbox.config(state='normal')
+        except Exception:
+            pass
+        for label, spinbox in getattr(self, 'individual_iteration_controls', []):
             state = 'disabled' if use_all else 'normal'
-            spinbox.config(state=state)
-            # Gray out labels when disabled
-            label.config(fg='gray' if use_all else 'white')
+            try:
+                spinbox.config(state=state)
+                label.config(fg='gray' if use_all else 'white')
+            except Exception:
+                pass
 
     def _set_mask_preset(self, dilation, use_all, all_iter, text_bubble_iter, empty_bubble_iter, free_text_iter):
         """Set mask dilation preset values with comprehensive iteration controls"""
@@ -2923,6 +2989,7 @@ class MangaSettingsDialog:
                 self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
                 self.settings['empty_bubble_dilation_iterations'] = self.empty_bubble_iterations_var.get()
                 self.settings['free_text_dilation_iterations'] = self.free_text_iterations_var.get()
+                self.settings['auto_iterations'] = self.auto_iterations_var.get()
                 
                 # Legacy support
                 self.settings['bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()

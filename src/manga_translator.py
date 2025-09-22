@@ -4289,24 +4289,68 @@ class MangaTranslator:
         # Get dilation settings
         base_dilation_size = manga_settings.get('mask_dilation', 15)
         
-        # Check if using uniform iterations for all text types
-        use_all_iterations = manga_settings.get('use_all_iterations', False)
+        # If Auto is enabled, also auto-set dilation by OCR provider
+        auto_iterations = manga_settings.get('auto_iterations', False)
+        if auto_iterations:
+            try:
+                if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google'):
+                    base_dilation_size = 15
+                else:
+                    base_dilation_size = 0
+                self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size} px", "info")
+            except Exception:
+                pass
         
-        if use_all_iterations:
-            # Use the same iteration count for all text types
-            all_iterations = manga_settings.get('all_iterations', 2)
-            text_bubble_iterations = all_iterations
-            empty_bubble_iterations = all_iterations
-            free_text_iterations = all_iterations
-            self._log(f"📏 Using uniform iterations: {all_iterations} for all text types", "info")
-        else:
-            # Use individual iteration settings
-            text_bubble_iterations = manga_settings.get('text_bubble_dilation_iterations',
-                                                       manga_settings.get('bubble_dilation_iterations', 2))
-            empty_bubble_iterations = manga_settings.get('empty_bubble_dilation_iterations', 3)
-            free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
-            self._log(f"📏 Using individual iterations - Text bubbles: {text_bubble_iterations}, "
-                     f"Empty bubbles: {empty_bubble_iterations}, Free text: {free_text_iterations}", "info")
+        # Auto iterations: decide by image color vs B&W
+        auto_iterations = manga_settings.get('auto_iterations', False)
+        if auto_iterations:
+            try:
+                # Heuristic: consider image B&W if RGB channels are near-equal
+                if len(image.shape) < 3 or image.shape[2] == 1:
+                    is_bw = True
+                else:
+                    # Compute mean absolute differences between channels
+                    ch0 = image[:, :, 0].astype(np.int16)
+                    ch1 = image[:, :, 1].astype(np.int16)
+                    ch2 = image[:, :, 2].astype(np.int16)
+                    diff01 = np.mean(np.abs(ch0 - ch1))
+                    diff12 = np.mean(np.abs(ch1 - ch2))
+                    diff02 = np.mean(np.abs(ch0 - ch2))
+                    # If channels are essentially the same, treat as B&W
+                    is_bw = max(diff01, diff12, diff02) < 2.0
+                if is_bw:
+                    text_bubble_iterations = 2
+                    empty_bubble_iterations = 2
+                    free_text_iterations = 0
+                    self._log("📏 Auto iterations (B&W): text=2, empty=2, free=0", "info")
+                else:
+                    text_bubble_iterations = 3
+                    empty_bubble_iterations = 3
+                    free_text_iterations = 3
+                    self._log("📏 Auto iterations (Color): all=3", "info")
+            except Exception:
+                # Fallback to configured behavior on any error
+                auto_iterations = False
+        
+        if not auto_iterations:
+            # Check if using uniform iterations for all text types
+            use_all_iterations = manga_settings.get('use_all_iterations', False)
+            
+            if use_all_iterations:
+                # Use the same iteration count for all text types
+                all_iterations = manga_settings.get('all_iterations', 2)
+                text_bubble_iterations = all_iterations
+                empty_bubble_iterations = all_iterations
+                free_text_iterations = all_iterations
+                self._log(f"📏 Using uniform iterations: {all_iterations} for all text types", "info")
+            else:
+                # Use individual iteration settings
+                text_bubble_iterations = manga_settings.get('text_bubble_dilation_iterations',
+                                                           manga_settings.get('bubble_dilation_iterations', 2))
+                empty_bubble_iterations = manga_settings.get('empty_bubble_dilation_iterations', 3)
+                free_text_iterations = manga_settings.get('free_text_dilation_iterations', 0)
+                self._log(f"📏 Using individual iterations - Text bubbles: {text_bubble_iterations}, "
+                         f"Empty bubbles: {empty_bubble_iterations}, Free text: {free_text_iterations}", "info")
         
         # Create separate masks for different text types
         text_bubble_mask = np.zeros(image.shape[:2], dtype=np.uint8)
