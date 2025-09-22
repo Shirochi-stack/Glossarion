@@ -5458,6 +5458,13 @@ class MangaTranslationTab:
                 shadow_blur=self.shadow_blur_var.get(),
                 force_caps_lock=self.force_caps_lock_var.get()
             )
+
+            # Free-text-only background opacity toggle -> pass through to translator
+            try:
+                if hasattr(self, 'free_text_only_bg_opacity_var'):
+                    self.translator.free_text_only_bg_opacity = bool(self.free_text_only_bg_opacity_var.get())
+            except Exception:
+                pass
             
             # Update font mode and multiplier explicitly
             self.translator.font_size_mode = self.font_size_mode_var.get()

@@ -415,28 +415,55 @@ class LocalInpainter:
                 logger.info("🗨️ Bubble detection not available")
     
     def _load_config(self):
-        if os.path.exists(self.config_path):
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        try:
+            if self.config_path and os.path.exists(self.config_path):
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if not content:
+                        return {}
+                    try:
+                        return json.loads(content)
+                    except json.JSONDecodeError:
+                        # Likely a concurrent write; retry once after a short delay
+                        try:
+                            import time
+                            time.sleep(0.05)
+                            with open(self.config_path, 'r', encoding='utf-8') as f2:
+                                return json.load(f2)
+                        except Exception:
+                            return {}
+        except Exception:
+            return {}
         return {}
     
     def _save_config(self):
         # Don't save if config is empty (prevents purging)
-        if not self.config:
+        if not getattr(self, 'config', None):
             return
-        
-        # Load existing
-        full_config = {}
-        if os.path.exists(self.config_path):
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                full_config = json.load(f)
-        
-        # Update
-        full_config.update(self.config)
-        
-        # Save
-        with open(self.config_path, 'w', encoding='utf-8') as f:
-            json.dump(full_config, f, indent=2, ensure_ascii=False)
+        try:
+            # Load existing (best-effort)
+            full_config = {}
+            if self.config_path and os.path.exists(self.config_path):
+                try:
+                    with open(self.config_path, 'r', encoding='utf-8') as f:
+                        full_config = json.load(f)
+                except Exception:
+                    full_config = {}
+            # Update
+            full_config.update(self.config)
+            # Atomic write: write to temp then replace
+            tmp_path = (self.config_path or 'config.json') + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(full_config, f, indent=2, ensure_ascii=False)
+            try:
+                os.replace(tmp_path, self.config_path or 'config.json')
+            except Exception:
+                # Fallback to direct write
+                with open(self.config_path or 'config.json', 'w', encoding='utf-8') as f:
+                    json.dump(full_config, f, indent=2, ensure_ascii=False)
+        except Exception:
+            # Never crash on config save
+            pass
     
     def set_stop_flag(self, stop_flag):
         """Set the stop flag for checking interruptions"""

@@ -1218,6 +1218,16 @@ class MangaTranslator:
                 
                 # Store free text locations for filtering later
                 free_text_regions = rtdetr_detections.get('text_free', []) if detect_free_text else []
+
+                # Helper to test if a point lies in any bbox
+                def _point_in_any_bbox(cx, cy, boxes):
+                    try:
+                        for (bx, by, bw, bh) in boxes or []:
+                            if bx <= cx <= bx + bw and by <= cy <= by + bh:
+                                return True
+                    except Exception:
+                        pass
+                    return False
                 
                 self._log(f"✅ RT-DETR detected:", "success")
                 self._log(f"   {len(rtdetr_detections.get('bubbles', []))} empty bubbles", "info")
@@ -1314,6 +1324,8 @@ class MangaTranslator:
                     # Store original regions for masking
                     merged_region.original_regions = bubble_regions
                     merged_region.bubble_bounds = (bx, by, bw, bh)
+                    # Classify as text bubble for downstream rendering/masking
+                    merged_region.bubble_type = 'text_bubble'
                     # Mark that this should be inpainted
                     merged_region.should_inpaint = True
                     
@@ -1331,6 +1343,14 @@ class MangaTranslator:
                         # Don't require RT-DETR to specifically detect it as free text
                         if ocr_settings.get('detect_free_text', True):
                             region.should_inpaint = True
+                            # If RT-DETR detected free text box covering this region's center, mark explicitly
+                            try:
+                                cx = region.bounding_box[0] + region.bounding_box[2] / 2
+                                cy = region.bounding_box[1] + region.bounding_box[3] / 2
+                                if _point_in_any_bbox(cx, cy, free_text_regions):
+                                    region.bubble_type = 'free_text'
+                            except Exception:
+                                pass
                             self._log(f"   Text outside bubbles INCLUDED: '{region.text[:30]}...'", "debug")
                         else:
                             region.should_inpaint = False
@@ -6297,7 +6317,13 @@ class MangaTranslator:
         if key not in tl.local_inpainters or tl.local_inpainters[key] is None:
             try:
                 from local_inpainter import LocalInpainter
-                inp = LocalInpainter()
+                # Use a per-thread config path to avoid concurrent JSON writes
+                try:
+                    import tempfile
+                    thread_cfg = os.path.join(tempfile.gettempdir(), f"gl_inpainter_{threading.get_ident()}.json")
+                except Exception:
+                    thread_cfg = "config_thread_local.json"
+                inp = LocalInpainter(config_path=thread_cfg)
                 # Apply tiling settings
                 tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
                 inp.tiling_enabled = tiling_settings.get('enabled', False)
