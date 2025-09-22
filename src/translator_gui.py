@@ -16399,8 +16399,32 @@ Important rules:
             self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var.get()
             self.config['thinking_budget'] = int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0
             self.config['openai_base_url'] = self.openai_base_url_var.get()
+            self.config['groq_base_url'] = self.groq_base_url_var.get()  # This was missing!
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
             self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
+            
+            # Save additional important missing settings
+            if hasattr(self, 'retain_source_extension_var'):
+                self.config['retain_source_extension'] = self.retain_source_extension_var.get()
+                # Update environment variable
+                os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var.get() else '0'
+            
+            if hasattr(self, 'use_fallback_keys_var'):
+                self.config['use_fallback_keys'] = self.use_fallback_keys_var.get()
+            
+            if hasattr(self, 'auto_update_check_var'):
+                self.config['auto_update_check'] = self.auto_update_check_var.get()
+                
+            # Save window manager safe ratios setting
+            if hasattr(self, 'wm') and hasattr(self.wm, '_force_safe_ratios'):
+                self.config['force_safe_ratios'] = self.wm._force_safe_ratios
+                
+            # Save metadata-related ignore settings
+            if hasattr(self, 'ignore_header_var'):
+                self.config['ignore_header'] = self.ignore_header_var.get()
+                
+            if hasattr(self, 'ignore_title_var'):
+                self.config['ignore_title'] = self.ignore_title_var.get()
             self.config['disable_chapter_merging'] = self.disable_chapter_merging_var.get()
             self.config['use_gemini_openai_endpoint'] = self.use_gemini_openai_endpoint_var.get()
             self.config['gemini_openai_endpoint'] = self.gemini_openai_endpoint_var.get()
@@ -16416,6 +16440,49 @@ Important rules:
 
             # NEW: Save strip honorifics setting
             self.config['strip_honorifics'] = self.strip_honorifics_var.get()
+            
+            # Save glossary backup settings
+            if hasattr(self, 'config') and 'glossary_auto_backup' in self.config:
+                # These might be set from the glossary backup dialog
+                pass  # Already in config, don't overwrite
+            else:
+                # Set defaults if not already set
+                self.config.setdefault('glossary_auto_backup', True)
+                self.config.setdefault('glossary_max_backups', 50)
+                
+            # Save QA Scanner settings if they exist
+            if hasattr(self, 'config') and 'qa_scanner_settings' in self.config:
+                # QA scanner settings already exist in config, keep them
+                pass
+            else:
+                # Initialize default QA scanner settings if not present
+                default_qa_settings = {
+                    'foreign_char_threshold': 10,
+                    'excluded_characters': '',
+                    'check_encoding_issues': False,
+                    'check_repetition': True,
+                    'check_translation_artifacts': True,
+                    'check_glossary_leakage': True,
+                    'min_file_length': 0,
+                    'report_format': 'detailed',
+                    'auto_save_report': True,
+                    'check_word_count_ratio': False,
+                    'check_multiple_headers': True,
+                    'warn_name_mismatch': False,
+                    'check_missing_html_tag': True,
+                    'check_paragraph_structure': True,
+                    'paragraph_threshold': 0.3,
+                    'cache_enabled': True,
+                    'cache_auto_size': False,
+                    'cache_show_stats': False
+                }
+                self.config.setdefault('qa_scanner_settings', default_qa_settings)
+            
+            # Save AI Hunter config settings if they exist
+            if 'ai_hunter_config' not in self.config:
+                self.config['ai_hunter_config'] = {}
+            # Ensure ai_hunter_max_workers has a default value
+            self.config['ai_hunter_config'].setdefault('ai_hunter_max_workers', 1)
             
             # NEW: Save prompts from text widgets if they exist
             if hasattr(self, 'auto_prompt_text'):
@@ -16442,24 +16509,37 @@ Important rules:
             else:
                 os.environ["EXTRACTION_WORKERS"] = "1"
                 
-            # New cleaner UI variables
+            # Chapter Extraction Settings - Save all extraction-related settings
+            # These are the critical settings shown in the screenshot
+            
+            # Save Text Extraction Method (Standard/Enhanced)
             if hasattr(self, 'text_extraction_method_var'):
                 self.config['text_extraction_method'] = self.text_extraction_method_var.get()
+            
+            # Save File Filtering Level (Smart/Comprehensive/Full)
+            if hasattr(self, 'file_filtering_level_var'):
                 self.config['file_filtering_level'] = self.file_filtering_level_var.get()
-                
-                # Update extraction_mode for backwards compatibility
+            
+            # Save Preserve Markdown Structure setting
+            if hasattr(self, 'enhanced_preserve_structure_var'):
+                self.config['enhanced_preserve_structure'] = self.enhanced_preserve_structure_var.get()
+            
+            # Save Enhanced Filtering setting (for backwards compatibility)
+            if hasattr(self, 'enhanced_filtering_var'):
+                self.config['enhanced_filtering'] = self.enhanced_filtering_var.get()
+            
+            # Update extraction_mode for backwards compatibility with older versions
+            if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):
                 if self.text_extraction_method_var.get() == 'enhanced':
                     self.config['extraction_mode'] = 'enhanced'
+                    # When enhanced mode is selected, the filtering level applies to enhanced mode
                     self.config['enhanced_filtering'] = self.file_filtering_level_var.get()
                 else:
+                    # When standard mode is selected, use the filtering level directly
                     self.config['extraction_mode'] = self.file_filtering_level_var.get()
-            else:
-                # Fallback for old UI - keep existing behavior
+            elif hasattr(self, 'extraction_mode_var'):
+                # Fallback for older UI
                 self.config['extraction_mode'] = self.extraction_mode_var.get()
-
-            # Enhanced mode settings (these already exist in your code but ensure they're saved)
-            self.config['enhanced_filtering'] = getattr(self, 'enhanced_filtering_var', tk.StringVar(value='smart')).get()
-            self.config['enhanced_preserve_structure'] = getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get()
 
             # Save image compression settings if they exist
             # These are saved from the compression dialog, but we ensure defaults here
