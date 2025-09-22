@@ -4698,6 +4698,17 @@ class MangaTranslationTab:
                     with zipfile.ZipFile(path, 'r') as zf:
                         # Extract all to preserve subfolders and avoid name collisions
                         zf.extractall(extract_dir)
+                    # Initialize CBZ job tracking
+                    if not hasattr(self, 'cbz_jobs'):
+                        self.cbz_jobs = {}
+                    if not hasattr(self, 'cbz_image_to_job'):
+                        self.cbz_image_to_job = {}
+                    # Prepare output dir next to source CBZ
+                    out_dir = os.path.join(os.path.dirname(path), f"{base}_translated")
+                    self.cbz_jobs[path] = {
+                        'extract_dir': extract_dir,
+                        'out_dir': out_dir,
+                    }
                     # Collect all images recursively from extract_dir
                     added = 0
                     for root, _, files_in_dir in os.walk(extract_dir):
@@ -4708,6 +4719,8 @@ class MangaTranslationTab:
                                     self.selected_files.append(target_path)
                                     self.file_listbox.insert(tk.END, os.path.basename(target_path))
                                     added += 1
+                                # Map extracted image to its CBZ job
+                                self.cbz_image_to_job[target_path] = path
                     self._log(f"📦 Added {added} images from CBZ: {os.path.basename(path)}", "info")
                 except Exception as e:
                     self._log(f"❌ Failed to read CBZ {os.path.basename(path)}: {e}", "error")
@@ -4754,6 +4767,17 @@ class MangaTranslationTab:
                     os.makedirs(extract_dir, exist_ok=True)
                     with zipfile.ZipFile(filepath, 'r') as zf:
                         zf.extractall(extract_dir)
+                    # Initialize CBZ job tracking
+                    if not hasattr(self, 'cbz_jobs'):
+                        self.cbz_jobs = {}
+                    if not hasattr(self, 'cbz_image_to_job'):
+                        self.cbz_image_to_job = {}
+                    # Prepare output dir next to source CBZ
+                    out_dir = os.path.join(os.path.dirname(filepath), f"{base}_translated")
+                    self.cbz_jobs[filepath] = {
+                        'extract_dir': extract_dir,
+                        'out_dir': out_dir,
+                    }
                     # Collect all images recursively
                     added = 0
                     for root, _, files_in_dir in os.walk(extract_dir):
@@ -4764,6 +4788,8 @@ class MangaTranslationTab:
                                     self.selected_files.append(target_path)
                                     self.file_listbox.insert(tk.END, os.path.basename(target_path))
                                     added += 1
+                                # Map extracted image to its CBZ job
+                                self.cbz_image_to_job[target_path] = filepath
                     self._log(f"📦 Added {added} images from CBZ: {filename}", "info")
                 except Exception as e:
                     self._log(f"❌ Failed to read CBZ {filename}: {e}", "error")
@@ -4782,6 +4808,32 @@ class MangaTranslationTab:
         self.file_listbox.delete(0, tk.END)
         self.selected_files.clear()
     
+    def _finalize_cbz_jobs(self):
+        """Package translated outputs back into .cbz for each imported CBZ."""
+        try:
+            if not hasattr(self, 'cbz_jobs') or not self.cbz_jobs:
+                return
+            import zipfile
+            for cbz_path, job in self.cbz_jobs.items():
+                out_dir = job.get('out_dir')
+                if not out_dir or not os.path.isdir(out_dir):
+                    continue
+                parent = os.path.dirname(cbz_path)
+                base = os.path.splitext(os.path.basename(cbz_path))[0]
+                zip_target = os.path.join(parent, f"{base}_translated.cbz")
+                count = 0
+                with zipfile.ZipFile(zip_target, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for root, _, files in os.walk(out_dir):
+                        for fn in files:
+                            if fn.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
+                                fp = os.path.join(root, fn)
+                                arcname = os.path.relpath(fp, out_dir)
+                                zf.write(fp, arcname)
+                                count += 1
+                self._log(f"📦 Compiled {count} images into {os.path.basename(zip_target)}", "success")
+        except Exception as e:
+            self._log(f"⚠️ Failed to compile CBZ packages: {e}", "warning")
+
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI text widget or console with enhanced stop suppression"""
         # Enhanced stop suppression - allow only essential stop confirmation messages
@@ -5490,15 +5542,27 @@ class MangaTranslationTab:
                         if self.stop_flag.is_set():
                             return False
                         
-                        # Determine output path
+                        # Determine output path (route CBZ images to job out_dir)
                         filename = os.path.basename(filepath)
-                        if self.create_subfolder_var.get():
-                            output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                            os.makedirs(output_dir, exist_ok=True)
-                            output_path = os.path.join(output_dir, filename)
-                        else:
-                            base, ext = os.path.splitext(filepath)
-                            output_path = f"{base}_translated{ext}"
+                        output_path = None
+                        try:
+                            if hasattr(self, 'cbz_image_to_job') and filepath in self.cbz_image_to_job:
+                                cbz_file = self.cbz_image_to_job[filepath]
+                                job = getattr(self, 'cbz_jobs', {}).get(cbz_file)
+                                if job:
+                                    output_dir = job.get('out_dir')
+                                    os.makedirs(output_dir, exist_ok=True)
+                                    output_path = os.path.join(output_dir, filename)
+                        except Exception:
+                            output_path = None
+                        if not output_path:
+                            if self.create_subfolder_var.get():
+                                output_dir = os.path.join(os.path.dirname(filepath), 'translated')
+                                os.makedirs(output_dir, exist_ok=True)
+                                output_path = os.path.join(output_dir, filename)
+                            else:
+                                base, ext = os.path.splitext(filepath)
+                                output_path = f"{base}_translated{ext}"
                         
                         # Announce start
                         self._update_current_file(filename)
@@ -5600,6 +5664,12 @@ class MangaTranslationTab:
                 
                 # After parallel processing, skip sequential loop
                 
+                # Finalize CBZ packaging after parallel mode finishes
+                try:
+                    self._finalize_cbz_jobs()
+                except Exception:
+                    pass
+                
             else:
                 # Sequential processing
                 for index, filepath in enumerate(self.selected_files):
@@ -5622,14 +5692,28 @@ class MangaTranslationTab:
                     )
                     
                     try:
-                        # Determine output path
-                        if self.create_subfolder_var.get():
-                            output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                            os.makedirs(output_dir, exist_ok=True)
-                            output_path = os.path.join(output_dir, filename)
+                        # Determine output path (route CBZ images to job out_dir)
+                        job_output_path = None
+                        try:
+                            if hasattr(self, 'cbz_image_to_job') and filepath in self.cbz_image_to_job:
+                                cbz_file = self.cbz_image_to_job[filepath]
+                                job = getattr(self, 'cbz_jobs', {}).get(cbz_file)
+                                if job:
+                                    output_dir = job.get('out_dir')
+                                    os.makedirs(output_dir, exist_ok=True)
+                                    job_output_path = os.path.join(output_dir, filename)
+                        except Exception:
+                            job_output_path = None
+                        if job_output_path:
+                            output_path = job_output_path
                         else:
-                            base, ext = os.path.splitext(filepath)
-                            output_path = f"{base}_translated{ext}"
+                            if self.create_subfolder_var.get():
+                                output_dir = os.path.join(os.path.dirname(filepath), 'translated')
+                                os.makedirs(output_dir, exist_ok=True)
+                                output_path = os.path.join(output_dir, filename)
+                            else:
+                                base, ext = os.path.splitext(filepath)
+                                output_path = f"{base}_translated{ext}"
                         
                         # Process the image
                         result = self.translator.process_image(filepath, output_path)
@@ -5716,6 +5800,12 @@ class MangaTranslationTab:
                             self._log(f"   Full traceback:", "error")
                             self._log(traceback.format_exc(), "error")
                         
+            
+            # Finalize CBZ packaging (both modes)
+            try:
+                self._finalize_cbz_jobs()
+            except Exception:
+                pass
             
             # Final summary - only if not stopped
             if not self.stop_flag.is_set():
