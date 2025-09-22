@@ -161,6 +161,8 @@ class TranslationConfig:
         self.USE_ROLLING_SUMMARY = os.getenv("USE_ROLLING_SUMMARY", "0") == "1"
         self.ROLLING_SUMMARY_EXCHANGES = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
         self.ROLLING_SUMMARY_MODE = os.getenv("ROLLING_SUMMARY_MODE", "replace")
+        # New: maximum number of rolling summary entries to retain when in append mode (0 = unlimited)
+        self.ROLLING_SUMMARY_MAX_ENTRIES = int(os.getenv("ROLLING_SUMMARY_MAX_ENTRIES", "10"))
         self.DUPLICATE_DETECTION_MODE = os.getenv("DUPLICATE_DETECTION_MODE", "basic")
         self.AI_HUNTER_THRESHOLD = int(os.getenv("AI_HUNTER_THRESHOLD", "75"))
         self.TRANSLATION_HISTORY_ROLLING = os.getenv("TRANSLATION_HISTORY_ROLLING", "0") == "1"
@@ -3878,6 +3880,38 @@ class TranslationProcessor:
                 sf.write(header)
                 sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
                 sf.write(summary_resp.strip())
+
+            # If in append mode, trim to retain only the last N entries if configured
+            try:
+                if self.config.ROLLING_SUMMARY_MODE == "append":
+                    max_entries = int(getattr(self.config, "ROLLING_SUMMARY_MAX_ENTRIES", 0) or 0)
+                    if max_entries > 0:
+                        with open(summary_file, 'r', encoding='utf-8') as rf:
+                            content = rf.read()
+                        # Find the start of each summary block by header line
+                        headers = [m.start() for m in re.finditer(r"(?m)^===\s*Rolling Summary.*$", content)]
+                        if len(headers) > max_entries:
+                            # Keep only the last max_entries blocks
+                            keep_starts = headers[-max_entries:]
+                            blocks = []
+                            for i, s in enumerate(keep_starts):
+                                e = keep_starts[i + 1] if i + 1 < len(keep_starts) else len(content)
+                                block = content[s:e].strip()
+                                if block:
+                                    blocks.append(block)
+                            trimmed_content = ("\n\n".join(blocks) + "\n") if blocks else ""
+                            with open(summary_file, 'w', encoding='utf-8') as wf:
+                                wf.write(trimmed_content)
+                            # Optional log showing retained count
+                            try:
+                                self._log(f"📚 Total summaries in memory: {len(blocks)} (trimmed to last {max_entries})")
+                            except Exception:
+                                pass
+            except Exception as _trim_err:
+                try:
+                    self._log(f"⚠️ Failed to trim rolling summaries: {_trim_err}")
+                except Exception:
+                    pass
             
             # Log to GUI if available, otherwise console
             try:
@@ -8689,7 +8723,8 @@ def build_system_prompt(user_prompt, glossary_path=None):
             print(f"[ERROR] Full traceback: {traceback.format_exc()}")
     else:
         if not append_glossary:
-            print(f"[DEBUG] ❌ Glossary append disabled")
+            #print(f"[DEBUG] ❌ Glossary append disabled")
+            pass
         elif not actual_glossary_path:
             print(f"[DEBUG] ❌ No glossary path provided")
         elif not os.path.exists(actual_glossary_path):

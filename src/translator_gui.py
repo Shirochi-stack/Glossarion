@@ -2193,6 +2193,8 @@ Recent translations to summarize:
             ('summary_role_var', 'summary_role', 'user'),
             ('rolling_summary_exchanges_var', 'rolling_summary_exchanges', '5'),
             ('rolling_summary_mode_var', 'rolling_summary_mode', 'append'),
+            # New: how many summaries to retain in append mode
+            ('rolling_summary_max_entries_var', 'rolling_summary_max_entries', '5'),
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
             ('max_retry_tokens_var', 'max_retry_tokens', '16384'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
@@ -8670,6 +8672,7 @@ Provide translations in the same numbered format."""
             'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),
             'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
             'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
+            'ROLLING_SUMMARY_MAX_ENTRIES': self.rolling_summary_max_entries_var.get(),
             'PROFILE_NAME': self.lang_var.get().lower(),
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
@@ -13594,6 +13597,13 @@ Important rules:
         tb.Entry(row2, width=5, textvariable=self.rolling_summary_exchanges_var).pack(side=tk.LEFT, padx=(0, 5))
         tk.Label(row2, text="exchanges").pack(side=tk.LEFT)
 
+        # Spacer
+        tk.Label(row2, text="   ").pack(side=tk.LEFT)
+        # New controls: Retain last N summaries (append mode)
+        tk.Label(row2, text="Retain").pack(side=tk.LEFT, padx=(10, 5))
+        tb.Entry(row2, width=5, textvariable=self.rolling_summary_max_entries_var).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(row2, text="entries").pack(side=tk.LEFT)
+
         tb.Button(content_frame, text="⚙️ Configure Memory Prompts", 
                 command=self.configure_rolling_summary_prompts,
                 bootstyle="info-outline", width=30).pack(anchor=tk.W, padx=20, pady=(10, 10))
@@ -15456,8 +15466,9 @@ Important rules:
                     'summary_role': self.summary_role_var.get(),
                     'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
                     'retain_source_extension': self.retain_source_extension_var.get(),
-                    'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
+'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
                     'rolling_summary_mode': self.rolling_summary_mode_var.get(),
+                    'rolling_summary_max_entries': safe_int(self.rolling_summary_max_entries_var.get(), 10),
                     'retry_truncated': self.retry_truncated_var.get(),
                     'max_retry_tokens': safe_int(self.max_retry_tokens_var.get(), 16384),
                     'retry_duplicate_bodies': self.retry_duplicate_var.get(),
@@ -15568,6 +15579,7 @@ Important rules:
                     "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
                     "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
                     "ROLLING_SUMMARY_USER_PROMPT": self.rolling_summary_user_prompt,
+                    "ROLLING_SUMMARY_MAX_ENTRIES": str(self.config.get('rolling_summary_max_entries', 10)),
                     "RETRY_TRUNCATED": "1" if self.retry_truncated_var.get() else "0",
                     "MAX_RETRY_TOKENS": str(self.config['max_retry_tokens']),
                     "RETRY_DUPLICATE_BODIES": "1" if self.retry_duplicate_var.get() else "0",

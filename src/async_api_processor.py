@@ -2551,6 +2551,7 @@ class AsyncProcessingDialog:
         env_vars['ROLLING_SUMMARY_MODE'] = self.gui.rolling_summary_mode_var.get()
         env_vars['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.gui.rolling_summary_system_prompt if hasattr(self.gui, 'rolling_summary_system_prompt') else ''
         env_vars['ROLLING_SUMMARY_USER_PROMPT'] = self.gui.rolling_summary_user_prompt if hasattr(self.gui, 'rolling_summary_user_prompt') else ''
+        env_vars['ROLLING_SUMMARY_MAX_ENTRIES'] = self.gui.rolling_summary_max_entries_var.get() if hasattr(self.gui, 'rolling_summary_max_entries_var') else '10'
         
         # Retry and error handling settings
         env_vars['EMERGENCY_PARAGRAPH_RESTORE'] = "1" if self.gui.emergency_restore_var.get() else "0"
