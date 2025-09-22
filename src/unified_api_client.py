@@ -1653,7 +1653,34 @@ class UnifiedClient:
                 if not use_gemini_endpoint:
                     self._log_once("Gemini model detected, not overriding with individual endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)", is_debug=True)
                 return
-            # Override other model types to use OpenAI client when individual endpoint is configured
+            
+            # Detect Azure endpoints and route via Azure handler instead of generic OpenAI base_url
+            url_l = individual_endpoint.lower()
+            is_azure = (".openai.azure.com" in url_l) or (".cognitiveservices" in url_l) or ("/openai/deployments/" in url_l)
+            if is_azure:
+                # Normalize to plain Azure base (strip any trailing /openai/... if present)
+                azure_base = individual_endpoint.split('/openai')[0] if '/openai' in individual_endpoint else individual_endpoint.rstrip('/')
+                with self._model_lock:
+                    # Switch this instance to Azure mode for correct routing
+                    self.client_type = 'azure'
+                    self.azure_endpoint = azure_base
+                    # Prefer per-key Azure API version if available
+                    self.azure_api_version = getattr(self, 'current_key_azure_api_version', None) or os.getenv('AZURE_API_VERSION', '2024-02-01')
+                    # Mark that we applied an individual (per-key) endpoint
+                    self._individual_endpoint_applied = True
+                # Also update TLS so subsequent calls on this thread know it's Azure
+                try:
+                    tls = self._get_thread_local_client()
+                    with self._model_lock:
+                        tls.azure_endpoint = azure_base
+                        tls.azure_api_version = self.azure_api_version
+                        tls.client_type = 'azure'
+                except Exception:
+                    pass
+                print(f"[DEBUG] Individual Azure endpoint applied: {azure_base} (api-version={self.azure_api_version})")
+                return  # Handled; do not fall through to custom endpoint logic
+            
+            # Non-Azure: Override to use OpenAI-compatible client against the provided base URL
             original_client_type = self.client_type
             self.client_type = 'openai'
             
@@ -1674,6 +1701,7 @@ class UnifiedClient:
                 tls = self._get_thread_local_client()
                 with self._model_lock:
                     tls.openai_client = self.openai_client
+                    tls.client_type = 'openai'
                 
                 return  # Individual endpoint applied - don't check global custom endpoint
             except ImportError:
@@ -8540,8 +8568,16 @@ class UnifiedClient:
     
     def _send_azure(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Azure OpenAI"""
-        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "https://YOUR-RESOURCE.openai.azure.com")
-        api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
+        # Prefer per-key (individual) endpoint/version when present, then fall back to env vars
+        endpoint = getattr(self, 'azure_endpoint', None) or \
+                   getattr(self, 'current_key_azure_endpoint', None) or \
+                   os.getenv("AZURE_OPENAI_ENDPOINT", "https://YOUR-RESOURCE.openai.azure.com")
+        api_version = getattr(self, 'azure_api_version', None) or \
+                      getattr(self, 'current_key_azure_api_version', None) or \
+                      os.getenv("AZURE_API_VERSION", "2024-02-01")
+        
+        if endpoint and not endpoint.startswith(("http://", "https://")):
+            endpoint = "https://" + endpoint
         
         headers = {
             "api-key": self.api_key,
@@ -8549,7 +8585,7 @@ class UnifiedClient:
         }
         
         # Azure uses a different URL structure
-        base_url = f"{endpoint}/openai/deployments/{self.model}"
+        base_url = f"{endpoint.rstrip('/')}/openai/deployments/{self.model}"
         url = f"{base_url}/chat/completions?api-version={api_version}"
         
         data = {
