@@ -3486,8 +3486,13 @@ class UnifiedClient:
                         print(f"❌ Rate limit error - single-key mode, indefinite retry disabled, re-raising")
                         raise
                 
-                # Check for prohibited content - check BOTH error_type AND error string
-                if e.error_type == "prohibited_content" or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
+                # Check for prohibited content — treat any HTTP 400 as prohibited to force fallback
+                if (
+                    e.error_type == "prohibited_content"
+                    or getattr(e, 'http_status', None) == 400
+                    or " 400 " in error_str
+                    or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown'))
+                ):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
                     
                     # Different behavior based on mode
@@ -3751,17 +3756,9 @@ class UnifiedClient:
             print(f"[MAIN KEY RETRY] Not in multi-key mode, skipping retry")
             return None
         
-        # CHECK: Verify the toggle is enabled
-        multi_key_enabled = os.getenv("USE_MULTI_KEYS", "0") == "1"
-        if not multi_key_enabled:
-            print(f"[MAIN KEY RETRY] Multi-key toggle is disabled, skipping retry")
-            return None
-        
-        # CHECK: Check if fallback keys are enabled
+        # CHECK: Multi-key mode is already verified above via self._multi_key_mode
+        # DO NOT gate main-GUI-key retry on fallback toggle; only use toggle for additional fallback keys
         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
-        if not use_fallback_keys:
-            print(f"[MAIN KEY RETRY] Fallback keys toggle is disabled, skipping retry")
-            return None
         
         # CHECK: Verify we have the necessary attributes
         if not (hasattr(self, 'original_api_key') and 
@@ -3785,10 +3782,10 @@ class UnifiedClient:
             })
             print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
             
-            # Try loading directly from environment if translator_config doesn't exist
+            # Add configured fallback keys only if toggle is enabled
             fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
             
-            if fallback_keys_json != '[]':
+            if use_fallback_keys and fallback_keys_json != '[]':
                 try:
                     configured_fallbacks = json.loads(fallback_keys_json)
                     print(f"[DEBUG] Loaded {len(configured_fallbacks)} fallback keys from environment")
@@ -3803,6 +3800,8 @@ class UnifiedClient:
                         })
                 except Exception as e:
                     print(f"[DEBUG] Failed to parse FALLBACK_KEYS: {e}")
+            elif not use_fallback_keys:
+                print("[MAIN KEY RETRY] Fallback keys toggle is OFF — will try main GUI key only")
             
             print(f"[MAIN KEY RETRY] Total keys to try: {len(fallback_keys)}")
             
@@ -8608,7 +8607,18 @@ class UnifiedClient:
             )
             
             if resp.status_code != 200:
-                raise UnifiedClientError(f"Azure OpenAI error: {resp.status_code} - {resp.text}")
+                # Treat all 400s as prohibited_content to trigger fallback keys cleanly
+                if resp.status_code == 400:
+                    raise UnifiedClientError(
+                        f"Azure OpenAI error: {resp.status_code} - {resp.text}",
+                        error_type="prohibited_content",
+                        http_status=400
+                    )
+                # Other errors propagate normally with status code
+                raise UnifiedClientError(
+                    f"Azure OpenAI error: {resp.status_code} - {resp.text}",
+                    http_status=resp.status_code
+                )
             
             json_resp = resp.json()
             content, finish_reason, usage = self._extract_openai_json(json_resp)
