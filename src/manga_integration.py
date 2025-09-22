@@ -4696,18 +4696,18 @@ class MangaTranslationTab:
                     extract_dir = os.path.join(self.cbz_temp_root or os.path.dirname(path), base)
                     os.makedirs(extract_dir, exist_ok=True)
                     with zipfile.ZipFile(path, 'r') as zf:
-                        members = [m for m in zf.namelist() if m.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'))]
-                        # Preserve order by natural sort
-                        members.sort()
-                        for m in members:
-                            target_path = os.path.join(extract_dir, os.path.basename(m))
-                            if not os.path.exists(target_path):
-                                with zf.open(m) as src, open(target_path, 'wb') as dst:
-                                    shutil.copyfileobj(src, dst)
-                            if target_path not in self.selected_files:
-                                self.selected_files.append(target_path)
-                                self.file_listbox.insert(tk.END, os.path.basename(target_path))
-                                added += 1
+                        # Extract all to preserve subfolders and avoid name collisions
+                        zf.extractall(extract_dir)
+                    # Collect all images recursively from extract_dir
+                    added = 0
+                    for root, _, files_in_dir in os.walk(extract_dir):
+                        for fn in sorted(files_in_dir):
+                            if fn.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
+                                target_path = os.path.join(root, fn)
+                                if target_path not in self.selected_files:
+                                    self.selected_files.append(target_path)
+                                    self.file_listbox.insert(tk.END, os.path.basename(target_path))
+                                    added += 1
                     self._log(f"📦 Added {added} images from CBZ: {os.path.basename(path)}", "info")
                 except Exception as e:
                     self._log(f"❌ Failed to read CBZ {os.path.basename(path)}: {e}", "error")
@@ -4753,18 +4753,17 @@ class MangaTranslationTab:
                     extract_dir = os.path.join(self.cbz_temp_root or folder, base)
                     os.makedirs(extract_dir, exist_ok=True)
                     with zipfile.ZipFile(filepath, 'r') as zf:
-                        members = [m for m in zf.namelist() if m.lower().endswith(tuple(image_extensions))]
-                        members.sort()
-                        added = 0
-                        for m in members:
-                            target_path = os.path.join(extract_dir, os.path.basename(m))
-                            if not os.path.exists(target_path):
-                                with zf.open(m) as src, open(target_path, 'wb') as dst:
-                                    shutil.copyfileobj(src, dst)
-                            if target_path not in self.selected_files:
-                                self.selected_files.append(target_path)
-                                self.file_listbox.insert(tk.END, os.path.basename(target_path))
-                                added += 1
+                        zf.extractall(extract_dir)
+                    # Collect all images recursively
+                    added = 0
+                    for root, _, files_in_dir in os.walk(extract_dir):
+                        for fn in sorted(files_in_dir):
+                            if fn.lower().endswith(tuple(image_extensions)):
+                                target_path = os.path.join(root, fn)
+                                if target_path not in self.selected_files:
+                                    self.selected_files.append(target_path)
+                                    self.file_listbox.insert(tk.END, os.path.basename(target_path))
+                                    added += 1
                     self._log(f"📦 Added {added} images from CBZ: {filename}", "info")
                 except Exception as e:
                     self._log(f"❌ Failed to read CBZ {filename}: {e}", "error")
