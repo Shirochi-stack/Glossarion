@@ -891,8 +891,12 @@ class WindowManager:
     
     def setup_scrollable(self, parent_window, title, width=None, height=None,
                         modal=True, resizable=True, max_width_ratio=0.9, 
-                        max_height_ratio=0.95, **kwargs):
-        """Create a scrollable dialog with proper setup"""
+                        max_height_ratio=0.95, fixed_bottom_frame=False, **kwargs):
+        """Create a scrollable dialog with proper setup
+        
+        Args:
+            fixed_bottom_frame: If True, creates a fixed bottom area for buttons
+        """
         
         dialog = tk.Toplevel(parent_window)
         dialog.title(title)
@@ -934,8 +938,25 @@ class WindowManager:
         main_container = tk.Frame(dialog)
         main_container.pack(fill=tk.BOTH, expand=True)
         
-        canvas = tk.Canvas(main_container, bg='white', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        # Configure layout based on fixed_bottom_frame
+        if fixed_bottom_frame:
+            main_container.grid_rowconfigure(0, weight=1)  # Scrollable area expands
+            main_container.grid_rowconfigure(1, weight=0)  # Fixed area doesn't expand
+            main_container.grid_columnconfigure(0, weight=1)
+            
+            # Scrollable area container
+            scroll_container = tk.Frame(main_container)
+            scroll_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+            
+            # Fixed bottom frame
+            fixed_frame = tk.Frame(main_container, bg='#f0f0f0', relief='raised', bd=1)
+            fixed_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
+        else:
+            scroll_container = main_container
+            fixed_frame = None
+        
+        canvas = tk.Canvas(scroll_container, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
@@ -964,7 +985,11 @@ class WindowManager:
         
         dialog.after(50, dialog.deiconify)
         
-        return dialog, scrollable_frame, canvas
+        # Return additional fixed_frame if requested
+        if fixed_bottom_frame:
+            return dialog, scrollable_frame, canvas, fixed_frame
+        else:
+            return dialog, scrollable_frame, canvas
     
     def create_simple_dialog(self, parent, title, width=None, height=None, 
                            modal=True, hide_initially=True):
@@ -13511,42 +13536,37 @@ Important rules:
                 self.thinking_budget_entry.config(state='disabled')
 
     def open_other_settings(self):
-        """Open the Other Settings dialog"""
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+        """Open the Other Settings dialog with compact tabbed interface"""
+        # Use the proper WindowManager with fixed bottom frame for buttons
+        dialog, scrollable_frame, canvas, fixed_frame = self.wm.setup_scrollable(
             self.master,
             "Other Settings",
             width=0,
             height=None,
-            max_width_ratio=0.7,
-            max_height_ratio=0.8
+            max_width_ratio=0.65,
+            max_height_ratio=0.85,
+            fixed_bottom_frame=True  # Enable fixed bottom area for buttons
         )
         
-        scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
-        scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
+        # Configure scrollable frame for better space management
+        scrollable_frame.grid_columnconfigure(0, weight=1)
+        scrollable_frame.grid_rowconfigure(0, weight=1)  # Notebook gets all space
         
-        # Section 1: Context Management
-        self._create_context_management_section(scrollable_frame)
+        # Create compact notebook for tabs with reduced padding
+        self.settings_notebook = ttk.Notebook(scrollable_frame)
+        self.settings_notebook.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
-        # Section 2: Response Handling
-        self._create_response_handling_section(scrollable_frame)
+        # Create tabs with their sections
+        self._create_settings_tab("💭 Context", self._create_context_management_section)
+        self._create_settings_tab("📝 Response", self._create_response_handling_section)
+        self._create_settings_tab("🎯 Metadata", self._create_prompt_management_section)
+        self._create_settings_tab("⚙️ Processing", self._create_processing_options_section)
+        self._create_settings_tab("🖼️ Images", self._create_image_translation_section)
+        self._create_settings_tab("🎲 Anti-Duplicate", self._create_anti_duplicate_section)
+        self._create_settings_tab("🔗 API Endpoints", self._create_custom_api_endpoints_section)
         
-        # Section 3: Prompt Management
-        self._create_prompt_management_section(scrollable_frame)
-        
-        # Section 4: Processing Options
-        self._create_processing_options_section(scrollable_frame)
-        
-        # Section 5: Image Translation
-        self._create_image_translation_section(scrollable_frame)
-        
-        # Section 6: Anti-Duplicate Parameters
-        self._create_anti_duplicate_section(scrollable_frame)
-        
-        # Section 7: Custom API Endpoints (NEW)
-        self._create_custom_api_endpoints_section(scrollable_frame)
-        
-        # Save & Close buttons
-        self._create_settings_buttons(scrollable_frame, dialog, canvas)
+        # Save & Close buttons in FIXED bottom frame (always visible, never scrolls)
+        self._create_settings_buttons(fixed_frame, dialog, canvas)
         
         # Persist toggle change on dialog close
         def _persist_settings():
@@ -13558,29 +13578,65 @@ Important rules:
             dialog.destroy()
         dialog.protocol("WM_DELETE_WINDOW", _persist_settings)
         
-        # Auto-resize and show
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.78, max_height_ratio=1.82)
+        # Use WindowManager's auto-resize functionality
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.65, max_height_ratio=0.85)
+    
+    def _create_settings_tab(self, tab_name, section_creator_func):
+        """Create a tab and populate it with a section"""
+        # Create tab frame
+        tab_frame = tk.Frame(self.settings_notebook)
+        self.settings_notebook.add(tab_frame, text=tab_name)
+        
+        # Configure tab frame to expand properly
+        tab_frame.grid_columnconfigure(0, weight=1)
+        tab_frame.grid_rowconfigure(0, weight=1)
+        
+        # Create container using grid instead of pack for better space control
+        container = tk.Frame(tab_frame)
+        container.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        
+        # Configure container layout to match original expectation
+        container.grid_columnconfigure(0, weight=1)
+        container.grid_columnconfigure(1, weight=1)
+        container.grid_rowconfigure(0, weight=1)
+        
+        # Call the section creator function with the container as parent
+        section_creator_func(container)
 
     def _create_context_management_section(self, parent):
         """Create context management section"""
         section_frame = tk.LabelFrame(parent, text="Context Management & Memory", padx=10, pady=10)
-        section_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
+        section_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
+        
+        # Configure section_frame to expand properly
+        section_frame.grid_rowconfigure(0, weight=1)
+        section_frame.grid_columnconfigure(0, weight=1)
            
         content_frame = tk.Frame(section_frame)
-        content_frame.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
-
-        tb.Checkbutton(content_frame, text="Use Rolling Summary (Memory)", 
+        content_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Configure content_frame for grid layout
+        content_frame.grid_columnconfigure(0, weight=1)
+        
+        # Memory Section - row 0
+        memory_section = tk.Frame(content_frame)
+        memory_section.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        memory_section.grid_columnconfigure(0, weight=1)
+        
+        tb.Checkbutton(memory_section, text="Use Rolling Summary (Memory)", 
                      variable=self.rolling_summary_var,
-                     bootstyle="round-toggle").pack(anchor=tk.W)
+                     bootstyle="round-toggle").grid(row=0, column=0, sticky="w")
 
-        tk.Label(content_frame, text="AI-powered memory system that maintains story context",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        tk.Label(memory_section, text="AI-powered memory system that maintains story context",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=1, column=0, sticky="w", padx=20, pady=(0, 5))
 
+        # Settings section - row 1
         settings_frame = tk.Frame(content_frame)
-        settings_frame.pack(anchor=tk.W, padx=20, fill=tk.X, pady=(5, 10))
+        settings_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
+        settings_frame.grid_columnconfigure(0, weight=1)
 
         row1 = tk.Frame(settings_frame)
-        row1.pack(fill=tk.X, pady=(0, 10))
+        row1.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 
         tk.Label(row1, text="Role:").pack(side=tk.LEFT, padx=(0, 5))
         role_combo = ttk.Combobox(row1, textvariable=self.summary_role_var,
@@ -13597,7 +13653,7 @@ Important rules:
         UIHelper.disable_spinbox_mousewheel(mode_combo)
 
         row2 = tk.Frame(settings_frame)
-        row2.pack(fill=tk.X, pady=(0, 10))
+        row2.grid(row=1, column=0, sticky="ew", pady=(0, 5))
 
         tk.Label(row2, text="Summarize last").pack(side=tk.LEFT, padx=(0, 5))
         tb.Entry(row2, width=5, textvariable=self.rolling_summary_exchanges_var).pack(side=tk.LEFT, padx=(0, 5))
@@ -13610,25 +13666,27 @@ Important rules:
         tb.Entry(row2, width=5, textvariable=self.rolling_summary_max_entries_var).pack(side=tk.LEFT, padx=(0, 5))
         tk.Label(row2, text="entries").pack(side=tk.LEFT)
 
+        # Button section - row 2
         tb.Button(content_frame, text="⚙️ Configure Memory Prompts", 
                 command=self.configure_rolling_summary_prompts,
-                bootstyle="info-outline", width=30).pack(anchor=tk.W, padx=20, pady=(10, 10))
+                bootstyle="info-outline", width=30).grid(row=2, column=0, sticky="w", padx=20, pady=(5, 10))
 
-        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        # Memory help section - row 3  
+        ttk.Separator(content_frame, orient='horizontal').grid(row=3, column=0, sticky="ew", pady=(5, 10))
         
-        tk.Label(section_frame, text="💡 Memory Mode:\n"
+        tk.Label(content_frame, text="💡 Memory Mode:\n"
                "• Append: Keeps adding summaries (longer context)\n"
                "• Replace: Only keeps latest summary (concise)",
-               font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(0, 5))       
+               font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).grid(row=4, column=0, sticky="w", padx=5, pady=(0, 5))
 
-        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-               
+        ttk.Separator(content_frame, orient='horizontal').grid(row=5, column=0, sticky="ew", pady=(5, 10))
         
-        tk.Label(section_frame, text="Application Updates:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        # Updates section - row 6
+        tk.Label(content_frame, text="Application Updates:", font=('TkDefaultFont', 11, 'bold')).grid(row=6, column=0, sticky="w", pady=(0, 5))
         
         # Create a frame for update-related controls
-        update_frame = tk.Frame(section_frame)
-        update_frame.pack(anchor=tk.W, fill=tk.X)
+        update_frame = tk.Frame(content_frame)
+        update_frame.grid(row=7, column=0, sticky="ew", pady=(0, 5))
 
         tb.Button(update_frame, text="🔄 Check for Updates", 
                  command=lambda: self.check_for_updates_manual(), 
@@ -13640,16 +13698,17 @@ Important rules:
                      variable=self.auto_update_check_var, 
                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(10, 0))
 
-        tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
-                     
-        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        tk.Label(content_frame, text="Check GitHub for new Glossarion releases\nand download updates",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=8, column=0, sticky="w", pady=(0, 5))
         
-        tk.Label(section_frame, text="Config Backup Management:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        ttk.Separator(content_frame, orient='horizontal').grid(row=9, column=0, sticky="ew", pady=(5, 10))
+        
+        # Backup section - row 10
+        tk.Label(content_frame, text="Config Backup Management:", font=('TkDefaultFont', 11, 'bold')).grid(row=10, column=0, sticky="w", pady=(0, 5))
         
         # Create a frame for backup-related controls
-        backup_frame = tk.Frame(section_frame)
-        backup_frame.pack(anchor=tk.W, fill=tk.X)
+        backup_frame = tk.Frame(content_frame)
+        backup_frame.grid(row=11, column=0, sticky="ew", pady=(0, 5))
 
         tb.Button(backup_frame, text="💾 Create Backup", 
                  command=lambda: self._create_manual_config_backup(), 
@@ -13661,13 +13720,13 @@ Important rules:
                  bootstyle="warning-outline",
                  width=20).pack(side=tk.LEFT, pady=2)
 
-        tk.Label(section_frame, text="Automatic backups are created before each config save.",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(5, 0))
+        tk.Label(content_frame, text="Automatic backups are created before each config save.",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=12, column=0, sticky="w", padx=5)
 
     def _create_response_handling_section(self, parent):
         """Create response handling section with AI Hunter additions"""
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
-        section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
+        section_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
         
         # Add Thinking Tokens Toggle with Budget Control (NEW)
         tk.Label(section_frame, text="Gemini Thinking Mode", 
@@ -13719,7 +13778,7 @@ Important rules:
         multi_key_frame = tk.Frame(section_frame)
         multi_key_frame.pack(anchor=tk.W, fill=tk.X, pady=(0, 15))
         
-        # Multi-key indicator and button in same row
+        # Multi-key status row (labels only)
         multi_key_row = tk.Frame(multi_key_frame)
         multi_key_row.pack(fill=tk.X)
         
@@ -13740,11 +13799,14 @@ Important rules:
             tk.Label(multi_key_row, text="🔑 Multi-Key Mode: DISABLED", 
                     font=('TkDefaultFont', 11), fg='gray').pack(side=tk.LEFT)
         
-        # Multi API Key Manager button
-        tb.Button(multi_key_row, text="Configure API Keys", 
+        # Multi API Key Manager button - separate row below the labels
+        button_row = tk.Frame(multi_key_frame)
+        button_row.pack(fill=tk.X, pady=(5, 0))
+        
+        tb.Button(button_row, text="Configure API Keys", 
                   command=self.open_multi_api_key_manager,
                   bootstyle="primary-outline",
-                  width=20).pack(side=tk.RIGHT)
+                  width=20).pack(side=tk.LEFT, padx=(20, 0))
         
         tk.Label(section_frame, text="Manage multiple API keys with automatic rotation and rate limit handling",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
@@ -13924,10 +13986,10 @@ Important rules:
         if not hasattr(self, 'http_pool_maxsize_var'):
             self.http_pool_maxsize_var = tk.StringVar(value=str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))))
 
-        # Layout columns
+        # Layout columns - compact spacing
         http_grid.grid_columnconfigure(0, weight=0)
         http_grid.grid_columnconfigure(1, weight=0)
-        http_grid.grid_columnconfigure(2, weight=1)  # spacer
+        http_grid.grid_columnconfigure(2, weight=0)  # no spacer for compact layout
         http_grid.grid_columnconfigure(3, weight=0)
         http_grid.grid_columnconfigure(4, weight=0)
 
@@ -13946,7 +14008,7 @@ Important rules:
         tk.Label(http_grid, text="Connect timeout (s):").grid(row=0, column=0, sticky='w', padx=(0, 6), pady=2)
         self.connect_timeout_entry = tb.Entry(http_grid, width=6, textvariable=self.connect_timeout_var)
         self.connect_timeout_entry.grid(row=0, column=1, sticky='w', pady=2)
-        tk.Label(http_grid, text="Read timeout (s):").grid(row=0, column=3, sticky='w', padx=(12, 6), pady=2)
+        tk.Label(http_grid, text="Read timeout (s):").grid(row=0, column=3, sticky='w', padx=(30, 6), pady=2)
         self.read_timeout_entry = tb.Entry(http_grid, width=6, textvariable=self.read_timeout_var)
         self.read_timeout_entry.grid(row=0, column=4, sticky='w', pady=2)
 
@@ -13954,7 +14016,7 @@ Important rules:
         tk.Label(http_grid, text="Pool connections:").grid(row=1, column=0, sticky='w', padx=(0, 6), pady=2)
         self.http_pool_connections_entry = tb.Entry(http_grid, width=6, textvariable=self.http_pool_connections_var)
         self.http_pool_connections_entry.grid(row=1, column=1, sticky='w', pady=2)
-        tk.Label(http_grid, text="Pool max size:").grid(row=1, column=3, sticky='w', padx=(12, 6), pady=2)
+        tk.Label(http_grid, text="Pool max size:").grid(row=1, column=3, sticky='w', padx=(30, 6), pady=2)
         self.http_pool_maxsize_entry = tb.Entry(http_grid, width=6, textvariable=self.http_pool_maxsize_var)
         self.http_pool_maxsize_entry.grid(row=1, column=4, sticky='w', pady=2)
 
@@ -14185,7 +14247,7 @@ Important rules:
     def _create_prompt_management_section(self, parent):
         """Create meta data section (formerly prompt management)"""
         section_frame = tk.LabelFrame(parent, text="Meta Data", padx=10, pady=10)
-        section_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
+        section_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
         
         title_frame = tk.Frame(section_frame)
         title_frame.pack(anchor=tk.W, pady=(10, 10))
@@ -14293,7 +14355,7 @@ Important rules:
     def _create_processing_options_section(self, parent):
         """Create processing options section"""
         section_frame = tk.LabelFrame(parent, text="Processing Options", padx=10, pady=10)
-        section_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
+        section_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
         
         # Reinforce messages option
         reinforce_frame = tk.Frame(section_frame)
@@ -14547,7 +14609,7 @@ Important rules:
     def _create_image_translation_section(self, parent):
         """Create image translation section"""
         section_frame = tk.LabelFrame(parent, text="Image Translation", padx=10, pady=8)
-        section_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=10, pady=(5, 10))
+        section_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
         
         left_column = tk.Frame(section_frame)
         left_column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 20))
@@ -14696,7 +14758,7 @@ Important rules:
         """Create comprehensive anti-duplicate parameter controls with tabs"""
         # Anti-Duplicate Parameters section
         ad_frame = tk.LabelFrame(parent, text="🎯 Anti-Duplicate Parameters", padx=15, pady=10)
-        ad_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 15))
+        ad_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
         
         # Description
         desc_label = tk.Label(ad_frame, 
@@ -14718,6 +14780,8 @@ Important rules:
         # Tab 1: Core Parameters
         core_frame = tk.Frame(self.anti_duplicate_notebook)
         self.anti_duplicate_notebook.add(core_frame, text="Core Parameters")
+        
+        # Configure core_frame to expand properly - not needed for pack
         
         # Top-P (Nucleus Sampling)
         top_p_frame = tk.Frame(core_frame)
@@ -14795,6 +14859,8 @@ Important rules:
         advanced_frame = tk.Frame(self.anti_duplicate_notebook)
         self.anti_duplicate_notebook.add(advanced_frame, text="Advanced")
         
+        # Configure advanced_frame to expand properly - not needed for pack
+        
         # Repetition Penalty
         rep_penalty_frame = tk.Frame(advanced_frame)
         rep_penalty_frame.pack(fill=tk.X, pady=5)
@@ -14835,6 +14901,8 @@ Important rules:
         stop_frame = tk.Frame(self.anti_duplicate_notebook)
         self.anti_duplicate_notebook.add(stop_frame, text="Stop Sequences")
         
+        # Configure stop_frame to expand properly - not needed for pack
+        
         # Custom Stop Sequences
         stop_seq_frame = tk.Frame(stop_frame)
         stop_seq_frame.pack(fill=tk.X, pady=5)
@@ -14848,6 +14916,8 @@ Important rules:
         # Tab 4: Logit Bias (OpenAI)
         bias_frame = tk.Frame(self.anti_duplicate_notebook)
         self.anti_duplicate_notebook.add(bias_frame, text="Logit Bias")
+        
+        # Configure bias_frame to expand properly - not needed for pack
         
         # Logit Bias Enable
         self.logit_bias_enabled_var = tk.BooleanVar(value=self.config.get('logit_bias_enabled', False))
@@ -15017,7 +15087,7 @@ Important rules:
         """Create the Custom API Endpoints section"""
         # Custom API Endpoints Section
         endpoints_frame = tb.LabelFrame(parent_frame, text="Custom API Endpoints", padding=10)
-        endpoints_frame.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW, padx=5, pady=5)
+        endpoints_frame.grid(row=0, column=0, columnspan=2, sticky=tk.NSEW, padx=5, pady=5)
         
         # Checkbox to enable/disable custom endpoint (MOVED TO TOP)
         custom_endpoint_checkbox_frame = tb.Frame(endpoints_frame)
@@ -15452,10 +15522,8 @@ Important rules:
         
     def _create_settings_buttons(self, parent, dialog, canvas):
         """Create save and close buttons for settings dialog"""
-        button_frame = tk.Frame(parent)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10))
-        
-        button_container = tk.Frame(button_frame)
+        # parent is now the button_frame itself, so we don't need to create another frame
+        button_container = tk.Frame(parent)
         button_container.pack(expand=True)
 
         def save_and_close():
@@ -15604,6 +15672,9 @@ Important rules:
                     "MAX_RETRIES": str(self.config['max_retries']),
                     # Persist auto-search preference for child dialogs
                     "QA_AUTO_SEARCH_OUTPUT": '1' if self.config.get('qa_auto_search_output', True) else '0',
+                    # Post-translation scanning phase settings
+                    "SCAN_PHASE_ENABLED": '1' if self.config.get('scan_phase_enabled', False) else '0',
+                    "SCAN_PHASE_MODE": self.config.get('scan_phase_mode', 'quick-scan'),
                     "INDEFINITE_RATE_LIMIT_RETRY": "1" if self.indefinite_rate_limit_retry_var.get() else "0",
                     "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
