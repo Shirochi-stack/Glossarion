@@ -52,3 +52,7 @@ howtoruntest.txt
 
 # Exclude all JSON by default (change if needed)
 *.json
+PATH
+PATH
+src/test_azure.py
+src/test_azure.py
