@@ -432,9 +432,13 @@ class MangaSettingsDialog:
         # Store canvas reference for potential cleanup
         self.canvas = canvas
         
-        # Create notebook for tabs
-        notebook = ttk.Notebook(scrollable_frame)
-        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        # Create main content frame (that will scroll)
+        content_frame = tk.Frame(scrollable_frame)
+        content_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Create notebook for tabs inside the content frame
+        notebook = ttk.Notebook(content_frame)
+        notebook.pack(fill='both', expand=True)
         
         # Create all tabs
         self._create_preprocessing_tab(notebook)
@@ -454,9 +458,9 @@ class MangaSettingsDialog:
         # Clear initialization flag after setup is complete
         self._initializing = False
         
-        # Button frame at bottom (inside scrollable frame for proper scrolling)
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill='x', padx=10, pady=(10, 20))
+        # Create fixed button frame at bottom of dialog (not inside scrollable content)
+        button_frame = tk.Frame(self.dialog)
+        button_frame.pack(fill='x', padx=10, pady=(5, 10), side='bottom')
         
         # Buttons
         tb.Button(
