@@ -2170,6 +2170,7 @@ Recent translations to summarize:
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', True),
             ('batch_translation_var', 'batch_translation', False),
+            ('conservative_batching_var', 'conservative_batching', False),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
@@ -8717,6 +8718,7 @@ Provide translations in the same numbered format."""
             'MAX_RETRIES': str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))),
             'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
             'BATCH_SIZE': self.batch_size_var.get(),
+            'CONSERVATIVE_BATCHING': "1" if self.conservative_batching_var.get() else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var.get() else '0',
@@ -14494,6 +14496,17 @@ Important rules:
         # Prevent accidental changes from mouse wheel while scrolling
         UIHelper.disable_spinbox_mousewheel(scan_mode_combo)
         
+        tk.Label(section_frame, text="Automatically run QA Scanner after translation completes",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        # Conservative Batching Toggle
+        tb.Checkbutton(section_frame, text="Use Conservative Batching",
+                      variable=self.conservative_batching_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(10, 0))
+        
+        tk.Label(section_frame, text="When enabled: Groups chapters in batches of 3x batch size for memory management\nWhen disabled (default): Uses direct batch size for faster processing",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
         
         # API Safety Settings subsection
@@ -16375,6 +16388,7 @@ Important rules:
             self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var.get(), 1)
             self.config['batch_translation'] = self.batch_translation_var.get()
             self.config['batch_size'] = safe_int(self.batch_size_var.get(), 3)
+            self.config['conservative_batching'] = self.conservative_batching_var.get()
             self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()

@@ -2515,6 +2515,7 @@ class AsyncProcessingDialog:
         env_vars['REMOVE_AI_ARTIFACTS'] = "1" if self.gui.REMOVE_AI_ARTIFACTS_var.get() else "0"
         env_vars['BATCH_TRANSLATION'] = "1" if self.gui.batch_translation_var.get() else "0"
         env_vars['BATCH_SIZE'] = self.gui.batch_size_var.get()
+        env_vars['CONSERVATIVE_BATCHING'] = "1" if self.gui.conservative_batching_var.get() else "0"
         
         # Anti-duplicate parameters
         env_vars['ENABLE_ANTI_DUPLICATE'] = '1' if hasattr(self.gui, 'enable_anti_duplicate_var') and self.gui.enable_anti_duplicate_var.get() else '0'

@@ -5157,6 +5157,8 @@ class MangaTranslationTab:
                 from unified_api_client import UnifiedClient
                 self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
                 self._log(f"Created API client with model: {model}", "info")
+                time.sleep(0.1)  # Brief pause for stability
+                self._log("💤 API client creation pausing briefly for stability", "debug")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
                 return
@@ -5272,6 +5274,9 @@ class MangaTranslationTab:
                 
                 # Apply text rendering settings
                 self._apply_rendering_settings()
+                
+                time.sleep(0.1)  # Brief pause for stability
+                self._log("💤 Translator initialization pausing briefly for stability", "debug")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
@@ -5677,6 +5682,8 @@ class MangaTranslationTab:
                             if translation_successful:
                                 self.completed_files += 1
                                 self._log(f"✅ Translation completed: {filename}", "success")
+                                time.sleep(0.1)  # Brief pause for stability
+                                self._log("💤 Panel completion pausing briefly for stability", "debug")
                             else:
                                 self.failed_files += 1
                                 # Log the specific reason for failure
@@ -5714,6 +5721,8 @@ class MangaTranslationTab:
                         futures.append(executor.submit(process_single, idx, filepath))
                         if stagger_ms > 0:
                             time.sleep(stagger_ms / 1000.0)
+                            time.sleep(0.1)  # Brief pause for stability
+                            self._log("💤 Staggered submission pausing briefly for stability", "debug")
                     
                     # Handle completion and stop behavior
                     try:
@@ -5815,6 +5824,8 @@ class MangaTranslationTab:
                             if output_exists and has_translations:
                                 self.completed_files += 1
                                 self._log(f"✅ Translation completed: {filename}", "success")
+                                time.sleep(0.1)  # Brief pause for stability
+                                self._log("💤 Sequential completion pausing briefly for stability", "debug")
                             else:
                                 self.failed_files += 1
                                 if not output_exists:

@@ -10472,17 +10472,27 @@ def main(log_callback=None, stop_callback=None):
         total_to_process = len(chapters_to_translate)
         processed = 0
         
+        # Apply conservative batching setting
+        batch_multiplier = 3 if os.getenv('CONSERVATIVE_BATCHING', '0') == '1' else 1
+        batch_group_size = config.BATCH_SIZE * batch_multiplier
+        
+        if batch_multiplier > 1:
+            print(f"📦 Using conservative batching: {batch_group_size} chapters per group, {config.BATCH_SIZE} parallel")
+        else:
+            print(f"📦 Using direct batching (default): {batch_group_size} chapters per group, {config.BATCH_SIZE} parallel")
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
-            for batch_start in range(0, total_to_process, config.BATCH_SIZE * 3):
+            for batch_start in range(0, total_to_process, batch_group_size):
                 if check_stop():
                     print("❌ Translation stopped during parallel processing")
                     executor.shutdown(wait=False)
                     return
                 
-                batch_end = min(batch_start + config.BATCH_SIZE * 3, total_to_process)
+                batch_end = min(batch_start + batch_group_size, total_to_process)
                 current_batch = chapters_to_translate[batch_start:batch_end]
                 
-                print(f"\n📦 Submitting batch {batch_start//config.BATCH_SIZE + 1}: {len(current_batch)} chapters")
+                batch_number = (batch_start // batch_group_size) + 1
+                print(f"\n📦 Submitting batch {batch_number}: {len(current_batch)} chapters")
                 
                 future_to_chapter = {
                     executor.submit(batch_processor.process_single_chapter, chapter_data): chapter_data

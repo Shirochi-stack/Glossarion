@@ -1029,6 +1029,8 @@ class MangaTranslator:
                         pass
                     # Wait a bit before re-checking
                     time.sleep(max(0.2, self.ram_check_interval_sec / 2))
+                    time.sleep(0.1)  # Brief pause for stability
+                    self._log("💤 Memory watchdog pausing briefly for stability", "debug")
                 else:
                     # Below cap or couldn't read RSS
                     self._mem_over_cap = False
@@ -1097,6 +1099,8 @@ class MangaTranslator:
             if self._check_stop():
                 break
             time.sleep(0.5)
+            time.sleep(0.1)  # Brief pause for stability
+            self._log("💤 RAM gate pausing briefly for stability", "debug")
         if waited and context_msg:
             self._log(f"🧹 Proceeding with {context_msg} (RSS now {self._get_process_rss_mb()} MB; target {target} MB)", "info")
 
@@ -1893,6 +1897,8 @@ class MangaTranslator:
                         break
                     
                     time.sleep(poll_interval)
+                    time.sleep(0.1)  # Brief pause for stability
+                    self._log("💤 Azure OCR polling pausing briefly for stability", "debug")
                     wait_time += poll_interval
                 
                 if result.status == OperationStatusCodes.succeeded:
@@ -2758,6 +2764,8 @@ class MangaTranslator:
             if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
                 break
             time.sleep(0.5)
+            time.sleep(0.1)  # Brief pause for stability
+            logger.debug("💤 Azure text detection pausing briefly for stability")
         
         regions = []
         confidence_threshold = ocr_settings.get('confidence_threshold', 0.8)

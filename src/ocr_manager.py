@@ -542,6 +542,8 @@ class CustomAPIProvider(OCRProvider):
                         delay = self.retry_initial_delay * (self.retry_backoff ** (attempt - 1)) + random.uniform(0, self.retry_jitter)
                         self._log(f"🔄 Retry {attempt}/{max_attempts - 1} after {delay:.1f}s due to {reason}...", "warning")
                         time.sleep(delay)
+                        time.sleep(0.1)  # Brief pause for stability
+                        self._log("💤 OCR retry pausing briefly for stability", "debug")
                         continue
 
                 except UnifiedClientError as ue:
@@ -558,6 +560,8 @@ class CustomAPIProvider(OCRProvider):
                     delay = self.retry_initial_delay * (self.retry_backoff ** (attempt - 1)) + random.uniform(0, self.retry_jitter)
                     self._log(f"🔄 API error, retry {attempt}/{max_attempts - 1} after {delay:.1f}s: {msg}", "warning")
                     time.sleep(delay)
+                    time.sleep(0.1)  # Brief pause for stability
+                    self._log("💤 OCR API error retry pausing briefly for stability", "debug")
                     continue
                 except Exception as e_inner:
                     last_error = str(e_inner)
@@ -568,6 +572,8 @@ class CustomAPIProvider(OCRProvider):
                     delay = self.retry_initial_delay * (self.retry_backoff ** (attempt - 1)) + random.uniform(0, self.retry_jitter)
                     self._log(f"🔄 Exception, retry {attempt}/{max_attempts - 1} after {delay:.1f}s: {last_error}", "warning")
                     time.sleep(delay)
+                    time.sleep(0.1)  # Brief pause for stability
+                    self._log("💤 OCR exception retry pausing briefly for stability", "debug")
                     continue
         
         except Exception as e:

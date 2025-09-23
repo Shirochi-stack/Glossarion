@@ -1289,12 +1289,15 @@ def main(log_callback=None, stop_callback=None):
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
     batch_size = int(os.getenv("BATCH_SIZE", "5"))
+    conservative_batching = os.getenv("CONSERVATIVE_BATCHING", "0") == "1"
     
     print(f"[DEBUG] BATCH_TRANSLATION = {os.getenv('BATCH_TRANSLATION')} (enabled: {batch_enabled})")
     print(f"[DEBUG] BATCH_SIZE = {batch_size}")
+    print(f"[DEBUG] CONSERVATIVE_BATCHING = {os.getenv('CONSERVATIVE_BATCHING')} (enabled: {conservative_batching})")
     
     if batch_enabled:
-        print(f"🚀 Batch mode enabled with size: {batch_size}")
+        print(f"🚀 Glossary batch mode enabled with size: {batch_size}")
+        print(f"📑 Note: Glossary extraction uses direct batching (not affected by conservative batching setting)")
     
     #API call delay
     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))

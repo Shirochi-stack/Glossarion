@@ -2923,6 +2923,8 @@ class MangaSettingsDialog:
             if hasattr(self.main_gui, 'save_config'):
                 self.main_gui.save_config()
                 print(f"Auto-saved rendering settings")
+                time.sleep(0.1)  # Brief pause for stability
+                print("💤 Auto-save pausing briefly for stability")
             
         except Exception as e:
             print(f"Error auto-saving rendering settings: {e}")
@@ -3128,6 +3130,8 @@ class MangaSettingsDialog:
                 if hasattr(self.main_gui, 'save_config'):
                     self.main_gui.save_config()
                     print("Settings saved successfully via save_config")
+                    time.sleep(0.1)  # Brief pause for stability
+                    print("💤 Main settings save pausing briefly for stability")
                 elif hasattr(self.main_gui, 'save_configuration'):
                     self.main_gui.save_configuration()
                     print("Settings saved successfully via save_configuration")

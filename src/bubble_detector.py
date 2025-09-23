@@ -786,6 +786,8 @@ class BubbleDetector:
                 return []
             
             logger.info(f"✅ Detected {len(bubbles)} speech bubbles")
+            time.sleep(0.1)  # Brief pause for stability
+            logger.debug("💤 Bubble detection pausing briefly for stability")
             return bubbles
             
         except Exception as e:
@@ -872,6 +874,10 @@ class BubbleDetector:
                         outputs = self.rtdetr_model(**inputs)
                 else:
                     outputs = self.rtdetr_model(**inputs)
+                
+                # Brief pause for stability after inference
+                time.sleep(0.1)
+                logger.debug("💤 RT-DETR inference pausing briefly for stability")
             
             # Post-process results
             target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
