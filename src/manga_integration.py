@@ -246,6 +246,61 @@ class MangaTranslationTab:
         
         self._log("🔄 Stop flags distributed to all components", "debug")
     
+    def _preflight_bubble_detector(self, ocr_settings: dict) -> bool:
+        """Try to ensure the bubble detector is ready before starting translation.
+        Returns True if a detector is ready (loaded), False otherwise.
+        This mitigates aggressive cleanup by retrying RT-DETR load briefly.
+        """
+        try:
+            # Only act when bubble detection is enabled
+            if not ocr_settings.get('bubble_detection_enabled', False):
+                return False
+            detector_type = ocr_settings.get('detector_type', 'rtdetr')
+
+            # Use translator helper if available
+            for attempt in range(3):
+                try:
+                    bd = None
+                    if hasattr(self, 'translator') and self.translator and hasattr(self.translator, '_ensure_bubble_detector_ready'):
+                        bd = self.translator._ensure_bubble_detector_ready(ocr_settings)
+                        if bd is not None:
+                            self.translator.bubble_detector = bd
+                            if getattr(bd, 'rtdetr_loaded', False) or getattr(bd, 'model_loaded', False):
+                                if attempt > 0:
+                                    self._log("✅ Bubble detector ready after retry", "info")
+                                else:
+                                    self._log("🤖 Bubble detector ready", "debug")
+                                return True
+                    # Fallback: try loading explicitly
+                    try:
+                        from bubble_detector import BubbleDetector
+                    except Exception:
+                        return False
+                    bd = BubbleDetector()
+                    if detector_type == 'rtdetr':
+                        model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or 'ogkalu/comic-text-and-bubble-detector'
+                        ok = bd.load_rtdetr_model(model_id=model_id)
+                    else:
+                        model_path = ocr_settings.get('bubble_model_path')
+                        ok = bd.load_model(model_path) if model_path else False
+                    if ok:
+                        if hasattr(self, 'translator') and self.translator:
+                            self.translator.bubble_detector = bd
+                        self._log(f"🤖 Bubble detector preloaded ({'RT-DETR' if detector_type=='rtdetr' else 'YOLO'})", "info")
+                        return True
+                except Exception as e:
+                    self._log(f"⚠️ Bubble detector preflight attempt {attempt+1} failed: {e}", "debug")
+                # Brief wait before retry
+                try:
+                    time.sleep(0.4)
+                except Exception:
+                    pass
+            # After retries
+            self._log("⚠️ Bubble detector preflight failed; will fall back to proximity merge if needed", "warning")
+            return False
+        except Exception:
+            return False
+    
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox"""
         spinbox.bind("<MouseWheel>", lambda e: "break")
@@ -5358,6 +5413,20 @@ class MangaTranslationTab:
             self._log(f"  - Cloud: {self.translator.use_cloud_inpainting}", "debug")
             self._log(f"  - Mode: {'SKIP' if self.translator.skip_inpainting else 'CLOUD' if self.translator.use_cloud_inpainting else 'LOCAL'}", "debug")
         
+        # Preflight RT-DETR to avoid first-page fallback after aggressive cleanup
+        try:
+            ocr_set = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) or {}
+            if ocr_set.get('bubble_detection_enabled', False):
+                # Ensure a default RT-DETR model id exists when required
+                if ocr_set.get('detector_type', 'rtdetr') in ('rtdetr', 'auto'):
+                    if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                        ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                        if hasattr(self.main_gui, 'save_config'):
+                            self.main_gui.save_config(show_message=False)
+                self._preflight_bubble_detector(ocr_set)
+        except Exception:
+            pass
+        
         # Clear log
         self.parent_frame.after(0, lambda: self.log_text.delete('1.0', tk.END))
         
@@ -5389,7 +5458,25 @@ class MangaTranslationTab:
             self._log(f"Using Azure endpoint: {ocr_config['azure_endpoint']}", "info")
         else:
             self._log(f"Using local OCR provider: {ocr_config['provider'].upper()}", "info")
-            #self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
+            # Report effective API routing/model with multi-key awareness
+            try:
+                c = getattr(self.main_gui, 'client', None)
+                if c is not None:
+                    if getattr(c, 'use_multi_keys', False):
+                        total_keys = 0
+                        try:
+                            stats = c.get_stats()
+                            total_keys = stats.get('total_keys', 0)
+                        except Exception:
+                            pass
+                        self._log(
+                            f"API routing: Multi-key pool enabled — starting model '{getattr(c, 'model', 'unknown')}', keys={total_keys}, rotation={getattr(c, '_rotation_frequency', 1)}",
+                            "info"
+                        )
+                    else:
+                        self._log(f"API model: {getattr(c, 'model', 'unknown')}", "info")
+            except Exception:
+                pass
             self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
             self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
             self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
