@@ -218,7 +218,7 @@ class CustomAPIProvider(OCRProvider):
             # Create UnifiedClient just like translations do
             self.client = UnifiedClient(model=model, api_key=api_key)
             
-            self._log(f"✅ Using {model} for OCR via UnifiedClient")
+            #self._log(f"✅ Using {model} for OCR via UnifiedClient")
             self.is_loaded = True
             return True
             

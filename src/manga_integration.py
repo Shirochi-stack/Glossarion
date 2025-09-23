@@ -5389,7 +5389,7 @@ class MangaTranslationTab:
             self._log(f"Using Azure endpoint: {ocr_config['azure_endpoint']}", "info")
         else:
             self._log(f"Using local OCR provider: {ocr_config['provider'].upper()}", "info")
-            self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
+            #self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
             self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
             self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
             self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")

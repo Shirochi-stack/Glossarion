@@ -12,6 +12,7 @@ import ttkbootstrap as tb
 from typing import Dict, Any, Optional, Callable
 from bubble_detector import BubbleDetector
 import logging
+import time
 
 # Use the same logging infrastructure initialized by translator_gui
 logger = logging.getLogger(__name__)
