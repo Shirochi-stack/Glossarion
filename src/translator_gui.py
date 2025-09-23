@@ -10948,33 +10948,32 @@ Important rules:
                         if len(folders_to_scan) > 1 and current_qa_settings.get('check_word_count_ratio', False):
                             # Try to find EPUB file matching this specific folder
                             folder_basename = os.path.basename(current_folder.rstrip('/\\'))
+                            self.append_log(f"  🔍 Searching for EPUB matching folder: {folder_basename}")
                             
                             # Look for EPUB in various locations
                             folder_parent = os.path.dirname(current_folder)
                             
-                            # Strip common output suffixes to find base name
+                            # Simple exact matching first, with minimal suffix handling
                             base_name = folder_basename
-                            common_suffixes = ['_output', '_translated', '_trans', '_en', '_english', '_done', '_complete', '_final']
+                            
+                            # Only handle the most common output suffixes
+                            common_suffixes = ['_output', '_translated', '_en']
                             for suffix in common_suffixes:
                                 if base_name.endswith(suffix):
                                     base_name = base_name[:-len(suffix)]
                                     break
                             
+                            # Simple EPUB search - focus on exact matching
+                            search_names = [folder_basename]  # Start with exact folder name
+                            if base_name != folder_basename:  # Add base name only if different
+                                search_names.append(base_name)
+                            
                             potential_epub_paths = [
-                                # Exact match with folder name
-                                os.path.join(folder_parent, f"{folder_basename}.epub"),
-                                # Base name without suffixes
-                                os.path.join(folder_parent, f"{base_name}.epub"),
-                                # In the folder itself
-                                os.path.join(current_folder, f"{folder_basename}.epub"),
-                                os.path.join(current_folder, f"{base_name}.epub"),
-                                # One level up from folder parent
-                                os.path.join(os.path.dirname(folder_parent), f"{folder_basename}.epub"),
-                                os.path.join(os.path.dirname(folder_parent), f"{base_name}.epub"),
-                                # In a common 'epubs' or 'source' directory
-                                os.path.join(os.path.dirname(current_folder), "epubs", f"{base_name}.epub"),
-                                os.path.join(os.path.dirname(current_folder), "source", f"{base_name}.epub"),
-                                os.path.join(os.path.dirname(current_folder), "originals", f"{base_name}.epub")
+                                # Most common locations in order of priority
+                                os.path.join(folder_parent, f"{folder_basename}.epub"),  # Same directory as output folder
+                                os.path.join(folder_parent, f"{base_name}.epub"),        # Same directory with base name
+                                os.path.join(current_folder, f"{folder_basename}.epub"), # Inside the output folder
+                                os.path.join(current_folder, f"{base_name}.epub"),       # Inside with base name
                             ]
                             
                             # Find the first existing EPUB
@@ -10982,21 +10981,30 @@ Important rules:
                             for potential_path in potential_epub_paths:
                                 if os.path.isfile(potential_path):
                                     folder_epub_path = potential_path
+                                    if len(folders_to_scan) > 1:
+                                        self.append_log(f"      Found matching EPUB: {os.path.basename(potential_path)}")
                                     break
                             
                             if folder_epub_path:
                                 current_epub_path = folder_epub_path
                                 if len(folders_to_scan) > 1:  # Only log for bulk scans
-                                    self.append_log(f"  📖 Using EPUB: {current_epub_path}")
-                            elif current_epub_path:  # Fallback to global EPUB
-                                if len(folders_to_scan) > 1:
-                                    self.append_log(f"  📖 Using global EPUB: {current_epub_path} (no folder-specific EPUB found)")
+                                    self.append_log(f"  📖 Using EPUB: {os.path.basename(current_epub_path)}")
                             else:
-                                # No EPUB available for word count analysis
+                                # NO FALLBACK TO GLOBAL EPUB FOR BULK SCANS - This prevents wrong EPUB usage!
                                 if len(folders_to_scan) > 1:
-                                    self.append_log(f"  ⚠️ No EPUB found for word count analysis")
-                                current_qa_settings = current_qa_settings.copy()
-                                current_qa_settings['check_word_count_ratio'] = False
+                                    self.append_log(f"  ⚠️ No matching EPUB found for folder '{folder_name}' - disabling word count analysis")
+                                    expected_names = ', '.join([f"{name}.epub" for name in search_names])
+                                    self.append_log(f"      Expected EPUB names: {expected_names}")
+                                    current_epub_path = None
+                                elif current_epub_path:  # Single folder scan can use global EPUB
+                                    self.append_log(f"  📖 Using global EPUB: {os.path.basename(current_epub_path)} (no folder-specific EPUB found)")
+                                else:
+                                    current_epub_path = None
+                                
+                                # Disable word count analysis when no matching EPUB is found
+                                if not current_epub_path:
+                                    current_qa_settings = current_qa_settings.copy()
+                                    current_qa_settings['check_word_count_ratio'] = False
                         
                         # Check for EPUB/folder name mismatch
                         if current_epub_path and current_qa_settings.get('check_word_count_ratio', False) and current_qa_settings.get('warn_name_mismatch', True):
