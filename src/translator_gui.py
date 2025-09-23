@@ -16415,6 +16415,10 @@ Important rules:
             if hasattr(self, 'auto_update_check_var'):
                 self.config['auto_update_check'] = self.auto_update_check_var.get()
                 
+            # Preserve last update check time if it exists
+            if hasattr(self, 'update_manager') and self.update_manager:
+                self.config['last_update_check_time'] = self.update_manager._last_check_time
+                
             # Save window manager safe ratios setting
             if hasattr(self, 'wm') and hasattr(self.wm, '_force_safe_ratios'):
                 self.config['force_safe_ratios'] = self.wm._force_safe_ratios

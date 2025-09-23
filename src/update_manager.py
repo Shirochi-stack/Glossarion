@@ -35,7 +35,8 @@ class UpdateManager:
         self.all_releases = []  # Store all fetched releases
         self.download_progress = 0
         self.is_downloading = False
-        self._last_check_time = 0
+        # Load persistent check time from config
+        self._last_check_time = self.main_gui.config.get('last_update_check_time', 0)
         self._check_cache_duration = 3600  # Cache for 1 hour
         self.selected_asset = None  # Store selected asset for download
         
@@ -65,13 +66,23 @@ class UpdateManager:
                 'User-Agent': 'Glossarion-Updater'
             }
             
-            # Fetch multiple releases
-            response = requests.get(
-                f"{self.GITHUB_API_URL}?per_page={count}", 
-                headers=headers, 
-                timeout=30
-            )
-            response.raise_for_status()
+            # Fetch multiple releases with retry logic
+            max_retries = 2
+            timeout = 10  # Reduced timeout
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    response = requests.get(
+                        f"{self.GITHUB_API_URL}?per_page={count}", 
+                        headers=headers, 
+                        timeout=timeout
+                    )
+                    response.raise_for_status()
+                    break  # Success
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    if attempt == max_retries:
+                        raise  # Re-raise after final attempt
+                    time.sleep(1)
             
             releases = response.json()
             
@@ -126,6 +137,12 @@ class UpdateManager:
             Tuple of (update_available, release_info)
         """
         try:
+            # Check if we need to skip the check due to cache
+            current_time = time.time()
+            if not force_show and (current_time - self._last_check_time) < self._check_cache_duration:
+                print(f"[DEBUG] Skipping update check - cache still valid for {int(self._check_cache_duration - (current_time - self._last_check_time))} seconds")
+                return False, None
+            
             # Check if this version was previously skipped
             skipped_versions = self.main_gui.config.get('skipped_versions', [])
             
@@ -134,11 +151,29 @@ class UpdateManager:
                 'User-Agent': 'Glossarion-Updater'
             }
             
-            response = requests.get(self.GITHUB_LATEST_URL, headers=headers, timeout=30)
-            response.raise_for_status()
+            # Try with shorter timeout and retry logic
+            max_retries = 2
+            timeout = 10  # Reduced from 30 seconds
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    print(f"[DEBUG] Update check attempt {attempt + 1}/{max_retries + 1}")
+                    response = requests.get(self.GITHUB_LATEST_URL, headers=headers, timeout=timeout)
+                    response.raise_for_status()
+                    break  # Success, exit retry loop
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    if attempt == max_retries:
+                        # Last attempt failed, save check time and re-raise
+                        self._save_last_check_time()
+                        raise
+                    print(f"[DEBUG] Network error on attempt {attempt + 1}: {e}")
+                    time.sleep(1)  # Short delay before retry
             
             release_data = response.json()
             latest_version = release_data['tag_name'].lstrip('v')
+            
+            # Save successful check time
+            self._save_last_check_time()
             
             # Fetch all releases for history regardless
             self.all_releases = self.fetch_multiple_releases(count=10)
@@ -170,13 +205,25 @@ class UpdateManager:
         except requests.Timeout:
             if not silent:
                 messagebox.showerror("Update Check Failed", 
-                                   "Connection timed out. Please check your internet connection.")
+                                   "Connection timed out while checking for updates.\n\n"
+                                   "This is usually due to network connectivity issues.\n"
+                                   "The next update check will be in 1 hour.")
             return False, None
             
-        except requests.ConnectionError:
+        except requests.ConnectionError as e:
             if not silent:
-                messagebox.showerror("Update Check Failed", 
-                                   "Could not connect to GitHub. Please check your internet connection.")
+                if 'api.github.com' in str(e):
+                    messagebox.showerror("Update Check Failed", 
+                                       "Cannot reach GitHub servers for update check.\n\n"
+                                       "This may be due to:\n"
+                                       "• Internet connectivity issues\n"
+                                       "• Firewall blocking GitHub API\n"
+                                       "• GitHub API temporarily unavailable\n\n"
+                                       "The next update check will be in 1 hour.")
+                else:
+                    messagebox.showerror("Update Check Failed", 
+                                       f"Network error: {str(e)}\n\n"
+                                       "The next update check will be in 1 hour.")
             return False, None
             
         except requests.HTTPError as e:
@@ -204,6 +251,17 @@ class UpdateManager:
     def check_for_updates_manual(self):
         """Manual update check from menu - always shows dialog (async)"""
         return self.check_for_updates_async(silent=False, force_show=True)
+    
+    def _save_last_check_time(self):
+        """Save the last update check time to config"""
+        try:
+            current_time = time.time()
+            self._last_check_time = current_time
+            self.main_gui.config['last_update_check_time'] = current_time
+            # Save config without showing message
+            self.main_gui.save_config(show_message=False)
+        except Exception as e:
+            print(f"[DEBUG] Failed to save last check time: {e}")
     
     def format_markdown_to_tkinter(self, text_widget, markdown_text):
         """Convert GitHub markdown to formatted tkinter text - simplified version
@@ -655,8 +713,8 @@ class UpdateManager:
             else:
                 download_path = new_exe_path
             
-            # Download with progress tracking and timeout
-            response = requests.get(asset['browser_download_url'], stream=True, timeout=30)
+            # Download with progress tracking and shorter timeout
+            response = requests.get(asset['browser_download_url'], stream=True, timeout=15)
             total_size = int(response.headers.get('content-length', 0))
             
             downloaded = 0
