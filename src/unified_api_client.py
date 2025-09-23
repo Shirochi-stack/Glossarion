@@ -5,6 +5,8 @@ Key Design Principles:
 - The client must save responses properly for duplicate detection
 - The client must return accurate finish_reason for truncation detection
 - The client must support cancellation for timeout handling
+- Enhanced Multi-Key Mode: Rotates API keys during exponential backoff on server errors (500, 502, 503, 504)
+  to avoid waiting on potentially problematic keys before trying alternatives
 
 Supported models and their prefixes (Updated July 2025):
 - OpenAI: gpt*, o1*, o3*, o4*, codex* (e.g., gpt-4, gpt-4o, gpt-4o-mini, gpt-4.5, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, o3, o3-mini, o3-pro, o4-mini)
@@ -3552,6 +3554,18 @@ class UnifiedClient:
                 if (http_status in [500, 502, 503, 504] or 
                     any(err in error_str for err in retryable_errors)):
                     if attempt < internal_retries - 1:
+                        # In multi-key mode, try rotating keys before backing off
+                        if self._multi_key_mode and attempt > 0:  # Only after first attempt
+                            try:
+                                print(f"🔄 Server error ({http_status or 'API error'}) - attempting key rotation (multi-key mode)")
+                                self._handle_rate_limit_for_thread()
+                                print(f"🔄 Server error retry: Key rotation completed, retrying immediately...")
+                                time.sleep(0.1)  # Brief pause after key rotation
+                                continue  # Retry with new key immediately
+                            except Exception as rotation_error:
+                                print(f"❌ Key rotation failed during server error: {rotation_error}")
+                                # Fall back to normal exponential backoff
+                        
                         # Exponential backoff with jitter
                         delay = self._compute_backoff(attempt, base_delay, 60)  # Max 60 seconds
                         
@@ -3704,6 +3718,18 @@ class UnifiedClient:
                 retryable_server_errors = ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]
                 if any(err in error_str for err in retryable_server_errors):
                     if attempt < internal_retries - 1:
+                        # In multi-key mode, try rotating keys before backing off
+                        if self._multi_key_mode and attempt > 0:  # Only after first attempt
+                            try:
+                                print(f"🔄 Unexpected server error - attempting key rotation (multi-key mode)")
+                                self._handle_rate_limit_for_thread()
+                                print(f"🔄 Unexpected server error retry: Key rotation completed, retrying immediately...")
+                                time.sleep(0.1)  # Brief pause after key rotation
+                                continue  # Retry with new key immediately
+                            except Exception as rotation_error:
+                                print(f"❌ Key rotation failed during unexpected server error: {rotation_error}")
+                                # Fall back to normal exponential backoff
+                        
                         # Exponential backoff with jitter
                         delay = self._compute_backoff(attempt, base_delay, 60)  # Max 60 seconds
                         
@@ -3720,6 +3746,18 @@ class UnifiedClient:
                 transient_errors = ["connection reset", "connection aborted", "connection error", "network error", "timeout", "timed out"]
                 if any(err in error_str for err in transient_errors):
                     if attempt < internal_retries - 1:
+                        # In multi-key mode, try rotating keys for network issues
+                        if self._multi_key_mode and attempt > 0:  # Only after first attempt
+                            try:
+                                print(f"🔄 Transient error - attempting key rotation (multi-key mode)")
+                                self._handle_rate_limit_for_thread()
+                                print(f"🔄 Transient error retry: Key rotation completed, retrying immediately...")
+                                time.sleep(0.1)  # Brief pause after key rotation
+                                continue  # Retry with new key immediately
+                            except Exception as rotation_error:
+                                print(f"❌ Key rotation failed during transient error: {rotation_error}")
+                                # Fall back to normal exponential backoff
+                        
                         # Use a slightly less aggressive backoff for transient errors
                         delay = self._compute_backoff(attempt, base_delay/2, 30)  # Max 30 seconds
                         
@@ -3740,6 +3778,18 @@ class UnifiedClient:
                     fallback_content = self._handle_empty_result(messages, context, str(e))
                     return fallback_content, 'error'
                 else:
+                    # In multi-key mode, try rotating keys before short backoff
+                    if self._multi_key_mode and attempt > 0:  # Only after first attempt
+                        try:
+                            print(f"🔄 Other error - attempting key rotation (multi-key mode)")
+                            self._handle_rate_limit_for_thread()
+                            print(f"🔄 Other error retry: Key rotation completed, retrying immediately...")
+                            time.sleep(0.1)  # Brief pause after key rotation
+                            continue  # Retry with new key immediately
+                        except Exception as rotation_error:
+                            print(f"❌ Key rotation failed during other error: {rotation_error}")
+                            # Fall back to normal exponential backoff
+                    
                     # For other unexpected errors, try again with a short delay
                     delay = self._compute_backoff(attempt, base_delay/4, 15)  # Short delay
                     print(f"🔄 Unexpected error - retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries}): {str(e)[:100]}")
