@@ -8656,10 +8656,14 @@ def handle_api_error(processor, error, chunk_info=""):
             
             if stats.get('active_keys', 0) == 0:
                 print("⏳ All API keys are cooling down - will wait and retry")
+            print(f"🔄 Multi-key error handling: Rate limit processed, preparing for key rotation...")
+            time.sleep(0.1)  # Brief pause after rate limit detection for stability
             return True  # Always retry
         else:
             print(f"⚠️ Rate limit hit {chunk_info}, waiting before retry...")
             time.sleep(60)
+            print(f"🔄 Single-key error handling: Rate limit wait completed, ready for retry...")
+            time.sleep(0.1)  # Brief pause after rate limit wait for stability
             return True  # Always retry
     
     # Other errors

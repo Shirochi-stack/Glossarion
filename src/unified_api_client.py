@@ -1274,6 +1274,8 @@ class UnifiedClient:
                     # Setup client for this key
                     self._setup_client()
                     self._apply_custom_endpoint_if_needed()
+                    print(f"[THREAD-{thread_name}] 🔄 Key assignment: Client setup completed, ready for requests...")
+                    time.sleep(0.1)  # Brief pause after key assignment for stability
                     return
             
             # No key available - all are on cooldown
@@ -1292,6 +1294,8 @@ class UnifiedClient:
                 # Clear expired entries before next attempt
                 if hasattr(self, '_rate_limit_cache') and self._rate_limit_cache:
                     self._rate_limit_cache.clear_expired()
+                print(f"[THREAD-{thread_name}] 🔄 Cooldown wait: Cache cleared, attempting next key assignment...")
+                time.sleep(0.1)  # Brief pause after cooldown wait for retry stability
             
             retry_count += 1
         
@@ -1396,6 +1400,8 @@ class UnifiedClient:
                     key_id = f"Key#{i+1} ({key.model})"
                     if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
                         print(f"[Thread-{thread_name}] Key became available early: {key_id}")
+                        print(f"[Thread-{thread_name}] 🔄 Early key availability: Key ready for immediate use...")
+                        time.sleep(0.1)  # Brief pause after early detection for stability
                         return (key, i)
             
             time.sleep(1)
@@ -1760,6 +1766,8 @@ class UnifiedClient:
                 print(f"[WARNING] Next key in rotation is on cooldown, but using it anyway")
             
             self._apply_key_change(key_info, old_key_identifier)
+            print(f"🔄 Force key rotation: Key change completed, system ready...")
+            time.sleep(0.1)  # Brief pause after force rotation for system stability
         else:
             print(f"[ERROR] Failed to rotate to next key")
     
@@ -1801,6 +1809,8 @@ class UnifiedClient:
             # Re-apply individual endpoint if needed (this takes priority over global custom endpoint)
             self._apply_individual_key_endpoint_if_needed()
             
+            print(f"🔄 Key rotation: Endpoint setup completed, rotation successful...")
+            time.sleep(0.1)  # Brief pause after rotation for system stability
             return True
         
         print(f"[WARNING] No available keys to rotate to")
@@ -2662,6 +2672,8 @@ class UnifiedClient:
                             try:
                                 # Rotate to next key
                                 self._handle_rate_limit_for_thread()
+                                print(f"🔄 Multi-key retry: Key rotation completed, preparing for next attempt...")
+                                time.sleep(0.1)  # Brief pause after key rotation for system stability
                                 
                                 # Check if we have any available keys left after rotation
                                 available_keys = self._count_available_keys()
@@ -3547,6 +3559,8 @@ class UnifiedClient:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)  # Check every 0.5 seconds
+                        print(f"🔄 Server error retry: Backoff completed, initiating retry attempt...")
+                        time.sleep(0.1)  # Brief pause after backoff for retry stability
                         continue  # Retry the attempt
                     else:
                         print(f"❌ Server error ({http_status or 'API error'}) - exhausted {internal_retries} retries")
@@ -3564,6 +3578,8 @@ class UnifiedClient:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)
+                        print(f"🔄 Timeout error retry: Backoff completed, initiating retry attempt...")
+                        time.sleep(0.1)  # Brief pause after backoff for retry stability
                         continue  # Retry the attempt
                     else:
                         print(f"❌ Network/timeout error - exhausted {internal_retries} retries")
@@ -3586,6 +3602,8 @@ class UnifiedClient:
                         if self._cancelled:
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         time.sleep(0.5)
+                    print(f"🔄 API error retry: Backoff completed, initiating retry attempt...")
+                    time.sleep(0.1)  # Brief pause after backoff for retry stability
                     continue  # Retry the attempt
                 
             except Exception as e:
