@@ -127,6 +127,12 @@ LAMA_JIT_MODELS = {
         'md5': None,  # Add MD5 if you want to verify
         'name': 'LaMa ONNX (Carve)',
         'is_onnx': True  # Flag to indicate this is ONNX, not JIT
+    },
+    'anime_onnx': {
+        'url': 'https://huggingface.co/ogkalu/lama-manga-onnx-dynamic/resolve/main/lama-manga-dynamic.onnx',
+        'md5': 'de31ffa5ba26916b8ea35319f6c12151ff9654d4261bccf0583a69bb095315f9',
+        'name': 'Anime/Manga ONNX (Dynamic)',
+        'is_onnx': True  # Flag to indicate this is ONNX
     }
 }
 
@@ -318,6 +324,7 @@ class LocalInpainter:
         'aot': ('AOT GAN Inpainting', FFCInpaintModel),
         'sd': ('Stable Diffusion Inpainting', FFCInpaintModel),
         'anime': ('Anime/Manga Inpainting', FFCInpaintModel),
+        'anime_onnx': ('Anime ONNX (Fast)', FFCInpaintModel),
         'lama_official': ('Official LaMa', FFCInpaintModel),
     }
     
@@ -1207,7 +1214,7 @@ class LocalInpainter:
                 _ext = os.path.splitext(model_path)[1].lower()
                 _method_lower = str(method).lower()
                 # For explicit ONNX methods, ensure we use a .onnx path
-                if _method_lower in ("lama_onnx",) and _ext != ".onnx":
+                if _method_lower in ("lama_onnx", "anime_onnx") and _ext != ".onnx":
                     # If the file exists, try to detect if it's actually an ONNX model and correct the extension
                     if os.path.exists(model_path) and ONNX_AVAILABLE:
                         try:
@@ -1240,10 +1247,14 @@ class LocalInpainter:
                     # If the path doesn't exist or still wrong, prefer the known ONNX download for this method
                     if (not os.path.exists(model_path)) or (os.path.splitext(model_path)[1].lower() != ".onnx"):
                         try:
-                            _dl = self.download_jit_model("lama_onnx")
+                            # Download the appropriate ONNX model based on the method
+                            if _method_lower == "anime_onnx":
+                                _dl = self.download_jit_model("anime_onnx")
+                            else:
+                                _dl = self.download_jit_model("lama_onnx")
                             if _dl and os.path.exists(_dl):
                                 model_path = _dl
-                                logger.info(f"🔧 Using downloaded LaMa ONNX: {model_path}")
+                                logger.info(f"🔧 Using downloaded {_method_lower.upper()} model: {model_path}")
                         except Exception:
                             pass
             except Exception:

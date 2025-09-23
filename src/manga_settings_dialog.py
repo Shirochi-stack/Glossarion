@@ -2440,6 +2440,28 @@ class MangaSettingsDialog:
         memory_frame = tk.LabelFrame(content_frame, text="Memory Management", padx=15, pady=10)
         memory_frame.pack(fill='x', padx=20, pady=(10, 0))
         
+        # Singleton mode for model instances
+        self.use_singleton_models = tk.BooleanVar(
+            value=self.settings.get('advanced', {}).get('use_singleton_models', True)
+        )
+        singleton_cb = tb.Checkbutton(
+            memory_frame,
+            text="Use single model instances (saves RAM, disables parallel processing)",
+            variable=self.use_singleton_models,
+            bootstyle="round-toggle"
+        )
+        singleton_cb.pack(anchor='w')
+        
+        singleton_note = tk.Label(
+            memory_frame,
+            text="When enabled: One bubble detector & one inpainter shared across all images.\n"
+                 "When disabled: Each thread/image can have its own models (uses more RAM).",
+            font=('Arial', 9),
+            fg='gray',
+            justify='left'
+        )
+        singleton_note.pack(anchor='w', pady=(2, 10), padx=(20, 0))
+        
         self.auto_cleanup_models = tk.BooleanVar(
             value=self.settings.get('advanced', {}).get('auto_cleanup_models', True)
         )
@@ -3033,6 +3055,7 @@ class MangaSettingsDialog:
             self.settings['advanced']['panel_start_stagger_ms'] = int(self.panel_stagger_ms_var.get())
             
             # Memory management settings
+            self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models.get())
             self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_models.get())
             
             # ONNX auto-convert settings (persist and apply to environment)

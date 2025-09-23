@@ -67,6 +67,12 @@ class MangaTranslator:
     _inpaint_pool_lock = threading.Lock()
     _inpaint_pool = {}  # (method, model_path) -> {'inpainter': obj|None, 'loaded': bool, 'event': threading.Event()}
     
+    # SINGLETON PATTERN: Shared model instances across all translators
+    _singleton_lock = threading.Lock()
+    _singleton_bubble_detector = None
+    _singleton_local_inpainter = None
+    _singleton_refs = 0  # Reference counter for singleton instances
+    
     # Class-level cancellation flag for all instances
     _global_cancelled = False
     _global_cancel_lock = threading.RLock()
@@ -88,6 +94,37 @@ class MangaTranslator:
         """Reset global cancellation flags when starting new translation"""
         with cls._global_cancel_lock:
             cls._global_cancelled = False
+    
+    @classmethod
+    def cleanup_singletons(cls, force=False):
+        """Clean up singleton instances when no longer needed
+        
+        Args:
+            force: If True, cleanup even if references exist (for app shutdown)
+        """
+        with cls._singleton_lock:
+            if force or cls._singleton_refs == 0:
+                # Cleanup singleton bubble detector
+                if cls._singleton_bubble_detector is not None:
+                    try:
+                        if hasattr(cls._singleton_bubble_detector, 'unload'):
+                            cls._singleton_bubble_detector.unload(release_shared=True)
+                        cls._singleton_bubble_detector = None
+                        print("🤖 Singleton bubble detector cleaned up")
+                    except Exception as e:
+                        print(f"Failed to cleanup singleton bubble detector: {e}")
+                
+                # Cleanup singleton local inpainter  
+                if cls._singleton_local_inpainter is not None:
+                    try:
+                        if hasattr(cls._singleton_local_inpainter, 'unload'):
+                            cls._singleton_local_inpainter.unload()
+                        cls._singleton_local_inpainter = None
+                        print("🎨 Singleton local inpainter cleaned up")
+                    except Exception as e:
+                        print(f"Failed to cleanup singleton local inpainter: {e}")
+                
+                cls._singleton_refs = 0
     
     def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
         """Initialize with OCR configuration and API client from main GUI
@@ -132,8 +169,10 @@ class MangaTranslator:
         self.hybrid_inpainter = None
         self.inpainter = None
         
-        # Initialize bubble detector
+        # Initialize bubble detector (will check singleton mode later)
         self.bubble_detector = None
+        # Default to singleton mode for memory efficiency
+        self.use_singleton_models = self.manga_settings.get('advanced', {}).get('use_singleton_models', True)
         
         # Processing flags
         self.is_processing = False
@@ -333,9 +372,12 @@ class MangaTranslator:
         
         self.manga_settings = config.get('manga_settings', {})
 
-        # Initialize local inpainter if configured
+        # Initialize local inpainter if configured (respects singleton mode)
         if self.manga_settings.get('inpainting', {}).get('method') == 'local':
-            self._initialize_local_inpainter()
+            if self.use_singleton_models:
+                self._initialize_singleton_local_inpainter()
+            else:
+                self._initialize_local_inpainter()
             
         # advanced settings
         self.debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False)
@@ -492,6 +534,12 @@ class MangaTranslator:
     def shutdown(self):
         """Fully release resources for MangaTranslator (models, detectors, torch caches, threads)."""
         try:
+            # Decrement singleton reference counter if using singleton mode
+            if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
+                with MangaTranslator._singleton_lock:
+                    MangaTranslator._singleton_refs = max(0, MangaTranslator._singleton_refs - 1)
+                    self._log(f"Singleton refs: {MangaTranslator._singleton_refs}", "debug")
+            
             # Stop memory watchdog thread if running
             if hasattr(self, '_mem_stop_event') and getattr(self, '_mem_stop_event', None) is not None:
                 try:
@@ -669,16 +717,22 @@ class MangaTranslator:
             try:
                 # Instance-level bubble detector
                 if hasattr(self, 'bubble_detector') and self.bubble_detector is not None:
-                    self._log("   Cleaning up bubble detector (YOLO/RT-DETR)...", "debug")
-                    bd = self.bubble_detector
-                    try:
-                        if hasattr(bd, 'unload'):
-                            bd.unload(release_shared=True)  # This unloads YOLO and RT-DETR models
-                            self._log("      ✓ Called bubble detector unload", "debug")
-                    except Exception as e:
-                        self._log(f"      Warning: Bubble detector unload failed: {e}", "debug")
-                    self.bubble_detector = None
-                    self._log("   ✓ Bubble detector cleaned up", "debug")
+                    # Check if using singleton mode - don't unload shared instance
+                    if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
+                        self._log("   Skipping bubble detector cleanup (singleton mode)", "debug")
+                        # Just clear our reference, don't unload the shared instance
+                        self.bubble_detector = None
+                    else:
+                        self._log("   Cleaning up bubble detector (YOLO/RT-DETR)...", "debug")
+                        bd = self.bubble_detector
+                        try:
+                            if hasattr(bd, 'unload'):
+                                bd.unload(release_shared=True)  # This unloads YOLO and RT-DETR models
+                                self._log("      ✓ Called bubble detector unload", "debug")
+                        except Exception as e:
+                            self._log(f"      Warning: Bubble detector unload failed: {e}", "debug")
+                        self.bubble_detector = None
+                        self._log("   ✓ Bubble detector cleaned up", "debug")
                     
                 # Also clean class-level shared RT-DETR models
                 try:
@@ -701,13 +755,19 @@ class MangaTranslator:
                 
                 # Instance-level inpainter
                 if hasattr(self, 'local_inpainter') and self.local_inpainter is not None:
-                    try:
-                        if hasattr(self.local_inpainter, 'unload'):
-                            self.local_inpainter.unload()
-                            self._log("      ✓ Unloaded local inpainter", "debug")
-                    except Exception:
-                        pass
-                    self.local_inpainter = None
+                    # Check if using singleton mode - don't unload shared instance
+                    if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
+                        self._log("      Skipping local inpainter cleanup (singleton mode)", "debug")
+                        # Just clear our reference, don't unload the shared instance
+                        self.local_inpainter = None
+                    else:
+                        try:
+                            if hasattr(self.local_inpainter, 'unload'):
+                                self.local_inpainter.unload()
+                                self._log("      ✓ Unloaded local inpainter", "debug")
+                        except Exception:
+                            pass
+                        self.local_inpainter = None
                 
                 # Hybrid inpainter
                 if hasattr(self, 'hybrid_inpainter') and self.hybrid_inpainter is not None:
@@ -6301,19 +6361,87 @@ class MangaTranslator:
         
         return None  # Will use default font
     
+    def _get_singleton_bubble_detector(self):
+        """Get or initialize the singleton bubble detector instance"""
+        with MangaTranslator._singleton_lock:
+            if MangaTranslator._singleton_bubble_detector is None:
+                try:
+                    from bubble_detector import BubbleDetector
+                    MangaTranslator._singleton_bubble_detector = BubbleDetector()
+                    self._log("🤖 Created singleton bubble detector instance", "info")
+                except Exception as e:
+                    self._log(f"Failed to create singleton bubble detector: {e}", "error")
+                    return None
+            MangaTranslator._singleton_refs += 1
+            return MangaTranslator._singleton_bubble_detector
+    
+    def _initialize_singleton_local_inpainter(self):
+        """Initialize singleton local inpainter instance"""
+        with MangaTranslator._singleton_lock:
+            if MangaTranslator._singleton_local_inpainter is None:
+                try:
+                    from local_inpainter import LocalInpainter
+                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                    # LocalInpainter only accepts config_path, not method
+                    MangaTranslator._singleton_local_inpainter = LocalInpainter()
+                    # Now load the model with the specified method
+                    if local_method:
+                        # Try to load the model
+                        model_path = self.manga_settings.get('inpainting', {}).get('local_model_path')
+                        if not model_path:
+                            # Try to download if no path specified
+                            try:
+                                model_path = MangaTranslator._singleton_local_inpainter.download_jit_model(local_method)
+                            except Exception as e:
+                                self._log(f"⚠️ Failed to download model for {local_method}: {e}", "warning")
+                        
+                        if model_path and os.path.exists(model_path):
+                            success = MangaTranslator._singleton_local_inpainter.load_model(local_method, model_path)
+                            if success:
+                                self._log(f"🎨 Created singleton local inpainter with {local_method} model", "info")
+                            else:
+                                self._log(f"⚠️ Failed to load {local_method} model", "warning")
+                        else:
+                            self._log(f"🎨 Created singleton local inpainter (no model loaded yet)", "info")
+                    else:
+                        self._log(f"🎨 Created singleton local inpainter (default)", "info")
+                except Exception as e:
+                    self._log(f"Failed to create singleton local inpainter: {e}", "error")
+                    return
+            # Use the singleton instance
+            self.local_inpainter = MangaTranslator._singleton_local_inpainter
+            self.inpainter = self.local_inpainter
+            MangaTranslator._singleton_refs += 1
+            self._log("🎨 Using singleton local inpainter instance", "debug")
+    
     def _get_thread_bubble_detector(self):
-        """Get or create a BubbleDetector dedicated to the current thread."""
-        if not hasattr(self, '_thread_local') or getattr(self, '_thread_local', None) is None:
-            self._thread_local = threading.local()
-        if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
-            from bubble_detector import BubbleDetector
-            self._thread_local.bubble_detector = BubbleDetector()
-        return self._thread_local.bubble_detector
+        """Get or initialize bubble detector (singleton or thread-local based on settings)"""
+        if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
+            # Use singleton instance
+            if self.bubble_detector is None:
+                self.bubble_detector = self._get_singleton_bubble_detector()
+            return self.bubble_detector
+        else:
+            # Use thread-local instance (original behavior for parallel processing)
+            if not hasattr(self, '_thread_local') or getattr(self, '_thread_local', None) is None:
+                self._thread_local = threading.local()
+            if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
+                from bubble_detector import BubbleDetector
+                self._thread_local.bubble_detector = BubbleDetector()
+                self._log("🤖 Created thread-local bubble detector", "debug")
+            return self._thread_local.bubble_detector
     
     def _get_thread_local_inpainter(self, local_method: str, model_path: str):
-        """Get or create a LocalInpainter dedicated to the current thread.
-        Loads the requested model for this thread if needed.
+        """Get or create a LocalInpainter (singleton or thread-local based on settings).
+        Loads the requested model if needed.
         """
+        if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
+            # Use singleton instance
+            if self.local_inpainter is None:
+                self._initialize_singleton_local_inpainter()
+            return self.local_inpainter
+        
+        # Use thread-local instance (original behavior for parallel processing)
         # Ensure thread-local storage exists and has a dict
         tl = getattr(self, '_thread_local', None)
         if tl is None:

@@ -2041,7 +2041,7 @@ class MangaTranslationTab:
         local_model_combo = ttk.Combobox(
             local_model_frame,
             textvariable=self.local_model_type_var,
-            values= ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local'],
+            values= ['aot', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'],
             state='readonly',
             width=15
         )
@@ -2056,6 +2056,7 @@ class MangaTranslationTab:
             'mat': 'MAT (High-res)',
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
+            'anime_onnx': 'Anime ONNX (Fast/Optimized)',
         }
         self.model_desc_label = tk.Label(
             local_model_frame,
@@ -2900,7 +2901,7 @@ class MangaTranslationTab:
         self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'anime'))
         
         # Load model paths
-        for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local']:
+        for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             if model_type == self.local_model_type_var.get():
                 self.local_model_path_var = tk.StringVar(value=path)
@@ -4301,6 +4302,7 @@ class MangaTranslationTab:
             'lama': 'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt',
             'lama_onnx': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',  
             'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
+            'anime_onnx': 'https://huggingface.co/ogkalu/lama-manga-onnx-dynamic/resolve/main/lama-manga-dynamic.onnx',
             'mat': '',  # User must provide
             'ollama': '',  # Not applicable
             'sd_local': ''  # User must provide
@@ -4318,6 +4320,8 @@ class MangaTranslationTab:
             'aot': 'aot_traced.pt',
             'lama': 'big-lama.pt',
             'anime': 'anime-manga-big-lama.pt',
+            'anime_onnx': 'lama-manga-dynamic.onnx',
+            'lama_onnx': 'lama_fp32.onnx',
             'fcf_onnx': 'fcf.onnx',
             'sd_inpaint_onnx': 'sd_inpaint_unet.onnx'
         }
