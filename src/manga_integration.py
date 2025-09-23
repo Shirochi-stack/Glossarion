@@ -2037,7 +2037,7 @@ class MangaTranslationTab:
 
         tk.Label(local_model_frame, text="Local Model:", width=20, anchor='w').pack(side=tk.LEFT)
 
-        self.local_model_type_var = tk.StringVar(value=self.main_gui.config.get('manga_local_inpaint_model', 'lama'))
+        self.local_model_type_var = tk.StringVar(value=self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx'))
         local_model_combo = ttk.Combobox(
             local_model_frame,
             textvariable=self.local_model_type_var,
@@ -2898,7 +2898,7 @@ class MangaTranslationTab:
         
         # Load inpaint method from the correct location
         self.inpaint_method_var = tk.StringVar(value=inpaint_settings.get('method', 'local'))
-        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'anime'))
+        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'anime_onnx'))
         
         # Load model paths
         for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
@@ -4115,6 +4115,7 @@ class MangaTranslationTab:
             'mat': 'MAT (High-res)',
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
+            'anime_onnx': 'Anime ONNX (Fast/Optimized)',
         }
         self.model_desc_label.config(text=model_desc.get(model_type, ''))
         
@@ -4508,6 +4509,15 @@ class MangaTranslationTab:
                      "• Auto-downloads from GitHub\n"
                      "• Recommended for manga translation\n"
                      "• Preserves screen tones and patterns",
+            
+            'anime_onnx': "Anime ONNX Model:\n\n"
+                          "• Optimized ONNX version for speed\n"
+                          "• Auto-downloads from HuggingFace\n"
+                          "• 2-3x faster than PyTorch version\n"
+                          "• Perfect for batch processing\n"
+                          "• Same quality as anime model\n"
+                          "• File size: ~190MB\n"
+                          "• DEFAULT for inpainting",
             
             'mat': "MAT Model:\n\n"
                    "• Manual download required\n"
