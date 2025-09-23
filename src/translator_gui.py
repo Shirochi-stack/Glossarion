@@ -19,6 +19,14 @@ from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
 from metadata_batch_translator import MetadataBatchTranslatorUI
 
+# Import the sophisticated container system
+try:
+    from gui_containers import ResponsiveContainer, FlexibleDialog, SectionContainer
+    ADVANCED_CONTAINERS_AVAILABLE = True
+except ImportError:
+    ADVANCED_CONTAINERS_AVAILABLE = False
+    print("Advanced container system not available.")
+
 # Support worker-mode dispatch in frozen builds to avoid requiring Python interpreter
 # This allows spawning the same .exe with a special flag to run helper tasks.
 if '--run-chapter-extraction' in sys.argv:
@@ -669,8 +677,198 @@ class UIHelper:
         spinbox.bind("<Button-4>", block_wheel)    # Linux scroll up
         spinbox.bind("<Button-5>", block_wheel)    # Linux scroll down
         
+class ResponsiveContainer(tk.Frame):
+    """Advanced responsive container with automatic layout management"""
+    
+    def __init__(self, parent, layout_type='vertical', spacing=5, padding=10, 
+                 auto_expand=True, responsive_breakpoints=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        self.layout_type = layout_type  # 'vertical', 'horizontal', 'grid', 'adaptive'
+        self.spacing = spacing
+        self.padding = padding
+        self.auto_expand = auto_expand
+        self.children_widgets = []
+        self.breakpoints = responsive_breakpoints or {'small': 600, 'medium': 900, 'large': 1200}
+        self.current_layout = None
+        
+        # Configure initial layout
+        self._configure_layout()
+        
+        # Bind resize events for responsive behavior
+        self.bind('<Configure>', self._on_resize)
+    
+    def _configure_layout(self):
+        """Configure the container layout based on type"""
+        if self.layout_type in ['vertical', 'horizontal']:
+            self.grid_columnconfigure(0, weight=1)
+            if self.layout_type == 'vertical':
+                # Vertical layout - each child gets its own row
+                pass  # Rows configured dynamically
+            else:
+                # Horizontal layout - each child gets its own column
+                self.grid_rowconfigure(0, weight=1)
+        elif self.layout_type == 'grid':
+            # Grid layout - configure based on content
+            self.grid_columnconfigure(0, weight=1)
+            self.grid_columnconfigure(1, weight=1)
+        elif self.layout_type == 'adaptive':
+            # Adaptive layout - changes based on container size
+            self.grid_columnconfigure(0, weight=1)
+    
+    def add_widget(self, widget, expand=None, fill=None, sticky=None, **grid_opts):
+        """Add a widget to the container with smart positioning"""
+        self.children_widgets.append({
+            'widget': widget, 
+            'expand': expand if expand is not None else self.auto_expand,
+            'fill': fill,
+            'sticky': sticky,
+            'grid_opts': grid_opts
+        })
+        self._layout_children()
+    
+    def _layout_children(self):
+        """Layout all children based on current layout type"""
+        for i, child_info in enumerate(self.children_widgets):
+            widget = child_info['widget']
+            
+            if self.layout_type == 'vertical':
+                row = i
+                col = 0
+                sticky = child_info['sticky'] or 'ew'
+                self.grid_rowconfigure(row, weight=1 if child_info['expand'] else 0)
+                
+            elif self.layout_type == 'horizontal':
+                row = 0
+                col = i
+                sticky = child_info['sticky'] or 'ns'
+                self.grid_columnconfigure(col, weight=1 if child_info['expand'] else 0)
+                
+            elif self.layout_type == 'grid':
+                cols = 2  # Default 2-column grid
+                row = i // cols
+                col = i % cols
+                sticky = child_info['sticky'] or 'nsew'
+                self.grid_rowconfigure(row, weight=1)
+                
+            elif self.layout_type == 'adaptive':
+                # Adaptive layout based on container width
+                width = self.winfo_width()
+                if width < self.breakpoints['small']:
+                    # Stack vertically on small screens
+                    row, col, sticky = i, 0, 'ew'
+                elif width < self.breakpoints['medium']:
+                    # 2-column layout
+                    row, col, sticky = i // 2, i % 2, 'nsew'
+                else:
+                    # 3-column layout on large screens
+                    row, col, sticky = i // 3, i % 3, 'nsew'
+            
+            # Apply layout
+            widget.grid(row=row, column=col, sticky=sticky, 
+                       padx=self.spacing, pady=self.spacing, **child_info['grid_opts'])
+    
+    def _on_resize(self, event):
+        """Handle container resize for adaptive layouts"""
+        if event.widget == self and self.layout_type == 'adaptive':
+            self._layout_children()
+
+class FlexibleDialog(tk.Toplevel):
+    """Advanced dialog with flexible layout management"""
+    
+    def __init__(self, parent, title="Dialog", layout='vertical', 
+                 min_size=(400, 300), max_size_ratio=(0.9, 0.9), 
+                 fixed_sections=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        self.title(title)
+        self.transient(parent)
+        self.min_size = min_size
+        self.max_size_ratio = max_size_ratio
+        self.fixed_sections = fixed_sections or []
+        
+        # Configure main layout
+        self.grid_columnconfigure(0, weight=1)
+        
+        # Create main responsive container
+        self.main_container = ResponsiveContainer(
+            self, layout_type=layout, padding=10
+        )
+        self.main_container.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        
+        # Track sections for advanced layout management
+        self.sections = {}
+        self.section_order = []
+        
+        self._setup_responsive_behavior()
+    
+    def add_section(self, name, widget, weight=1, fixed=False, position=None):
+        """Add a section to the dialog"""
+        if fixed:
+            self.fixed_sections.append(name)
+        
+        self.sections[name] = {
+            'widget': widget,
+            'weight': weight,
+            'fixed': fixed,
+            'position': position
+        }
+        
+        if position is not None:
+            self.section_order.insert(position, name)
+        else:
+            self.section_order.append(name)
+        
+        self._layout_sections()
+    
+    def _layout_sections(self):
+        """Layout all sections based on their properties"""
+        # Separate fixed and flexible sections
+        flexible_sections = []
+        fixed_sections = []
+        
+        for name in self.section_order:
+            section = self.sections[name]
+            if section['fixed']:
+                fixed_sections.append((name, section))
+            else:
+                flexible_sections.append((name, section))
+        
+        # Layout flexible sections in main container
+        for name, section in flexible_sections:
+            self.main_container.add_widget(
+                section['widget'], 
+                expand=section['weight'] > 0
+            )
+        
+        # Layout fixed sections directly in dialog
+        for i, (name, section) in enumerate(fixed_sections):
+            row = len(flexible_sections) + i + 1
+            self.grid_rowconfigure(row, weight=0)
+            section['widget'].grid(row=row, column=0, sticky="ew", padx=10, pady=(0, 10))
+    
+    def _setup_responsive_behavior(self):
+        """Setup responsive behavior for the dialog"""
+        def on_configure(event):
+            if event.widget == self:
+                # Auto-adjust layout based on dialog size
+                width, height = event.width, event.height
+                if width < 600:
+                    # Switch to compact layout for small dialogs
+                    self.main_container.layout_type = 'vertical'
+                elif width > 1000:
+                    # Use grid layout for large dialogs
+                    self.main_container.layout_type = 'grid'
+                else:
+                    # Default layout for medium dialogs
+                    self.main_container.layout_type = 'vertical'
+                
+                self.main_container._layout_children()
+        
+        self.bind('<Configure>', on_configure)
+
 class WindowManager:
-    """Unified window geometry and dialog management - FULLY REFACTORED V2"""
+    """Unified window geometry and dialog management - ENHANCED V3 with Sophisticated Containers"""
     
     def __init__(self, base_dir):
         self.base_dir = base_dir
@@ -681,6 +879,237 @@ class WindowManager:
         self._topmost_protection_active = {}
         self._force_safe_ratios = False
         self._primary_monitor_width = None  # Cache the detected width
+        
+        # Container management
+        self._active_containers = {}
+        self._container_themes = {
+            'default': {'bg': '#f0f0f0', 'relief': 'flat'},
+            'raised': {'bg': '#f0f0f0', 'relief': 'raised', 'bd': 1},
+            'sunken': {'bg': '#e8e8e8', 'relief': 'sunken', 'bd': 1},
+            'modern': {'bg': '#ffffff', 'relief': 'flat', 'bd': 0}
+        }
+    
+    def create_responsive_container(self, parent, layout_type='vertical', theme='default', 
+                                   spacing=5, padding=10, auto_expand=True, **kwargs):
+        """Create a sophisticated responsive container"""
+        theme_config = self._container_themes.get(theme, self._container_themes['default'])
+        
+        # Use advanced containers if available, otherwise fallback to built-in ResponsiveContainer
+        if ADVANCED_CONTAINERS_AVAILABLE:
+            from gui_containers import ResponsiveContainer as AdvancedContainer
+            container = AdvancedContainer(
+                parent, 
+                layout_type=layout_type,
+                spacing=spacing,
+                padding=padding,
+                auto_expand=auto_expand,
+                **theme_config,
+                **kwargs
+            )
+        else:
+            # Fallback to built-in ResponsiveContainer
+            container = ResponsiveContainer(
+                parent, 
+                layout_type=layout_type,
+                spacing=spacing,
+                padding=padding,
+                auto_expand=auto_expand,
+                **theme_config,
+                **kwargs
+            )
+        
+        # Register container for management
+        container_id = f"container_{len(self._active_containers)}"
+        self._active_containers[container_id] = container
+        
+        return container, container_id
+    
+    def create_flexible_dialog(self, parent, title="Advanced Dialog", layout='vertical',
+                             min_size=(400, 300), max_size_ratio=(0.9, 0.9), 
+                             theme='modern', **kwargs):
+        """Create a sophisticated flexible dialog"""
+        # Use advanced containers if available, otherwise fallback to built-in FlexibleDialog
+        if ADVANCED_CONTAINERS_AVAILABLE:
+            from gui_containers import FlexibleDialog as AdvancedDialog
+            dialog = AdvancedDialog(
+                parent, 
+                title=title,
+                layout=layout,
+                **kwargs
+            )
+        else:
+            # Fallback to built-in FlexibleDialog
+            dialog = FlexibleDialog(
+                parent, 
+                title=title,
+                layout=layout,
+                min_size=min_size,
+                max_size_ratio=max_size_ratio,
+                **kwargs
+            )
+        
+        # Apply theme to dialog
+        theme_config = self._container_themes.get(theme, self._container_themes['default'])
+        if 'bg' in theme_config:
+            dialog.configure(bg=theme_config['bg'])
+        
+        # Setup icon and standard window features
+        load_application_icon(dialog, self.base_dir)
+        
+        return dialog
+    
+    def create_section_container(self, parent, title=None, collapsible=False, 
+                               theme='raised', **kwargs):
+        """Create a section container with optional title and collapsible feature"""
+        # Use advanced containers if available
+        if ADVANCED_CONTAINERS_AVAILABLE:
+            from gui_containers import SectionContainer as AdvancedSection
+            container = AdvancedSection(
+                parent, 
+                title=title, 
+                collapsible=collapsible, 
+                theme=theme, 
+                **kwargs
+            )
+        else:
+            # Fallback to basic tkinter containers
+            if title:
+                container = tk.LabelFrame(parent, text=title, padx=10, pady=10)
+            else:
+                container = tk.Frame(parent, padx=10, pady=10)
+            
+            # Apply theme
+            theme_config = self._container_themes.get(theme, self._container_themes['default'])
+            container.configure(**theme_config)
+            
+            if collapsible:
+                self._make_collapsible(container, title)
+        
+        return container
+    
+    def _make_collapsible(self, container, title):
+        """Make a container collapsible"""
+        collapsed = tk.BooleanVar(value=False)
+        
+        def toggle_collapse():
+            if collapsed.get():
+                # Expand
+                for child in container.winfo_children():
+                    if child != toggle_button:
+                        child.grid_remove()
+                container.configure(text=f"▶ {title}")
+            else:
+                # Collapse
+                for child in container.winfo_children():
+                    if child != toggle_button:
+                        child.grid()
+                container.configure(text=f"▼ {title}")
+            collapsed.set(not collapsed.get())
+        
+        # Create toggle button (if it's a LabelFrame, we'll modify the title)
+        if isinstance(container, tk.LabelFrame):
+            container.configure(text=f"▼ {title}")
+            # Note: LabelFrame doesn't support click events on title directly
+            # Would need custom implementation for full collapsible feature
+    
+    def create_tabbed_container(self, parent, tab_position='top', theme='modern', **kwargs):
+        """Create a sophisticated tabbed container"""
+        import tkinter.ttk as ttk
+        
+        # Create notebook with custom styling
+        style = ttk.Style()
+        
+        if theme == 'modern':
+            style.configure('Modern.TNotebook', background='white')
+            style.configure('Modern.TNotebook.Tab', 
+                          padding=[20, 10], 
+                          background='#f0f0f0',
+                          focuscolor='none')
+            style.map('Modern.TNotebook.Tab',
+                     background=[('selected', '#ffffff'), ('active', '#e8e8e8')])
+            notebook = ttk.Notebook(parent, style='Modern.TNotebook', **kwargs)
+        else:
+            notebook = ttk.Notebook(parent, **kwargs)
+        
+        return notebook
+    
+    def create_split_container(self, parent, orientation='horizontal', sash_relief='raised',
+                             theme='default', **kwargs):
+        """Create a sophisticated split/paned container"""
+        paned_window = tk.PanedWindow(
+            parent, 
+            orient=orientation,
+            sashrelief=sash_relief,
+            sashwidth=8,
+            **kwargs
+        )
+        
+        # Apply theme
+        theme_config = self._container_themes.get(theme, self._container_themes['default'])
+        paned_window.configure(**theme_config)
+        
+        return paned_window
+    
+    def setup_scrollable_advanced(self, parent_window, title, layout='vertical', 
+                                theme='modern', fixed_sections=None, 
+                                responsive=True, **kwargs):
+        """Create an advanced scrollable dialog using sophisticated containers
+        
+        Args:
+            parent_window: Parent window
+            title: Dialog title
+            layout: Layout type for main content ('vertical', 'horizontal', 'grid', 'adaptive')
+            theme: Visual theme ('default', 'modern', 'raised', 'sunken')
+            fixed_sections: List of section names that should be fixed (non-scrollable)
+            responsive: Enable responsive layout behavior
+        
+        Returns:
+            tuple: (dialog, main_container, fixed_containers_dict)
+        """
+        
+        # For now, fallback to the reliable setup_scrollable method to ensure stability
+        # This ensures all existing functionality works while we develop the advanced features
+        
+        # Determine if we should use fixed bottom frame for buttons
+        use_fixed_frame = bool(fixed_sections)
+        
+        if use_fixed_frame:
+            # Use the existing reliable method with fixed frame
+            dialog, scrollable_frame, canvas, fixed_frame = self.setup_scrollable(
+                parent_window,
+                title,
+                modal=True,
+                resizable=True,
+                fixed_bottom_frame=True,
+                **kwargs
+            )
+            
+            # Create fixed containers dict
+            fixed_containers = {}
+            if fixed_sections:
+                for section_name in fixed_sections:
+                    if section_name == 'buttons':
+                        fixed_containers[section_name] = fixed_frame
+                    else:
+                        # Create additional fixed containers if needed
+                        container = tk.Frame(fixed_frame)
+                        container.pack(fill=tk.X, pady=2)
+                        fixed_containers[section_name] = container
+        else:
+            # Use the existing reliable method without fixed frame
+            dialog, scrollable_frame, canvas = self.setup_scrollable(
+                parent_window,
+                title,
+                modal=True,
+                resizable=True,
+                **kwargs
+            )
+            fixed_containers = {}
+        
+        return dialog, scrollable_frame, fixed_containers
+    
+    # Advanced scrolling methods removed - using reliable setup_scrollable instead
+    # This ensures maximum compatibility while the advanced container system is developed
 
     def toggle_safe_ratios(self):
         """Toggle forcing 1080p Windows ratios"""
@@ -3860,15 +4289,15 @@ Recent translations to summarize:
         # CREATE UI
         # =====================================================
         
-        # If no parent dialog or tab frame, create standalone dialog
+        # If no parent dialog or tab frame, create standalone dialog with fixed sections
+        fixed_containers = {}
         if not parent_dialog and not tab_frame:
-            dialog = self.wm.create_simple_dialog(
+            # Use the advanced setup for standalone dialogs with button section
+            dialog, container, fixed_containers = self.wm.setup_scrollable_advanced(
                 self.master,
                 "Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation",
-                width=1000,
-                height=700
+                fixed_sections=['buttons']
             )
-            container = dialog
         else:
             container = tab_frame or parent_dialog
             dialog = parent_dialog
@@ -3897,7 +4326,10 @@ Recent translations to summarize:
         
         # Main frame for listbox
         main_frame = tk.Frame(container)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10 if not tab_frame else 5, pady=5)
+        if hasattr(container, 'add_widget') and container.__class__.__name__ in ['ResponsiveContainer', 'FlexibleDialog']:
+            container.add_widget(main_frame, expand=True)
+        else:
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10 if not tab_frame else 5, pady=5)
         
         # Create scrollbars and listbox
         h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
@@ -4005,12 +4437,21 @@ Recent translations to summarize:
             'listbox': listbox,
             'selection_count_label': selection_count_label,
             'dialog': dialog,
-            'container': container
+            'container': container,
+            'fixed_containers': fixed_containers
         }
         
         # If standalone (no parent), add buttons
         if not parent_dialog or tab_frame:
-            self._add_retranslation_buttons_opf(result)
+            # Use the fixed containers if available
+            button_frame = result.get('fixed_containers', {}).get('buttons')
+            
+            if not button_frame:
+                # Create standard button frame
+                button_frame = tk.Frame(container)
+                button_frame.pack(pady=10)
+            
+            self._add_retranslation_buttons_opf(result, button_frame)
         
         return result
 
@@ -4020,7 +4461,10 @@ Recent translations to summarize:
         
         if not button_frame:
             button_frame = tk.Frame(data['container'])
-            button_frame.pack(pady=10)
+            if hasattr(data['container'], 'add_widget'):
+                data['container'].add_widget(button_frame, expand=False)
+            else:
+                button_frame.pack(pady=10)
         
         # Configure column weights
         for i in range(5):
@@ -12973,15 +13417,20 @@ Important rules:
            
     def configure_translation_chunk_prompt(self):
         """Configure the prompt template for translation chunks"""
-        dialog = self.wm.create_simple_dialog(
+        dialog, main_container, fixed_containers = self.wm.setup_scrollable_advanced(
             self.master,
-            "Configure Translation Chunk Prompt",
-            width=700,
-            height=None
+            "📋 Configure Translation Chunk Prompt",
+            layout='vertical',
+            theme='modern',
+            fixed_sections=['buttons'],
+            responsive=True
         )
         
-        main_frame = tk.Frame(dialog, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = tk.Frame(main_container, padx=20, pady=20)
+        if hasattr(main_container, 'add_widget'):
+            main_container.add_widget(main_frame, expand=True)
+        else:
+            main_frame.pack(fill=tk.BOTH, expand=True)
         
         tk.Label(main_frame, text="Translation Chunk Prompt Template", 
                 font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
@@ -13038,42 +13487,45 @@ Important rules:
         self.chunk_prompt_text.bind('<KeyRelease>', update_example)
         update_example()
         
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        def save_chunk_prompt():
-            self.translation_chunk_prompt = self.chunk_prompt_text.get('1.0', tk.END).strip()
-            self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
-            messagebox.showinfo("Success", "Translation chunk prompt saved!")
-            dialog.destroy()
-        
-        def reset_chunk_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset to default chunk prompt?"):
-                self.chunk_prompt_text.delete('1.0', tk.END)
-                self.chunk_prompt_text.insert('1.0', self.default_translation_chunk_prompt)
-                update_example()
-        
-        tb.Button(button_frame, text="Save", command=save_chunk_prompt, 
-                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Reset to Default", command=reset_chunk_prompt, 
-                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-        
-        dialog.deiconify()
+        # Create buttons in fixed container
+        if 'buttons' in fixed_containers:
+            button_frame = fixed_containers['buttons']
+            
+            def save_chunk_prompt():
+                self.translation_chunk_prompt = self.chunk_prompt_text.get('1.0', tk.END).strip()
+                self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
+                messagebox.showinfo("Success", "Translation chunk prompt saved!")
+                dialog.destroy()
+            
+            def reset_chunk_prompt():
+                if messagebox.askyesno("Reset Prompt", "Reset to default chunk prompt?"):
+                    self.chunk_prompt_text.delete('1.0', tk.END)
+                    self.chunk_prompt_text.insert('1.0', self.default_translation_chunk_prompt)
+                    update_example()
+            
+            tb.Button(button_frame, text="💾 Save", command=save_chunk_prompt, 
+                     bootstyle="success", width=15).pack(side=tk.LEFT, padx=10, pady=10)
+            tb.Button(button_frame, text="🔄 Reset to Default", command=reset_chunk_prompt, 
+                     bootstyle="warning", width=20).pack(side=tk.LEFT, padx=10, pady=10)
+            tb.Button(button_frame, text="❌ Cancel", command=dialog.destroy, 
+                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=10, pady=10)
 
     def configure_image_chunk_prompt(self):
         """Configure the prompt template for image chunks"""
-        dialog = self.wm.create_simple_dialog(
+        dialog, main_container, fixed_containers = self.wm.setup_scrollable_advanced(
             self.master,
-            "Configure Image Chunk Prompt",
-            width=700,
-            height=None
+            "🖼️ Configure Image Chunk Prompt",
+            layout='vertical',
+            theme='modern',
+            fixed_sections=['buttons'],
+            responsive=True
         )
         
-        main_frame = tk.Frame(dialog, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = tk.Frame(main_container, padx=20, pady=20)
+        if hasattr(main_container, 'add_widget'):
+            main_container.add_widget(main_frame, expand=True)
+        else:
+            main_frame.pack(fill=tk.BOTH, expand=True)
         
         tk.Label(main_frame, text="Image Chunk Context Template", 
                 font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
@@ -13131,40 +13583,38 @@ Important rules:
         self.image_chunk_prompt_text.bind('<KeyRelease>', update_image_example)
         update_image_example()
         
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        def save_image_chunk_prompt():
-            self.image_chunk_prompt = self.image_chunk_prompt_text.get('1.0', tk.END).strip()
-            self.config['image_chunk_prompt'] = self.image_chunk_prompt
-            messagebox.showinfo("Success", "Image chunk prompt saved!")
-            dialog.destroy()
-        
-        def reset_image_chunk_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset to default image chunk prompt?"):
-                self.image_chunk_prompt_text.delete('1.0', tk.END)
-                self.image_chunk_prompt_text.insert('1.0', self.default_image_chunk_prompt)
-                update_image_example()
-        
-        tb.Button(button_frame, text="Save", command=save_image_chunk_prompt, 
-                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Reset to Default", command=reset_image_chunk_prompt, 
-                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-        
-        dialog.deiconify()
+        # Create buttons in fixed container
+        if 'buttons' in fixed_containers:
+            button_frame = fixed_containers['buttons']
+            
+            def save_image_chunk_prompt():
+                self.image_chunk_prompt = self.image_chunk_prompt_text.get('1.0', tk.END).strip()
+                self.config['image_chunk_prompt'] = self.image_chunk_prompt
+                messagebox.showinfo("Success", "Image chunk prompt saved!")
+                dialog.destroy()
+            
+            def reset_image_chunk_prompt():
+                if messagebox.askyesno("Reset Prompt", "Reset to default image chunk prompt?"):
+                    self.image_chunk_prompt_text.delete('1.0', tk.END)
+                    self.image_chunk_prompt_text.insert('1.0', self.default_image_chunk_prompt)
+                    update_image_example()
+            
+            tb.Button(button_frame, text="💾 Save", command=save_image_chunk_prompt, 
+                     bootstyle="success", width=15).pack(side=tk.LEFT, padx=10, pady=10)
+            tb.Button(button_frame, text="🔄 Reset to Default", command=reset_image_chunk_prompt, 
+                     bootstyle="warning", width=20).pack(side=tk.LEFT, padx=10, pady=10)
+            tb.Button(button_frame, text="❌ Cancel", command=dialog.destroy, 
+                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=10, pady=10)
 
     def configure_image_compression(self):
         """Open the image compression configuration dialog"""
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+        dialog, scrollable_frame, fixed_containers = self.wm.setup_scrollable_advanced(
             self.master,
-            "Image Compression Settings",
-            width=None,
-            height=None,
-            max_width_ratio=0.6,
-            max_height_ratio=1.2
+            "🗜️ Image Compression Settings",
+            layout='vertical',
+            theme='modern',
+            fixed_sections=['buttons'],
+            responsive=True
         )
         
         # Main container with padding
@@ -13372,51 +13822,52 @@ Important rules:
         tk.Label(info_frame, text=info_text, justify=tk.LEFT, 
                 font=('TkDefaultFont', 9), fg='#666').pack(anchor=tk.W)
         
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
-        
-        def save_image_compression():
-            try:
-                # Validate numeric inputs
+        # Create buttons in the fixed section
+        if 'buttons' in fixed_containers:
+            button_frame = fixed_containers['buttons']
+            
+            def save_image_compression():
                 try:
-                    int(self.target_image_tokens_var.get())
-                    int(self.max_image_dimension_var.get())
-                    float(self.max_image_size_mb_var.get())
-                except ValueError:
-                    messagebox.showerror("Invalid Input", "Please enter valid numbers for numeric fields")
-                    return
-                
-                # Save all settings
-                self.config['enable_image_compression'] = self.enable_image_compression_var.get()
-                self.config['auto_compress_enabled'] = self.auto_compress_enabled_var.get()
-                self.config['target_image_tokens'] = int(self.target_image_tokens_var.get())
-                self.config['image_compression_format'] = self.image_format_var.get()
-                self.config['webp_quality'] = self.webp_quality_var.get()
-                self.config['jpeg_quality'] = self.jpeg_quality_var.get()
-                self.config['png_compression'] = self.png_compression_var.get()
-                self.config['max_image_dimension'] = int(self.max_image_dimension_var.get())
-                self.config['max_image_size_mb'] = float(self.max_image_size_mb_var.get())
-                self.config['preserve_transparency'] = self.preserve_transparency_var.get()
-                self.config['preserve_original_format'] = self.preserve_original_format_var.get()
-                self.config['optimize_for_ocr'] = self.optimize_for_ocr_var.get()
-                self.config['progressive_encoding'] = self.progressive_encoding_var.get()
-                self.config['save_compressed_images'] = self.save_compressed_images_var.get()
-                
-                self.append_log("✅ Image compression settings saved")
-                dialog._cleanup_scrolling()
-                dialog.destroy()
-                
-            except Exception as e:
-                print(f"❌ Failed to save compression settings: {e}")
-                messagebox.showerror("Error", f"Failed to save settings: {e}")
-        
-        tb.Button(button_frame, text="💾 Save Settings", command=save_image_compression, 
-                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(button_frame, text="❌ Cancel", 
-                 command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
-                 bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
+                    # Validate numeric inputs
+                    try:
+                        int(self.target_image_tokens_var.get())
+                        int(self.max_image_dimension_var.get())
+                        float(self.max_image_size_mb_var.get())
+                    except ValueError:
+                        messagebox.showerror("Invalid Input", "Please enter valid numbers for numeric fields")
+                        return
+                    
+                    # Save all settings
+                    self.config['enable_image_compression'] = self.enable_image_compression_var.get()
+                    self.config['auto_compress_enabled'] = self.auto_compress_enabled_var.get()
+                    self.config['target_image_tokens'] = int(self.target_image_tokens_var.get())
+                    self.config['image_compression_format'] = self.image_format_var.get()
+                    self.config['webp_quality'] = self.webp_quality_var.get()
+                    self.config['jpeg_quality'] = self.jpeg_quality_var.get()
+                    self.config['png_compression'] = self.png_compression_var.get()
+                    self.config['max_image_dimension'] = int(self.max_image_dimension_var.get())
+                    self.config['max_image_size_mb'] = float(self.max_image_size_mb_var.get())
+                    self.config['preserve_transparency'] = self.preserve_transparency_var.get()
+                    self.config['preserve_original_format'] = self.preserve_original_format_var.get()
+                    self.config['optimize_for_ocr'] = self.optimize_for_ocr_var.get()
+                    self.config['progressive_encoding'] = self.progressive_encoding_var.get()
+                    self.config['save_compressed_images'] = self.save_compressed_images_var.get()
+                    
+                    self.append_log("✅ Image compression settings saved")
+                    if hasattr(dialog, '_cleanup_scrolling'):
+                        dialog._cleanup_scrolling()
+                    dialog.destroy()
+                    
+                except Exception as e:
+                    print(f"❌ Failed to save compression settings: {e}")
+                    messagebox.showerror("Error", f"Failed to save settings: {e}")
+            
+            tb.Button(button_frame, text="💾 Save Settings", command=save_image_compression, 
+                     bootstyle="success", width=20).pack(side=tk.LEFT, padx=10, pady=10)
+            
+            tb.Button(button_frame, text="❌ Cancel", 
+                     command=lambda: [dialog._cleanup_scrolling() if hasattr(dialog, '_cleanup_scrolling') else None, dialog.destroy()], 
+                     bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=10, pady=10)
         
         # Toggle function for enable/disable
         def _toggle_compression_options():
@@ -13435,11 +13886,6 @@ Important rules:
         
         # Set initial state
         _toggle_compression_options()
-        
-        # Auto-resize and show
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.6, max_height_ratio=1.2)
-        
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
     
     def prompt_custom_token_limit(self):
        val = simpledialog.askinteger(
@@ -13455,15 +13901,20 @@ Important rules:
 
     def configure_rolling_summary_prompts(self):
        """Configure rolling summary prompts"""
-       dialog = self.wm.create_simple_dialog(
+       dialog, main_container, fixed_containers = self.wm.setup_scrollable_advanced(
            self.master,
-           "Configure Memory System Prompts",
-           width=800,
-           height=1050
+           "🧠 Configure Memory System Prompts",
+           layout='vertical',
+           theme='modern',
+           fixed_sections=['buttons'],
+           responsive=True
        )
        
-       main_frame = tk.Frame(dialog, padx=20, pady=20)
-       main_frame.pack(fill=tk.BOTH, expand=True)
+       main_frame = tk.Frame(main_container, padx=20, pady=20)
+       if hasattr(main_container, 'add_widget'):
+           main_container.add_widget(main_frame, expand=True)
+       else:
+           main_frame.pack(fill=tk.BOTH, expand=True)
        
        tk.Label(main_frame, text="Memory System Configuration", 
                font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
@@ -13537,15 +13988,14 @@ Important rules:
 
     def open_other_settings(self):
         """Open the Other Settings dialog with compact tabbed interface"""
-        # Use the proper WindowManager with fixed bottom frame for buttons
-        dialog, scrollable_frame, canvas, fixed_frame = self.wm.setup_scrollable(
+        # Use the advanced scrollable dialog with fixed bottom frame for buttons
+        dialog, scrollable_frame, fixed_containers = self.wm.setup_scrollable_advanced(
             self.master,
-            "Other Settings",
-            width=0,
-            height=None,
-            max_width_ratio=0.65,
-            max_height_ratio=0.85,
-            fixed_bottom_frame=True  # Enable fixed bottom area for buttons
+            "⚙️ Other Settings",
+            layout='vertical',
+            theme='modern',
+            fixed_sections=['buttons'],
+            responsive=True
         )
         
         # Configure scrollable frame for better space management
@@ -13566,7 +14016,8 @@ Important rules:
         self._create_settings_tab("🔗 API Endpoints", self._create_custom_api_endpoints_section)
         
         # Save & Close buttons in FIXED bottom frame (always visible, never scrolls)
-        self._create_settings_buttons(fixed_frame, dialog, canvas)
+        if 'buttons' in fixed_containers:
+            self._create_settings_buttons(fixed_containers['buttons'], dialog, None)
         
         # Persist toggle change on dialog close
         def _persist_settings():
@@ -13574,12 +14025,10 @@ Important rules:
             os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var.get() else '0'
             # Save without user-facing message when closing Other Settings
             self.save_config(show_message=False)
-            dialog._cleanup_scrolling()
+            if hasattr(dialog, '_cleanup_scrolling'):
+                dialog._cleanup_scrolling()
             dialog.destroy()
         dialog.protocol("WM_DELETE_WINDOW", _persist_settings)
-        
-        # Use WindowManager's auto-resize functionality
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.65, max_height_ratio=0.85)
     
     def _create_settings_tab(self, tab_name, section_creator_func):
         """Create a tab and populate it with a section"""
