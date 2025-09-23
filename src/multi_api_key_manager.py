@@ -258,7 +258,7 @@ class APIKeyPool:
                                         del self._keys_in_use[k_idx]
                         
                         logger.info(f"[Thread-{thread_name}] Assigned {key_id}")
-                        time.sleep(0.1)  # Brief pause to improve retry responsiveness
+                        time.sleep(0.5)  # Brief pause to improve retry responsiveness
                         logger.debug("💤 Pausing briefly to improve retry responsiveness after key assignment")
                         return key, key_index, key_id
                 
@@ -287,7 +287,7 @@ class APIKeyPool:
                 key_id = f"Key#{best_key_index+1} ({key.model})"
                 logger.warning(f"[Thread-{thread_name}] All keys on cooldown, using {key_id} (cooldown: {min_cooldown:.1f}s)")
                 self._thread_assignments[thread_id] = (best_key_index, time.time())
-                time.sleep(0.1)  # Brief pause to improve retry responsiveness
+                time.sleep(0.5)  # Brief pause to improve retry responsiveness
                 logger.debug("💤 Pausing briefly to improve retry responsiveness after cooldown key selection")
                 return key, best_key_index, key_id
             
@@ -309,7 +309,7 @@ class APIKeyPool:
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
                     
                     print(f"Marked key {key_id} with error code {error_code}")
-                    time.sleep(0.1)  # Brief pause to improve retry responsiveness
+                    time.sleep(0.5)  # Brief pause to improve retry responsiveness
                     logger.debug("💤 Pausing briefly to improve retry responsiveness after marking key error")
 
     def mark_key_success(self, key_index: int):
@@ -2391,7 +2391,7 @@ class MultiAPIKeyDialog:
                 key.mark_success()
                 key.set_test_result('passed', 'Test successful')
                 print(f"[DEBUG] Key {index} test completed - PASSED")
-                time.sleep(0.1)  # Brief pause to improve retry responsiveness
+                time.sleep(0.5)  # Brief pause to improve retry responsiveness
                 logger.debug("💤 Pausing briefly to improve retry responsiveness after test completion")
                 return (index, True, "Test passed")
                 

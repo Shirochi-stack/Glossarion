@@ -1769,7 +1769,7 @@ class UnifiedClient:
             
             self._apply_key_change(key_info, old_key_identifier)
             print(f"🔄 Force key rotation: Key change completed, system ready...")
-            time.sleep(0.1)  # Brief pause after force rotation for system stability
+            time.sleep(0.5)  # Brief pause after force rotation for system stability
         else:
             print(f"[ERROR] Failed to rotate to next key")
     
@@ -1812,7 +1812,7 @@ class UnifiedClient:
             self._apply_individual_key_endpoint_if_needed()
             
             print(f"🔄 Key rotation: Endpoint setup completed, rotation successful...")
-            time.sleep(0.1)  # Brief pause after rotation for system stability
+            time.sleep(0.5)  # Brief pause after rotation for system stability
             return True
         
         print(f"[WARNING] No available keys to rotate to")
@@ -3560,7 +3560,7 @@ class UnifiedClient:
                                 print(f"🔄 Server error ({http_status or 'API error'}) - attempting key rotation (multi-key mode)")
                                 self._handle_rate_limit_for_thread()
                                 print(f"🔄 Server error retry: Key rotation completed, retrying immediately...")
-                                time.sleep(0.1)  # Brief pause after key rotation
+                                time.sleep(1)  # Brief pause after key rotation
                                 continue  # Retry with new key immediately
                             except Exception as rotation_error:
                                 print(f"❌ Key rotation failed during server error: {rotation_error}")
@@ -3578,7 +3578,7 @@ class UnifiedClient:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                             time.sleep(0.5)  # Check every 0.5 seconds
                         print(f"🔄 Server error retry: Backoff completed, initiating retry attempt...")
-                        time.sleep(0.1)  # Brief pause after backoff for retry stability
+                        time.sleep(1)  # Brief pause after backoff for retry stability
                         continue  # Retry the attempt
                     else:
                         print(f"❌ Server error ({http_status or 'API error'}) - exhausted {internal_retries} retries")
