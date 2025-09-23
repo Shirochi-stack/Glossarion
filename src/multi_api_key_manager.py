@@ -308,7 +308,7 @@ class APIKeyPool:
                     key_id = f"Key#{key_index+1} ({key.model})"
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
                     
-                    print(f"Marked key {key_id} with error code {error_code}")
+                    print(f"Marked key {key_id} with an error code")
                     time.sleep(0.5)  # Brief pause to improve retry responsiveness
                     logger.debug("💤 Pausing briefly to improve retry responsiveness after marking key error")
 

@@ -2170,7 +2170,7 @@ Recent translations to summarize:
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', True),
             ('batch_translation_var', 'batch_translation', False),
-            ('conservative_batching_var', 'conservative_batching', False),
+            ('conservative_batching_var', 'conservative_batching', True),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
