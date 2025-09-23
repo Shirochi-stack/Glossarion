@@ -1341,7 +1341,7 @@ class TranslatorGUI:
         
         # Initialize the variables with default values
         self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
-        self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 4))
+        self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 2))
 
         # Set initial environment variable and ensure executor
         if self.enable_parallel_extraction_var.get():
@@ -7479,10 +7479,10 @@ Provide translations in the same numbered format."""
                             
                             # Get user-configured worker count
                             if hasattr(self, 'config') and 'extraction_workers' in self.config:
-                                max_workers = self.config.get('extraction_workers', 4)
+                                max_workers = self.config.get('extraction_workers', 2)
                             else:
                                 # Fallback to environment variable or default
-                                max_workers = int(os.environ.get('EXTRACTION_WORKERS', '4'))
+                                max_workers = int(os.environ.get('EXTRACTION_WORKERS', '2'))
                             
                             # Set extraction parameters
                             os.environ['EXTRACTION_WORKERS'] = str(max_workers)
@@ -15548,7 +15548,7 @@ Important rules:
                     'bias_common_words': getattr(self, 'bias_common_words_var', type('', (), {'get': lambda: False})).get(),
                     'bias_repetitive_phrases': getattr(self, 'bias_repetitive_phrases_var', type('', (), {'get': lambda: False})).get(),
                     'enable_parallel_extraction': self.enable_parallel_extraction_var.get(),
-                    'extraction_workers': safe_int(self.extraction_workers_var.get(), 4),
+                    'extraction_workers': safe_int(self.extraction_workers_var.get(), 2),
                     
                     # Batch header translation settings
                     'batch_translate_headers': self.batch_translate_headers_var.get(),
