@@ -37,7 +37,7 @@ class UpdateManager:
         self.is_downloading = False
         # Load persistent check time from config
         self._last_check_time = self.main_gui.config.get('last_update_check_time', 0)
-        self._check_cache_duration = 3600  # Cache for 1 hour
+        self._check_cache_duration = 1800  # Cache for 30 minutes
         self.selected_asset = None  # Store selected asset for download
         
         # Get version from the main GUI's __version__ variable
