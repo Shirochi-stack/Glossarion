@@ -3432,6 +3432,10 @@ class UnifiedClient:
                 
                 self._apply_api_delay()
                 
+                # Brief stability pause after API call completion
+                if not getattr(self, '_in_cleanup', False):
+                    time.sleep(0.1)  # System stability pause after API completion
+                
                 # If the provider signaled a content filter, elevate to prohibited_content to trigger retries
                 if finish_reason == 'content_filter':
                     raise UnifiedClientError(

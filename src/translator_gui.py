@@ -15216,7 +15216,7 @@ Important rules:
             api_version = self.azure_api_version_var.get()
             if api_version:
                 os.environ['AZURE_API_VERSION'] = api_version
-                print(f"✅ Updated Azure API Version in environment: {api_version}")
+                #print(f"✅ Updated Azure API Version in environment: {api_version}")
         except Exception as e:
             print(f"❌ Error updating Azure API Version environment variable: {e}")
 
