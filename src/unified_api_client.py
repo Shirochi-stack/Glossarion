@@ -5811,16 +5811,15 @@ class UnifiedClient:
             next_available = self.__class__._last_api_call_start + api_delay
             
             if current_time < next_available:
-                sleep_time = next_available - current_time
                 # Reserve this slot
                 self.__class__._last_api_call_start = next_available
                 
                 # Check stop flag before logging stagger message
                 if not self._is_stop_requested():
-                    print(f"⏳ [{thread_name}] Staggering API call by {sleep_time:.1f}s")
+                    print(f"⏳ [{thread_name}] Staggering API call by {api_delay:.1f}s")
                 
                 # Sleep outside lock
-                time.sleep(sleep_time)
+                time.sleep(api_delay)
                 
                 # Immediately after stagger completes, indicate what is being sent
                 if not self._is_stop_requested():
