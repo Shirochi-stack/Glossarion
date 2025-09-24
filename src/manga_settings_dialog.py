@@ -89,7 +89,7 @@ class MangaSettingsDialog:
             'parallel_panel_translation': False,
             'panel_max_workers': 2,
             'auto_cleanup_models': False,  # Less aggressive by default
-            'auto_convert_to_onnx': True,
+            'auto_convert_to_onnx': False,  # Disabled by default
             'auto_convert_to_onnx_background': True,
             'quantize_models': False,
             'onnx_quantize': False,
@@ -2531,7 +2531,7 @@ class MangaSettingsDialog:
         onnx_frame = tk.LabelFrame(content_frame, text="ONNX Conversion", padx=15, pady=10)
         onnx_frame.pack(fill='x', padx=20, pady=(10, 0))
         
-        self.auto_convert_onnx_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx', True))
+        self.auto_convert_onnx_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx', False))
         self.auto_convert_onnx_bg_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx_background', True))
         
         def _toggle_onnx_controls():

@@ -122,6 +122,12 @@ LAMA_JIT_MODELS = {
         'md5': '5ecdac562c1d56267468fc4fbf80db27',
         'name': 'AOT GAN'
     },
+    'aot_onnx': {
+        'url': 'https://huggingface.co/ogkalu/aot-inpainting/resolve/main/aot.onnx',
+        'md5': 'ffd39ed8e2a275869d3b49180d030f0d8b8b9c2c20ed0e099ecd207201f0eada',
+        'name': 'AOT ONNX (Fast)',
+        'is_onnx': True
+    },
     'lama_onnx': {
         'url': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',
         'md5': None,  # Add MD5 if you want to verify
@@ -322,6 +328,7 @@ class LocalInpainter:
         'lama': ('LaMa Inpainting', FFCInpaintModel),
         'mat': ('MAT Inpainting', FFCInpaintModel),
         'aot': ('AOT GAN Inpainting', FFCInpaintModel),
+        'aot_onnx': ('AOT ONNX (Fast)', FFCInpaintModel),
         'sd': ('Stable Diffusion Inpainting', FFCInpaintModel),
         'anime': ('Anime/Manga Inpainting', FFCInpaintModel),
         'anime_onnx': ('Anime ONNX (Fast)', FFCInpaintModel),
@@ -1214,7 +1221,7 @@ class LocalInpainter:
                 _ext = os.path.splitext(model_path)[1].lower()
                 _method_lower = str(method).lower()
                 # For explicit ONNX methods, ensure we use a .onnx path
-                if _method_lower in ("lama_onnx", "anime_onnx") and _ext != ".onnx":
+                if _method_lower in ("lama_onnx", "anime_onnx", "aot_onnx") and _ext != ".onnx":
                     # If the file exists, try to detect if it's actually an ONNX model and correct the extension
                     if os.path.exists(model_path) and ONNX_AVAILABLE:
                         try:
@@ -1250,6 +1257,8 @@ class LocalInpainter:
                             # Download the appropriate ONNX model based on the method
                             if _method_lower == "anime_onnx":
                                 _dl = self.download_jit_model("anime_onnx")
+                            elif _method_lower == "aot_onnx":
+                                _dl = self.download_jit_model("aot_onnx")
                             else:
                                 _dl = self.download_jit_model("lama_onnx")
                             if _dl and os.path.exists(_dl):

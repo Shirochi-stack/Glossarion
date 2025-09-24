@@ -2041,7 +2041,7 @@ class MangaTranslationTab:
         local_model_combo = ttk.Combobox(
             local_model_frame,
             textvariable=self.local_model_type_var,
-            values= ['aot', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'],
+            values= ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'],
             state='readonly',
             width=15
         )
@@ -2053,6 +2053,7 @@ class MangaTranslationTab:
         model_desc = {
             'lama': 'LaMa (Best quality)',
             'aot': 'AOT GAN (Fast)',
+            'aot_onnx': 'AOT ONNX (Optimized)',
             'mat': 'MAT (High-res)',
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
@@ -2901,7 +2902,7 @@ class MangaTranslationTab:
         self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'anime_onnx'))
         
         # Load model paths
-        for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
+        for model_type in  ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             if model_type == self.local_model_type_var.get():
                 self.local_model_path_var = tk.StringVar(value=path)
@@ -4112,6 +4113,7 @@ class MangaTranslationTab:
         model_desc = {
             'lama': 'LaMa (Best quality)',
             'aot': 'AOT GAN (Fast)',
+            'aot_onnx': 'AOT ONNX (Optimized)',
             'mat': 'MAT (High-res)',
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
@@ -4300,6 +4302,7 @@ class MangaTranslationTab:
         # Define URLs for each model type
         model_urls = {
             'aot': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
+            'aot_onnx': 'https://huggingface.co/ogkalu/aot-inpainting/resolve/main/aot.onnx',
             'lama': 'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt',
             'lama_onnx': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',  
             'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
@@ -4319,6 +4322,7 @@ class MangaTranslationTab:
         # Determine filename
         filename_map = {
             'aot': 'aot_traced.pt',
+            'aot_onnx': 'aot.onnx',
             'lama': 'big-lama.pt',
             'anime': 'anime-manga-big-lama.pt',
             'anime_onnx': 'lama-manga-dynamic.onnx',
@@ -4495,6 +4499,14 @@ class MangaTranslationTab:
                    "• Good for general inpainting\n"
                    "• Fast processing speed\n"
                    "• File size: ~100MB",
+            
+            'aot_onnx': "AOT ONNX Model:\n\n"
+                        "• Optimized ONNX version\n"
+                        "• Auto-downloads from HuggingFace\n"
+                        "• 2-3x faster than PyTorch version\n"
+                        "• Great for batch processing\n"
+                        "• Lower memory usage\n"
+                        "• File size: ~100MB",
             
             'lama': "LaMa Model:\n\n"
                     "• Auto-downloads anime-optimized version\n"
