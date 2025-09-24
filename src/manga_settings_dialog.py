@@ -2444,11 +2444,34 @@ class MangaSettingsDialog:
         self.use_singleton_models = tk.BooleanVar(
             value=self.settings.get('advanced', {}).get('use_singleton_models', True)
         )
+        
+        def _toggle_singleton_mode():
+            """Disable parallel processing options when singleton mode is enabled"""
+            if self.use_singleton_models.get():
+                # Disable both parallel processing toggles
+                self.parallel_processing.set(0)
+                self.parallel_panel_var.set(False)
+                # Disable the UI elements
+                parallel_cb.config(state='disabled')
+                panel_cb.config(state='disabled')
+                # Also disable the spinboxes
+                self.workers_spinbox.config(state='disabled')
+                panel_workers_spinbox.config(state='disabled')
+                panel_stagger_spinbox.config(state='disabled')
+            else:
+                # Re-enable the UI elements
+                parallel_cb.config(state='normal')
+                panel_cb.config(state='normal')
+                # Re-enable spinboxes based on their toggle states
+                self._toggle_workers()
+                _toggle_panel_controls()
+        
         singleton_cb = tb.Checkbutton(
             memory_frame,
             text="Use single model instances (saves RAM, disables parallel processing)",
             variable=self.use_singleton_models,
-            bootstyle="round-toggle"
+            bootstyle="round-toggle",
+            command=_toggle_singleton_mode
         )
         singleton_cb.pack(anchor='w')
         
@@ -2490,12 +2513,24 @@ class MangaSettingsDialog:
         self.parallel_panel_var = tk.BooleanVar(
             value=self.settings.get('advanced', {}).get('parallel_panel_translation', False)
         )
-        tb.Checkbutton(
+        
+        def _toggle_panel_controls():
+            """Enable/disable panel spinboxes based on panel parallel toggle"""
+            if self.parallel_panel_var.get() and not self.use_singleton_models.get():
+                panel_workers_spinbox.config(state='normal')
+                panel_stagger_spinbox.config(state='normal')
+            else:
+                panel_workers_spinbox.config(state='disabled')
+                panel_stagger_spinbox.config(state='disabled')
+        
+        panel_cb = tb.Checkbutton(
             panel_frame,
             text="Enable parallel panel translation (process multiple images concurrently)",
             variable=self.parallel_panel_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+            bootstyle="round-toggle",
+            command=_toggle_panel_controls
+        )
+        panel_cb.pack(anchor='w')
 
         panels_row = tk.Frame(panel_frame)
         panels_row.pack(fill='x', pady=5)
@@ -2503,13 +2538,14 @@ class MangaSettingsDialog:
         self.panel_max_workers_var = tk.IntVar(
             value=self.settings.get('advanced', {}).get('panel_max_workers', 2)
         )
-        tb.Spinbox(
+        panel_workers_spinbox = tb.Spinbox(
             panels_row,
             from_=1,
             to=12,
             textvariable=self.panel_max_workers_var,
             width=10
-        ).pack(side='left', padx=10)
+        )
+        panel_workers_spinbox.pack(side='left', padx=10)
         
         # Panel start stagger (ms)
         stagger_row = tk.Frame(panel_frame)
@@ -2518,14 +2554,19 @@ class MangaSettingsDialog:
         self.panel_stagger_ms_var = tk.IntVar(
             value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 0)
         )
-        tb.Spinbox(
+        panel_stagger_spinbox = tb.Spinbox(
             stagger_row,
             from_=0,
             to=1000,
             textvariable=self.panel_stagger_ms_var,
             width=10
-        ).pack(side='left', padx=10)
+        )
+        panel_stagger_spinbox.pack(side='left', padx=10)
         tk.Label(stagger_row, text="ms").pack(side='left')
+        
+        # Initialize control states
+        _toggle_panel_controls()  # Initialize panel spinbox states
+        _toggle_singleton_mode()  # Initialize singleton mode state (may override above)
 
         # ONNX conversion settings
         onnx_frame = tk.LabelFrame(content_frame, text="ONNX Conversion", padx=15, pady=10)
