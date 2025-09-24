@@ -18,6 +18,9 @@ from tkinter import ttk
 import ttkbootstrap as tb
 from typing import List, Dict, Optional, Any
 from queue import Queue
+import logging
+import sys
+import threading
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
 
@@ -27,6 +30,72 @@ try:
     from unified_api_client import UnifiedClient
 except ImportError:
     UnifiedClient = None
+
+class _MangaGuiLogHandler(logging.Handler):
+    """Forward logging records into MangaTranslationTab._log."""
+    def __init__(self, gui_ref, level=logging.INFO):
+        super().__init__(level)
+        self.gui_ref = gui_ref
+        self._last_msg = None
+        self.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Avoid looping/duplicates from this module's own messages or when stdio is redirected
+        try:
+            if getattr(self.gui_ref, '_stdio_redirect_active', False):
+                return
+            if record and isinstance(record.name, str) and record.name.startswith(('manga_integration',)):
+                return
+        except Exception:
+            pass
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = record.getMessage()
+        # Deduplicate identical consecutive messages
+        if msg == self._last_msg:
+            return
+        self._last_msg = msg
+        try:
+            if hasattr(self.gui_ref, '_log'):
+                # Map logging levels to our tag levels
+                lvl = record.levelname.lower()
+                tag = 'info'
+                if lvl.startswith('warn'):
+                    tag = 'warning'
+                elif lvl.startswith('err') or lvl.startswith('crit'):
+                    tag = 'error'
+                elif lvl.startswith('debug'):
+                    tag = 'debug'
+                elif lvl.startswith('info'):
+                    tag = 'info'
+                self.gui_ref._log(msg, tag)
+        except Exception:
+            pass
+
+class _StreamToGuiLog:
+    """A minimal file-like stream that forwards lines to _log."""
+    def __init__(self, write_cb):
+        self._write_cb = write_cb
+        self._buf = ''
+
+    def write(self, s: str):
+        try:
+            self._buf += s
+            while '\n' in self._buf:
+                line, self._buf = self._buf.split('\n', 1)
+                if line.strip():
+                    self._write_cb(line)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            if self._buf.strip():
+                self._write_cb(self._buf)
+            self._buf = ''
+        except Exception:
+            pass
 
 class MangaTranslationTab:
     """GUI interface for manga translation integrated with TranslatorGUI"""
@@ -107,6 +176,11 @@ class MangaTranslationTab:
         # Queue for thread-safe GUI updates
         self.update_queue = Queue()
         
+        # Flags for stdio redirection to avoid duplicate GUI logs
+        self._stdout_redirect_on = False
+        self._stderr_redirect_on = False
+        self._stdio_redirect_active = False
+        
         # Flag to prevent saving during initialization
         self._initializing = True
         
@@ -170,6 +244,9 @@ class MangaTranslationTab:
         # Now that everything is initialized, allow saving
         self._initializing = False
         
+        # Attach logging bridge so library logs appear in our log area
+        self._attach_logging_bridge()
+
         # Start update loop
         self._process_updates()
     
@@ -1930,7 +2007,7 @@ class MangaTranslationTab:
         # Skip inpainting toggle - store as instance variable
         self.skip_inpainting_checkbox = tb.Checkbutton(
             render_frame, 
-            text="Skip Inpainter (Recommended)", 
+            text="Skip Inpainter", 
             variable=self.skip_inpainting_var,
             bootstyle="round-toggle",
             command=self._toggle_inpaint_visibility
@@ -2680,7 +2757,7 @@ class MangaTranslationTab:
         
         self.log_text = tk.Text(
             log_scroll_frame,
-            height=24,
+            height=28,
             wrap=tk.WORD,
             yscrollcommand=log_scrollbar.set
         )
@@ -4202,68 +4279,64 @@ class MangaTranslationTab:
             pass
 
     def _try_load_model(self, method: str, model_path: str):
-        """Try to load a model and update status"""
+        """Try to load a model and update status (runs loading on a background thread)."""
         try:
-            # Show loading status
+            # Show loading status immediately
             self.local_model_status_label.config(text="⏳ Loading model...", fg='orange')
             self.dialog.update_idletasks()
-            
             self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
-            
-            # Try to load using LocalInpainter
-            from local_inpainter import LocalInpainter
-            
-            # Initialize test inpainter
-            test_inpainter = LocalInpainter()
-            
-            # Try to load the model (with retries)
-            if test_inpainter.load_model_with_retry(method, model_path, force_reload=True):
-                # Success - update status using existing method
-                self._update_local_model_status()
-                
-                # Override with success message temporarily
-                self.local_model_status_label.config(
-                    text=f"✅ {method.upper()} model loaded successfully!",
-                    fg='green'
-                )
-                
-                self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
-                
-                # Update the translator's inpainter if it exists
-                if hasattr(self, 'translator') and self.translator:
-                    # Force reinitialize with new model - DELETE the attributes completely
-                    if hasattr(self.translator, 'local_inpainter'):
-                        delattr(self.translator, 'local_inpainter')
-                    if hasattr(self.translator, '_last_local_method'):
-                        delattr(self.translator, '_last_local_method')
-                    if hasattr(self.translator, '_last_local_model_path'):
-                        delattr(self.translator, '_last_local_model_path')
-                
-                # After 3 seconds, revert to normal status display
-                self.dialog.after(3000, self._update_local_model_status)
-                
-                return True
-            else:
-                self.local_model_status_label.config(
-                    text="⚠️ Model file found but failed to load",
-                    fg='orange'
-                )
-                self.main_gui.append_log(f"⚠️ Model file found but failed to load")
-                return False
-                
-        except ImportError:
-            self.local_model_status_label.config(
-                text="❌ Local inpainter module not available",
-                fg='red'
-            )
-            self.main_gui.append_log("❌ Local inpainter module not available", "error")
-            return False
+
+            def do_load():
+                from local_inpainter import LocalInpainter
+                ok = False
+                try:
+                    test_inpainter = LocalInpainter()
+                    ok = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
+                except Exception as e:
+                    self.main_gui.append_log(f"❌ Error loading model: {e}")
+                    ok = False
+                # Update UI on main thread
+                def _after():
+                    if ok:
+                        self._update_local_model_status()
+                        self.local_model_status_label.config(
+                            text=f"✅ {method.upper()} model loaded successfully!",
+                            fg='green'
+                        )
+                        self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
+                        if hasattr(self, 'translator') and self.translator:
+                            for attr in ('local_inpainter', '_last_local_method', '_last_local_model_path'):
+                                if hasattr(self.translator, attr):
+                                    try:
+                                        delattr(self.translator, attr)
+                                    except Exception:
+                                        pass
+                        self.dialog.after(3000, self._update_local_model_status)
+                    else:
+                        self.local_model_status_label.config(
+                            text="⚠️ Model file found but failed to load",
+                            fg='orange'
+                        )
+                        self.main_gui.append_log("⚠️ Model file found but failed to load")
+                try:
+                    self.dialog.after(0, _after)
+                except Exception:
+                    pass
+            # Fire background loader
+            threading.Thread(target=do_load, daemon=True).start()
+            return True
         except Exception as e:
+            try:
+                self.local_model_status_label.config(text=f"❌ Error: {str(e)[:50]}", fg='red')
+            except Exception:
+                pass
+            self.main_gui.append_log(f"❌ Error loading model: {e}")
+            return False
             self.local_model_status_label.config(
                 text=f"❌ Error: {str(e)[:50]}",
                 fg='red'
             )
-            print(f"❌ Error loading model: {str(e)}")
+            self.main_gui.append_log(f"❌ Error loading model: {str(e)}")
             return False
         
     def _update_local_model_status(self):
@@ -5002,6 +5075,63 @@ class MangaTranslationTab:
         except Exception as e:
             self._log(f"⚠️ Failed to compile CBZ packages: {e}", "warning")
 
+    def _attach_logging_bridge(self):
+        """Attach a root logging handler that forwards records into the GUI log."""
+        try:
+            if getattr(self, '_gui_log_handler', None) is None:
+                handler = _MangaGuiLogHandler(self, level=logging.INFO)
+                root_logger = logging.getLogger()
+                # Avoid duplicates
+                if all(not isinstance(h, _MangaGuiLogHandler) for h in root_logger.handlers):
+                    root_logger.addHandler(handler)
+                self._gui_log_handler = handler
+                # Ensure common module loggers propagate
+                for name in ['bubble_detector', 'local_inpainter', 'manga_translator']:
+                    try:
+                        lg = logging.getLogger(name)
+                        lg.setLevel(logging.INFO)
+                        lg.propagate = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _redirect_stderr(self, enable: bool):
+        """Temporarily redirect stderr to the GUI log (captures tqdm/HF progress)."""
+        try:
+            if enable:
+                if not hasattr(self, '_old_stderr') or self._old_stderr is None:
+                    self._old_stderr = sys.stderr
+                    sys.stderr = _StreamToGuiLog(lambda s: self._log(s, 'info'))
+                self._stderr_redirect_on = True
+            else:
+                if hasattr(self, '_old_stderr') and self._old_stderr is not None:
+                    sys.stderr = self._old_stderr
+                    self._old_stderr = None
+                self._stderr_redirect_on = False
+            # Update combined flag to avoid double-forwarding with logging handler
+            self._stdio_redirect_active = bool(self._stdout_redirect_on or self._stderr_redirect_on)
+        except Exception:
+            pass
+
+    def _redirect_stdout(self, enable: bool):
+        """Temporarily redirect stdout to the GUI log."""
+        try:
+            if enable:
+                if not hasattr(self, '_old_stdout') or self._old_stdout is None:
+                    self._old_stdout = sys.stdout
+                    sys.stdout = _StreamToGuiLog(lambda s: self._log(s, 'info'))
+                self._stdout_redirect_on = True
+            else:
+                if hasattr(self, '_old_stdout') and self._old_stdout is not None:
+                    sys.stdout = self._old_stdout
+                    self._old_stdout = None
+                self._stdout_redirect_on = False
+            # Update combined flag to avoid double-forwarding with logging handler
+            self._stdio_redirect_active = bool(self._stdout_redirect_on or self._stderr_redirect_on)
+        except Exception:
+            pass
+
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI text widget or console with enhanced stop suppression"""
         # Enhanced stop suppression - allow only essential stop confirmation messages
@@ -5016,6 +5146,16 @@ class MangaTranslationTab:
             # Suppress ALL other messages when stopped - be very restrictive
             if not any(keyword in message for keyword in essential_stop_keywords):
                 return
+        
+        # Lightweight deduplication: ignore identical lines within a short interval
+        try:
+            now = time.time()
+            last_msg = getattr(self, '_last_log_msg', None)
+            last_ts = getattr(self, '_last_log_time', 0)
+            if last_msg == message and (now - last_ts) < 0.7:
+                return
+        except Exception:
+            pass
             
         # Check if log_text widget exists yet
         if hasattr(self, 'log_text') and self.log_text:
@@ -5034,6 +5174,13 @@ class MangaTranslationTab:
         else:
             # Widget doesn't exist yet or we're in initialization, print to console
             print(message)
+        
+        # Update deduplication state
+        try:
+            self._last_log_msg = message
+            self._last_log_time = time.time()
+        except Exception:
+            pass
     
     def _update_progress(self, current: int, total: int, status: str):
         """Thread-safe progress update"""
@@ -5042,6 +5189,37 @@ class MangaTranslationTab:
     def _update_current_file(self, filename: str):
         """Thread-safe current file update"""
         self.update_queue.put(('current_file', filename))
+    
+    def _start_startup_heartbeat(self):
+        """Show a small spinner in the progress label during startup so there is no silence."""
+        try:
+            self._startup_heartbeat_running = True
+            self._heartbeat_idx = 0
+            chars = ['|', '/', '-', '\\']
+            def tick():
+                if not getattr(self, '_startup_heartbeat_running', False):
+                    return
+                try:
+                    c = chars[self._heartbeat_idx % len(chars)]
+                    if hasattr(self, 'progress_label'):
+                        self.progress_label.config(text=f"Starting… {c}", fg='white')
+                except Exception:
+                    pass
+                self._heartbeat_idx += 1
+                try:
+                    self.parent_frame.after(250, tick)
+                except Exception:
+                    pass
+            # Kick off on main thread
+            self.parent_frame.after(0, tick)
+        except Exception:
+            pass
+
+    def _stop_startup_heartbeat(self):
+        try:
+            self._startup_heartbeat_running = False
+        except Exception:
+            pass
     
     def _process_updates(self):
         """Process queued GUI updates"""
@@ -5125,14 +5303,55 @@ class MangaTranslationTab:
             
     def _start_translation(self):
         """Start the translation process"""
+        # Mirror console output to GUI during startup for immediate feedback
+        self._redirect_stdout(True)
+        self._redirect_stderr(True)
         if not self.selected_files:
             messagebox.showwarning("No Files", "Please select manga images to translate.")
             return
         
+        # Immediately disable Start to prevent double-clicks
+        try:
+            if hasattr(self, 'start_button') and self.start_button and self.start_button.winfo_exists():
+                self.start_button.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        
+        # Clear existing log immediately (main thread) so the next lines are visible
+        try:
+            if hasattr(self, 'log_text') and self.log_text:
+                self.log_text.config(state='normal')
+                self.log_text.delete('1.0', tk.END)
+                self.log_text.config(state='disabled')
+        except Exception:
+            pass
+        
+        # Immediate minimal feedback
+        self._log("starting translation", "info")
+        try:
+            self.dialog.update_idletasks()
+        except Exception:
+            pass
+        # Start heartbeat spinner so there's visible activity until logs stream
+        self._start_startup_heartbeat()
+        
         # Reset all stop flags at the start of new translation
         self.reset_stop_flags()
         self._log("🚀 Starting new manga translation batch", "info")
+        try:
+            # Let the GUI render the above log immediately
+            self.dialog.update_idletasks()
+        except Exception:
+            pass
         
+        # Run the heavy preparation and kickoff in a background thread to avoid GUI freeze
+        threading.Thread(target=self._start_translation_heavy, name="MangaStartHeavy", daemon=True).start()
+        return
+    
+    def _start_translation_heavy(self):
+        """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
+        # Early feedback
+        self._log("⏳ Preparing configuration...", "info")
         # Build OCR configuration
         ocr_config = {'provider': self.ocr_provider_var.get()}
 
@@ -5166,7 +5385,15 @@ class MangaTranslationTab:
             import os
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
             if not google_creds or not os.path.exists(google_creds):
-                messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
+                try:
+                    self.dialog.after(0, lambda: messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings."))
+                except Exception:
+                    pass
+                try:
+                    self.parent_frame.after(0, self._stop_startup_heartbeat)
+                    self.parent_frame.after(0, self._reset_ui_state)
+                except Exception:
+                    pass
                 return
             ocr_config['google_credentials_path'] = google_creds
             
@@ -5175,7 +5402,15 @@ class MangaTranslationTab:
             azure_endpoint = self.azure_endpoint_entry.get().strip()
             
             if not azure_key or not azure_endpoint:
-                messagebox.showerror("Error", "Azure credentials not configured.")
+                try:
+                    self.dialog.after(0, lambda: messagebox.showerror("Error", "Azure credentials not configured."))
+                except Exception:
+                    pass
+                try:
+                    self.parent_frame.after(0, self._stop_startup_heartbeat)
+                    self.parent_frame.after(0, self._reset_ui_state)
+                except Exception:
+                    pass
                 return
             
             # Save Azure settings
@@ -5204,18 +5439,29 @@ class MangaTranslationTab:
             model = self.main_gui.config.get('model')
         
         if not api_key:
-            messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings.")
+            try:
+                self.dialog.after(0, lambda: messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings."))
+            except Exception:
+                pass
+            try:
+                self.parent_frame.after(0, self._stop_startup_heartbeat)
+                self.parent_frame.after(0, self._reset_ui_state)
+            except Exception:
+                pass
             return
         
         # Check if we need to create or update the client
         needs_new_client = False
+        self._log("🔎 Checking API client...", "debug")
         
         if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
             needs_new_client = True
-            self._log(f"Creating new API client with model: {model}", "info")
+            self._log(f"🛠 Creating new API client with model: {model}", "info")
         elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
             needs_new_client = True
-            self._log(f"Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
+            self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
+        else:
+            self._log("♻️ Reusing existing API client", "debug")
         
         if needs_new_client:
             # Apply multi-key settings from config so UnifiedClient picks them up
@@ -5247,12 +5493,23 @@ class MangaTranslationTab:
             # Create the unified client with the current model
             try:
                 from unified_api_client import UnifiedClient
+                self._log("⏳ Creating API client (network/model handshake)...", "debug")
                 self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
-                self._log(f"Created API client with model: {model}", "info")
-                time.sleep(0.1)  # Brief pause for stability
-                self._log("💤 API client creation pausing briefly for stability", "debug")
+                self._log(f"✅ API client ready (model: {model})", "info")
+                try:
+                    time.sleep(0.05)
+                except Exception:
+                    pass
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
+                try:
+                    self.dialog.after(0, lambda e=e: messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}"))
+                except Exception:
+                    pass
+                try:
+                    self.parent_frame.after(0, self._stop_startup_heartbeat)
+                    self.parent_frame.after(0, self._reset_ui_state)
+                except Exception:
+                    pass
                 return
         
         # Reset the translator's history manager for new batch
@@ -5354,7 +5611,7 @@ class MangaTranslationTab:
         
         # Initialize translator if needed (or if it was reset)
         if not self.translator or not hasattr(self, 'translator'):
-            self._log("🆕 Creating new translator instance...", "info")
+            self._log("⚙️ Initializing translator...", "info")
             try:
                 self.translator = MangaTranslator(
                     ocr_config,
@@ -5391,14 +5648,25 @@ class MangaTranslationTab:
                 # Apply text rendering settings
                 self._apply_rendering_settings()
                 
-                time.sleep(0.1)  # Brief pause for stability
-                self._log("💤 Translator initialization pausing briefly for stability", "debug")
+                try:
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+                self._log("✅ Translator ready", "info")
                 
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
+                try:
+                    self.dialog.after(0, lambda e=e: messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}"))
+                except Exception:
+                    pass
                 self._log(f"Initialization error: {str(e)}", "error")
                 import traceback
                 self._log(traceback.format_exc(), "error")
+                try:
+                    self.parent_frame.after(0, self._stop_startup_heartbeat)
+                    self.parent_frame.after(0, self._reset_ui_state)
+                except Exception:
+                    pass
                 return
         else:
             # Update the translator with the new client if model changed
@@ -5488,9 +5756,6 @@ class MangaTranslationTab:
         except Exception:
             pass
         
-        # Clear log
-        self.parent_frame.after(0, lambda: self.log_text.delete('1.0', tk.END))
-        
         # Reset progress
         self.total_files = len(self.selected_files)
         self.completed_files = 0
@@ -5500,15 +5765,23 @@ class MangaTranslationTab:
         # Reset all global cancellation flags for new translation
         self._reset_global_cancellation()
         
-        # Update UI state
+        # Update UI state (schedule on main thread)
         self.is_running = True
         self.stop_flag.clear()
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        
-        # Disable file modification during translation
-        for widget in [self.file_listbox]:
-            widget.config(state=tk.DISABLED)
+        if threading.current_thread() == threading.main_thread():
+            try:
+                self.start_button.config(state=tk.DISABLED)
+                self.stop_button.config(state=tk.NORMAL)
+                self.file_listbox.config(state=tk.DISABLED)
+            except Exception:
+                pass
+        else:
+            try:
+                self.parent_frame.after(0, lambda: self.start_button.config(state=tk.DISABLED))
+                self.parent_frame.after(0, lambda: self.stop_button.config(state=tk.NORMAL))
+                self.parent_frame.after(0, lambda: self.file_listbox.config(state=tk.DISABLED))
+            except Exception:
+                pass
         
         # Log start message
         self._log(f"Starting translation of {self.total_files} files...", "info")
@@ -5542,6 +5815,12 @@ class MangaTranslationTab:
             self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
             self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+        
+        # Stop heartbeat before launching worker; now regular progress takes over
+        try:
+            self.parent_frame.after(0, self._stop_startup_heartbeat)
+        except Exception:
+            pass
         
         # Start translation via executor
         try:
@@ -6357,6 +6636,14 @@ class MangaTranslationTab:
     
     def _reset_ui_state(self):
         """Reset UI to ready state - with widget existence checks"""
+        # Restore stdio redirection if active
+        self._redirect_stderr(False)
+        self._redirect_stdout(False)
+        # Stop any startup heartbeat if still running
+        try:
+            self._stop_startup_heartbeat()
+        except Exception:
+            pass
         try:
             # Check if the dialog still exists
             if not hasattr(self, 'dialog') or not self.dialog or not self.dialog.winfo_exists():

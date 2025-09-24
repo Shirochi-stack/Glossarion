@@ -319,6 +319,18 @@ class BubbleDetector:
             True if model loaded successfully, False otherwise
         """
         try:
+            # If given a Hugging Face repo ID (e.g., 'owner/name'), fetch detector.onnx into models/
+            if model_path and (('/' in model_path) and not os.path.exists(model_path)):
+                try:
+                    from huggingface_hub import hf_hub_download
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                    logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {self.cache_dir}...")
+                    resolved = hf_hub_download(repo_id=model_path, filename='detector.onnx', cache_dir=self.cache_dir, local_dir=self.cache_dir, local_dir_use_symlinks=False)
+                    if resolved and os.path.exists(resolved):
+                        model_path = resolved
+                        logger.info(f"✅ Downloaded detector.onnx to: {model_path}")
+                except Exception as repo_err:
+                    logger.error(f"Failed to download from repo '{model_path}': {repo_err}")
             if not os.path.exists(model_path):
                 logger.error(f"Model file not found: {model_path}")
                 return False
@@ -1530,16 +1542,16 @@ class BubbleDetector:
                 logger.error(f"huggingface-hub required to fetch RT-DETR ONNX: {e}")
                 return False
 
-            # Ensure local models dir
-            cache_dir = os.path.join(self.cache_dir, 'detection')
+            # Ensure local models dir (use configured cache_dir directly: e.g., 'models')
+            cache_dir = self.cache_dir
             os.makedirs(cache_dir, exist_ok=True)
 
-            # Download files
+            # Download files into models/ and avoid symlinks so the file is visible there
             try:
-                _ = hf_hub_download(repo_id=repo, filename='config.json')
+                _ = hf_hub_download(repo_id=repo, filename='config.json', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             except Exception:
                 pass
-            onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx')
+            onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             BubbleDetector._rtdetr_onnx_model_path = onnx_fp
 
             # Pick providers: prefer CUDA if available; otherwise CPU. Do NOT use DML.
