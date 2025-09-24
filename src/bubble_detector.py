@@ -1520,20 +1520,38 @@ class BubbleDetector:
                 pass
             onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx')
 
-            # Pick providers
+            # Pick providers (prefer DML on Windows/AMD, then CUDA, then CPU)
             providers = ['CPUExecutionProvider']
             try:
                 avail = ort.get_available_providers() if ONNX_AVAILABLE else []
-                if self.use_gpu and 'CUDAExecutionProvider' in avail:
+                if 'DmlExecutionProvider' in avail:
+                    providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+                elif self.use_gpu and 'CUDAExecutionProvider' in avail:
                     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
             except Exception:
                 pass
 
-            # Session options with reduced memory arena (already set via env)
+            # Session options with reduced memory arena and optional thread limiting in singleton mode
             so = ort.SessionOptions()
             try:
                 so.enable_mem_pattern = False
                 so.enable_cpu_mem_arena = False
+            except Exception:
+                pass
+            # If singleton models mode is enabled in config, limit ORT threading to reduce CPU spikes
+            try:
+                adv = (self.config or {}).get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+                if bool(adv.get('use_singleton_models', True)):
+                    so.intra_op_num_threads = 1
+                    so.inter_op_num_threads = 1
+                    try:
+                        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    except Exception:
+                        pass
+                    try:
+                        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

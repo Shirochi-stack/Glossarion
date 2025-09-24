@@ -394,6 +394,8 @@ class LocalInpainter:
         # Quantization/precision toggle (off by default)
         try:
             adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+            # Track singleton mode from settings for thread limiting
+            self.singleton_mode = bool(adv_cfg.get('use_singleton_models', True))
             env_quant = os.environ.get('MODEL_QUANTIZE', 'false').lower() == 'true'
             self.quantize_enabled = bool(env_quant or adv_cfg.get('quantize_models', False))
             # ONNX quantization is now strictly opt-in (config or env), decoupled from general quantize_models
@@ -614,7 +616,17 @@ class LocalInpainter:
                 self.onnx_fixed_size = None
             
             # Standard ONNX loading, device-aware transformations for specific models
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
+            # Prefer DirectML on Windows/AMD if available; otherwise CUDA if available; else CPU
+            try:
+                avail = ort.get_available_providers() if ONNX_AVAILABLE else []
+            except Exception:
+                avail = []
+            if 'DmlExecutionProvider' in avail:
+                providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+            elif self.use_gpu and 'CUDAExecutionProvider' in avail:
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            else:
+                providers = ['CPUExecutionProvider']
             session_path = onnx_path
             try:
                 fname_lower = os.path.basename(onnx_path).lower()
@@ -972,6 +984,21 @@ class LocalInpainter:
             try:
                 so.enable_mem_pattern = False
                 so.enable_cpu_mem_arena = False
+            except Exception:
+                pass
+            # If singleton mode, limit ORT internal threading and parallel execution
+            try:
+                if getattr(self, 'singleton_mode', False):
+                    so.intra_op_num_threads = 1
+                    so.inter_op_num_threads = 1
+                    try:
+                        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    except Exception:
+                        pass
+                    try:
+                        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+                    except Exception:
+                        pass
             except Exception:
                 pass
             # Try to create an inference session, with graceful fallbacks

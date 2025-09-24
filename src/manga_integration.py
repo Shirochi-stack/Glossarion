@@ -91,6 +91,16 @@ class MangaTranslationTab:
             adv_cfg = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
         except Exception:
             adv_cfg = {}
+        # In singleton mode, reduce OpenCV thread usage to avoid CPU spikes
+        try:
+            if bool(adv_cfg.get('use_singleton_models', True)):
+                import cv2 as _cv2
+                try:
+                    _cv2.setNumThreads(1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Do NOT preload big local models by default to avoid startup crashes
         self.preload_local_models_on_open = bool(adv_cfg.get('preload_local_models_on_open', False))
         
