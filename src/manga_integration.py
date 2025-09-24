@@ -2058,6 +2058,7 @@ class MangaTranslationTab:
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
+            'lama_onnx': 'LaMa ONNX (Optimized)',
         }
         self.model_desc_label = tk.Label(
             local_model_frame,
@@ -5664,7 +5665,24 @@ class MangaTranslationTab:
         try:
             self.translator.set_stop_flag(self.stop_flag)
             
-            # Panel-level parallelization setting
+            # Ensure API parallelism (batch API calls) is controlled independently of local parallel processing.
+            # Propagate the GUI "Batch Translation" toggle into environment so Unified API Client applies it globally
+            # for all providers (including custom endpoints).
+            try:
+                import os as _os
+                _os.environ['BATCH_TRANSLATION'] = '1' if getattr(self.main_gui, 'batch_translation_var', None) and self.main_gui.batch_translation_var.get() else '0'
+                # Use GUI batch size if available; default to 3 to match existing default
+                bs_val = None
+                try:
+                    bs_val = str(int(self.main_gui.batch_size_var.get())) if hasattr(self.main_gui, 'batch_size_var') else None
+                except Exception:
+                    bs_val = None
+                _os.environ['BATCH_SIZE'] = bs_val or _os.environ.get('BATCH_SIZE', '3')
+            except Exception:
+                # Non-fatal if env cannot be set
+                pass
+            
+            # Panel-level parallelization setting (LOCAL threading for panels)
             advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
             panel_parallel = bool(advanced.get('parallel_panel_translation', False))
             panel_workers = int(advanced.get('panel_max_workers', 2))

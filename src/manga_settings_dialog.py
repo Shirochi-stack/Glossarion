@@ -2446,12 +2446,14 @@ class MangaSettingsDialog:
         )
         
         def _toggle_singleton_mode():
-            """Disable parallel processing options when singleton mode is enabled"""
+            """Disable LOCAL parallel processing options when singleton mode is enabled.
+            Note: This does NOT affect parallel API calls (batch translation).
+            """
             if self.use_singleton_models.get():
-                # Disable both parallel processing toggles
+                # Disable LOCAL parallel processing toggles (but NOT API batch translation)
                 self.parallel_processing.set(0)
                 self.parallel_panel_var.set(False)
-                # Disable the UI elements
+                # Disable the UI elements for LOCAL parallel processing
                 parallel_cb.config(state='disabled')
                 panel_cb.config(state='disabled')
                 # Also disable the spinboxes
@@ -2468,7 +2470,7 @@ class MangaSettingsDialog:
         
         singleton_cb = tb.Checkbutton(
             memory_frame,
-            text="Use single model instances (saves RAM, disables parallel processing)",
+            text="Use single model instances (saves RAM, only affects local models)",
             variable=self.use_singleton_models,
             bootstyle="round-toggle",
             command=_toggle_singleton_mode
@@ -2478,7 +2480,8 @@ class MangaSettingsDialog:
         singleton_note = tk.Label(
             memory_frame,
             text="When enabled: One bubble detector & one inpainter shared across all images.\n"
-                 "When disabled: Each thread/image can have its own models (uses more RAM).",
+                 "When disabled: Each thread/image can have its own models (uses more RAM).\n"
+                 "✅ Batch API translation remains fully functional with singleton mode enabled.",
             font=('Arial', 9),
             fg='gray',
             justify='left'

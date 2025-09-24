@@ -179,9 +179,20 @@ class MangaTranslator:
         self.cancel_requested = False
         self.stop_flag = None  # Initialize stop_flag attribute
 
-        # Initialize batch mode attributes
-        self.batch_mode = main_gui.batch_translation_var.get() if hasattr(main_gui, 'batch_translation_var') else False
-        self.batch_size = int(main_gui.batch_size_var.get()) if hasattr(main_gui, 'batch_size_var') else 1
+        # Initialize batch mode attributes (API parallelism) from environment, not GUI local toggles
+        # BATCH_TRANSLATION controls whether UnifiedClient allows concurrent API calls across threads.
+        try:
+            self.batch_mode = os.getenv('BATCH_TRANSLATION', '0') == '1'
+        except Exception:
+            self.batch_mode = False
+        try:
+            self.batch_size = int(os.getenv('BATCH_SIZE', '1'))
+        except Exception:
+            # Fallback to GUI entry if present; otherwise default to 1
+            try:
+                self.batch_size = int(main_gui.batch_size_var.get()) if hasattr(main_gui, 'batch_size_var') else 1
+            except Exception:
+                self.batch_size = 1
         self.batch_current = 1 
         
         if self.batch_mode:
@@ -2289,9 +2300,10 @@ class MangaTranslator:
                             # Clear detections after extracting regions
                             rtdetr_detections = None
                             
-                            # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
-                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions")
+                            # Decide parallelization for custom-api:
+                            # Use API batch mode OR local parallel toggle so that API calls can run in parallel
+                            if (getattr(self, 'batch_mode', False) or self.parallel_processing) and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions (custom-api; API batch mode honored)")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'custom-api', confidence_threshold)
                             else:
                                 # Original sequential processing
@@ -2665,6 +2677,17 @@ class MangaTranslator:
         
         # Process regions in parallel
         max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        # For custom-api, treat OCR calls as API calls: use batch size when batch mode is enabled
+        try:
+            if provider == 'custom-api':
+                # prefer MangaTranslator.batch_size (from env BATCH_SIZE)
+                bs = int(getattr(self, 'batch_size', 0) or int(os.getenv('BATCH_SIZE', '0')))
+                if bs and bs > 0:
+                    max_workers = bs
+        except Exception:
+            pass
+        # Never spawn more workers than regions
+        max_workers = max(1, min(max_workers, len(regions)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_index = {}
@@ -4840,7 +4863,15 @@ class MangaTranslator:
                 self._log("   🧽 Using local inpainting", "info")
                 return inp.inpaint(image, mask)
             else:
-                self._log("   ⚠️ Local inpainting model not loaded for this thread, returning original image", "warning")
+                # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
+                try:
+                    shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                    if shared_inp and getattr(shared_inp, 'model_loaded', False):
+                        self._log("   ✅ Using shared inpainting instance", "info")
+                        return shared_inp.inpaint(image, mask)
+                except Exception:
+                    pass
+                self._log("   ⚠️ Local inpainting model not loaded; returning original image", "warning")
                 return image.copy()
         
         elif inpaint_method == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
@@ -6478,22 +6509,25 @@ class MangaTranslator:
                 # Load model for this thread's instance
                 if resolved_model_path and os.path.exists(resolved_model_path):
                     try:
-                        loaded_ok = inp.load_model(local_method, resolved_model_path, force_reload=True)
-                        if not loaded_ok:
-                            self._log(f"⚠️ Thread-local inpainter load returned False for {local_method}", "warning")
+                        self._log(f"📥 Loading {local_method} inpainting model (thread-local)", "info")
+                        inp.load_model(local_method, resolved_model_path, force_reload=False)
                     except Exception as e:
-                        self._log(f"⚠️ Thread-local inpainter load failed: {e}", "warning")
+                        self._log(f"⚠️ Thread-local inpainter load error: {e}", "warning")
                 else:
                     self._log("⚠️ No model path available for thread-local inpainter", "warning")
                 
-                # Re-check thread-local in case it was cleared during load; then assign
+                # Re-check thread-local and publish ONLY if model loaded successfully
                 tl2 = getattr(self, '_thread_local', None)
                 if tl2 is None:
                     self._thread_local = threading.local()
                     tl2 = self._thread_local
                 if not hasattr(tl2, 'local_inpainters') or getattr(tl2, 'local_inpainters', None) is None:
                     tl2.local_inpainters = {}
-                tl2.local_inpainters[key] = inp
+                if getattr(inp, 'model_loaded', False):
+                    tl2.local_inpainters[key] = inp
+                else:
+                    # Ensure future calls will attempt a fresh init instead of using a half-initialized instance
+                    tl2.local_inpainters[key] = None
             except Exception as e:
                 self._log(f"❌ Failed to create thread-local inpainter: {e}", "error")
                 try:
@@ -6622,6 +6656,17 @@ class MangaTranslator:
         # Get max_workers from settings if not provided
         if max_workers is None:
             max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        
+        # Override with API batch size when batch mode is enabled — these are API calls.
+        try:
+            if getattr(self, 'batch_mode', False):
+                bs = int(getattr(self, 'batch_size', 0) or int(os.getenv('BATCH_SIZE', '0')))
+                if bs and bs > 0:
+                    max_workers = bs
+        except Exception:
+            pass
+        # Bound to number of regions
+        max_workers = max(1, min(max_workers, len(regions)))
         
         # Thread-safe storage for results
         results_lock = threading.Lock()

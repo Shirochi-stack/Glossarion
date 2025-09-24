@@ -31,7 +31,7 @@ if IS_FROZEN:
 
 # Environment variables for ONNX
 ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'models')
-AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true'
+AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'false').lower() == 'true'
 SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'true'
 FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
 CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting'))
@@ -356,6 +356,10 @@ class LocalInpainter:
         self.onnx_model_loaded = False
         self.onnx_input_size = None  # Will be detected from model
         
+        # Quantization diagnostics flags
+        self.onnx_quantize_applied = False
+        self.torch_quantize_applied = False
+        
         # Bubble detection
         self.bubble_detector = None
         self.bubble_model_loaded = False
@@ -659,6 +663,7 @@ class LocalInpainter:
                                     weight_type=QuantType.QInt8,
                                     op_types_to_quantize=['MatMul']
                                 )
+                            self.onnx_quantize_applied = True
                             # Validate dynamic quant result
                             try:
                                 import onnx as _onnx
@@ -733,6 +738,7 @@ class LocalInpainter:
                                     quant_path = None
                                 else:
                                     logger.info(f"✅ Generated MatMul-only INT8 ONNX for LaMa: {quant_path}")
+                                    self.onnx_quantize_applied = True
                             except Exception as st_err:
                                 logger.warning(f"LaMa static MatMul-only quantization failed: {st_err}")
                                 quant_path = None
@@ -1278,12 +1284,16 @@ class LocalInpainter:
                 logger.info("📦 Detected ONNX file signature (regardless of extension)")
                 if self.load_onnx_model(model_path):
                     self.model_loaded = True
-                    self.current_method = method
+                    # Ensure aot_onnx is properly set as current method
+                    if 'aot' in method.lower():
+                        self.current_method = 'aot_onnx'
+                    else:
+                        self.current_method = method
                     self.use_onnx = True
                     self.is_jit_model = False
                     self.config[f'{method}_model_path'] = model_path
                     self._save_config()
-                    logger.info(f"✅ {method.upper()} ONNX loaded!")
+                    logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
                     return True
                 else:
                     logger.error("Failed to load ONNX model")
@@ -1295,12 +1305,16 @@ class LocalInpainter:
                 logger.info("📥 Loading ONNX model directly...")
                 if self.load_onnx_model(model_path):
                     self.model_loaded = True
-                    self.current_method = method
+                    # Ensure aot_onnx is properly set as current method
+                    if 'aot' in method.lower():
+                        self.current_method = 'aot_onnx'
+                    else:
+                        self.current_method = method
                     self.use_onnx = True
                     self.is_jit_model = False
                     self.config[f'{method}_model_path'] = model_path
                     self._save_config()
-                    logger.info(f"✅ {method.upper()} ONNX loaded!")
+                    logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
                     return True
                 else:
                     logger.error("Failed to load ONNX model")
@@ -1365,6 +1379,7 @@ class LocalInpainter:
                                 pass
                             if applied:
                                 logger.info("🔻 Applied INT8 dynamic quantization to JIT inpainting model (CPU)")
+                                self.torch_quantize_applied = True
                             else:
                                 logger.info("ℹ️ INT8 dynamic quantization not applied (unsupported for this JIT graph); using FP32 CPU")
                         except Exception as _qe:
@@ -1445,6 +1460,7 @@ class LocalInpainter:
                             import torch.ao.quantization as tq  # type: ignore
                             self.model = tq.quantize_dynamic(self.model, {nn.Linear}, dtype=torch.qint8)  # type: ignore
                             logger.info("🔻 Applied dynamic INT8 quantization to inpainting model (CPU)")
+                            self.torch_quantize_applied = True
                         except Exception as qe:
                             logger.warning(f"INT8 dynamic quantization not applied: {qe}")
                             
@@ -1697,6 +1713,45 @@ class LocalInpainter:
             logger.debug(f"No-op detection failed: {e}")
             return False
 
+    def _is_white_paste(self, result: np.ndarray, mask: np.ndarray, white_threshold: int = 245, ratio: float = 0.90) -> bool:
+        """Detect 'white paste' failure: masked area mostly saturated near white."""
+        try:
+            if result is None or mask is None:
+                return False
+            if len(mask.shape) == 3:
+                mask_gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            else:
+                mask_gray = mask
+            m = mask_gray > 0
+            if not np.any(m):
+                return False
+            if len(result.shape) == 3:
+                white = (result[..., 0] >= white_threshold) & (result[..., 1] >= white_threshold) & (result[..., 2] >= white_threshold)
+            else:
+                white = result >= white_threshold
+            count_mask = int(np.count_nonzero(m))
+            count_white = int(np.count_nonzero(white & m))
+            if count_mask == 0:
+                return False
+            frac = count_white / float(count_mask)
+            return frac >= ratio
+        except Exception as e:
+            logger.debug(f"White paste detection failed: {e}")
+            return False
+
+    def _log_inpaint_diag(self, path: str, result: np.ndarray, mask: np.ndarray):
+        try:
+            h, w = result.shape[:2]
+            if len(result.shape) == 3:
+                stats = (float(result.min()), float(result.max()), float(result.mean()))
+            else:
+                stats = (float(result.min()), float(result.max()), float(result.mean()))
+            logger.info(f"[Diag] Path={path} onnx_quant={self.onnx_quantize_applied} torch_quant={self.torch_quantize_applied} size={w}x{h} stats(min,max,mean)={stats}")
+            if self._is_white_paste(result, mask):
+                logger.warning(f"[Diag] White-paste detected (mask>0 mostly white)")
+        except Exception as e:
+            logger.debug(f"Diag log failed: {e}")
+
     def inpaint(self, image, mask, refinement='normal', _retry_attempt: int = 0):
         """Inpaint - compatible with JIT, checkpoint, and ONNX models"""
         # Check for stop at start
@@ -1754,7 +1809,7 @@ class LocalInpainter:
                         img_np = image_resized.astype(np.float32) / 255.0
                         mask_np = mask_resized.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0.5) * 1.0  # Binary mask
-                    elif self.current_method == 'aot':
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
                         # AOT normalization: [-1, 1] range for image
                         logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
                         img_np = (image_resized.astype(np.float32) / 127.5) - 1.0
@@ -1789,7 +1844,7 @@ class LocalInpainter:
                         raw_output = output[0].transpose(1, 2, 0)
                         logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
                         result = raw_output  # Just transpose, no scaling
-                    elif self.current_method == 'aot':
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
                         # AOT: [-1, 1] to [0, 255]
                         result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
                     else:
@@ -1802,6 +1857,7 @@ class LocalInpainter:
                     
                     # Resize back to original size
                     result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+                    self._log_inpaint_diag('onnx-fixed', result, mask)
                     
                 else:
                     # Variable-size models (use padding)
@@ -1815,7 +1871,7 @@ class LocalInpainter:
                         img_np = image_padded.astype(np.float32) / 255.0
                         mask_np = mask_padded.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0.5) * 1.0
-                    elif self.current_method == 'aot':
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
                         # AOT normalization: [-1, 1] for image
                         logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
                         img_np = (image_padded.astype(np.float32) / 127.5) - 1.0
@@ -1854,7 +1910,7 @@ class LocalInpainter:
                         raw_output = output[0].transpose(1, 2, 0)
                         logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
                         result = raw_output  # Just transpose, no scaling
-                    elif self.current_method == 'aot':
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
                         result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
                     else:
                         result = output[0].transpose(1, 2, 0) * 255
@@ -1864,7 +1920,8 @@ class LocalInpainter:
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
                     
                     # Remove padding
-                    result = self.remove_padding(result, padding)    
+                    result = self.remove_padding(result, padding)
+                    self._log_inpaint_diag('onnx-padded', result, mask)
                     
             elif self.is_jit_model:
                 # JIT model processing
@@ -1918,6 +1975,7 @@ class LocalInpainter:
                     
                     # Remove padding
                     result = self.remove_padding(result, padding)
+                    self._log_inpaint_diag('jit-aot', result, mask)
                     
                 else:
                     # LaMa/Anime model processing
@@ -2018,6 +2076,7 @@ class LocalInpainter:
                     
                     # Remove padding
                     result = self.remove_padding(result, padding)
+                    self._log_inpaint_diag('jit-lama', result, mask)
             
             else:
                 # Original checkpoint model processing (keep as is)
@@ -2043,6 +2102,7 @@ class LocalInpainter:
                 result = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 result = ((result + 1) * 127.5).clip(0, 255).astype(np.uint8)
                 result = cv2.resize(result, (w, h), interpolation=cv2.INTER_LANCZOS4)
+                self._log_inpaint_diag('ckpt', result, mask)
             
             # Ensure result matches original size exactly
             if result.shape[:2] != (orig_h, orig_w):
