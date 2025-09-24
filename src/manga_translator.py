@@ -1757,6 +1757,41 @@ class MangaTranslator:
                 }
         return None
             
+    def _ensure_google_client(self):
+        try:
+            if getattr(self, 'vision_client', None) is None:
+                from google.cloud import vision
+                google_path = self.ocr_config.get('google_credentials_path') if hasattr(self, 'ocr_config') else None
+                if google_path:
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
+                self.vision_client = vision.ImageAnnotatorClient()
+                self._log("✅ Reinitialized Google Vision client", "debug")
+        except Exception as e:
+            self._log(f"❌ Failed to initialize Google Vision client: {e}", "error")
+
+    def _ensure_azure_client(self):
+        try:
+            if getattr(self, 'vision_client', None) is None:
+                from azure.cognitiveservices.vision.computervision import ComputerVisionClient
+                from msrest.authentication import CognitiveServicesCredentials
+                key = None
+                endpoint = None
+                try:
+                    key = (self.ocr_config or {}).get('azure_key')
+                    endpoint = (self.ocr_config or {}).get('azure_endpoint')
+                except Exception:
+                    pass
+                if not key:
+                    key = self.main_gui.config.get('azure_vision_key', '') if hasattr(self, 'main_gui') else None
+                if not endpoint:
+                    endpoint = self.main_gui.config.get('azure_vision_endpoint', '') if hasattr(self, 'main_gui') else None
+                if not key or not endpoint:
+                    raise ValueError("Azure credentials missing for client init")
+                self.vision_client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(key))
+                self._log("✅ Reinitialized Azure Computer Vision client", "debug")
+        except Exception as e:
+            self._log(f"❌ Failed to initialize Azure CV client: {e}", "error")
+
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
         """Detect text regions using configured OCR provider"""
         # Reduce logging in batch mode
@@ -1920,7 +1955,12 @@ class MangaTranslator:
                         self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
                         
             elif self.ocr_provider == 'azure':
-                # === AZURE COMPUTER VISION (unchanged) ===
+                # === AZURE COMPUTER VISION ===
+                # Ensure client exists (it might have been cleaned up between runs)
+                try:
+                    self._ensure_azure_client()
+                except Exception:
+                    pass
                 import io
                 import time
                 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
