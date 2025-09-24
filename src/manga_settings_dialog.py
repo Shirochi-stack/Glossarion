@@ -2578,7 +2578,7 @@ class MangaSettingsDialog:
         stagger_row.pack(fill='x', pady=5)
         tk.Label(stagger_row, text="Panel start stagger:", width=20, anchor='w').pack(side='left')
         self.panel_stagger_ms_var = tk.IntVar(
-            value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 100)
+            value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 500)
         )
         panel_stagger_spinbox = tb.Spinbox(
             stagger_row,
