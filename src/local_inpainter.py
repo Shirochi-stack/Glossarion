@@ -1527,6 +1527,37 @@ class LocalInpainter:
             self.model_loaded = False
             return False
 
+    def load_model_with_retry(self, method, model_path, force_reload=False, retries: int = 2, retry_delay: float = 0.5) -> bool:
+        """Attempt to load a model with retries.
+        Returns True if loaded; False if all attempts fail. On failure, the inpainter will safely no-op.
+        """
+        try:
+            attempts = max(0, int(retries)) + 1
+        except Exception:
+            attempts = 1
+        for attempt in range(attempts):
+            try:
+                ok = self.load_model(method, model_path, force_reload=force_reload)
+                if ok:
+                    return True
+            except Exception as e:
+                logger.warning(f"Load attempt {attempt+1} failed with exception: {e}")
+            # brief delay before next try
+            if attempt < attempts - 1:
+                try:
+                    time.sleep(max(0.0, float(retry_delay)))
+                except Exception:
+                    pass
+        # If we reach here, loading failed. Leave model unloaded so inpaint() no-ops and returns original image.
+        logger.warning("All load attempts failed; local inpainting will fall back to returning original images (no-op)")
+        self.model_loaded = False
+        # Keep current_method for logging/context if provided
+        try:
+            self.current_method = method
+        except Exception:
+            pass
+        return False
+
     def unload(self):
         """Release all heavy resources held by this inpainter instance."""
         try:

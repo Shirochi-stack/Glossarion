@@ -4681,7 +4681,7 @@ class MangaTranslator:
                 loaded_ok = False
                 if model_path and os.path.exists(model_path):
                     try:
-                        loaded_ok = inp.load_model(local_method, model_path, force_reload=True)
+                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
                     except Exception as e:
                         self._log(f"⚠️ Inpainter load failed: {e}", "warning")
                         loaded_ok = False
@@ -6477,7 +6477,7 @@ class MangaTranslator:
                                 self._log(f"⚠️ Failed to download model for {local_method}: {e}", "warning")
                         
                         if model_path and os.path.exists(model_path):
-                            success = MangaTranslator._singleton_local_inpainter.load_model(local_method, model_path)
+                            success = MangaTranslator._singleton_local_inpainter.load_model_with_retry(local_method, model_path)
                             if success:
                                 self._log(f"🎨 Created singleton local inpainter with {local_method} model", "info")
                             else:
@@ -6560,7 +6560,7 @@ class MangaTranslator:
                 if resolved_model_path and os.path.exists(resolved_model_path):
                     try:
                         self._log(f"📥 Loading {local_method} inpainting model (thread-local)", "info")
-                        inp.load_model(local_method, resolved_model_path, force_reload=False)
+                        inp.load_model_with_retry(local_method, resolved_model_path, force_reload=False)
                     except Exception as e:
                         self._log(f"⚠️ Thread-local inpainter load error: {e}", "warning")
                 else:

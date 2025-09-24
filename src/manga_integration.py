@@ -4216,8 +4216,8 @@ class MangaTranslationTab:
             # Initialize test inpainter
             test_inpainter = LocalInpainter()
             
-            # Try to load the model
-            if test_inpainter.load_model(method, model_path, force_reload=True):
+            # Try to load the model (with retries)
+            if test_inpainter.load_model_with_retry(method, model_path, force_reload=True):
                 # Success - update status using existing method
                 self._update_local_model_status()
                 
