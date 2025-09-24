@@ -1810,6 +1810,7 @@ class MangaSettingsDialog:
 
         # Model mapping
         self.detector_models = {
+            'RTEDR_onnx': 'ogkalu/comic-text-and-bubble-detector',
             'RT-DETR': 'ogkalu/comic-text-and-bubble-detector',
             'YOLOv8 Speech': 'ogkalu/comic-speech-bubble-detector-yolov8m',
             'YOLOv8 Text': 'ogkalu/comic-text-segmenter-yolov8m',
@@ -1817,16 +1818,18 @@ class MangaSettingsDialog:
             'Custom Model': ''
         }
 
-        # Get saved detector type
-        saved_type = self.settings['ocr'].get('detector_type', 'rtdetr')
-        if saved_type == 'rtdetr':
+        # Get saved detector type (default to ONNX backend)
+        saved_type = self.settings['ocr'].get('detector_type', 'rtdetr_onnx')
+        if saved_type == 'rtdetr_onnx':
+            initial_selection = 'RTEDR_onnx'
+        elif saved_type == 'rtdetr':
             initial_selection = 'RT-DETR'
         elif saved_type == 'yolo':
             initial_selection = 'YOLOv8 Speech'
         elif saved_type == 'custom':
             initial_selection = 'Custom Model'
         else:
-            initial_selection = 'RT-DETR'
+            initial_selection = 'RTEDR_onnx'
 
         self.detector_type = tk.StringVar(value=initial_selection)
 
@@ -1987,7 +1990,8 @@ class MangaSettingsDialog:
 
         tk.Label(conf_frame, text="Confidence:", width=12, anchor='w').pack(side='left')
 
-        default_conf = 0.3 if 'RT-DETR' in self.detector_type.get() else 0.5
+        detector_label = self.detector_type.get()
+        default_conf = 0.3 if ('RT-DETR' in detector_label or 'RTEDR_onnx' in detector_label or 'onnx' in detector_label.lower()) else 0.5
         
         self.bubble_confidence = tk.DoubleVar(
             value=self.settings['ocr'].get('bubble_confidence', default_conf)
@@ -2103,7 +2107,7 @@ class MangaSettingsDialog:
             self.rtdetr_download_btn.pack(side='left', padx=(0, 5))
         
         # Show/hide RT-DETR specific controls
-        if 'RT-DETR' in detector:
+        if 'RT-DETR' in detector or 'RTEDR_onnx' in detector:
             self.rtdetr_classes_frame.pack(fill='x', pady=(10, 0), after=self.rtdetr_load_btn.master)
         else:
             self.rtdetr_classes_frame.pack_forget()
@@ -2123,7 +2127,16 @@ class MangaSettingsDialog:
             self.rtdetr_status_label.config(text="Downloading...", fg='orange')
             self.dialog.update_idletasks()
             
-            if 'RT-DETR' in detector:
+            if 'RTEDR_onnx' in detector:
+                from bubble_detector import BubbleDetector
+                bd = BubbleDetector()
+                if bd.load_rtdetr_onnx_model(model_id=model_url):
+                    self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
+                    messagebox.showinfo("Success", f"RTEDR_onnx model downloaded successfully!")
+                else:
+                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                    messagebox.showerror("Error", f"Failed to download RTEDR_onnx model")
+            elif 'RT-DETR' in detector:
                 # RT-DETR handling (works fine)
                 from bubble_detector import BubbleDetector
                 bd = BubbleDetector()
@@ -2180,10 +2193,13 @@ class MangaSettingsDialog:
             if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, 'translator'):
                 translator = self.main_gui.manga_tab.translator
                 if hasattr(translator, 'bubble_detector') and translator.bubble_detector:
-                    if translator.bubble_detector.rtdetr_loaded:
+                    if getattr(translator.bubble_detector, 'rtdetr_onnx_loaded', False):
                         self.rtdetr_status_label.config(text="✅ Loaded", fg='green')
                         return True
-                    elif translator.bubble_detector.model_loaded:
+                    if getattr(translator.bubble_detector, 'rtdetr_loaded', False):
+                        self.rtdetr_status_label.config(text="✅ Loaded", fg='green')
+                        return True
+                    elif getattr(translator.bubble_detector, 'model_loaded', False):
                         self.rtdetr_status_label.config(text="✅ Loaded", fg='green')
                         return True
             
@@ -2209,7 +2225,14 @@ class MangaSettingsDialog:
             detector = self.detector_type.get()
             model_path = self.bubble_model_path.get()
             
-            if 'RT-DETR' in detector:
+            if 'RTEDR_onnx' in detector:
+                # RT-DETR (ONNX) uses repo id directly
+                if bd.load_rtdetr_onnx_model(model_id=model_path):
+                    self.rtdetr_status_label.config(text="✅ Ready", fg='green')
+                    messagebox.showinfo("Success", f"RTEDR_onnx model loaded successfully!")
+                else:
+                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+            elif 'RT-DETR' in detector:
                 # RT-DETR uses model_id directly
                 if bd.load_rtdetr_model(model_id=model_path):
                     self.rtdetr_status_label.config(text="✅ Ready", fg='green')
@@ -3056,7 +3079,9 @@ class MangaSettingsDialog:
             # Save the detector type properly
             if hasattr(self, 'detector_type'):
                 detector_display = self.detector_type.get()
-                if 'RT-DETR' in detector_display:
+                if 'RTEDR_onnx' in detector_display or 'ONNX' in detector_display.upper():
+                    self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
+                elif 'RT-DETR' in detector_display:
                     self.settings['ocr']['detector_type'] = 'rtdetr'
                 elif 'YOLOv8' in detector_display:
                     self.settings['ocr']['detector_type'] = 'yolo'
@@ -3064,7 +3089,7 @@ class MangaSettingsDialog:
                     self.settings['ocr']['detector_type'] = 'custom'
                     self.settings['ocr']['custom_model_path'] = self.bubble_model_path.get()
                 else:
-                    self.settings['ocr']['detector_type'] = 'rtdetr'
+                    self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
             
             # Inpainting settings
             if hasattr(self, 'inpaint_batch_size'):

@@ -5288,33 +5288,46 @@ class MangaTranslationTab:
             
             self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
 
-            # Ensure AI bubble detection is enabled with RT-DETR by default
+            # Respect user settings: only set default detector values when bubble detection is OFF.
             try:
                 ms = self.main_gui.config.setdefault('manga_settings', {})
                 ocr_set = ms.setdefault('ocr', {})
                 changed = False
-                if not ocr_set.get('bubble_detection_enabled', False):
-                    ocr_set['bubble_detection_enabled'] = True
-                    changed = True
-                if ocr_set.get('detector_type') != 'rtdetr':
-                    ocr_set['detector_type'] = 'rtdetr'
-                    changed = True
-                if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
-                    # Default RT-DETR model on HF
-                    ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
-                    changed = True
-                if changed and hasattr(self.main_gui, 'save_config'):
-                    self.main_gui.save_config(show_message=False)
+                bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
 
-                # Pre-download/load RT-DETR so first run is fast
-                try:
-                    from bubble_detector import BubbleDetector
-                    self._log("📥 Ensuring RT-DETR is downloaded/loaded for custom-api OCR", "info")
-                    self._preloaded_bd = BubbleDetector()
-                    model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
-                    self._preloaded_bd.load_rtdetr_model(model_id=model_id)
-                except Exception:
+                if not bubble_enabled:
+                    # User has bubble detection OFF -> set non-intrusive defaults only
+                    if 'detector_type' not in ocr_set:
+                        ocr_set['detector_type'] = 'rtdetr_onnx'
+                        changed = True
+                    if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                        # Default HF repo (detector.onnx lives here)
+                        ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                        changed = True
+                    if changed and hasattr(self.main_gui, 'save_config'):
+                        self.main_gui.save_config(show_message=False)
+                    # Do NOT preload when detection is off
                     self._preloaded_bd = None
+                else:
+                    # Bubble detection is ON → do not override user's detector choice
+                    # Optionally warm up based on current detector type
+                    detector_type = str(ocr_set.get('detector_type', '')).lower()
+                    try:
+                        from bubble_detector import BubbleDetector
+                        self._preloaded_bd = BubbleDetector()
+                        if detector_type == 'rtdetr_onnx':
+                            self._log("📥 Warming up RTEDR_onnx for custom-api OCR", "info")
+                            model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
+                            self._preloaded_bd.load_rtdetr_onnx_model(model_id=model_id)
+                        elif detector_type == 'rtdetr':
+                            self._log("📥 Warming up RT-DETR (PyTorch) for custom-api OCR", "info")
+                            model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
+                            self._preloaded_bd.load_rtdetr_model(model_id=model_id)
+                        else:
+                            # YOLO or custom – no preload here
+                            self._preloaded_bd = None
+                    except Exception:
+                        self._preloaded_bd = None
             except Exception:
                 self._preloaded_bd = None
         

@@ -1205,8 +1205,13 @@ class MangaTranslator:
         """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
         try:
             bd = self._get_thread_bubble_detector()
-            detector_type = ocr_settings.get('detector_type', 'rtdetr')
-            if detector_type == 'rtdetr':
+            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            if detector_type == 'rtdetr_onnx':
+                if not getattr(bd, 'rtdetr_onnx_loaded', False):
+                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
+                    if not bd.load_rtdetr_onnx_model(model_id=model_id):
+                        return None
+            elif detector_type == 'rtdetr':
                 if not getattr(bd, 'rtdetr_loaded', False):
                     model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path')
                     if not bd.load_rtdetr_model(model_id=model_id):
@@ -1229,7 +1234,7 @@ class MangaTranslator:
         try:
             # Get detector settings from config
             ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
-            detector_type = ocr_settings.get('detector_type', 'yolo')
+            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
             
             # Ensure detector is ready (auto-reload after cleanup)
             bd = self._ensure_bubble_detector_ready(ocr_settings)
@@ -1248,7 +1253,44 @@ class MangaTranslator:
             bubbles = None
             rtdetr_detections = None
             
-            if detector_type == 'rtdetr':
+            if detector_type == 'rtdetr_onnx':
+                if not self.batch_mode:
+                    self._log("🤖 Using RTEDR_onnx for bubble detection", "info")
+                if self.batch_mode and getattr(bd, 'rtdetr_onnx_loaded', False):
+                    pass
+                elif not getattr(bd, 'rtdetr_onnx_loaded', False):
+                    self._log("📥 Loading RTEDR_onnx model...", "info")
+                    if not bd.load_rtdetr_onnx_model():
+                        self._log("⚠️ Failed to load RTEDR_onnx, falling back to traditional merging", "warning")
+                        return self._merge_nearby_regions(regions)
+                rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
+                detect_empty = ocr_settings.get('detect_empty_bubbles', True)
+                detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
+                detect_free_text = ocr_settings.get('detect_free_text', True)
+                if not self.batch_mode:
+                    self._log(f"📋 RTEDR_onnx class filters:", "info")
+                    self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                    self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                    self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                    self._log(f"🎯 RTEDR_onnx confidence threshold: {rtdetr_confidence:.2f}", "info")
+                rtdetr_detections = bd.detect_with_rtdetr_onnx(
+                    image_path=image_path,
+                    confidence=rtdetr_confidence,
+                    return_all_bubbles=False
+                )
+                # Combine enabled bubble types for merging
+                bubbles = []
+                if detect_empty and 'bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['bubbles'])
+                if detect_text_bubbles and 'text_bubbles' in rtdetr_detections:
+                    bubbles.extend(rtdetr_detections['text_bubbles'])
+                # Store free text locations for filtering later
+                free_text_regions = rtdetr_detections.get('text_free', []) if detect_free_text else []
+                self._log(f"✅ RTEDR_onnx detected:", "success")
+                self._log(f"   {len(rtdetr_detections.get('bubbles', []))} empty bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_bubbles', []))} text bubbles", "info")
+                self._log(f"   {len(rtdetr_detections.get('text_free', []))} free text regions", "info")
+            elif detector_type == 'rtdetr':
                 # BATCH OPTIMIZATION: Less verbose logging
                 if not self.batch_mode:
                     self._log("🤖 Using RT-DETR for bubble detection", "info")
@@ -1656,15 +1698,23 @@ class MangaTranslator:
         Returns:
             dict: Detection results or None if failed
         """
-        detector_type = ocr_settings.get('detector_type', 'rtdetr')
+        detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
         model_path = ocr_settings.get('bubble_model_path', '')
         confidence = ocr_settings.get('bubble_confidence', 0.5)
         
         bd = self._get_thread_bubble_detector()
         
-        if detector_type == 'rtdetr' or 'RT-DETR' in detector_type:
-            # Load RT-DETR model
-            if bd.load_rtdetr_model(model_id=model_path):
+        if detector_type == 'rtdetr_onnx' or 'RTEDR_onnx' in str(detector_type):
+            # Load RT-DETR ONNX model
+            if bd.load_rtdetr_onnx_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                return bd.detect_with_rtdetr_onnx(
+                    image_path=image_path,
+                    confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                    return_all_bubbles=False
+                )
+        elif detector_type == 'rtdetr' or 'RT-DETR' in str(detector_type):
+            # Load RT-DETR (PyTorch) model
+            if bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
                 return bd.detect_with_rtdetr(
                     image_path=image_path,
                     confidence=ocr_settings.get('rtdetr_confidence', confidence),

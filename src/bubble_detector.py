@@ -175,6 +175,11 @@ class BubbleDetector:
         self.rtdetr_processor = None
         self.rtdetr_loaded = False
         self.rtdetr_repo = 'ogkalu/comic-text-and-bubble-detector'
+
+        # RT-DETR (ONNX) backend components
+        self.rtdetr_onnx_session = None
+        self.rtdetr_onnx_loaded = False
+        self.rtdetr_onnx_repo = 'ogkalu/comic-text-and-bubble-detector'
         
         # RT-DETR class definitions
         self.CLASS_BUBBLE = 0      # Empty speech bubble
@@ -711,14 +716,22 @@ class BubbleDetector:
             # Auto-select: prefer RT-DETR if available
             use_rtdetr = self.rtdetr_loaded
         
-        if use_rtdetr and self.rtdetr_loaded:
-            # Use RT-DETR
-            results = self.detect_with_rtdetr(
-                image_path=image_path,
-                confidence=confidence,
-                return_all_bubbles=True
-            )
-            return results
+        if use_rtdetr:
+            # Prefer ONNX backend if available, else PyTorch
+            if getattr(self, 'rtdetr_onnx_loaded', False):
+                results = self.detect_with_rtdetr_onnx(
+                    image_path=image_path,
+                    confidence=confidence,
+                    return_all_bubbles=True
+                )
+                return results
+            if self.rtdetr_loaded:
+                results = self.detect_with_rtdetr(
+                    image_path=image_path,
+                    confidence=confidence,
+                    return_all_bubbles=True
+                )
+                return results
         
         # Original YOLOv8 detection
         if not self.model_loaded:
@@ -802,7 +815,7 @@ class BubbleDetector:
                           confidence: float = None,
                           return_all_bubbles: bool = False) -> Any:
         """
-        Detect using RT-DETR model with 3-class detection.
+        Detect using RT-DETR model with 3-class detection (PyTorch backend).
         
         Args:
             image_path: Path to image file
@@ -1325,13 +1338,18 @@ class BubbleDetector:
                     self.onnx_session = None
             except Exception:
                 pass
+            try:
+                if getattr(self, 'rtdetr_onnx_session', None) is not None:
+                    self.rtdetr_onnx_session = None
+            except Exception:
+                pass
             for attr in ['model', 'rtdetr_model', 'rtdetr_processor']:
                 try:
                     if hasattr(self, attr):
                         setattr(self, attr, None)
                 except Exception:
                     pass
-            for flag in ['model_loaded', 'rtdetr_loaded']:
+            for flag in ['model_loaded', 'rtdetr_loaded', 'rtdetr_onnx_loaded']:
                 try:
                     if hasattr(self, flag):
                         setattr(self, flag, False)
@@ -1468,6 +1486,142 @@ class BubbleDetector:
             merged.append((int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
         
         return merged
+
+    # ============================
+    # RT-DETR (ONNX) BACKEND
+    # ============================
+    def load_rtdetr_onnx_model(self, model_id: str = None, force_reload: bool = False) -> bool:
+        """
+        Load RT-DETR ONNX model using onnxruntime. Downloads detector.onnx and config.json
+        from the provided Hugging Face repo if not already cached.
+        """
+        if not ONNX_AVAILABLE:
+            logger.error("ONNX Runtime not available for RT-DETR ONNX backend")
+            return False
+        try:
+            if self.rtdetr_onnx_loaded and not force_reload and self.rtdetr_onnx_session is not None:
+                return True
+
+            repo = model_id or self.rtdetr_onnx_repo
+            try:
+                from huggingface_hub import hf_hub_download
+            except Exception as e:
+                logger.error(f"huggingface-hub required to fetch RT-DETR ONNX: {e}")
+                return False
+
+            # Ensure local models dir
+            cache_dir = os.path.join(self.cache_dir, 'detection')
+            os.makedirs(cache_dir, exist_ok=True)
+
+            # Download files
+            try:
+                _ = hf_hub_download(repo_id=repo, filename='config.json')
+            except Exception:
+                pass
+            onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx')
+
+            # Pick providers
+            providers = ['CPUExecutionProvider']
+            try:
+                avail = ort.get_available_providers() if ONNX_AVAILABLE else []
+                if self.use_gpu and 'CUDAExecutionProvider' in avail:
+                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            except Exception:
+                pass
+
+            # Session options with reduced memory arena (already set via env)
+            so = ort.SessionOptions()
+            try:
+                so.enable_mem_pattern = False
+                so.enable_cpu_mem_arena = False
+            except Exception:
+                pass
+
+            self.rtdetr_onnx_session = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
+            self.rtdetr_onnx_loaded = True
+            logger.info("✅ RT-DETR (ONNX) model ready")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load RT-DETR ONNX: {e}")
+            self.rtdetr_onnx_session = None
+            self.rtdetr_onnx_loaded = False
+            return False
+
+    def detect_with_rtdetr_onnx(self,
+                                image_path: str = None,
+                                image: np.ndarray = None,
+                                confidence: float = 0.3,
+                                return_all_bubbles: bool = False) -> Any:
+        """Detect using RT-DETR ONNX backend.
+        Returns bubbles list if return_all_bubbles else dict by classes similar to PyTorch path.
+        """
+        if not self.rtdetr_onnx_loaded or self.rtdetr_onnx_session is None:
+            logger.warning("RT-DETR ONNX not loaded")
+            return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+        try:
+            # Acquire image
+            if image_path is not None:
+                import cv2
+                image = cv2.imread(image_path)
+                if image is None:
+                    raise RuntimeError(f"Failed to read image: {image_path}")
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                if image is None:
+                    raise RuntimeError("No image provided")
+                # Assume image is BGR np.ndarray if from OpenCV
+                try:
+                    import cv2
+                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                except Exception:
+                    image_rgb = image
+
+            # To PIL then resize 640x640 as in reference
+            from PIL import Image as _PILImage
+            pil_image = _PILImage.fromarray(image_rgb)
+            im_resized = pil_image.resize((640, 640))
+            arr = np.asarray(im_resized, dtype=np.float32) / 255.0
+            arr = np.transpose(arr, (2, 0, 1))  # (3,H,W)
+            im_data = arr[np.newaxis, ...]
+
+            w, h = pil_image.size
+            orig_size = np.array([[w, h]], dtype=np.int64)
+
+            outputs = self.rtdetr_onnx_session.run(None, {
+                'images': im_data,
+                'orig_target_sizes': orig_size
+            })
+
+            # outputs expected: labels, boxes, scores
+            labels, boxes, scores = outputs[:3]
+            if labels.ndim == 2 and labels.shape[0] == 1:
+                labels = labels[0]
+            if scores.ndim == 2 and scores.shape[0] == 1:
+                scores = scores[0]
+            if boxes.ndim == 3 and boxes.shape[0] == 1:
+                boxes = boxes[0]
+
+            detections = {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+            bubbles_all = []
+            for lab, box, scr in zip(labels, boxes, scores):
+                if float(scr) < float(confidence):
+                    continue
+                x1, y1, x2, y2 = map(int, box)
+                bbox = (x1, y1, x2 - x1, y2 - y1)
+                label_id = int(lab)
+                if label_id == self.CLASS_BUBBLE:
+                    detections['bubbles'].append(bbox)
+                    bubbles_all.append(bbox)
+                elif label_id == self.CLASS_TEXT_BUBBLE:
+                    detections['text_bubbles'].append(bbox)
+                    bubbles_all.append(bbox)
+                elif label_id == self.CLASS_TEXT_FREE:
+                    detections['text_free'].append(bbox)
+
+            return bubbles_all if return_all_bubbles else detections
+        except Exception as e:
+            logger.error(f"RT-DETR ONNX detection failed: {e}")
+            return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
 
 
 # Standalone utility functions
