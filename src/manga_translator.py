@@ -1851,7 +1851,12 @@ class MangaTranslator:
             
             # Route to appropriate provider
             if self.ocr_provider == 'google':
-                # === GOOGLE CLOUD VISION (unchanged) ===
+                # === GOOGLE CLOUD VISION ===
+                # Ensure client exists (it might have been cleaned up between runs)
+                try:
+                    self._ensure_google_client()
+                except Exception:
+                    pass
                 # Create Vision API image object
                 image = vision.Image(content=processed_image_data)
                 
