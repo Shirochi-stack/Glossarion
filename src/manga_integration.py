@@ -5319,10 +5319,21 @@ class MangaTranslationTab:
                             self._log("📥 Warming up RTEDR_onnx for custom-api OCR", "info")
                             model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
                             self._preloaded_bd.load_rtdetr_onnx_model(model_id=model_id)
+                            # Stagger subsequent heavy initializations to prevent CPU spike
+                            try:
+                                import time as _time
+                                _time.sleep(1.0)
+                            except Exception:
+                                pass
                         elif detector_type == 'rtdetr':
                             self._log("📥 Warming up RT-DETR (PyTorch) for custom-api OCR", "info")
                             model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
                             self._preloaded_bd.load_rtdetr_model(model_id=model_id)
+                            try:
+                                import time as _time
+                                _time.sleep(1.0)
+                            except Exception:
+                                pass
                         else:
                             # YOLO or custom – no preload here
                             self._preloaded_bd = None
@@ -5698,10 +5709,13 @@ class MangaTranslationTab:
             # Panel-level parallelization setting (LOCAL threading for panels)
             advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
             panel_parallel = bool(advanced.get('parallel_panel_translation', False))
-            panel_workers = int(advanced.get('panel_max_workers', 2))
-            
-            if panel_parallel and len(self.selected_files) > 1:
-                self._log(f"🚀 Parallel PANEL translation ENABLED ({panel_workers} workers)", "info")
+            requested_panel_workers = int(advanced.get('panel_max_workers', 2))
+
+            # Decouple from global parallel processing: panel concurrency is governed ONLY by panel settings
+            effective_workers = requested_panel_workers if (panel_parallel and len(self.selected_files) > 1) else 1
+
+            if panel_parallel and len(self.selected_files) > 1 and effective_workers > 1:
+                self._log(f"🚀 Parallel PANEL translation ENABLED ({effective_workers} workers)", "info")
                 
                 import concurrent.futures
                 import threading as _threading
@@ -5856,9 +5870,9 @@ class MangaTranslationTab:
                             self._log(traceback.format_exc(), "error")
                         return False
                 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=panel_workers) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, effective_workers)) as executor:
                     futures = []
-                    stagger_ms = int(advanced.get('panel_start_stagger_ms', 0))
+                    stagger_ms = int(advanced.get('panel_start_stagger_ms', 100))
                     for idx, filepath in enumerate(self.selected_files):
                         if self.stop_flag.is_set():
                             break
@@ -5907,7 +5921,7 @@ class MangaTranslationTab:
                     pass
                 
             else:
-                # Sequential processing
+                # Sequential processing (or panel parallel requested but capped to 1 by global setting)
                 for index, filepath in enumerate(self.selected_files):
                     if self.stop_flag.is_set():
                         self._log("\n⏹️ Translation stopped by user", "warning")
