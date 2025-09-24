@@ -154,6 +154,19 @@ class BubbleDetector:
     _rtdetr_loaded = False
     _rtdetr_repo_id = 'ogkalu/comic-text-and-bubble-detector'
     
+    # Shared RT-DETR (ONNX) across process to avoid device/context storms
+    _rtdetr_onnx_init_lock = threading.Lock()
+    _rtdetr_onnx_shared_session = None
+    _rtdetr_onnx_loaded = False
+    _rtdetr_onnx_providers = None
+    _rtdetr_onnx_model_path = None
+    # Limit DML concurrent runs to avoid DXGI device hang. Adjustable via env DML_MAX_CONCURRENT
+    try:
+        _rtdetr_onnx_max_concurrent = int(os.environ.get('DML_MAX_CONCURRENT', '1'))
+    except Exception:
+        _rtdetr_onnx_max_concurrent = 1
+    _rtdetr_onnx_sema = threading.Semaphore(max(1, _rtdetr_onnx_max_concurrent))
+    
     def __init__(self, config_path: str = "config.json"):
         """
         Initialize the bubble detector.
@@ -1499,7 +1512,15 @@ class BubbleDetector:
             logger.error("ONNX Runtime not available for RT-DETR ONNX backend")
             return False
         try:
-            if self.rtdetr_onnx_loaded and not force_reload and self.rtdetr_onnx_session is not None:
+            # If singleton mode and already loaded, just attach shared session
+            try:
+                adv = (self.config or {}).get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+                singleton = bool(adv.get('use_singleton_models', True))
+            except Exception:
+                singleton = True
+            if singleton and BubbleDetector._rtdetr_onnx_loaded and not force_reload and BubbleDetector._rtdetr_onnx_shared_session is not None:
+                self.rtdetr_onnx_session = BubbleDetector._rtdetr_onnx_shared_session
+                self.rtdetr_onnx_loaded = True
                 return True
 
             repo = model_id or self.rtdetr_onnx_repo
@@ -1519,14 +1540,13 @@ class BubbleDetector:
             except Exception:
                 pass
             onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx')
+            BubbleDetector._rtdetr_onnx_model_path = onnx_fp
 
-            # Pick providers (prefer DML on Windows/AMD, then CUDA, then CPU)
+            # Pick providers: prefer CUDA if available; otherwise CPU. Do NOT use DML.
             providers = ['CPUExecutionProvider']
             try:
                 avail = ort.get_available_providers() if ONNX_AVAILABLE else []
-                if 'DmlExecutionProvider' in avail:
-                    providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
-                elif self.use_gpu and 'CUDAExecutionProvider' in avail:
+                if 'CUDAExecutionProvider' in avail:
                     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
             except Exception:
                 pass
@@ -1555,8 +1575,23 @@ class BubbleDetector:
             except Exception:
                 pass
 
-            self.rtdetr_onnx_session = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
-            self.rtdetr_onnx_loaded = True
+            # Create session (serialize creation in singleton mode to avoid device storms)
+            if singleton:
+                with BubbleDetector._rtdetr_onnx_init_lock:
+                    # Re-check after acquiring lock
+                    if BubbleDetector._rtdetr_onnx_loaded and BubbleDetector._rtdetr_onnx_shared_session is not None and not force_reload:
+                        self.rtdetr_onnx_session = BubbleDetector._rtdetr_onnx_shared_session
+                        self.rtdetr_onnx_loaded = True
+                        return True
+                    sess = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
+                    BubbleDetector._rtdetr_onnx_shared_session = sess
+                    BubbleDetector._rtdetr_onnx_loaded = True
+                    BubbleDetector._rtdetr_onnx_providers = providers
+                    self.rtdetr_onnx_session = sess
+                    self.rtdetr_onnx_loaded = True
+            else:
+                self.rtdetr_onnx_session = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
+                self.rtdetr_onnx_loaded = True
             logger.info("✅ RT-DETR (ONNX) model ready")
             return True
         except Exception as e:
@@ -1605,10 +1640,51 @@ class BubbleDetector:
             w, h = pil_image.size
             orig_size = np.array([[w, h]], dtype=np.int64)
 
-            outputs = self.rtdetr_onnx_session.run(None, {
-                'images': im_data,
-                'orig_target_sizes': orig_size
-            })
+            # Run with a concurrency guard when using DML to prevent device hangs
+            providers = BubbleDetector._rtdetr_onnx_providers or []
+            def _do_run(session):
+                return session.run(None, {
+                    'images': im_data,
+                    'orig_target_sizes': orig_size
+                })
+            if 'DmlExecutionProvider' in providers:
+                acquired = False
+                try:
+                    BubbleDetector._rtdetr_onnx_sema.acquire()
+                    acquired = True
+                    outputs = _do_run(self.rtdetr_onnx_session)
+                except Exception as dml_err:
+                    msg = str(dml_err)
+                    if '887A0005' in msg or '887A0006' in msg or 'Dml' in msg:
+                        # Rebuild CPU session and retry once
+                        try:
+                            base_path = BubbleDetector._rtdetr_onnx_model_path
+                            if base_path:
+                                so = ort.SessionOptions()
+                                so.enable_mem_pattern = False
+                                so.enable_cpu_mem_arena = False
+                                cpu_providers = ['CPUExecutionProvider']
+                                # Serialize rebuild
+                                with BubbleDetector._rtdetr_onnx_init_lock:
+                                    sess = ort.InferenceSession(base_path, providers=cpu_providers, sess_options=so)
+                                    BubbleDetector._rtdetr_onnx_shared_session = sess
+                                    BubbleDetector._rtdetr_onnx_providers = cpu_providers
+                                    self.rtdetr_onnx_session = sess
+                                outputs = _do_run(self.rtdetr_onnx_session)
+                            else:
+                                raise
+                        except Exception:
+                            raise
+                    else:
+                        raise
+                finally:
+                    if acquired:
+                        try:
+                            BubbleDetector._rtdetr_onnx_sema.release()
+                        except Exception:
+                            pass
+            else:
+                outputs = _do_run(self.rtdetr_onnx_session)
 
             # outputs expected: labels, boxes, scores
             labels, boxes, scores = outputs[:3]

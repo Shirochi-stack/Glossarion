@@ -615,15 +615,12 @@ class LocalInpainter:
             else:
                 self.onnx_fixed_size = None
             
-            # Standard ONNX loading, device-aware transformations for specific models
-            # Prefer DirectML on Windows/AMD if available; otherwise CUDA if available; else CPU
+            # Standard ONNX loading: prefer CUDA if available; otherwise CPU. Do NOT use DML.
             try:
                 avail = ort.get_available_providers() if ONNX_AVAILABLE else []
             except Exception:
                 avail = []
-            if 'DmlExecutionProvider' in avail:
-                providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
-            elif self.use_gpu and 'CUDAExecutionProvider' in avail:
+            if 'CUDAExecutionProvider' in avail:
                 providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
             else:
                 providers = ['CPUExecutionProvider']
