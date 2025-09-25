@@ -14634,7 +14634,7 @@ Important rules:
         # Toggle to force HTTP-only path for OpenRouter (SDK bypass)
         if not hasattr(self, 'openrouter_http_only_var'):
             self.openrouter_http_only_var = tk.BooleanVar(
-                value=self.config.get('openrouter_use_http_only', False)
+                value=self.config.get('openrouter_use_http_only', True)
             )
         
         tb.Checkbutton(

@@ -6996,7 +6996,7 @@ class UnifiedClient:
             with self._file_write_lock:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
-            print(f"Saved OpenRouter config to: {config_path}")
+            #print(f"Saved OpenRouter config to: {config_path}")
         except Exception as e:
             print(f"Failed to save OpenRouter config: {e}")
 
@@ -8365,8 +8365,8 @@ class UnifiedClient:
         sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
                          'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes']
         
-        # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
-        openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
+        # Allow forcing HTTP-only for OpenRouter via toggle (default: enabled)
+        openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '1') == '1'
         if provider == 'openrouter' and openrouter_http_only:
             print("OpenRouter HTTP-only mode enabled — using direct HTTP client")
         
@@ -8449,6 +8449,8 @@ class UnifiedClient:
                             "Accept": "application/json",
                             "Cache-Control": "no-cache",
                         })
+                        if os.getenv('OPENROUTER_ACCEPT_IDENTITY', '0') == '1':
+                            extra_headers["Accept-Encoding"] = "identity"
                     
                     # Build call kwargs and include extra_body only when present
                     call_kwargs = {
@@ -8526,6 +8528,11 @@ class UnifiedClient:
                     if provider == 'openrouter' and ("expecting value" in error_str or "json" in error_str):
                         try:
                             print("OpenRouter SDK parse error — falling back to HTTP path for this attempt")
+                            # Save the SDK parse error to failed_requests with traceback
+                            try:
+                                self._save_failed_request(messages, e, getattr(self, 'context', 'general'))
+                            except Exception:
+                                pass
                             # Build headers
                             http_headers = self._build_openai_headers(provider, actual_api_key, headers)
                             http_headers['HTTP-Referer'] = os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion')
@@ -8533,6 +8540,8 @@ class UnifiedClient:
                             http_headers['X-Proxy-TTL'] = '0'
                             http_headers['Accept'] = 'application/json'
                             http_headers['Cache-Control'] = 'no-cache'
+                            if os.getenv('OPENROUTER_ACCEPT_IDENTITY', '0') == '1':
+                                http_headers['Accept-Encoding'] = 'identity'
                             # Build body similar to HTTP branch
                             norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
                             body = {
@@ -8606,6 +8615,8 @@ class UnifiedClient:
                 headers['X-Title'] = os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
                 headers['X-Proxy-TTL'] = '0'
                 headers['Cache-Control'] = 'no-cache'
+                if os.getenv('OPENROUTER_ACCEPT_IDENTITY', '0') == '1':
+                    headers['Accept-Encoding'] = 'identity'
             elif provider == 'zhipu':
                 headers["Authorization"] = f"Bearer {actual_api_key}"
             elif provider == 'baidu':
