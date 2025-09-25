@@ -1179,8 +1179,9 @@ class BatchHeaderTranslator:
         updated_count = 0
         added_count = 0
         
-        # Get all HTML files in directory
-        all_html_files = [f for f in os.listdir(html_dir) if f.endswith('.html')]
+        # Get all HTML files in directory (support all HTML extensions)
+        html_extensions = ('.html', '.xhtml', '.htm')
+        all_html_files = [f for f in os.listdir(html_dir) if f.lower().endswith(html_extensions)]
         
         for num, new_title in translated_headers.items():
             # Try multiple filename patterns
@@ -1748,9 +1749,10 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
     
     log("📖 Extracting headers and mapping to output files...")
     
-    # Step 1: Get HTML files that contain numbers
+    # Step 1: Get HTML files that contain numbers (support all HTML extensions)
+    html_extensions = ('.html', '.xhtml', '.htm')
     all_html_files = sorted([f for f in os.listdir(html_dir) 
-                             if f.endswith('.html') 
+                             if f.lower().endswith(html_extensions) 
                              and re.search(r'\d+', f)])  # Only files with numbers
     log(f"📁 Found {len(all_html_files)} HTML files with numbers in {html_dir}")
     
@@ -1791,7 +1793,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                         actual_num = chapter_info.get('actual_num')
                         output_file = os.path.basename(chapter_info['output_file'])
                         
-                        # Skip files without numbers
+                        # Skip files without numbers (but allow retain extension naming patterns)
                         if not re.search(r'\d+', output_file):
                             continue
                         
@@ -2038,10 +2040,10 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     has_output = chapter_info.get('output_file')
                     is_completed = chapter_info.get('status') == 'completed' or has_output
                     
-                    # Skip if output file doesn't have a number
+                    # Skip if output file doesn't have a number or isn't an HTML file
                     if has_output:
                         output_file = os.path.basename(chapter_info['output_file'])
-                        if not re.search(r'\d+', output_file):
+                        if not re.search(r'\d+', output_file) or not output_file.lower().endswith(html_extensions):
                             continue
                     
                     if is_completed and actual_num is not None:
