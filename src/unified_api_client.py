@@ -8400,6 +8400,24 @@ class UnifiedClient:
                     elif norm_max_tokens is not None:
                         params["max_tokens"] = norm_max_tokens
                     
+                    # Inject OpenRouter reasoning configuration (effort/max_tokens)
+                    if provider == 'openrouter':
+                        try:
+                            enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                            if enable_gpt:
+                                reasoning = {"enabled": True, "exclude": True}
+                                tokens_str
+                                if tokens_str.isdigit() and int(tokens_str) > 0:
+                                    reasoning["max_tokens"] = int(tokens_str)
+                                else:
+                                    effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                                    if effort not in ('low', 'medium', 'high'):
+                                        effort = 'medium'
+                                    reasoning["effort"] = effort
+                                params["reasoning"] = reasoning
+                        except Exception:
+                            pass
+                    
                     # Add safety parameters for providers that support them
                     # Note: Together AI doesn't support the 'moderation' parameter
                     if disable_safety and provider in ["groq", "fireworks"]:
@@ -8504,6 +8522,24 @@ class UnifiedClient:
                 "max_tokens": max_tokens
             }
             
+            # Inject OpenRouter reasoning configuration (effort/max_tokens)
+            if provider == 'openrouter':
+                try:
+                    enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                    if enable_gpt:
+                        reasoning = {"enabled": True, "exclude": True}
+                        tokens_str
+                        if tokens_str.isdigit() and int(tokens_str) > 0:
+                            reasoning["max_tokens"] = int(tokens_str)
+                        else:
+                            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                            if effort not in ('low', 'medium', 'high'):
+                                effort = 'medium'
+                            reasoning["effort"] = effort
+                        data["reasoning"] = reasoning
+                except Exception:
+                    pass
+            
             # Add Perplexity-specific options for Sonar models
             if provider == 'perplexity' and 'sonar' in effective_model.lower():
                 data['search_domain_filter'] = ['perplexity.ai']
@@ -8522,6 +8558,22 @@ class UnifiedClient:
                     "temperature": temperature,
                     "max_tokens": max_tokens
                 }
+                # Persist reasoning config in saved debug file
+                try:
+                    enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                    if enable_gpt:
+                        reasoning = {"enabled": True, "exclude": True}
+                        tokens_str
+                        if tokens_str.isdigit() and int(tokens_str) > 0:
+                            reasoning["max_tokens"] = int(tokens_str)
+                        else:
+                            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                            if effort not in ('low', 'medium', 'high'):
+                                effort = 'medium'
+                            reasoning["effort"] = effort
+                        cfg["reasoning"] = reasoning
+                except Exception:
+                    pass
                 self._save_openrouter_config(cfg, response_name)
             # Endpoint and idempotency
             endpoint = "/chat/completions"

@@ -1318,6 +1318,10 @@ class TranslatorGUI:
         self.single_api_image_chunks_var = tk.BooleanVar(value=False)
         self.enable_gemini_thinking_var = tk.BooleanVar(value=self.config.get('enable_gemini_thinking', True))
         self.thinking_budget_var = tk.StringVar(value=str(self.config.get('thinking_budget', '-1')))
+        # NEW: GPT/OpenRouter reasoning controls
+        self.enable_gpt_thinking_var = tk.BooleanVar(value=self.config.get('enable_gpt_thinking', True))
+        self.gpt_reasoning_tokens_var = tk.StringVar(value=str(self.config.get('gpt_reasoning_tokens', '2000')))
+        self.gpt_effort_var = tk.StringVar(value=self.config.get('gpt_effort', 'medium'))
         self.thread_delay_var = tk.StringVar(value=str(self.config.get('thread_submission_delay', 0.5)))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
@@ -8756,6 +8760,11 @@ Provide translations in the same numbered format."""
             'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
             'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+            # GPT/OpenRouter reasoning
+            'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var.get() else "0",
+            'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var.get() if self.enable_gpt_thinking_var.get() else '',
+            'GPT_EFFORT': self.gpt_effort_var.get(),
+            'OPENROUTER_EXCLUDE': '1',
             # Custom API endpoints
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
             'GROQ_API_URL': self.groq_base_url_var.get() if self.groq_base_url_var.get() else '',
@@ -13520,6 +13529,20 @@ Important rules:
             else:
                 self.thinking_budget_entry.config(state='disabled')
 
+    def toggle_gpt_reasoning_controls(self):
+        """Enable/disable GPT reasoning controls based on toggle state"""
+        enabled = self.enable_gpt_thinking_var.get()
+        # Tokens entry
+        if hasattr(self, 'gpt_reasoning_tokens_entry'):
+            self.gpt_reasoning_tokens_entry.config(state='normal' if enabled else 'disabled')
+        # Effort combo
+        if hasattr(self, 'gpt_effort_combo'):
+            try:
+                self.gpt_effort_combo.config(state='readonly' if enabled else 'disabled')
+            except Exception:
+                # Fallback for ttk on some platforms
+                self.gpt_effort_combo.configure(state='readonly' if enabled else 'disabled')
+
     def open_other_settings(self):
         """Open the Other Settings dialog"""
         dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
@@ -13679,6 +13702,38 @@ Important rules:
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
         section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
         
+        # GPT-5/OpenAI Reasoning Toggle (NEW)
+        tk.Label(section_frame, text="GPT-5 Thinking (OpenRouter/OpenAI-style)", 
+                font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
+
+        gpt_frame = tk.Frame(section_frame)
+        gpt_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+
+        tb.Checkbutton(gpt_frame, text="Enable GPT / OR Thinking", 
+                      variable=self.enable_gpt_thinking_var,
+                      bootstyle="round-toggle",
+                      command=self.toggle_gpt_reasoning_controls).pack(side=tk.LEFT)
+
+        tk.Label(gpt_frame, text="Effort:").pack(side=tk.LEFT, padx=(20, 5))
+        self.gpt_effort_combo = ttk.Combobox(gpt_frame, textvariable=self.gpt_effort_var,
+                                             values=["low", "medium", "high"], state="readonly", width=8)
+        self.gpt_effort_combo.pack(side=tk.LEFT, padx=5)
+        UIHelper.disable_spinbox_mousewheel(self.gpt_effort_combo)
+
+        # Second row for OpenRouter-specific token budget
+        gpt_row2 = tk.Frame(section_frame)
+        gpt_row2.pack(anchor=tk.W, padx=40, pady=(5, 0))
+        tk.Label(gpt_row2, text="OR Thinking Tokens:").pack(side=tk.LEFT)
+        self.gpt_reasoning_tokens_entry = tb.Entry(gpt_row2, width=8, textvariable=self.gpt_reasoning_tokens_var)
+        self.gpt_reasoning_tokens_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(gpt_row2, text="tokens").pack(side=tk.LEFT)
+
+        # Initialize enabled state for GPT controls
+        self.toggle_gpt_reasoning_controls()
+
+        tk.Label(section_frame, text="Controls GPT-5 and OpenRouter reasoning. \nProvide Tokens to force a max token budget for other models; GPT-5 only uses Effort (low/medium/high).",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
         # Add Thinking Tokens Toggle with Budget Control (NEW)
         tk.Label(section_frame, text="Gemini Thinking Mode", 
                 font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
@@ -15539,6 +15594,9 @@ Important rules:
                     'single_api_image_chunks': self.single_api_image_chunks_var.get(),
                     'enable_gemini_thinking': self.enable_gemini_thinking_var.get(),
                     'thinking_budget': int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0,
+                    'enable_gpt_thinking': self.enable_gpt_thinking_var.get(),
+                    'gpt_reasoning_tokens': safe_int(self.gpt_reasoning_tokens_var.get(), 0),
+                    'gpt_effort': self.gpt_effort_var.get(),
                     'openai_base_url': self.openai_base_url_var.get(),
                     'groq_base_url': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') else '',
                     'fireworks_base_url': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') else '',
@@ -15651,6 +15709,10 @@ Important rules:
                     'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
                     'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
                     'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+                    'ENABLE_GPT_THINKING': '1' if self.enable_gpt_thinking_var.get() else '0',
+'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var.get() if self.enable_gpt_thinking_var.get() else '',
+                    'GPT_EFFORT': self.gpt_effort_var.get(),
+                    'OPENROUTER_EXCLUDE': '1',
                     # Custom API endpoints
                     'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
                     'GROQ_API_URL': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') and self.groq_base_url_var.get() else '',
@@ -16420,6 +16482,9 @@ Important rules:
             self.config['single_api_image_chunks'] = self.single_api_image_chunks_var.get()
             self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var.get()
             self.config['thinking_budget'] = int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0
+            self.config['enable_gpt_thinking'] = self.enable_gpt_thinking_var.get()
+            self.config['gpt_reasoning_tokens'] = int(self.gpt_reasoning_tokens_var.get()) if self.gpt_reasoning_tokens_var.get().lstrip('-').isdigit() else 0
+            self.config['gpt_effort'] = self.gpt_effort_var.get()
             self.config['openai_base_url'] = self.openai_base_url_var.get()
             self.config['groq_base_url'] = self.groq_base_url_var.get()  # This was missing!
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
