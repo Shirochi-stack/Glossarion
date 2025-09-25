@@ -14634,7 +14634,7 @@ Important rules:
         # Toggle to force HTTP-only path for OpenRouter (SDK bypass)
         if not hasattr(self, 'openrouter_http_only_var'):
             self.openrouter_http_only_var = tk.BooleanVar(
-                value=self.config.get('openrouter_use_http_only', True)
+                value=self.config.get('openrouter_use_http_only', False)
             )
         
         tb.Checkbutton(
@@ -14646,12 +14646,31 @@ Important rules:
         
         tk.Label(
             section_frame,
-            text="When enabled, requests to OpenRouter use direct HTTP POST with explicit headers (Accept, Referer, X-Title).\n"
-                 "This can improve error clarity and avoid SDK parse issues.",
+            text="When enabled, requests to OpenRouter use direct HTTP POST with explicit headers (Accept, Referer, X-Title).",
             font=('TkDefaultFont', 9),
             fg='gray',
             justify=tk.LEFT
         ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 5))
+
+        # OpenRouter: Disable compression (Accept-Encoding: identity)
+        if not hasattr(self, 'openrouter_accept_identity_var'):
+            self.openrouter_accept_identity_var = tk.BooleanVar(
+                value=self.config.get('openrouter_accept_identity', False)
+            )
+        tb.Checkbutton(
+            section_frame,
+            text="Disable compression for OpenRouter (Accept-Encoding: identity)",
+            variable=self.openrouter_accept_identity_var,
+            bootstyle="round-toggle"
+        ).pack(anchor=tk.W, pady=(4, 0))
+        tk.Label(
+            section_frame,
+            text="Sends Accept-Encoding: identity to request uncompressed responses.\n"
+                 "Use if proxies/CDNs cause corrupted or non-JSON compressed bodies.",
+            font=('TkDefaultFont', 8),
+            fg='gray',
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 8))
         
         # Initial state - show/hide enhanced options
         self.on_extraction_method_change()
@@ -15594,7 +15613,7 @@ Important rules:
                     'summary_role': self.summary_role_var.get(),
                     'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
                     'retain_source_extension': self.retain_source_extension_var.get(),
-'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
+                    'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
                     'rolling_summary_mode': self.rolling_summary_mode_var.get(),
                     'rolling_summary_max_entries': safe_int(self.rolling_summary_max_entries_var.get(), 10),
                     'retry_truncated': self.retry_truncated_var.get(),
@@ -15634,6 +15653,7 @@ Important rules:
                     'use_header_as_output': self.use_header_as_output_var.get(),
                     'disable_gemini_safety': self.disable_gemini_safety_var.get(),
                     'openrouter_use_http_only': self.openrouter_http_only_var.get(),
+                    'openrouter_accept_identity': self.openrouter_accept_identity_var.get(),
                     'auto_update_check': self.auto_update_check_var.get(),
                     'force_ncx_only': self.force_ncx_only_var.get(),
                     'single_api_image_chunks': self.single_api_image_chunks_var.get(),
@@ -15750,6 +15770,7 @@ Important rules:
                     'IMAGE_CHUNK_PROMPT': str(getattr(self, 'image_chunk_prompt', '')),  # FIXED: Convert to string
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
                     "OPENROUTER_USE_HTTP_ONLY": '1' if self.openrouter_http_only_var.get() else '0',
+                    "OPENROUTER_ACCEPT_IDENTITY": '1' if self.openrouter_accept_identity_var.get() else '0',
                     'auto_update_check': str(self.auto_update_check_var.get()),
                     'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
                     'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
@@ -16506,6 +16527,14 @@ Important rules:
             self.config['batch_size'] = safe_int(self.batch_size_var.get(), 3)
             self.config['conservative_batching'] = self.conservative_batching_var.get()
             self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
+
+            # OpenRouter transport/compression toggles (ensure persisted even when dialog not open)
+            if hasattr(self, 'openrouter_http_only_var'):
+                self.config['openrouter_use_http_only'] = bool(self.openrouter_http_only_var.get())
+                os.environ['OPENROUTER_USE_HTTP_ONLY'] = '1' if self.openrouter_http_only_var.get() else '0'
+            if hasattr(self, 'openrouter_accept_identity_var'):
+                self.config['openrouter_accept_identity'] = bool(self.openrouter_accept_identity_var.get())
+                os.environ['OPENROUTER_ACCEPT_IDENTITY'] = '1' if self.openrouter_accept_identity_var.get() else '0'
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()

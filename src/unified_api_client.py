@@ -5942,6 +5942,32 @@ class UnifiedClient:
 
             # Rate limit handling (429)
             if status == 429:
+                # Print detailed 429 info (match SDK-level detail)
+                try:
+                    ct = (resp.headers.get('content-type') or '').lower()
+                    retry_after_val = resp.headers.get('Retry-After', '')
+                    rl_remaining = resp.headers.get('X-RateLimit-Remaining') or resp.headers.get('x-ratelimit-remaining')
+                    rl_limit = resp.headers.get('X-RateLimit-Limit') or resp.headers.get('x-ratelimit-limit')
+                    rl_reset = resp.headers.get('X-RateLimit-Reset') or resp.headers.get('x-ratelimit-reset')
+                    detail_msg = None
+                    if 'application/json' in ct:
+                        try:
+                            body = resp.json()
+                            if isinstance(body, dict):
+                                err = body.get('error') or {}
+                                detail_msg = err.get('message') or body.get('message') or None
+                                err_code = err.get('code') or body.get('code') or None
+                                if detail_msg:
+                                    print(f"{provider} 429: {detail_msg} | code: {err_code} | retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
+                                else:
+                                    print(f"{provider} 429: {resp.text[:1200]} | retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
+                        except Exception:
+                            print(f"{provider} 429 (non-JSON parse): ct={ct} retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
+                    else:
+                        print(f"{provider} 429: ct={ct} retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
+                except Exception:
+                    pass
+
                 # Check if indefinite rate limit retry is enabled
                 indefinite_retry_enabled = os.getenv("INDEFINITE_RATE_LIMIT_RETRY", "1") == "1"
                 
@@ -8366,7 +8392,7 @@ class UnifiedClient:
                          'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: enabled)
-        openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '1') == '1'
+        openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
         if provider == 'openrouter' and openrouter_http_only:
             print("OpenRouter HTTP-only mode enabled — using direct HTTP client")
         
@@ -8716,7 +8742,7 @@ class UnifiedClient:
             try:
                 ct = (resp.headers.get('content-type') or '').lower()
                 if 'application/json' not in ct:
-                    snippet = resp.text[:800] if hasattr(resp, 'text') else ''
+                    snippet = resp.text[:1200] if hasattr(resp, 'text') else ''
                     # Log failed request snapshot
                     try:
                         self._save_failed_request(messages, f"non-JSON content-type: {ct}", getattr(self, 'context', 'general'), response=snippet)
@@ -8737,7 +8763,7 @@ class UnifiedClient:
                 try:
                     # detect common JSON decode exceptions without importing vendor-specific types
                     if 'Expecting value' in str(je) or 'JSONDecodeError' in str(type(je)):
-                        snippet = resp.text[:800] if hasattr(resp, 'text') else ''
+                        snippet = resp.text[:1200] if hasattr(resp, 'text') else ''
                         try:
                             self._save_failed_request(messages, f"json-parse-failed: {je}", getattr(self, 'context', 'general'), response=snippet)
                         except Exception:
