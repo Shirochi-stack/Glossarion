@@ -9681,6 +9681,7 @@ Important rules:
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
                     'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+                    'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var.get() else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
                     'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.get().strip() or '0.5',
@@ -14628,6 +14629,29 @@ Important rules:
             fg='gray',
             justify=tk.LEFT
         ).pack(anchor=tk.W, padx=(20, 0))
+
+        # New: OpenRouter Transport Preference
+        # Toggle to force HTTP-only path for OpenRouter (SDK bypass)
+        if not hasattr(self, 'openrouter_http_only_var'):
+            self.openrouter_http_only_var = tk.BooleanVar(
+                value=self.config.get('openrouter_use_http_only', False)
+            )
+        
+        tb.Checkbutton(
+            section_frame,
+            text="Use HTTP-only for OpenRouter (bypass SDK)",
+            variable=self.openrouter_http_only_var,
+            bootstyle="round-toggle"
+        ).pack(anchor=tk.W, pady=(8, 0))
+        
+        tk.Label(
+            section_frame,
+            text="When enabled, requests to OpenRouter use direct HTTP POST with explicit headers (Accept, Referer, X-Title).\n"
+                 "This can improve error clarity and avoid SDK parse issues.",
+            font=('TkDefaultFont', 9),
+            fg='gray',
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 5))
         
         # Initial state - show/hide enhanced options
         self.on_extraction_method_change()
@@ -15609,6 +15633,7 @@ Important rules:
                     'enable_decimal_chapters': self.enable_decimal_chapters_var.get(),
                     'use_header_as_output': self.use_header_as_output_var.get(),
                     'disable_gemini_safety': self.disable_gemini_safety_var.get(),
+                    'openrouter_use_http_only': self.openrouter_http_only_var.get(),
                     'auto_update_check': self.auto_update_check_var.get(),
                     'force_ncx_only': self.force_ncx_only_var.get(),
                     'single_api_image_chunks': self.single_api_image_chunks_var.get(),
@@ -15724,6 +15749,7 @@ Important rules:
                     'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', '')),  # FIXED: Convert to string
                     'IMAGE_CHUNK_PROMPT': str(getattr(self, 'image_chunk_prompt', '')),  # FIXED: Convert to string
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
+                    "OPENROUTER_USE_HTTP_ONLY": '1' if self.openrouter_http_only_var.get() else '0',
                     'auto_update_check': str(self.auto_update_check_var.get()),
                     'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
                     'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",

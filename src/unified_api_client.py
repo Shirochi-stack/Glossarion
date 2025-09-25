@@ -3628,6 +3628,11 @@ class UnifiedClient:
                 # COMPREHENSIVE ERROR HANDLING FOR NoneType and other issues
                 error_str = str(e).lower()
                 print(f"Unexpected error: {e}")
+                # Save unexpected error details to Payloads/failed_requests
+                try:
+                    self._save_failed_request(messages, e, context)
+                except Exception:
+                    pass
                 
                 # Special handling for NoneType length errors
                 if "nonetype" in error_str and "len" in error_str:
@@ -6966,31 +6971,20 @@ class UnifiedClient:
             raise UnifiedClientError(f"Poe API error: {e}")
             
     def _save_openrouter_config(self, config_data: dict, response_name: str = None):
-        """Save OpenRouter configuration - simplified"""
+        """Save OpenRouter configuration next to the current request payloads (thread-specific directory)"""
         if not os.getenv("SAVE_PAYLOAD", "1") == "1":
             return
         
         # Handle None or empty response_name
         if not response_name:
-            response_name = f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            response_name = f"config_{datetime.now().strftime('%H%M%S')}"
         
         # Sanitize response_name
         import re
         response_name = re.sub(r'[<>:"/\\|?*]', '_', str(response_name))
         
-        # Determine context from thread
-        thread_name = threading.current_thread().name
-        thread_id = threading.current_thread().ident
-        
-        if 'Translation' in thread_name:
-            context = 'translation'
-        elif 'Glossary' in thread_name:
-            context = 'glossary'
-        else:
-            context = 'general'
-        
-        # Create directory
-        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{thread_id}")
+        # Reuse the same payload directory as other saves
+        thread_dir = self._get_thread_directory()
         os.makedirs(thread_dir, exist_ok=True)
         
         # Create filename
@@ -6999,15 +6993,9 @@ class UnifiedClient:
         config_path = os.path.join(thread_dir, config_filename)
         
         try:
-            # Use file lock if available
-            if hasattr(self, '_file_write_lock'):
-                with self._file_write_lock:
-                    with open(config_path, 'w', encoding='utf-8') as f:
-                        json.dump(config_data, f, indent=2, ensure_ascii=False)
-            else:
+            with self._file_write_lock:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
-            
             print(f"Saved OpenRouter config to: {config_path}")
         except Exception as e:
             print(f"Failed to save OpenRouter config: {e}")
@@ -8377,7 +8365,12 @@ class UnifiedClient:
         sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
                          'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes']
         
-        if openai and provider in sdk_compatible:
+        # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
+        openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
+        if provider == 'openrouter' and openrouter_http_only:
+            print("OpenRouter HTTP-only mode enabled — using direct HTTP client")
+        
+        if openai and provider in sdk_compatible and not (provider == 'openrouter' and openrouter_http_only):
             # Use OpenAI SDK with custom base URL
             for attempt in range(max_retries):
                 try:
@@ -8454,6 +8447,7 @@ class UnifiedClient:
                             "X-Title": os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation'),
                             "X-Proxy-TTL": "0",
                             "Accept": "application/json",
+                            "Cache-Control": "no-cache",
                         })
                     
                     # Build call kwargs and include extra_body only when present
@@ -8538,6 +8532,7 @@ class UnifiedClient:
                             http_headers['X-Title'] = os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
                             http_headers['X-Proxy-TTL'] = '0'
                             http_headers['Accept'] = 'application/json'
+                            http_headers['Cache-Control'] = 'no-cache'
                             # Build body similar to HTTP branch
                             norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
                             body = {
@@ -8610,6 +8605,7 @@ class UnifiedClient:
                 headers['HTTP-Referer'] = os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion')
                 headers['X-Title'] = os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
                 headers['X-Proxy-TTL'] = '0'
+                headers['Cache-Control'] = 'no-cache'
             elif provider == 'zhipu':
                 headers["Authorization"] = f"Bearer {actual_api_key}"
             elif provider == 'baidu':
@@ -8705,7 +8701,47 @@ class UnifiedClient:
                 provider_name=provider,
                 use_session=True
             )
-            json_resp = resp.json()
+            # Safely parse JSON with diagnostics for non-JSON bodies
+            try:
+                ct = (resp.headers.get('content-type') or '').lower()
+                if 'application/json' not in ct:
+                    snippet = resp.text[:800] if hasattr(resp, 'text') else ''
+                    # Log failed request snapshot
+                    try:
+                        self._save_failed_request(messages, f"non-JSON content-type: {ct}", getattr(self, 'context', 'general'), response=snippet)
+                    except Exception:
+                        pass
+                    raise UnifiedClientError(
+                        f"{provider} returned non-JSON content-type: {ct or 'unknown'} | snippet: {snippet}",
+                        error_type="parse_error",
+                        http_status=resp.status_code,
+                        details={"content_type": ct, "snippet": snippet}
+                    )
+                json_resp = resp.json()
+            except Exception as je:
+                # If this is a JSON decode error, surface a helpful message
+                import json as _json
+                if isinstance(je, UnifiedClientError):
+                    raise
+                try:
+                    # detect common JSON decode exceptions without importing vendor-specific types
+                    if 'Expecting value' in str(je) or 'JSONDecodeError' in str(type(je)):
+                        snippet = resp.text[:800] if hasattr(resp, 'text') else ''
+                        try:
+                            self._save_failed_request(messages, f"json-parse-failed: {je}", getattr(self, 'context', 'general'), response=snippet)
+                        except Exception:
+                            pass
+                        raise UnifiedClientError(
+                            f"{provider} JSON parse failed: {je} | snippet: {snippet}",
+                            error_type="parse_error",
+                            http_status=resp.status_code,
+                            details={"content_type": ct, "snippet": snippet}
+                        )
+                except Exception:
+                    pass
+                # Re-raise unknown parsing exceptions
+                raise
+            
             choices = json_resp.get("choices", [])
             if not choices:
                 raise UnifiedClientError(f"{provider} API returned no choices")
