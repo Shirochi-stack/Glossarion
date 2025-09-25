@@ -14281,9 +14281,21 @@ Important rules:
         header_frame = tk.Frame(section_frame)
         header_frame.pack(anchor=tk.W, fill=tk.X, pady=(5, 10))
         
-        tb.Checkbutton(header_frame, text="Batch Translate Headers", 
+        # Master toggle for batch header translation
+        def _toggle_header_controls():
+            enabled = bool(self.batch_translate_headers_var.get())
+            new_state = tk.NORMAL if enabled else tk.DISABLED
+            update_cb.configure(state=new_state)
+            save_cb.configure(state=new_state)
+            ignore_header_cb.configure(state=new_state)
+            ignore_title_cb.configure(state=new_state)
+            delete_btn.configure(state=new_state)
+        
+        batch_toggle = tb.Checkbutton(header_frame, text="Batch Translate Headers", 
                       variable=self.batch_translate_headers_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT)
+                      bootstyle="round-toggle",
+                      command=_toggle_header_controls)
+        batch_toggle.pack(side=tk.LEFT)
         
         tk.Label(header_frame, text="Headers per batch:").pack(side=tk.LEFT, padx=(20, 5))
         
@@ -14294,30 +14306,38 @@ Important rules:
         update_frame = tk.Frame(section_frame)
         update_frame.pack(anchor=tk.W, fill=tk.X, padx=20)
         
-        tb.Checkbutton(update_frame, text="Update headers in HTML files", 
+        update_cb = tb.Checkbutton(update_frame, text="Update headers in HTML files", 
                       variable=self.update_html_headers_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT)
+                      bootstyle="round-toggle")
+        update_cb.pack(side=tk.LEFT)
         
-        tb.Checkbutton(update_frame, text="Save translations to .txt", 
+        save_cb = tb.Checkbutton(update_frame, text="Save translations to .txt", 
                       variable=self.save_header_translations_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(20, 0))
+                      bootstyle="round-toggle")
+        save_cb.pack(side=tk.LEFT, padx=(20, 0))
         
         # Additional ignore header option
         ignore_frame = tk.Frame(section_frame)
         ignore_frame.pack(anchor=tk.W, fill=tk.X, padx=20, pady=(5, 0))
         
-        tb.Checkbutton(ignore_frame, text="Ignore header", 
+        ignore_header_cb = tb.Checkbutton(ignore_frame, text="Ignore header", 
                       variable=self.ignore_header_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT)
+                      bootstyle="round-toggle")
+        ignore_header_cb.pack(side=tk.LEFT)
         
-        tb.Checkbutton(ignore_frame, text="Ignore title", 
+        ignore_title_cb = tb.Checkbutton(ignore_frame, text="Ignore title", 
                       variable=self.ignore_title_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(15, 0))
+                      bootstyle="round-toggle")
+        ignore_title_cb.pack(side=tk.LEFT, padx=(15, 0))
         
         # Delete translated_headers.txt button
-        tb.Button(ignore_frame, text="🗑️Delete Header Files", 
+        delete_btn = tb.Button(ignore_frame, text="🗑️Delete Header Files", 
                  command=self.delete_translated_headers_file,
-                 bootstyle="danger-outline", width=21).pack(side=tk.LEFT, padx=(20, 0))
+                 bootstyle="danger-outline", width=21)
+        delete_btn.pack(side=tk.LEFT, padx=(20, 0))
+        
+        # Initialize disabled state when batch headers is OFF
+        _toggle_header_controls()
         
         tk.Label(section_frame, 
                 text="• OFF: Use existing headers from translated chapters\n"

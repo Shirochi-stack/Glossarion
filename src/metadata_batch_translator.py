@@ -953,7 +953,7 @@ class BatchHeaderTranslator:
             with open(html_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            soup = BeautifulSoup(content, 'html.parser')
+            soup = BeautifulSoup(content, 'lxml')
             
             # Check ONLY for header tags (h1-h6)
             # NOT checking title tag per user requirement
@@ -1114,52 +1114,54 @@ class BatchHeaderTranslator:
                     continue
                 
                 if not has_header:
-                    # HTML has no header, insert the translated one
+                    # HTML has no header, insert the translated one WITHOUT rewriting the rest of the file
                     print(f"📝 Adding header to {html_file}: '{new_title}'")
-                    if self._insert_header_into_html(soup, new_title):
-                        # Write back with proper encoding
-                        html_str = str(soup)
-                        with open(html_path, 'w', encoding='utf-8') as f:
-                            f.write(html_str)
-                        added_count += 1
-                        print(f"✓ Added header to {html_file}")
-                    else:
-                        print(f"⚠️ Failed to add header to {html_file}")
+                    header_html = f"<h1>{new_title}</h1><br/>"
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    import re as _re
+                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', r"\1" + header_html, original, count=1, flags=_re.IGNORECASE)
+                    if n == 0:
+                        # Fallback: just prepend if <body> not found
+                        new_content = original + "\n" + header_html
+                    with open(html_path, 'w', encoding='utf-8') as wf:
+                        wf.write(new_content)
+                    added_count += 1
+                    print(f"✓ Added header to {html_file}")
                 else:
-                    # HTML has header, update it
+                    # HTML has header, update it WITHOUT reparsing/rewriting the rest of the file
                     updated = False
-                    
-                    # Update title tag
-                    title_tag = soup.find('title')
-                    if title_tag and title_tag.get_text().strip() == current_title:
-                        title_tag.string = new_title
+                    import re as _re
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    content = original
+                    # Replace title text only if it exactly matches current_title
+                    def _repl_title(m):
+                        inner = m.group(2).strip()
+                        return m.group(1) + new_title + m.group(3) if inner == current_title else m.group(0)
+                    content2 = _re.sub(r'(<title[^>]*>)([\s\S]*?)(</title>)', _repl_title, content, count=1, flags=_re.IGNORECASE)
+                    if content2 != content:
                         updated = True
-                    
-                    # Update ALL elements that contain the exact current title
-                    for element in soup.find_all(text=current_title):
-                        if element.parent.name not in ['script', 'style']:
-                            element.replace_with(new_title)
-                            updated = True
-                    
-                    # Also check elements where the text might have extra whitespace
+                        content = content2
+                    # Replace exact text inside first h1/h2/h3/p/div/span if it equals current_title
                     for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
-                        for element in soup.find_all(tag):
-                            if element.get_text().strip() == current_title:
-                                element.clear()
-                                element.string = new_title
-                                updated = True
-                    
-                    # Update meta og:title if it matches
-                    meta_title = soup.find('meta', {'property': 'og:title'})
-                    if meta_title and meta_title.get('content', '').strip() == current_title:
-                        meta_title['content'] = new_title
+                        pattern = rf'(<{tag}[^>]*>)\s*{_re.escape(current_title)}\s*(</{tag}>)'
+                        content2, n = _re.subn(pattern, r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                        if n > 0:
+                            updated = True
+                            content = content2
+                            break
+                    # Update meta og:title content if it matches
+                    def _repl_meta(m):
+                        before, val, after = m.group(1), m.group(2), m.group(3)
+                        return before + new_title + after if val.strip() == current_title else m.group(0)
+                    content2 = _re.sub(r'(<meta\b[^>]*property=["\']og:title["\'][^>]*content=["\'])([^"\']*)(["\'][^>]*>)', _repl_meta, content, count=1, flags=_re.IGNORECASE)
+                    if content2 != content:
                         updated = True
-                    
+                        content = content2
                     if updated:
-                        # Write back with proper encoding
-                        html_str = str(soup)
-                        with open(html_path, 'w', encoding='utf-8') as f:
-                            f.write(html_str)
+                        with open(html_path, 'w', encoding='utf-8') as wf:
+                            wf.write(content)
                         updated_count += 1
                         print(f"✓ Updated {html_file}: '{current_title}' → '{new_title}'")
                     else:
@@ -1225,51 +1227,55 @@ class BatchHeaderTranslator:
                     continue
                 
                 if not has_header:
-                    # HTML has no header, insert the translated one
+                    # HTML has no header, insert the translated one WITHOUT rewriting the rest of the file
                     print(f"📝 Adding header to {html_file}: '{new_title}'")
-                    if self._insert_header_into_html(soup, new_title):
-                        # Write back with proper encoding
-                        html_str = str(soup)
-                        with open(html_path, 'w', encoding='utf-8') as f:
-                            f.write(html_str)
-                        added_count += 1
-                        print(f"✓ Added header to {html_file}")
-                    else:
-                        print(f"⚠️ Failed to add header to {html_file}")
+                    header_html = f"<h1>{new_title}</h1><br/>"
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    import re as _re
+                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', r"\1" + header_html, original, count=1, flags=_re.IGNORECASE)
+                    if n == 0:
+                        new_content = original + "\n" + header_html
+                    with open(html_path, 'w', encoding='utf-8') as wf:
+                        wf.write(new_content)
+                    added_count += 1
+                    print(f"✓ Added header to {html_file}")
                 else:
-                    # HTML has header, update it
+                    # HTML has header, update it WITHOUT reparsing/rewriting the rest of the file
                     updated = False
-                    
-                    # Update title tag
-                    title_tag = soup.find('title')
-                    if title_tag:
-                        title_tag.string = new_title
+                    import re as _re
+                    with open(html_path, 'r', encoding='utf-8') as rf:
+                        original = rf.read()
+                    content = original
+                    # Replace title text (first <title>)
+                    content2, n = _re.subn(r'(<title[^>]*>)[\s\S]*?(</title>)', r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                    if n > 0:
                         updated = True
-                    
-                    # Update first h1, h2, or h3 tag
+                        content = content2
+                    # Replace first h1/h2/h3
                     for tag in ['h1', 'h2', 'h3']:
-                        header = soup.find(tag)
-                        if header:
-                            header.clear()
-                            header.string = new_title
+                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\s\S]*?(</{tag}>)', r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                        if n > 0:
                             updated = True
+                            content = content2
                             break
-                    
-                    # Update meta og:title
-                    meta_title = soup.find('meta', {'property': 'og:title'})
-                    if meta_title:
-                        meta_title['content'] = new_title
+                    # Update or add meta og:title (set content=...)
+                    # Replace existing
+                    content2, n = _re.subn(r'(<meta\b[^>]*property=["\']og:title["\'][^>]*content=["\'])[^"\']*(["\'][^>]*>)', r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                    if n == 0:
+                        # Try to add if missing: insert after <head>
+                        content2, n2 = _re.subn(r'(<head\b[^>]*>)', r"\1\n<meta property=\"og:title\" content=\"" + new_title + "\"/>", content, count=1, flags=_re.IGNORECASE)
+                        if n2 > 0:
+                            updated = True
+                            content = content2
+                    else:
                         updated = True
-                    
+                        content = content2
                     if updated:
-                        # Ensure proper encoding
-                        html_str = str(soup)
-                        # Preserve Unicode characters
-                        with open(html_path, 'w', encoding='utf-8') as f:
-                            f.write(html_str)
+                        with open(html_path, 'w', encoding='utf-8') as wf:
+                            wf.write(content)
                         updated_count += 1
                         print(f"✓ Updated {html_file} with: {new_title}")
-                    
             except Exception as e:
                 print(f"❌ Error processing chapter {num}: {e}")
         
@@ -1819,8 +1825,8 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 html_path = os.path.join(html_dir, html_file)
                 with open(html_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                
-                soup = BeautifulSoup(content, 'html.parser')
+                parser = 'lxml-xml' if html_path.lower().endswith('.xhtml') or content.lstrip().startswith('<?xml') else 'lxml'
+                soup = BeautifulSoup(content, parser)
                 
                 current_title = None
                 for tag_name in ['h1', 'h2', 'h3', 'title']:
