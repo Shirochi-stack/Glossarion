@@ -2024,6 +2024,13 @@ class MangaTranslator:
                 
                 # Start Read operation with error handling
                 try:
+                    # Ensure client is alive before starting
+                    if getattr(self, 'vision_client', None) is None:
+                        self._log("⚠️ Azure client missing before read; reinitializing...", "warning")
+                        self._ensure_azure_client()
+                    if getattr(self, 'vision_client', None) is None:
+                        raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-cognitiveservices-vision-computervision installation.")
+
                     read_response = self.vision_client.read_in_stream(
                         image_stream,
                         **read_params
@@ -2035,6 +2042,8 @@ class MangaTranslator:
                         # Retry without language parameter
                         image_stream.seek(0)
                         read_params.pop('language', None)
+                        if getattr(self, 'vision_client', None) is None:
+                            self._ensure_azure_client()
                         read_response = self.vision_client.read_in_stream(
                             image_stream,
                             **read_params
@@ -2043,16 +2052,33 @@ class MangaTranslator:
                         raise
                 
                 # Get operation ID
-                operation_location = read_response.headers["Operation-Location"]
+                operation_location = read_response.headers.get("Operation-Location") if hasattr(read_response, 'headers') else None
+                if not operation_location:
+                    raise RuntimeError("Azure Read API did not return Operation-Location header")
                 operation_id = operation_location.split("/")[-1]
                 
                 # Poll for results with configurable timeout
                 self._log(f"   Waiting for Azure OCR to complete (max {max_wait}s)...")
                 wait_time = 0
                 last_status = None
+                result = None
                 
                 while wait_time < max_wait:
-                    result = self.vision_client.get_read_result(operation_id)
+                    try:
+                        if getattr(self, 'vision_client', None) is None:
+                            # Client got cleaned up mid-poll; reinitialize and continue
+                            self._log("⚠️ Azure client became None during polling; reinitializing...", "warning")
+                            self._ensure_azure_client()
+                            if getattr(self, 'vision_client', None) is None:
+                                raise AttributeError("Azure client lost and could not be reinitialized")
+                        result = self.vision_client.get_read_result(operation_id)
+                    except AttributeError as e:
+                        # Defensive: reinitialize once and retry this iteration
+                        self._log(f"⚠️ {e} — reinitializing Azure client and retrying once", "warning")
+                        self._ensure_azure_client()
+                        if getattr(self, 'vision_client', None) is None:
+                            raise
+                        result = self.vision_client.get_read_result(operation_id)
                     
                     # Log status changes
                     if result.status != last_status:
@@ -2067,6 +2093,8 @@ class MangaTranslator:
                     self._log("💤 Azure OCR polling pausing briefly for stability", "debug")
                     wait_time += poll_interval
                 
+                if not result:
+                    raise RuntimeError("Azure Read API polling did not return a result")
                 if result.status == OperationStatusCodes.succeeded:
                     # Track statistics
                     total_lines = 0

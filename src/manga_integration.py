@@ -5609,8 +5609,16 @@ class MangaTranslationTab:
             except Exception:
                 self._preloaded_bd = None
         
-        # Initialize translator if needed (or if it was reset)
-        if not self.translator or not hasattr(self, 'translator'):
+        # Initialize translator if needed (or if it was reset or client was cleared during shutdown)
+        needs_new_translator = (not hasattr(self, 'translator')) or (self.translator is None)
+        if not needs_new_translator:
+            try:
+                needs_new_translator = getattr(self.translator, 'client', None) is None
+                if needs_new_translator:
+                    self._log("♻️ Translator exists but client was cleared — reinitializing translator", "debug")
+            except Exception:
+                needs_new_translator = True
+        if needs_new_translator:
             self._log("⚙️ Initializing translator...", "info")
             try:
                 self.translator = MangaTranslator(
@@ -5976,7 +5984,12 @@ class MangaTranslationTab:
     def _translation_worker(self):
         """Worker thread for translation"""
         try:
-            self.translator.set_stop_flag(self.stop_flag)
+            # Defensive: ensure translator exists before using it (legacy callers may start this worker early)
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("⚠️ Translator not initialized yet; skipping worker start", "warning")
+                return
+            if hasattr(self.translator, 'set_stop_flag'):
+                self.translator.set_stop_flag(self.stop_flag)
             
             # Ensure API parallelism (batch API calls) is controlled independently of local parallel processing.
             # Propagate the GUI "Batch Translation" toggle into environment so Unified API Client applies it globally
@@ -6627,6 +6640,8 @@ class MangaTranslationTab:
                     import threading
                     threading.Thread(target=tr.shutdown, name="MangaTranslatorShutdown", daemon=True).start()
                     self._log("🧹 Initiated translator resource shutdown", "info")
+                    # Important: clear the stale translator reference so the next Start creates a fresh instance
+                    self.translator = None
             except Exception as e:
                 self._log(f"⚠️ Failed to start shutdown: {e}", "warning")
             
