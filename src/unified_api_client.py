@@ -6789,9 +6789,11 @@ class UnifiedClient:
                 raise UnifiedClientError(error_msg, error_type="auth_error")
                 
             elif "rate limit" in error_str.lower() or "429" in error_str:
-                error_msg = f"ElectronHub rate limit exceeded. Please wait before retrying."
-                print(f"\n⏳ {error_msg}")
-                raise UnifiedClientError(error_msg, error_type="rate_limit")
+                # Preserve the original error details from OpenRouter/ElectronHub
+                # The original error should contain the full API response with specific details
+                print(f"\n⏳ ElectronHub rate limit error: {error_str}")
+                # Use the original error string to preserve the full OpenRouter error description
+                raise UnifiedClientError(error_str, error_type="rate_limit")
                 
             else:
                 # Re-raise original error with context
@@ -8474,7 +8476,8 @@ class UnifiedClient:
                 except Exception as e:
                     error_str = str(e).lower()
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
-                        raise UnifiedClientError(f"{provider} rate limit: {e}", error_type="rate_limit")
+                        # Preserve the full error message from OpenRouter/ElectronHub
+                        raise UnifiedClientError(str(e), error_type="rate_limit")
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
