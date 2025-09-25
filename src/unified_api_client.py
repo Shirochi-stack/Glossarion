@@ -8528,10 +8528,73 @@ class UnifiedClient:
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
                         # Preserve the full error message from OpenRouter/ElectronHub
                         raise UnifiedClientError(str(e), error_type="rate_limit")
-                    # Clarify JSON parse issues from SDK when hitting OpenRouter
+                    # Fallback: If SDK has trouble parsing OpenRouter response, retry via direct HTTP with full diagnostics
                     if provider == 'openrouter' and ("expecting value" in error_str or "json" in error_str):
-                        hint = "Likely non-JSON response (e.g., HTML or empty body). Ensure Accept: application/json, HTTP-Referer, and X-Title headers are set."
-                        raise UnifiedClientError(f"OpenRouter SDK parse error: {hint} Original: {e}", error_type="parse_error")
+                        try:
+                            print("OpenRouter SDK parse error — falling back to HTTP path for this attempt")
+                            # Build headers
+                            http_headers = self._build_openai_headers(provider, actual_api_key, headers)
+                            http_headers['HTTP-Referer'] = os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion')
+                            http_headers['X-Title'] = os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
+                            http_headers['X-Proxy-TTL'] = '0'
+                            http_headers['Accept'] = 'application/json'
+                            # Build body similar to HTTP branch
+                            norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
+                            body = {
+                                "model": effective_model,
+                                "messages": messages,
+                                "temperature": req_temperature,
+                            }
+                            if norm_max_completion_tokens is not None:
+                                body["max_completion_tokens"] = norm_max_completion_tokens
+                            elif norm_max_tokens is not None:
+                                body["max_tokens"] = norm_max_tokens
+                            # Reasoning (OpenRouter-only)
+                            try:
+                                enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                                if enable_gpt:
+                                    reasoning = {"enabled": True, "exclude": True}
+                                    tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
+                                    if tokens_str.isdigit() and int(tokens_str) > 0:
+                                        reasoning["max_tokens"] = int(tokens_str)
+                                    else:
+                                        effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                                        if effort not in ('low', 'medium', 'high'):
+                                            effort = 'medium'
+                                        reasoning["effort"] = effort
+                                    body["reasoning"] = reasoning
+                            except Exception:
+                                pass
+                            # Make HTTP request
+                            endpoint = "/chat/completions"
+                            http_headers["Idempotency-Key"] = self._get_idempotency_key()
+                            resp = self._http_request_with_retries(
+                                method="POST",
+                                url=f"{base_url}{endpoint}",
+                                headers=http_headers,
+                                json=body,
+                                expected_status=(200,),
+                                max_retries=1,
+                                provider_name="OpenRouter (HTTP)",
+                                use_session=True
+                            )
+                            json_resp = resp.json()
+                            choices = json_resp.get("choices", [])
+                            if not choices:
+                                raise UnifiedClientError("OpenRouter (HTTP) returned no choices")
+                            content, finish_reason, usage = self._extract_openai_json(json_resp)
+                            return UnifiedResponse(
+                                content=content,
+                                finish_reason=finish_reason,
+                                usage=usage,
+                                raw_response=json_resp
+                            )
+                        except Exception as http_e:
+                            # Surface detailed diagnostics
+                            raise UnifiedClientError(
+                                f"OpenRouter HTTP fallback failed: {http_e}",
+                                error_type="parse_error"
+                            )
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
