@@ -9741,6 +9741,17 @@ class UnifiedClient:
             translated_text = result.get('translatedText', '')
             detected_lang = result.get('detectedSourceLanguage', source_lang)
             
+            # FIX: Convert literal \n characters to actual line breaks
+            if '\\n' in translated_text:
+                translated_text = translated_text.replace('\\n', '\n')
+                logger.debug("Converted literal \\n characters to actual line breaks")
+            
+            # Also handle other escaped characters that might appear
+            if '\\r' in translated_text:
+                translated_text = translated_text.replace('\\r', '\r')
+            if '\\t' in translated_text:
+                translated_text = translated_text.replace('\\t', '\t')
+            
             import re
             
             # Fix markdown structure issues in Google Translate text output
