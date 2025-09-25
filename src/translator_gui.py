@@ -1207,7 +1207,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.7.0"
+        __version__ = "4.7.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -2268,7 +2268,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.7.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.7.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -15730,7 +15730,7 @@ Important rules:
                     'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
                     'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
                     'ENABLE_GPT_THINKING': '1' if self.enable_gpt_thinking_var.get() else '0',
-'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var.get() if self.enable_gpt_thinking_var.get() else '',
+'                   GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var.get() if self.enable_gpt_thinking_var.get() else '',
                     'GPT_EFFORT': self.gpt_effort_var.get(),
                     'OPENROUTER_EXCLUDE': '1',
                     # Custom API endpoints
@@ -17175,7 +17175,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v4.7.0...")
+    print("🚀 Starting Glossarion v4.7.5...")
     
     # Initialize splash screen
     splash_manager = None
