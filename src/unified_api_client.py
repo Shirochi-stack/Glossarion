@@ -6059,13 +6059,17 @@ class UnifiedClient:
         # Ensure content type
         if 'Content-Type' not in h:
             h['Content-Type'] = 'application/json'
+        # Ensure we explicitly request JSON back from providers
+        if 'Accept' not in h:
+            h['Accept'] = 'application/json'
         return h
 
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
-        """Apply safety flags for providers that support them (no behavior change)."""
+        """Apply safety flags for providers that support them (avoid unsupported params)."""
         if not disable_safety:
             return
-        if provider in ["openai", "groq", "fireworks", "together"]:
+        # Do NOT send 'moderation' to OpenAI; it's unsupported and causes 400 Unknown parameter
+        if provider in ["groq", "fireworks"]:
             payload["moderation"] = False
         elif provider == "poe":
             payload["safe_mode"] = False
@@ -8388,11 +8392,19 @@ class UnifiedClient:
                     # Get user-configured anti-duplicate parameters
                     anti_dupe_params = self._get_anti_duplicate_params(temperature)
 
+                    # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
+                    req_temperature = temperature
+                    try:
+                        if self._is_o_series_model():
+                            req_temperature = 1.0
+                    except Exception:
+                        pass
+
                     norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
                     params = {
                         "model": effective_model,
                         "messages": messages,
-                        "temperature": temperature,
+                        "temperature": req_temperature,
                         **anti_dupe_params
                     }
                     if norm_max_completion_tokens is not None:
@@ -8400,28 +8412,33 @@ class UnifiedClient:
                     elif norm_max_tokens is not None:
                         params["max_tokens"] = norm_max_tokens
                     
-                    # Inject OpenRouter reasoning configuration (effort/max_tokens)
+                    # Use extra_body for provider-specific fields the SDK doesn't type-accept
+                    extra_body = {}
+                    
+                    # Inject OpenRouter reasoning configuration (effort/max_tokens) via extra_body
                     if provider == 'openrouter':
                         try:
                             enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
                             if enable_gpt:
                                 reasoning = {"enabled": True, "exclude": True}
-                                tokens_str
+                                tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
                                 if tokens_str.isdigit() and int(tokens_str) > 0:
+                                    reasoning.pop('effort', None)
                                     reasoning["max_tokens"] = int(tokens_str)
                                 else:
                                     effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
                                     if effort not in ('low', 'medium', 'high'):
                                         effort = 'medium'
+                                    reasoning.pop('max_tokens', None)
                                     reasoning["effort"] = effort
-                                params["reasoning"] = reasoning
+                                extra_body["reasoning"] = reasoning
                         except Exception:
                             pass
                     
                     # Add safety parameters for providers that support them
                     # Note: Together AI doesn't support the 'moderation' parameter
                     if disable_safety and provider in ["groq", "fireworks"]:
-                        params["moderation"] = False
+                        extra_body["moderation"] = False
                         logger.info(f"🔓 Safety moderation disabled for {provider}")
                     elif disable_safety and provider == "together":
                         # Together AI handles safety differently - no moderation parameter
@@ -8429,10 +8446,25 @@ class UnifiedClient:
                     
                     # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
                     idem_key = self._get_idempotency_key()
-                    resp = client.chat.completions.create(
+                    extra_headers = {"Idempotency-Key": idem_key}
+                    if provider == 'openrouter':
+                        # OpenRouter requires Referer and Title; also request JSON explicitly
+                        extra_headers.update({
+                            "HTTP-Referer": os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion'),
+                            "X-Title": os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation'),
+                            "X-Proxy-TTL": "0",
+                            "Accept": "application/json",
+                        })
+                    
+                    # Build call kwargs and include extra_body only when present
+                    call_kwargs = {
                         **params,
-                        extra_headers={"Idempotency-Key": idem_key}
-                    )
+                        "extra_headers": extra_headers,
+                    }
+                    if extra_body:
+                        call_kwargs["extra_body"] = extra_body
+                    
+                    resp = client.chat.completions.create(**call_kwargs)
                     
                     # Enhanced extraction for Gemini endpoints
                     content = None
@@ -8496,6 +8528,10 @@ class UnifiedClient:
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
                         # Preserve the full error message from OpenRouter/ElectronHub
                         raise UnifiedClientError(str(e), error_type="rate_limit")
+                    # Clarify JSON parse issues from SDK when hitting OpenRouter
+                    if provider == 'openrouter' and ("expecting value" in error_str or "json" in error_str):
+                        hint = "Likely non-JSON response (e.g., HTML or empty body). Ensure Accept: application/json, HTTP-Referer, and X-Title headers are set."
+                        raise UnifiedClientError(f"OpenRouter SDK parse error: {hint} Original: {e}", error_type="parse_error")
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
@@ -8515,12 +8551,26 @@ class UnifiedClient:
                 headers["Authorization"] = f"Bearer {actual_api_key}"
             elif provider == 'baidu':
                 headers["Content-Type"] = "application/json"
+            # Normalize token parameter (o-series: max_completion_tokens; others: max_tokens)
+            norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
+
+            # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
+            req_temperature = temperature
+            try:
+                if provider == 'openai' and self._is_o_series_model():
+                    req_temperature = 1.0
+            except Exception:
+                pass
+
             data = {
                 "model": effective_model,
                 "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens
+                "temperature": req_temperature,
             }
+            if norm_max_completion_tokens is not None:
+                data["max_completion_tokens"] = norm_max_completion_tokens
+            elif norm_max_tokens is not None:
+                data["max_tokens"] = norm_max_tokens
             
             # Inject OpenRouter reasoning configuration (effort/max_tokens)
             if provider == 'openrouter':
@@ -8528,13 +8578,15 @@ class UnifiedClient:
                     enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
                     if enable_gpt:
                         reasoning = {"enabled": True, "exclude": True}
-                        tokens_str
+                        tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
                         if tokens_str.isdigit() and int(tokens_str) > 0:
+                            reasoning.pop('effort', None)
                             reasoning["max_tokens"] = int(tokens_str)
                         else:
                             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
                             if effort not in ('low', 'medium', 'high'):
                                 effort = 'medium'
+                            reasoning.pop('max_tokens', None)
                             reasoning["effort"] = effort
                         data["reasoning"] = reasoning
                 except Exception:
@@ -8563,13 +8615,15 @@ class UnifiedClient:
                     enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
                     if enable_gpt:
                         reasoning = {"enabled": True, "exclude": True}
-                        tokens_str
+                        tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
                         if tokens_str.isdigit() and int(tokens_str) > 0:
+                            reasoning.pop('effort', None)
                             reasoning["max_tokens"] = int(tokens_str)
                         else:
                             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
                             if effort not in ('low', 'medium', 'high'):
                                 effort = 'medium'
+                            reasoning.pop('max_tokens', None)
                             reasoning["effort"] = effort
                         cfg["reasoning"] = reasoning
                 except Exception:
