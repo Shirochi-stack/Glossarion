@@ -1957,6 +1957,9 @@ class ChapterExtractor:
         enhanced_filtering = extraction_mode  # Default fallback
         preserve_structure = True
         
+        # Override cover skipping when automatic cover creation is disabled
+        disable_automatic_cover_creation = os.getenv("DISABLE_AUTOMATIC_COVER_CREATION", "0") == "1"
+        
         if extraction_mode == "enhanced":
             print("🚀 Initializing Enhanced extraction mode with html2text...")
             
@@ -2014,9 +2017,9 @@ class ChapterExtractor:
                     self.progress_callback(f"Scanning files: {idx}/{total_files}")
                 
             if name.lower().endswith(('.xhtml', '.html', '.htm')):
-                # Always skip cover files in ALL modes - check basename exactly
+                # Skip cover files by default unless override is enabled
                 basename = os.path.basename(name).lower()
-                if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
+                if basename in ['cover.html', 'cover.xhtml', 'cover.htm'] and not disable_automatic_cover_creation:
                     print(f"[SKIP] Cover file excluded from all modes: {name}")
                     continue
                 

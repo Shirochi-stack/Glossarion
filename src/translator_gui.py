@@ -2176,6 +2176,8 @@ Recent translations to summarize:
             ('batch_translation_var', 'batch_translation', False),
             ('conservative_batching_var', 'conservative_batching', True),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
+            # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
+            ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
@@ -8745,6 +8747,7 @@ Provide translations in the same numbered format."""
             "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
             'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
+            'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0",
             'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
             'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
@@ -9900,6 +9903,7 @@ Important rules:
             
             # Set environment variables for EPUB converter
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
+            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0"
 
             source_epub_file = os.path.join(folder, 'source_epub.txt')
             if os.path.exists(source_epub_file):
@@ -14537,6 +14541,14 @@ Important rules:
         
         tk.Label(section_frame, text="Skip creating image gallery page in EPUB",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        # New: Disable Automatic Cover Creation
+        tb.Checkbutton(section_frame, text="Disable Automatic Cover Creation", 
+                      variable=self.disable_automatic_cover_creation_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="When enabled: no auto-generated cover page is created. If a cover.html exists, it will be translated (skip override)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         tb.Checkbutton(section_frame, text="Disable 0-based Chapter Detection", 
                       variable=self.disable_zero_detection_var,
@@ -15655,6 +15667,7 @@ Important rules:
                     'emergency_paragraph_restore': self.emergency_restore_var.get(),
                     'disable_chapter_merging': self.disable_chapter_merging_var.get(),
                     'disable_epub_gallery': self.disable_epub_gallery_var.get(),
+                    'disable_automatic_cover_creation': self.disable_automatic_cover_creation_var.get(),
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
                     'enable_image_translation': self.enable_image_translation_var.get(),
                     'process_webnovel_images': self.process_webnovel_images_var.get(),
@@ -15773,6 +15786,7 @@ Important rules:
                     "IMAGE_CHUNK_HEIGHT": str(self.config['image_chunk_height']),
                     "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
                     "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
+                    "DISABLE_AUTOMATIC_COVER_CREATION": "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0",
                     "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
                     "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
                     "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
@@ -16549,6 +16563,7 @@ Important rules:
                 os.environ['OPENROUTER_ACCEPT_IDENTITY'] = '1' if self.openrouter_accept_identity_var.get() else '0'
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
+            self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var.get()
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)

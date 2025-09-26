@@ -2952,7 +2952,9 @@ img {
                         self.log(f"  [{completed}/{len(image_files)}] ❌ Failed to process image: {e}")
             
             # Find cover (sequential - quick operation)
-            if processed_images:
+            # Respect user preference to disable automatic cover creation
+            disable_auto_cover = os.environ.get('DISABLE_AUTOMATIC_COVER_CREATION', '0') == '1'
+            if processed_images and not disable_auto_cover:
                 cover_prefixes = ['cover', 'front']
                 for original_name, safe_name in processed_images.items():
                     name_lower = original_name.lower()
