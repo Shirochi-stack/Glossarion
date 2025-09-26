@@ -1962,6 +1962,9 @@ class ChapterExtractor:
             
             # Get enhanced mode configuration from environment
             enhanced_filtering = os.getenv("ENHANCED_FILTERING", "smart")
+            # Avoid 'full' with html2text to prevent XML declaration artifacts; use 'comprehensive' instead
+            if str(enhanced_filtering).lower() == 'full':
+                enhanced_filtering = 'comprehensive'
             preserve_structure = os.getenv("ENHANCED_PRESERVE_STRUCTURE", "1") == "1"
             
             print(f"  • Enhanced filtering level: {enhanced_filtering}")
@@ -9129,27 +9132,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     The input is the TRANSLATED text that was originally extracted using html2text.
     """
     import re
-    import html as _html
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
-    
-    # Remove stray XML declaration lines that sometimes leak through extraction
-    # Examples to strip (with or without angle brackets, with smart quotes or entities):
-    #   xml version='1.0' encoding='utf-8'?
-    #   <?xml version="1.0" encoding="utf-8"?>
-    def _strip_xml_decl(text: str) -> str:
-        cleaned = []
-        for line in text.splitlines():
-            test = _html.unescape(line).strip()
-            # Normalize curly quotes to straight quotes for matching
-            test_norm = test.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
-            if re.match(r"^<?\??xml\s+version\s*=\s*['\"][^'\"]+['\"]\s+encoding\s*=\s*['\"][^'\"]+['\"]\s*\??>??\s*$",
-                        test_norm, flags=re.IGNORECASE):
-                continue
-            cleaned.append(line)
-        return "\n".join(cleaned)
-    
-    plain_text = _strip_xml_decl(plain_text)
     
     # First, try to use markdown2 for proper markdown conversion
     try:
