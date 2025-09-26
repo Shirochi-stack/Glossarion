@@ -6,6 +6,7 @@ Provides superior text extraction from HTML with proper Unicode handling
 Optimized for Korean, Japanese, and Chinese content extraction
 """
 
+import os
 import re
 import html
 import unicodedata
@@ -437,9 +438,26 @@ class EnhancedTextExtractor:
             # Extract title
             chapter_title = self._extract_title(soup)
             
-            # Determine content to convert
+            # Respect GUI toggles to exclude headers/titles BEFORE conversion
+            try:
+                batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                if ignore_title_tag and soup.title:
+                    # Remove <title> so it isn't included when using full extraction
+                    soup.title.decompose()
+                if ignore_header_tags:
+                    # Remove visible headers from body prior to conversion
+                    for tag_name in ['h1', 'h2', 'h3']:
+                        for hdr in soup.find_all(tag_name):
+                            hdr.decompose()
+            except Exception:
+                # Non-fatal – proceed with original soup if anything goes wrong
+                pass
+            
+            # Determine content to convert (after removals)
             if extraction_mode == "full":
-                content_to_convert = html_content
+                content_to_convert = str(soup)  # Use modified soup
             else:
                 content_to_convert = self._extract_body_content(soup, html_content)
             

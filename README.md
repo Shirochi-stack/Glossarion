@@ -342,11 +342,12 @@ Glossarion/
 
 ## 🙏 Acknowledgments
 
-Built with ❤️ using:
+Built using:
 - OpenAI, Google, and Anthropic APIs
 - Designed with assistance from ChatGPT & Claude
 - Community feedback and contributions
 - Open source libraries and tools
+- comic-translate by ogkalu2 — https://github.com/ogkalu2/comic-translate
 
 ---
 
