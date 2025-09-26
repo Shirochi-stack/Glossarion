@@ -1122,8 +1122,8 @@ class BatchHeaderTranslator:
                     import re as _re
                     new_content, n = _re.subn(r'(\<body\b[^>]*\>)', r"\1" + header_html, original, count=1, flags=_re.IGNORECASE)
                     if n == 0:
-                        # Fallback: just prepend if <body> not found
-                        new_content = original + "\n" + header_html
+                        # Fallback: prepend at the very beginning if <body> not found
+                        new_content = header_html + "\n" + original
                     with open(html_path, 'w', encoding='utf-8') as wf:
                         wf.write(new_content)
                     added_count += 1
@@ -1235,7 +1235,8 @@ class BatchHeaderTranslator:
                     import re as _re
                     new_content, n = _re.subn(r'(\<body\b[^>]*\>)', r"\1" + header_html, original, count=1, flags=_re.IGNORECASE)
                     if n == 0:
-                        new_content = original + "\n" + header_html
+                        # Fallback: prepend at the top if <body> not found
+                        new_content = header_html + "\n" + original
                     with open(html_path, 'w', encoding='utf-8') as wf:
                         wf.write(new_content)
                     added_count += 1

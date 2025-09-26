@@ -2234,8 +2234,18 @@ class ChapterExtractor:
                 chapter_title = None
                 enhanced_extraction_used = False
                 
-                # Use enhanced extractor if available
-                if enhanced_extractor and extraction_mode == "enhanced":
+                # Determine whether to use enhanced extractor based on toggle and provider
+                use_enhanced = enhanced_extractor and extraction_mode == "enhanced"
+                try:
+                    force_bs = os.getenv('FORCE_BS_FOR_TRADITIONAL', '0') == '1'
+                    model_env = os.getenv('MODEL', '')
+                    if force_bs and is_traditional_translation_api(model_env):
+                        use_enhanced = False
+                except Exception:
+                    pass
+                
+                # Use enhanced extractor if available and allowed
+                if use_enhanced:
                     print(f"🚀 Using enhanced extraction for: {os.path.basename(file_path)}")
                     # Get clean text from html2text
                     clean_content, _, chapter_title = enhanced_extractor.extract_chapter_content(

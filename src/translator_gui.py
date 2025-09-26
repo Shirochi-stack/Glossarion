@@ -8738,6 +8738,7 @@ Provide translations in the same numbered format."""
             "EXTRACTION_MODE": extraction_mode,
             "ENHANCED_FILTERING": enhanced_filtering,
             "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get() else "0",
+            'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', tk.BooleanVar(value=False)).get() else '0',
             
             # For new UI
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
@@ -14502,6 +14503,17 @@ Important rules:
         tk.Label(filtering_frame, text="Extracts ALL HTML/XHTML files\nUse when other modes skip important content",
                 font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
+        # NEW: Force BeautifulSoup for Traditional APIs toggle
+        if not hasattr(self, 'force_bs_for_traditional_var'):
+            self.force_bs_for_traditional_var = tk.BooleanVar(
+                value=self.config.get('force_bs_for_traditional', True)
+            )
+        tb.Checkbutton(extraction_frame, text="Force BeautifulSoup for DeepL / Google Translate",
+                      variable=self.force_bs_for_traditional_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(0, 5))
+        tk.Label(extraction_frame, text="When enabled, DeepL/Google Translate always use BeautifulSoup extraction even if Enhanced is selected.",
+                 font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
         # Chapter merging option
         ttk.Separator(extraction_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
@@ -14659,7 +14671,7 @@ Important rules:
             )
         tb.Checkbutton(
             section_frame,
-            text="Disable compression for OpenRouter (Accept-Encoding: identity)",
+            text="Disable compression for OpenRouter (Accept-Encoding)",
             variable=self.openrouter_accept_identity_var,
             bootstyle="round-toggle"
         ).pack(anchor=tk.W, pady=(4, 0))
@@ -16693,6 +16705,10 @@ Important rules:
             # Save Enhanced Filtering setting (for backwards compatibility)
             if hasattr(self, 'enhanced_filtering_var'):
                 self.config['enhanced_filtering'] = self.enhanced_filtering_var.get()
+            
+            # Save force BeautifulSoup for traditional APIs
+            if hasattr(self, 'force_bs_for_traditional_var'):
+                self.config['force_bs_for_traditional'] = self.force_bs_for_traditional_var.get()
             
             # Update extraction_mode for backwards compatibility with older versions
             if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):

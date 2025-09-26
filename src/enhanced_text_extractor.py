@@ -457,7 +457,7 @@ class EnhancedTextExtractor:
             
             # Determine content to convert (after removals)
             if extraction_mode == "full":
-                content_to_convert = str(soup)  # Use modified soup
+                content_to_convert = str(soup)
             else:
                 content_to_convert = self._extract_body_content(soup, html_content)
             
