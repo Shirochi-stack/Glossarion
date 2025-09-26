@@ -9907,6 +9907,7 @@ Important rules:
             # Set environment variables for EPUB converter
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
             os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0"
+            os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_cover_html_var', tk.BooleanVar(value=False)).get() else "0"
 
             source_epub_file = os.path.join(folder, 'source_epub.txt')
             if os.path.exists(source_epub_file):

@@ -1799,12 +1799,16 @@ class EPUBCompiler:
             
             spine = root.find('.//opf:spine', ns)
             if spine is not None:
+                # Build dynamic skip list; allow cover when TRANSLATE_COVER_HTML is enabled
+                skip_list = ['nav', 'toc', 'contents']
+                if os.environ.get('TRANSLATE_COVER_HTML', '0') != '1':
+                    skip_list.append('cover')
                 for itemref in spine.findall('opf:itemref', ns):
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
                         filename = manifest[idref]
-                        # Skip navigation documents
-                        if not any(skip in filename.lower() for skip in ['nav', 'toc', 'contents', 'cover']):
+                        # Skip navigation documents; optionally skip cover
+                        if not any(skip in filename.lower() for skip in skip_list):
                             filename_to_order[filename] = chapter_num
                             self.log(f"  Chapter {chapter_num}: {filename}")
                             chapter_num += 1
@@ -1923,7 +1927,11 @@ class EPUBCompiler:
                     self.log(f"⚠️ Adding {len(unmapped_files)} unmapped files at the end")
                     final_order.extend(sorted(unmapped_files))
                     # Mark non-response unmapped files as auxiliary (omit from TOC)
-                    self.auxiliary_html_files = {f for f in unmapped_files if not f.startswith('response_')}
+                    aux = {f for f in unmapped_files if not f.startswith('response_')}
+                    # If skipping override is enabled, do NOT treat cover.html as auxiliary
+                    if os.environ.get('TRANSLATE_COVER_HTML', '0') == '1':
+                        aux = {f for f in aux if os.path.splitext(os.path.basename(f))[0].lower() not in ['cover']}
+                    self.auxiliary_html_files = aux
                 else:
                     self.auxiliary_html_files = set()
                 
@@ -1966,8 +1974,12 @@ class EPUBCompiler:
             # Append non-response files as auxiliary pages (not in TOC)
             aux_files = sorted([f for f in html_files if not f.startswith('response_')])
             if aux_files:
-                self.auxiliary_html_files = set(aux_files)
-                self.log(f"[DEBUG] Appending {len(aux_files)} auxiliary HTML file(s) (not in TOC): {aux_files[:5]}")
+                aux_set = set(aux_files)
+                # If skipping override is enabled, ensure cover.html is not marked auxiliary
+                if os.environ.get('TRANSLATE_COVER_HTML', '0') == '1':
+                    aux_set = {f for f in aux_set if os.path.splitext(os.path.basename(f))[0].lower() != 'cover'}
+                self.auxiliary_html_files = aux_set
+                self.log(f"[DEBUG] Appending {len(aux_set)} auxiliary HTML file(s) (not in TOC): {list(aux_set)[:5]}")
             else:
                 self.auxiliary_html_files = set()
             
