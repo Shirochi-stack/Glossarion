@@ -3682,7 +3682,7 @@ def process_html_file_batch(args):
         
         # Detect translation artifacts
         artifacts = []
-        if not is_quick_scan and qa_settings.get('check_translation_artifacts', True):
+        if not is_quick_scan and qa_settings.get('check_translation_artifacts', False):
             artifacts = detect_translation_artifacts(raw_text)
             
         # Filter out encoding_issues if disabled
@@ -3737,7 +3737,8 @@ def process_html_file_batch(args):
                     elif issue == 'incomplete_html_structure':
                         issues.append("incomplete_html_structure")
                     elif issue == 'invalid_nesting':
-                        issues.append("invalid_nesting")
+                        if qa_settings.get('check_invalid_nesting', False):
+                            issues.append("invalid_nesting")
                     elif issue == 'malformed_html':
                         issues.append("malformed_html")
                     else:
@@ -3836,17 +3837,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'excluded_characters': '',
             'check_encoding_issues': False,
             'check_repetition': True,
-            'check_translation_artifacts': True,
+            'check_translation_artifacts': False,
             'check_glossary_leakage': True,
             'min_file_length': 0,
             'report_format': 'detailed',
             'auto_save_report': True,
-            'check_missing_html_tag': True, 
+            'check_missing_html_tag': True,
             'check_paragraph_structure': True,
+            'check_invalid_nesting': False,
             'paragraph_threshold': 0.3,
-            'check_word_count_ratio': False,     
-            'check_multiple_headers': True,   
-            'warn_name_mismatch': True           
+            'check_word_count_ratio': False,
+            'check_multiple_headers': True,
+            'warn_name_mismatch': True
         }
     
     check_word_count = qa_settings.get('check_word_count_ratio', False)
@@ -3867,10 +3869,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"\n📋 QA Settings Status:")
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
-    log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', True) else 'DISABLED'}")
+    log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
     log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
+    log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}") 
     log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")  
     

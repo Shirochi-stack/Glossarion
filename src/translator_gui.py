@@ -10101,13 +10101,14 @@ Important rules:
                 'excluded_characters': '',
                 'check_encoding_issues': False,
                 'check_repetition': True,
-                'check_translation_artifacts': True,
+'check_translation_artifacts': False,
                 'min_file_length': 0,
                 'report_format': 'detailed',
                 'auto_save_report': True,
-                'check_missing_html_tag': True,     
-                'check_word_count_ratio': False,     
-                'check_multiple_headers': True,     
+                'check_missing_html_tag': True,
+                'check_invalid_nesting': False,
+                'check_word_count_ratio': False,
+                'check_multiple_headers': True,
                 'warn_name_mismatch': True,
                 'cache_enabled': True,
                 'cache_auto_size': False,
@@ -11286,7 +11287,7 @@ Important rules:
             # Checkboxes for detection options
             check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', False))
             check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
-            check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', True))
+            check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', False))
             check_glossary_var = tk.BooleanVar(value=qa_settings.get('check_glossary_leakage', True))
             
             tb.Checkbutton(
@@ -11496,6 +11497,15 @@ Important rules:
                 font=('Arial', 9),
                 foreground='gray'
             ).pack(side=tk.LEFT, padx=(10, 0))
+
+            # Invalid nesting check (separate toggle)
+            check_invalid_nesting_var = tk.BooleanVar(value=qa_settings.get('check_invalid_nesting', False))
+            tb.Checkbutton(
+                additional_section,
+                text="Check for invalid tag nesting",
+                variable=check_invalid_nesting_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=(5, 5))
 
             # NEW: Paragraph Structure Check
             paragraph_section_frame = tk.Frame(additional_section)
@@ -11955,6 +11965,7 @@ Important rules:
                     qa_settings['warn_name_mismatch'] = warn_mismatch_var.get()
                     qa_settings['check_missing_html_tag'] = check_missing_html_tag_var.get()
                     qa_settings['check_paragraph_structure'] = check_paragraph_structure_var.get()
+                    qa_settings['check_invalid_nesting'] = check_invalid_nesting_var.get()
                     
                     # Save cache settings
                     qa_settings['cache_enabled'] = cache_enabled_var.get()
@@ -12008,7 +12019,8 @@ Important rules:
                     excluded_text.delete(1.0, tk.END)
                     check_encoding_var.set(False)
                     check_repetition_var.set(True)
-                    check_artifacts_var.set(True)
+                    check_artifacts_var.set(False)
+
                     check_glossary_var.set(True)
                     min_length_var.set(0)
                     format_var.set('detailed')
@@ -12018,6 +12030,8 @@ Important rules:
                     warn_mismatch_var.set(False)
                     check_missing_html_tag_var.set(True)
                     check_paragraph_structure_var.set(True)
+                    check_invalid_nesting_var.set(False)
+                    paragraph_threshold_var.set(30)  # 30% default
                     paragraph_threshold_var.set(30)  # 30% default
                     
                     # Reset cache settings
@@ -16669,7 +16683,7 @@ Important rules:
                     'excluded_characters': '',
                     'check_encoding_issues': False,
                     'check_repetition': True,
-                    'check_translation_artifacts': True,
+'check_translation_artifacts': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -16679,6 +16693,7 @@ Important rules:
                     'warn_name_mismatch': False,
                     'check_missing_html_tag': True,
                     'check_paragraph_structure': True,
+                    'check_invalid_nesting': False,
                     'paragraph_threshold': 0.3,
                     'cache_enabled': True,
                     'cache_auto_size': False,
