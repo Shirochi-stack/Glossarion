@@ -2236,11 +2236,13 @@ class ChapterExtractor:
                 
                 # Determine whether to use enhanced extractor based on toggle and provider
                 use_enhanced = enhanced_extractor and extraction_mode == "enhanced"
+                force_bs_traditional = False
                 try:
                     force_bs = os.getenv('FORCE_BS_FOR_TRADITIONAL', '0') == '1'
                     model_env = os.getenv('MODEL', '')
                     if force_bs and is_traditional_translation_api(model_env):
                         use_enhanced = False
+                        force_bs_traditional = True
                 except Exception:
                     pass
                 
@@ -2261,7 +2263,7 @@ class ChapterExtractor:
                 
                 # BeautifulSoup method (only for non-enhanced modes)
                 if not enhanced_extraction_used:
-                    if extraction_mode == "enhanced":
+                    if extraction_mode == "enhanced" and not force_bs_traditional:
                         # Enhanced mode failed - skip this file
                         print(f"❌ Skipping {file_path} - enhanced extraction required but not available")
                         return None
@@ -9127,8 +9129,27 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     The input is the TRANSLATED text that was originally extracted using html2text.
     """
     import re
+    import html as _html
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
+    
+    # Remove stray XML declaration lines that sometimes leak through extraction
+    # Examples to strip (with or without angle brackets, with smart quotes or entities):
+    #   xml version='1.0' encoding='utf-8'?
+    #   <?xml version="1.0" encoding="utf-8"?>
+    def _strip_xml_decl(text: str) -> str:
+        cleaned = []
+        for line in text.splitlines():
+            test = _html.unescape(line).strip()
+            # Normalize curly quotes to straight quotes for matching
+            test_norm = test.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+            if re.match(r"^<?\??xml\s+version\s*=\s*['\"][^'\"]+['\"]\s+encoding\s*=\s*['\"][^'\"]+['\"]\s*\??>??\s*$",
+                        test_norm, flags=re.IGNORECASE):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
+    
+    plain_text = _strip_xml_decl(plain_text)
     
     # First, try to use markdown2 for proper markdown conversion
     try:
