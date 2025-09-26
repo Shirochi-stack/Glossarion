@@ -3892,7 +3892,7 @@ Recent translations to summarize:
         
         listbox = tk.Listbox(
             main_frame, 
-            selectmode=tk.MULTIPLE, 
+            selectmode=tk.EXTENDED, 
             yscrollcommand=v_scrollbar.set,
             xscrollcommand=h_scrollbar.set,
             width=120,
@@ -4400,7 +4400,7 @@ Recent translations to summarize:
         
         listbox = tk.Listbox(
             main_frame,
-            selectmode=tk.MULTIPLE,
+            selectmode=tk.EXTENDED,
             yscrollcommand=v_scrollbar.set,
             xscrollcommand=h_scrollbar.set,
             width=100
@@ -4500,7 +4500,7 @@ Recent translations to summarize:
         
         listbox = tk.Listbox(
             main_frame,
-            selectmode=tk.MULTIPLE,
+            selectmode=tk.EXTENDED,
             yscrollcommand=v_scrollbar.set,
             xscrollcommand=h_scrollbar.set,
             width=100
@@ -4702,7 +4702,7 @@ Recent translations to summarize:
         # Create listbox
         listbox = tk.Listbox(
             main_frame, 
-            selectmode=tk.MULTIPLE, 
+            selectmode=tk.EXTENDED, 
             yscrollcommand=v_scrollbar.set,
             xscrollcommand=h_scrollbar.set,
             width=100
