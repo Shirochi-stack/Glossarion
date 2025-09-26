@@ -2178,6 +2178,8 @@ Recent translations to summarize:
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
+            # NEW: Translate cover.html (Skip Override)
+            ('translate_cover_html_var', 'translate_cover_html', False),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
@@ -8748,6 +8750,7 @@ Provide translations in the same numbered format."""
             'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0",
+            'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', tk.BooleanVar(value=False)).get() else "0",
             'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
             'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
@@ -14547,7 +14550,15 @@ Important rules:
                       variable=self.disable_automatic_cover_creation_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(section_frame, text="When enabled: no auto-generated cover page is created. If a cover.html exists, it will be translated (skip override)",
+        tk.Label(section_frame, text="When enabled: no auto-generated cover page is created.",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        # New: Translate cover.html (Skip Override)
+        tb.Checkbutton(section_frame, text="Translate cover.html (Skip Override)", 
+                      variable=self.translate_cover_html_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="When enabled: existing cover.html/cover.xhtml will be included and translated (not skipped).",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         tb.Checkbutton(section_frame, text="Disable 0-based Chapter Detection", 
@@ -15668,6 +15679,7 @@ Important rules:
                     'disable_chapter_merging': self.disable_chapter_merging_var.get(),
                     'disable_epub_gallery': self.disable_epub_gallery_var.get(),
                     'disable_automatic_cover_creation': self.disable_automatic_cover_creation_var.get(),
+                    'translate_cover_html': self.translate_cover_html_var.get(),
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
                     'enable_image_translation': self.enable_image_translation_var.get(),
                     'process_webnovel_images': self.process_webnovel_images_var.get(),
@@ -15787,6 +15799,7 @@ Important rules:
                     "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
                     "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
                     "DISABLE_AUTOMATIC_COVER_CREATION": "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0",
+                    "TRANSLATE_COVER_HTML": "1" if getattr(self, 'translate_cover_html_var', tk.BooleanVar(value=False)).get() else "0",
                     "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
                     "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
                     "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
@@ -16564,6 +16577,7 @@ Important rules:
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var.get()
+            self.config['translate_cover_html'] = self.translate_cover_html_var.get()
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
