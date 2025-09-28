@@ -110,6 +110,7 @@ class APIKeyEntry:
     def mark_error(self, error_code: int = None):
         with self._lock:
             self.error_count += 1
+            self.times_used = getattr(self, 'times_used', 0) + 1
             self.last_error_time = time.time()
             if error_code == 429:
                 self.is_cooling_down = True
@@ -117,6 +118,7 @@ class APIKeyEntry:
     def mark_success(self):
         with self._lock:
             self.success_count += 1
+            self.times_used = getattr(self, 'times_used', 0) + 1
             self.last_used_time = time.time()
             self.error_count = 0
     
@@ -161,13 +163,21 @@ class APIKeyPool:
     
     def load_from_list(self, key_list: List[dict]):
         with self.lock:
+            # Preserve existing counters by mapping old entries by (api_key, model)
+            old_map = {}
+            for old in getattr(self, 'keys', []):
+                key = (getattr(old, 'api_key', ''), getattr(old, 'model', ''))
+                old_map[key] = old
+            
             self.keys.clear()
             self.key_locks.clear()  # Clear existing locks
             
             for i, key_data in enumerate(key_list):
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
                 entry = APIKeyEntry(
-                    api_key=key_data.get('api_key', ''),
-                    model=key_data.get('model', ''),
+                    api_key=api_key,
+                    model=model,
                     cooldown=key_data.get('cooldown', 60),
                     enabled=key_data.get('enabled', True),
                     google_credentials=key_data.get('google_credentials'),
@@ -176,13 +186,32 @@ class APIKeyPool:
                     azure_api_version=key_data.get('azure_api_version'),
                     use_individual_endpoint=key_data.get('use_individual_endpoint', False)
                 )
+                # Restore counters if we had this key before
+                old = old_map.get((api_key, model))
+                if old is not None:
+                    try:
+                        entry.success_count = getattr(old, 'success_count', entry.success_count)
+                        entry.error_count = getattr(old, 'error_count', entry.error_count)
+                        entry.times_used = getattr(old, 'times_used', getattr(old, 'success_count', 0) + getattr(old, 'error_count', 0))
+                        entry.last_used_time = getattr(old, 'last_used_time', None)
+                        entry.last_error_time = getattr(old, 'last_error_time', None)
+                        entry.is_cooling_down = getattr(old, 'is_cooling_down', False)
+                        entry.last_test_result = getattr(old, 'last_test_result', None)
+                        entry.last_test_time = getattr(old, 'last_test_time', None)
+                        entry.last_test_message = getattr(old, 'last_test_message', None)
+                    except Exception:
+                        pass
                 self.keys.append(entry)
                 # Create a lock for each key
                 self.key_locks[i] = threading.Lock()
             
-            self._rotation_index = 0
+            # Keep rotation index if possible
+            if getattr(self, '_rotation_index', 0) >= len(self.keys):
+                self._rotation_index = 0
+            else:
+                self._rotation_index = getattr(self, '_rotation_index', 0)
             self._keys_in_use.clear()
-            logger.info(f"Loaded {len(self.keys)} API keys into pool with individual locks")
+            logger.info(f"Loaded {len(self.keys)} API keys into pool with individual locks (preserved counters where possible)")
     
     def get_key_for_thread(self, force_rotation: bool = False, 
                           rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
@@ -415,6 +444,9 @@ class MultiAPIKeyDialog:
         self.tree = None
         self.test_results = queue.Queue()
         
+        # Attempt to bind to UnifiedClient's shared pool so UI reflects live usage
+        self._bind_shared_pool()
+        
         # Load existing keys from config
         self._load_keys_from_config()
         
@@ -448,6 +480,22 @@ class MultiAPIKeyDialog:
                 except Exception:
                     pass
         except Exception:
+            pass
+
+    def _bind_shared_pool(self):
+        """Bind this dialog to the UnifiedClient's shared APIKeyPool if available.
+        If UnifiedClient has no pool yet, register our pool as the shared pool.
+        This keeps Times Used and other counters in sync across UI and runtime.
+        """
+        try:
+            from unified_api_client import UnifiedClient
+            # If UC already has a pool, use it; otherwise share ours
+            if getattr(UnifiedClient, '_api_key_pool', None) is not None:
+                self.key_pool = UnifiedClient._api_key_pool
+            else:
+                UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            # If import fails (early load), continue with local pool
             pass
 
     def _load_keys_from_config(self):
@@ -562,6 +610,12 @@ class MultiAPIKeyDialog:
                                       textvariable=self.rotation_frequency_var,
                                       width=5, command=self._update_rotation_display)
         frequency_spinbox.pack(side=tk.LEFT)
+        # Disable mouse wheel changing values (use main GUI helper if available)
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(frequency_spinbox)
+        except Exception:
+            pass
         tk.Label(rotation_settings, text="requests").pack(side=tk.LEFT, padx=(5, 0))
         
         # Rotation description
@@ -812,6 +866,12 @@ class MultiAPIKeyDialog:
             self.fallback_tree.item(item, values=values)
         
         # Run tests in thread for all fallback keys
+        # Ensure UnifiedClient uses the same shared pool instance
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
         thread = threading.Thread(target=self._test_all_fallback_keys_batch)
         thread.daemon = True
         thread.start()
@@ -1152,6 +1212,12 @@ class MultiAPIKeyDialog:
         
         key_data = fallback_keys[index]
         
+        # Ensure UnifiedClient uses the same shared pool instance
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
         # Run test in thread
         thread = threading.Thread(target=self._test_single_fallback_key, args=(key_data, index))
         thread.daemon = True
@@ -1516,8 +1582,15 @@ class MultiAPIKeyDialog:
         cooldown_frame = tk.Frame(add_frame)
         cooldown_frame.grid(row=1, column=1, sticky=tk.W, pady=5)
         
-        tb.Spinbox(cooldown_frame, from_=10, to=3600, textvariable=self.cooldown_var,
-                  width=10).pack(side=tk.LEFT)
+        cooldown_spinbox = tb.Spinbox(cooldown_frame, from_=10, to=3600, textvariable=self.cooldown_var,
+                  width=10)
+        cooldown_spinbox.pack(side=tk.LEFT)
+        # Disable mouse wheel for cooldown
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(cooldown_spinbox)
+        except Exception:
+            pass
         tk.Label(cooldown_frame, text="(10-3600)", font=('TkDefaultFont', 9), 
                 fg='gray').pack(side=tk.LEFT, padx=(10, 0))
         
@@ -1912,6 +1985,12 @@ class MultiAPIKeyDialog:
         edit_var = tk.IntVar(value=key.cooldown)
         self.edit_widget = tb.Spinbox(self.tree, from_=10, to=3600, 
                                       textvariable=edit_var, width=10)
+        # Disable mouse wheel changing values on inline editor
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(self.edit_widget)
+        except Exception:
+            pass
         
         def save_edit():
             new_value = edit_var.get()
@@ -2491,6 +2570,12 @@ class MultiAPIKeyDialog:
         # Get selected indices
         indices = [self.tree.index(item) for item in selected]
         
+        # Ensure UnifiedClient uses the same shared pool instance
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
         # Start testing in thread
         thread = threading.Thread(target=self._run_inline_tests, args=(indices,))
         thread.daemon = True
