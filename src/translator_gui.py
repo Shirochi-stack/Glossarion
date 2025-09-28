@@ -2483,11 +2483,11 @@ Recent translations to summarize:
         self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
         
     def _on_model_combo_keyrelease(self, event=None):
-        """Autocomplete and filter behavior for the model combobox.
-        - Filters the dropdown to options that start with what the user typed (case-insensitive).
-        - Falls back to substring match if no prefix matches.
-        - Auto-fills ONLY when appending at the end (not on Backspace/Delete or mid-string edits).
-        - Preserves existing on_model_change behavior, but avoids fighting user input.
+        """Combobox type-to-search without filtering values.
+        - Keeps the full model list intact; does not replace the Combobox values.
+        - Finds the best match and, if the dropdown is open, scrolls/highlights to it.
+        - Does NOT auto-fill text on deletion or mid-string edits (and by default avoids autofill).
+        - Calls on_model_change only when the entry text actually changes.
         """
         try:
             combo = self.model_combo
@@ -2508,49 +2508,45 @@ Recent translations to summarize:
 
             source = self._model_all_values
 
-            # Compute filtered list based on what's currently typed
+            # Compute match set without altering combobox values
+            first_match = None
             if typed:
                 lowered = typed.lower()
-                filtered = [v for v in source if v.lower().startswith(lowered)]
-                if not filtered:
-                    filtered = [v for v in source if lowered in v.lower()]
-            else:
-                filtered = source
+                pref = [v for v in source if v.lower().startswith(lowered)]
+                cont = [v for v in source if lowered in v.lower()] if not pref else []
+                if pref:
+                    first_match = pref[0]
+                elif cont:
+                    first_match = cont[0]
 
-            # Update values only if changed
-            try:
-                current_values = list(combo['values'])
-            except Exception:
-                current_values = []
-            if filtered != current_values:
-                combo['values'] = filtered
-
-            # Decide whether to perform autofill:
-            # Only when user appended at the end (grew by typing), not on deletion or mid-string edits
+            # Decide whether to perform any autofill: default to no text autofill
             grew = len(typed) > len(prev) and typed.startswith(prev)
             is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
             try:
                 at_end = combo.index(tk.INSERT) == len(typed)
             except Exception:
                 at_end = True
-            has_selection = False
             try:
                 has_selection = combo.selection_present()
             except Exception:
-                pass
+                has_selection = False
 
-            do_autofill = grew and at_end and not has_selection and not is_deletion
+            # Gentle autofill only when appending at the end (not on delete or mid-string edits)
+            do_autofill_text = first_match is not None and grew and at_end and not has_selection and not is_deletion
 
-            if do_autofill and typed and filtered:
-                first = filtered[0]
+            if do_autofill_text:
                 # Only complete if it's a true prefix match to avoid surprising jumps
-                if first.lower().startswith(typed.lower()) and first != typed:
-                    combo.set(first)
+                if first_match.lower().startswith(typed.lower()) and first_match != typed:
+                    combo.set(first_match)
                     try:
                         combo.icursor(len(typed))
-                        combo.selection_range(len(typed), len(first))
+                        combo.selection_range(len(typed), len(first_match))
                     except Exception:
                         pass
+
+            # If we have a match and the dropdown is open, scroll/highlight it (values intact)
+            if first_match:
+                self._scroll_model_list_to_value(first_match)
 
             # Remember current text for next event
             self._model_prev_text = typed
@@ -2563,6 +2559,45 @@ Recent translations to summarize:
                 logging.debug(f"Model combobox autocomplete error: {e}")
             except Exception:
                 pass
+
+    def _ensure_model_dropdown_open(self):
+        """Open the combobox dropdown if it isn't already visible."""
+        try:
+            tkobj = self.model_combo.tk
+            popdown = tkobj.eval(f'ttk::combobox::PopdownWindow {self.model_combo._w}')
+            viewable = int(tkobj.eval(f'winfo viewable {popdown}'))
+            if not viewable:
+                # Prefer internal Post proc
+                tkobj.eval(f'ttk::combobox::Post {self.model_combo._w}')
+        except Exception:
+            # Fallback: try keyboard event to open
+            try:
+                self.model_combo.event_generate('<Down>')
+            except Exception:
+                pass
+
+    def _scroll_model_list_to_value(self, value: str):
+        """If the combobox dropdown is open, scroll to and highlight the given value.
+        Uses Tk internals for ttk::combobox to access the popdown listbox.
+        Safe no-op if anything fails.
+        """
+        try:
+            values = getattr(self, '_model_all_values', []) or list(self.model_combo['values'])
+            if value not in values:
+                return
+            index = values.index(value)
+            # Resolve the internal popdown listbox for this combobox
+            popdown = self.model_combo.tk.eval(f'ttk::combobox::PopdownWindow {self.model_combo._w}')
+            listbox = f'{popdown}.f.l'
+            tkobj = self.model_combo.tk
+            # Scroll and highlight the item
+            tkobj.call(listbox, 'see', index)
+            tkobj.call(listbox, 'selection', 'clear', 0, 'end')
+            tkobj.call(listbox, 'selection', 'set', index)
+            tkobj.call(listbox, 'activate', index)
+        except Exception:
+            # Dropdown may be closed or internals unavailable; ignore
+            pass
     def _create_model_section(self):
         """Create model selection section"""
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
