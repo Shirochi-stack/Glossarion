@@ -1098,21 +1098,22 @@ class ContentProcessor:
         if not remove_artifacts:
             return text
         
-        lines = text.split('\n', 2)
+        # First, remove thinking tags if they exist
+        text = ContentProcessor._remove_thinking_tags(text)
         
-        if len(lines) < 2:
+        # After removing thinking tags, re-analyze the text structure
+        # to catch AI artifacts that may now be at the beginning
+        lines = text.split('\n')
+        
+        # Clean up empty lines at the beginning
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        
+        if not lines:
             return text
         
+        # Check the first non-empty line for AI artifacts
         first_line = lines[0].strip()
-        
-        if not first_line:
-            if len(lines) > 1:
-                first_line = lines[1].strip()
-                if not first_line:
-                    return text
-                lines = lines[1:]
-            else:
-                return text
         
         ai_patterns = [
             r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
@@ -1126,23 +1127,71 @@ class ContentProcessor:
         
         for pattern in ai_patterns:
             if re.search(pattern, first_line, re.IGNORECASE):
-                remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+                remaining_lines = lines[1:]
+                remaining_text = '\n'.join(remaining_lines)
                 
                 if remaining_text.strip():
+                    # More lenient conditions: if we detect AI artifact patterns and there's meaningful content
                     if (re.search(r'<h[1-6]', remaining_text, re.IGNORECASE) or 
                         re.search(r'Chapter\s+\d+', remaining_text, re.IGNORECASE) or
                         re.search(r'第\s*\d+\s*[章節話话回]', remaining_text) or
                         re.search(r'제\s*\d+\s*[장화]', remaining_text) or
-                        len(remaining_text.strip()) > 100):
+                        re.search(r'<p>', remaining_text, re.IGNORECASE) or
+                        len(remaining_text.strip()) > 50):  # Reduced from 100 to 50
                         
                         print(f"✂️ Removed AI artifact: {first_line[:50]}...")
                         return remaining_text.lstrip()
         
         if first_line.lower() in ['html', 'text', 'content', 'translation', 'output']:
-            remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+            remaining_lines = lines[1:]
+            remaining_text = '\n'.join(remaining_lines)
             if remaining_text.strip():
                 print(f"✂️ Removed single word artifact: {first_line}")
                 return remaining_text.lstrip()
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def _remove_thinking_tags(text):
+        """Remove thinking tags that some AI models produce"""
+        if not text:
+            return text
+        
+        # Common thinking tag patterns used by various AI models
+        thinking_patterns = [
+            # XML-style thinking tags
+            (r'<thinking>.*?</thinking>', 'thinking'),
+            (r'<think>.*?</think>', 'think'),
+            (r'<thoughts>.*?</thoughts>', 'thoughts'),
+            (r'<reasoning>.*?</reasoning>', 'reasoning'),
+            (r'<analysis>.*?</analysis>', 'analysis'),
+            (r'<reflection>.*?</reflection>', 'reflection'),
+            # OpenAI o1-style reasoning blocks - fix the regex escaping
+            (r'<\|thinking\|>.*?</\|thinking\|>', 'o1-thinking'),
+            # Claude-style thinking blocks
+            (r'\[thinking\].*?\[/thinking\]', 'claude-thinking'),
+            # Generic bracketed thinking patterns
+            (r'\[THINKING\].*?\[/THINKING\]', 'bracketed-thinking'),
+            (r'\[ANALYSIS\].*?\[/ANALYSIS\]', 'bracketed-analysis'),
+        ]
+        
+        original_text = text
+        removed_count = 0
+        
+        for pattern, tag_type in thinking_patterns:
+            # Use DOTALL flag to match across newlines
+            matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+            if matches:
+                text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE)
+                removed_count += len(matches)
+        
+        # Clean up any extra whitespace or empty lines left after removing thinking tags
+        if removed_count > 0:
+            # Remove multiple consecutive newlines
+            text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
+            # Remove leading/trailing whitespace
+            text = text.strip()
+            print(f"🧠 Removed {removed_count} thinking tag(s)")
         
         return text
     
