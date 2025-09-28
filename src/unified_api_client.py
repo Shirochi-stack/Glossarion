@@ -3235,6 +3235,9 @@ class UnifiedClient:
         extracted_content = ""
         finish_reason = 'error'
         
+        # Track whether we already attempted a Gemma/OpenRouter system->user retry
+        gemma_no_system_retry_done = False
+
         for attempt in range(internal_retries):
             try:
                 # Validate request
@@ -4269,24 +4272,83 @@ class UnifiedClient:
         """Validate and clean messages, removing None entries and fixing content issues"""
         if messages is None:
             return []
-        
         cleaned_messages = []
         for msg in messages:
             if msg is None:
                 continue
-            
-            # Ensure the message is a dict
             if not isinstance(msg, dict):
                 continue
-            
-            # Ensure content is not None
+            # Ensure role exists and is a string
+            if 'role' not in msg or msg['role'] is None:
+                msg = dict(msg)
+                msg['role'] = 'user'
+            # Normalize content
             if msg.get('content') is None:
                 msg = dict(msg)  # Make a copy
                 msg['content'] = ''
-            
             cleaned_messages.append(msg)
-        
         return cleaned_messages
+    def _merge_system_into_user(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert all system prompts into a user message by prepending them to the first
+        user message, separated by a line break. If no user message exists, one is created.
+        Supports both simple string content and OpenAI 'content parts' lists.
+        """
+        if not messages:
+            return []
+        system_texts: List[str] = []
+        # Collect system texts and build the new list without system messages
+        pruned: List[Dict[str, Any]] = []
+        for msg in messages:
+            role = msg.get("role")
+            if role == "system":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    if content.strip():
+                        system_texts.append(content.strip())
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            txt = part.get("text", "").strip()
+                            if txt:
+                                system_texts.append(txt)
+                # Skip adding this system message
+                continue
+            pruned.append(msg)
+        # Nothing to merge: still ensure we don't return an empty list
+        if not system_texts:
+            if not pruned:
+                return [{"role": "user", "content": ""}]  # minimal valid user message to avoid empty list
+            return pruned
+        merged_header = "\n\n".join(system_texts).strip()
+        if merged_header:
+            merged_header += "\n"  # ensure separation from current user content
+        # Find first user message and prepend
+        first_user_index = -1
+        for i, m in enumerate(pruned):
+            if m.get("role") == "user":
+                first_user_index = i
+                break
+        if first_user_index >= 0:
+            um = pruned[first_user_index]
+            content = um.get("content", "")
+            if isinstance(content, str):
+                um["content"] = f"{merged_header}{content}" if merged_header else content
+            elif isinstance(content, list):
+                # If first part is text, prepend; otherwise insert a text part at the front
+                if content and isinstance(content[0], dict) and content[0].get("type") == "text":
+                    content[0]["text"] = f"{merged_header}{content[0].get('text', '')}" if merged_header else content[0].get('text', '')
+                else:
+                    text_part = {"type": "text", "text": merged_header or ""}
+                    content.insert(0, text_part)
+                um["content"] = content
+            else:
+                # Unknown structure; coerce to string with the merged header
+                um["content"] = f"{merged_header}{str(content)}"
+            pruned[first_user_index] = um
+        else:
+            # No user message exists; create one with the merged header
+            pruned.append({"role": "user", "content": merged_header})
+        return pruned
     
     def _validate_request(self, messages, max_tokens=None):
         """Validate request parameters before sending"""
@@ -8420,6 +8482,21 @@ class UnifiedClient:
                         pass
 
                     norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
+                    # Targeted preflight for OpenRouter free Gemma variant only
+                    try:
+                        if provider == 'openrouter':
+                            ml = (effective_model or '').lower().strip()
+                            if ml == 'google/gemma-3-27b-it:free' and any(isinstance(m, dict) and m.get('role') == 'system' for m in messages):
+                                messages = self._merge_system_into_user(messages)
+                                print("🔁 Preflight: merged system prompt into user for google/gemma-3-27b-it:free (SDK)")
+                                try:
+                                    payload_name, _ = self._get_file_names(messages, context=getattr(self, 'context', 'translation'))
+                                    self._save_payload(messages, payload_name, retry_reason="preflight_gemma_no_system")
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
                     params = {
                         "model": effective_model,
                         "messages": messages,
@@ -8655,6 +8732,21 @@ class UnifiedClient:
             try:
                 if provider == 'openai' and self._is_o_series_model():
                     req_temperature = 1.0
+            except Exception:
+                pass
+
+            # Targeted preflight for OpenRouter free Gemma variant only
+            try:
+                if provider == 'openrouter':
+                    ml = (effective_model or '').lower().strip()
+                    if ml == 'google/gemma-3-27b-it:free' and any(isinstance(m, dict) and m.get('role') == 'system' for m in messages):
+                        messages = self._merge_system_into_user(messages)
+                        print("🔁 Preflight (HTTP): merged system prompt into user for google/gemma-3-27b-it:free")
+                        try:
+                            payload_name, _ = self._get_file_names(messages, context=getattr(self, 'context', 'translation'))
+                            self._save_payload(messages, payload_name, retry_reason="preflight_gemma_no_system")
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
