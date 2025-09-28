@@ -1207,7 +1207,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.7.7"
+        __version__ = "4.8.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -2272,7 +2272,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.7.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.8.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -2474,14 +2474,95 @@ Recent translations to summarize:
 
     # Also add this to bind manual typing events to the combobox
     def setup_model_combobox_bindings(self):
-        """Setup bindings for manual model input in combobox"""
-        # Bind to key release events to detect manual typing
-        self.model_combo.bind('<KeyRelease>', self.on_model_change)
+        """Setup bindings for manual model input in combobox with autocomplete"""
+        # Bind to key release events for live filtering and autofill
+        self.model_combo.bind('<KeyRelease>', self._on_model_combo_keyrelease)
         # Also bind to FocusOut to catch when user clicks away after typing
         self.model_combo.bind('<FocusOut>', self.on_model_change)
         # Keep the existing binding for dropdown selection
         self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
         
+    def _on_model_combo_keyrelease(self, event=None):
+        """Autocomplete and filter behavior for the model combobox.
+        - Filters the dropdown to options that start with what the user typed (case-insensitive).
+        - Falls back to substring match if no prefix matches.
+        - Auto-fills ONLY when appending at the end (not on Backspace/Delete or mid-string edits).
+        - Preserves existing on_model_change behavior, but avoids fighting user input.
+        """
+        try:
+            combo = self.model_combo
+            typed = combo.get()
+            prev = getattr(self, '_model_prev_text', '')
+            keysym = (getattr(event, 'keysym', '') or '').lower()
+
+            # Navigation/commit keys: don't interfere; Combobox handles selection events
+            if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
+                return
+
+            # Ensure we have the full source list
+            if not hasattr(self, '_model_all_values') or not self._model_all_values:
+                try:
+                    self._model_all_values = list(combo['values'])
+                except Exception:
+                    self._model_all_values = []
+
+            source = self._model_all_values
+
+            # Compute filtered list based on what's currently typed
+            if typed:
+                lowered = typed.lower()
+                filtered = [v for v in source if v.lower().startswith(lowered)]
+                if not filtered:
+                    filtered = [v for v in source if lowered in v.lower()]
+            else:
+                filtered = source
+
+            # Update values only if changed
+            try:
+                current_values = list(combo['values'])
+            except Exception:
+                current_values = []
+            if filtered != current_values:
+                combo['values'] = filtered
+
+            # Decide whether to perform autofill:
+            # Only when user appended at the end (grew by typing), not on deletion or mid-string edits
+            grew = len(typed) > len(prev) and typed.startswith(prev)
+            is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
+            try:
+                at_end = combo.index(tk.INSERT) == len(typed)
+            except Exception:
+                at_end = True
+            has_selection = False
+            try:
+                has_selection = combo.selection_present()
+            except Exception:
+                pass
+
+            do_autofill = grew and at_end and not has_selection and not is_deletion
+
+            if do_autofill and typed and filtered:
+                first = filtered[0]
+                # Only complete if it's a true prefix match to avoid surprising jumps
+                if first.lower().startswith(typed.lower()) and first != typed:
+                    combo.set(first)
+                    try:
+                        combo.icursor(len(typed))
+                        combo.selection_range(len(typed), len(first))
+                    except Exception:
+                        pass
+
+            # Remember current text for next event
+            self._model_prev_text = typed
+
+            # Only trigger change logic when the text actually changed
+            if typed != prev:
+                self.on_model_change()
+        except Exception as e:
+            try:
+                logging.debug(f"Model combobox autocomplete error: {e}")
+            except Exception:
+                pass
     def _create_model_section(self):
         """Create model selection section"""
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
@@ -2594,7 +2675,8 @@ Recent translations to summarize:
             "or/openai/gpt-5-mini",
             "or/openai/gpt-5-nano",
             "or/openai/chatgpt-4o-latest",   
-            "or/deepseek/deepseek-r1-0528:free",           
+            "or/deepseek/deepseek-r1-0528:free", 
+            "or/google/gemma-3-27b-it:free",
             
             # For ElectronHub, prefix with 'eh/'
             "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
@@ -2605,8 +2687,12 @@ Recent translations to summarize:
             "deepl",  # Will use DeepL API
             "google-translate",  # Will use Google Cloud Translate
         ]
+        self._model_all_values = models
         self.model_combo = tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal")
         self.model_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
+        
+        # Track previous text to make autocomplete less aggressive
+        self._model_prev_text = self.model_var.get()
         
         self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
         self.setup_model_combobox_bindings()
@@ -17291,7 +17377,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v4.7.7...")
+    print("🚀 Starting Glossarion v4.8.0...")
     
     # Initialize splash screen
     splash_manager = None
