@@ -233,7 +233,8 @@ app_files = [
 
 	('local_inpainter.py', '.'),	
 	
-	('ocr_manager.py', '.'),
+    ('ocr_manager.py', '.'),
+    ('model_options.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -276,6 +277,7 @@ app_modules = [
 	'bubble_detector', 
 	'local_inpainter',  	
 	'ocr_manager',
+	'model_options',
 	
 ]
 

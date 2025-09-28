@@ -98,6 +98,7 @@ app_files = [
 	
 	('multi_api_key_manager.py', '.'),	
 	('individual_endpoint_dialog.py', '.'),
+	('model_options.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -140,6 +141,7 @@ app_modules = [
 	'bubble_detector', 
 	'local_inpainter',  	
 	'ocr_manager',
+	'model_options',
 	
 ]
 
