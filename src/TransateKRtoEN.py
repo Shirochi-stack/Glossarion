@@ -1121,7 +1121,7 @@ class ContentProcessor:
             r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
             r'^\[PART\s+\d+/\d+\]',
             r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
-            r'^```(?:html)?',
+            r'^```(?:html|xml|text)?\s*$',  # Enhanced code block detection
             r'^<!DOCTYPE',
         ]
         
@@ -1185,13 +1185,34 @@ class ContentProcessor:
                 text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE)
                 removed_count += len(matches)
         
+        # Also remove standalone code block markers that might be artifacts
+        # But preserve all actual content - only remove the ``` markers themselves
+        code_block_removed = 0
+        code_block_patterns = [
+            (r'^```\w*\s*\n', '\n'),                # Opening code blocks - replace with newline
+            (r'\n```\s*$', ''),                     # Closing code blocks at end - remove entirely
+            (r'^```\w*\s*$', ''),                   # Standalone ``` on its own line - remove entirely
+        ]
+        
+        for pattern, replacement in code_block_patterns:
+            matches = re.findall(pattern, text, re.MULTILINE)
+            if matches:
+                text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+                code_block_removed += len(matches)
+        
         # Clean up any extra whitespace or empty lines left after removing thinking tags
-        if removed_count > 0:
+        total_removed = removed_count + code_block_removed
+        if total_removed > 0:
             # Remove multiple consecutive newlines
             text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
             # Remove leading/trailing whitespace
             text = text.strip()
-            print(f"🧠 Removed {removed_count} thinking tag(s)")
+            if removed_count > 0 and code_block_removed > 0:
+                print(f"🧠 Removed {removed_count} thinking tag(s) and {code_block_removed} code block marker(s)")
+            elif removed_count > 0:
+                print(f"🧠 Removed {removed_count} thinking tag(s)")
+            elif code_block_removed > 0:
+                print(f"📝 Removed {code_block_removed} code block marker(s)")
         
         return text
     
