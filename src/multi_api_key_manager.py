@@ -708,6 +708,12 @@ class MultiAPIKeyDialog:
         self.fallback_model_combo = tb.Combobox(add_fallback_frame, textvariable=self.fallback_model_var,
                                                values=fallback_models, state='normal')
         self.fallback_model_combo.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        # Block mouse wheel on combobox to avoid accidental changes
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(self.fallback_model_combo)
+        except Exception:
+            pass
         # Attach gentle autofill
         self._attach_model_autofill(self.fallback_model_combo, self.fallback_model_var)
         
@@ -763,6 +769,12 @@ class MultiAPIKeyDialog:
                                                             values=fallback_azure_versions, width=18, 
                                                             state='normal', font=('TkDefaultFont', 7))
         self.fallback_azure_api_version_combo.grid(row=2, column=4, sticky=tk.W, pady=2)
+        # Block mouse wheel on version combobox
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(self.fallback_azure_api_version_combo)
+        except Exception:
+            pass
         
         # Fallback keys list
         self._create_fallback_list(fallback_frame)
@@ -1031,6 +1043,12 @@ class MultiAPIKeyDialog:
         model_combo = ttk.Combobox(main_frame, values=all_models, 
                                    textvariable=model_var, width=45, height=12)
         model_combo.pack(pady=(0, 10))
+        # Block mouse wheel on combobox
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(model_combo)
+        except Exception:
+            pass
         # Attach gentle autofill
         self._attach_model_autofill(model_combo, model_var)
         
@@ -1573,6 +1591,12 @@ class MultiAPIKeyDialog:
         add_models = get_model_options()
         self.model_combo = tb.Combobox(add_frame, textvariable=self.model_var, values=add_models, state='normal')
         self.model_combo.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        # Block mouse wheel on combobox
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(self.model_combo)
+        except Exception:
+            pass
         # Attach gentle autofill
         self._attach_model_autofill(self.model_combo, self.model_var)
         
@@ -1661,6 +1685,12 @@ class MultiAPIKeyDialog:
                                                    values=azure_versions, width=18, state='disabled',
                                                    font=('TkDefaultFont', 7))
         self.azure_api_version_combo.grid(row=4, column=4, sticky=tk.W, pady=2)
+        # Block mouse wheel on version combobox
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(self.azure_api_version_combo)
+        except Exception:
+            pass
         
         # Initially hide the endpoint fields
         self._toggle_individual_endpoint_fields()
@@ -2115,6 +2145,13 @@ class MultiAPIKeyDialog:
         model_combo = ttk.Combobox(main_frame, values=all_models, 
                                    textvariable=model_var, width=45, height=12)
         model_combo.pack(pady=(0, 10))
+        
+        # Block mouse wheel on combobox
+        try:
+            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
+                self.translator_gui.ui.disable_spinbox_mousewheel(model_combo)
+        except Exception:
+            pass
         
         # Attach gentle autofill
         self._attach_model_autofill(model_combo, model_var)
