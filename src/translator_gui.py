@@ -1298,6 +1298,23 @@ class TranslatorGUI:
             
         if 'force_ncx_only' not in self.config:
             self.config['force_ncx_only'] = True
+
+        # Initialize OpenRouter transport/compression toggles early so they're available
+        # before the settings UI creates these variables. This prevents attribute errors
+        # when features (like glossary extraction) access them at startup.
+        try:
+            self.openrouter_http_only_var = tk.BooleanVar(
+                value=self.config.get('openrouter_use_http_only', False)
+            )
+        except Exception:
+            self.openrouter_http_only_var = tk.BooleanVar(value=False)
+        
+        try:
+            self.openrouter_accept_identity_var = tk.BooleanVar(
+                value=self.config.get('openrouter_accept_identity', False)
+            )
+        except Exception:
+            self.openrouter_accept_identity_var = tk.BooleanVar(value=False)
             
         # Initialize retain_source_extension env var on startup
         try:
