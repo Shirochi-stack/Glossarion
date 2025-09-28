@@ -84,6 +84,7 @@ class APIKeyEntry:
         self.error_count = 0
         self.success_count = 0
         self.last_used_time = None
+        self.times_used = 0  # Incremented whenever this key is assigned/used
         self.is_cooling_down = False
         
         # Add lock for thread-safe modifications
@@ -137,7 +138,9 @@ class APIKeyEntry:
             'azure_endpoint': self.azure_endpoint,
             'google_region': self.google_region,
             'azure_api_version': self.azure_api_version,
-            'use_individual_endpoint': self.use_individual_endpoint
+            'use_individual_endpoint': self.use_individual_endpoint,
+            # Persist times used optionally (non-breaking if ignored elsewhere)
+            'times_used': getattr(self, 'times_used', 0)
         }
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
@@ -236,6 +239,12 @@ class APIKeyPool:
                     if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
                         # Assign to thread
                         self._thread_assignments[thread_id] = (key_index, time.time())
+                        
+                        # Increment usage counter on assignment
+                        try:
+                            key.times_used += 1
+                        except Exception:
+                            pass
                         
                         # Track usage
                         with self._usage_lock:
@@ -743,7 +752,7 @@ class MultiAPIKeyDialog:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Treeview for fallback keys
-        columns = ('Model', 'Status')
+        columns = ('Model', 'Status', 'Times Used')
         self.fallback_tree = ttk.Treeview(tree_container, columns=columns, show='tree headings',
                                           yscrollcommand=scrollbar.set, height=5)
         self.fallback_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -753,13 +762,16 @@ class MultiAPIKeyDialog:
         
         # Configure columns
         self.fallback_tree.heading('#0', text='API Key', anchor='w')
-        self.fallback_tree.column('#0', width=200, minwidth=150, anchor='w')
+        self.fallback_tree.column('#0', width=220, minwidth=160, anchor='w')
         
         self.fallback_tree.heading('Model', text='Model', anchor='w')
-        self.fallback_tree.column('Model', width=150, minwidth=100, anchor='w')
+        self.fallback_tree.column('Model', width=220, minwidth=140, anchor='w')
         
         self.fallback_tree.heading('Status', text='Status', anchor='center')
-        self.fallback_tree.column('Status', width=100, minwidth=80, anchor='center')
+        self.fallback_tree.column('Status', width=120, minwidth=80, anchor='center')
+        
+        self.fallback_tree.heading('Times Used', text='Times Used', anchor='center')
+        self.fallback_tree.column('Times Used', width=100, minwidth=70, anchor='center')
         
         # Action buttons - store reference for toggling
         self.fallback_action_frame = tk.Frame(list_frame)
@@ -957,7 +969,7 @@ class MultiAPIKeyDialog:
         all_models = get_model_options()
         
         model_combo = ttk.Combobox(main_frame, values=all_models, 
-                                   textvariable=model_var, width=35, height=12)
+                                   textvariable=model_var, width=45, height=12)
         model_combo.pack(pady=(0, 10))
         # Attach gentle autofill
         self._attach_model_autofill(model_combo, model_var)
@@ -1010,6 +1022,7 @@ class MultiAPIKeyDialog:
         for key_data in fallback_keys:
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
+            times_used = int(key_data.get('times_used', 0))
             
             # Mask API key
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
@@ -1017,7 +1030,7 @@ class MultiAPIKeyDialog:
             # Insert into tree
             self.fallback_tree.insert('', 'end',
                                      text=masked_key,
-                                     values=(model, "Not tested"),
+                                     values=(model, "Not tested", times_used),
                                      tags=('untested',))
         
         # Configure tags
@@ -1049,7 +1062,8 @@ class MultiAPIKeyDialog:
             'google_credentials': google_credentials,
             'azure_endpoint': azure_endpoint,
             'google_region': google_region,
-            'azure_api_version': azure_api_version
+            'azure_api_version': azure_api_version,
+            'times_used': 0
         })
         
         # Save to config
@@ -1144,12 +1158,31 @@ class MultiAPIKeyDialog:
         thread.start()
 
     def _update_fallback_test_result(self, index, success):
-        """Update fallback tree item with test result"""
+        """Update fallback tree item with test result and bump times used"""
+        # Increment times_used in config
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if index < len(fallback_keys):
+            try:
+                fallback_keys[index]['times_used'] = int(fallback_keys[index].get('times_used', 0)) + 1
+                # Persist
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+            except Exception:
+                pass
+        
         items = self.fallback_tree.get_children()
         if index < len(items):
             item = items[index]
             values = list(self.fallback_tree.item(item, 'values'))
+            # Update status
+            if len(values) < 3:
+                values = values + [0] * (3 - len(values))
             values[1] = "✅ Passed" if success else "❌ Failed"
+            # Update times used cell
+            try:
+                values[2] = int(values[2]) + 1
+            except Exception:
+                values[2] = 1
             self.fallback_tree.item(item, values=values)
 
     def _test_single_fallback_key(self, key_data, index):
@@ -1374,7 +1407,7 @@ class MultiAPIKeyDialog:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Treeview
-        columns = ('Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Last Used')
+        columns = ('Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Times Used')
         self.tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings',
                                 yscrollcommand=scrollbar.set, height=10)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1386,7 +1419,7 @@ class MultiAPIKeyDialog:
         self.tree.column('#0', width=180, minwidth=150, anchor='w')
         
         self.tree.heading('Model', text='Model', anchor='w')
-        self.tree.column('Model', width=180, minwidth=120, anchor='w')
+        self.tree.column('Model', width=260, minwidth=160, anchor='w')
         
         self.tree.heading('Cooldown', text='Cooldown', anchor='center')
         self.tree.column('Cooldown', width=80, minwidth=60, anchor='center')
@@ -1400,8 +1433,8 @@ class MultiAPIKeyDialog:
         self.tree.heading('Errors', text='✗', anchor='center')
         self.tree.column('Errors', width=40, minwidth=30, anchor='center')
         
-        self.tree.heading('Last Used', text='Last Used', anchor='center')
-        self.tree.column('Last Used', width=90, minwidth=60, anchor='center')
+        self.tree.heading('Times Used', text='Times Used', anchor='center')
+        self.tree.column('Times Used', width=90, minwidth=60, anchor='center')
         
         # Configure tree style for better appearance
         style = ttk.Style()
@@ -1765,24 +1798,14 @@ class MultiAPIKeyDialog:
                 status = "Active"
                 tags = ('active',)
             
-            # Last used
-            last_used = ""
-            if key.last_used_time:
-                time_diff = time.time() - key.last_used_time
-                if time_diff < 60:
-                    last_used = "Just now"
-                elif time_diff < 3600:
-                    last_used = f"{int(time_diff/60)}m ago"
-                elif time_diff < 86400:
-                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M")
-                else:
-                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%m/%d")
+            # Times used (counter)
+            times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             
             # Insert into tree with position column
             self.tree.insert('', 'end', 
                            text=masked_key,
                            values=(position, key.model, f"{key.cooldown}s", status, 
-                                 key.success_count, key.error_count, last_used),
+                                 key.success_count, key.error_count, times_used),
                            tags=tags)
         
         # Configure tags (these may or may not work depending on ttkbootstrap theme)
@@ -2011,7 +2034,7 @@ class MultiAPIKeyDialog:
         all_models = get_model_options()
         
         model_combo = ttk.Combobox(main_frame, values=all_models, 
-                                   textvariable=model_var, width=35, height=12)
+                                   textvariable=model_var, width=45, height=12)
         model_combo.pack(pady=(0, 10))
         
         # Attach gentle autofill
@@ -2437,25 +2460,14 @@ class MultiAPIKeyDialog:
                 status = "Active"
                 tags = ('active',)
             
-            # Last used
-            last_used = ""
-            if key.last_used_time:
-                # Show relative time if recent, otherwise just time
-                time_diff = time.time() - key.last_used_time
-                if time_diff < 60:  # Less than 1 minute
-                    last_used = "Just now"
-                elif time_diff < 3600:  # Less than 1 hour
-                    last_used = f"{int(time_diff/60)}m ago"
-                elif time_diff < 86400:  # Less than 1 day
-                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M")
-                else:
-                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%m/%d")
+            # Times used (counter)
+            times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             
             # Insert into tree
             self.tree.insert('', 'end', 
                            text=masked_key,
                            values=(key.model, f"{key.cooldown}s", status, 
-                                 key.success_count, key.error_count, last_used),
+                                 key.success_count, key.error_count, times_used),
                            tags=tags)
         
         # Configure tags
@@ -2640,9 +2652,8 @@ class MultiAPIKeyDialog:
                 values[3] = key.success_count
                 values[4] = key.error_count
                 
-                # Update last used
-                if key.last_used_time:
-                    values[5] = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M:%S")
+                # Update times used (counter)
+                values[5] = getattr(key, 'times_used', key.success_count + key.error_count)
                 
                 # Update the item
                 self.tree.item(item, values=values, tags=tags)
@@ -2697,16 +2708,14 @@ class MultiAPIKeyDialog:
                 status = "Active"
                 tags = ('active',)
             
-            # Last used
-            last_used = ""
-            if key.last_used_time:
-                last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M:%S")
+            # Times used (counter)
+            times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             
             # Insert into tree
             self.tree.insert('', 'end', 
                            text=masked_key,
                            values=(key.model, f"{key.cooldown}s", status, 
-                                 key.success_count, key.error_count, last_used),
+                                 key.success_count, key.error_count, times_used),
                            tags=tags)
         
         # Configure tags
@@ -2784,6 +2793,12 @@ class MultiAPIKeyDialog:
             self.dialog.after(0, lambda: self.progress_text.see(tk.END))
             
             try:
+                # Count this usage for times used in testing as well
+                try:
+                    key.times_used += 1
+                except Exception:
+                    pass
+                
                 # Check if this is a Gemini model with custom endpoint
                 is_gemini_model = key.model.lower().startswith('gemini')
                 
