@@ -322,6 +322,33 @@ class UnifiedClient:
         except Exception:
             return 2.0
 
+    def _debug_log(self, message: str) -> None:
+        """Print debug logs unless in cleanup/stop state or quiet mode.
+        Suppresses noisy logs when the operation is cancelled or in cleanup.
+        Honours QUIET_LOGS=1 environment toggle.
+        """
+        try:
+            if getattr(self, '_in_cleanup', False):
+                return
+            if getattr(self, '_cancelled', False):
+                return
+            # Some call sites expose a stop check
+            if hasattr(self, '_is_stop_requested') and callable(getattr(self, '_is_stop_requested')):
+                try:
+                    if self._is_stop_requested():
+                        return
+                except Exception:
+                    pass
+            if os.getenv('QUIET_LOGS', '0') == '1':
+                return
+            print(message)
+        except Exception:
+            # Best-effort logging; swallow any print failures
+            try:
+                print(message)
+            except Exception:
+                pass
+
     def _safe_len(self, obj, context="unknown"):
         """Safely get length of an object with better error reporting"""
         try:
@@ -480,14 +507,15 @@ class UnifiedClient:
             return mt, None
     def _apply_api_delay(self) -> None:
         if getattr(self, '_in_cleanup', False):
-            print("⚡ Skipping API delay (cleanup mode)")
+            # Suppress log in cleanup mode
+            # self._debug_log("⚡ Skipping API delay (cleanup mode)")
             return
         try:
             api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         except Exception:
             api_delay = 2.0
         if api_delay > 0:
-            print(f"⏳ Waiting {api_delay}s before next API call...")
+            self._debug_log(f"⏳ Waiting {api_delay}s before next API call...")
             time.sleep(api_delay)
 
     def _set_idempotency_context(self, request_id: str, attempt: int) -> None:
@@ -4516,8 +4544,8 @@ class UnifiedClient:
         if provider is None:
             provider = self.client_type
         
-        print(f"   🔍 Extracting text from {provider} response...")
-        print(f"   🔍 Response type: {type(response)}")
+        self._debug_log(f"   🔍 Extracting text from {provider} response...")
+        self._debug_log(f"   🔍 Response type: {type(response)}")
         
         # Handle UnifiedResponse objects
         if isinstance(response, UnifiedResponse):
@@ -4525,37 +4553,37 @@ class UnifiedClient:
             if response.content is not None and isinstance(response.content, str):
                 # Always return the content from UnifiedResponse
                 if len(response.content) > 0:
-                    print(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
+                    self._debug_log(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
                 else:
-                    print(f"   ⚠️ UnifiedResponse has empty content (finish_reason: {response.finish_reason})")
+                    self._debug_log(f"   ⚠️ UnifiedResponse has empty content (finish_reason: {response.finish_reason})")
                 return response.content, response.finish_reason or 'stop'
             elif response.error_details:
-                print(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
+                self._debug_log(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
                 return "", response.finish_reason or 'error'
             else:
                 # Only try to extract from raw_response if content is actually None
-                print(f"   ⚠️ UnifiedResponse.content is None, checking raw_response...")
+                self._debug_log(f"   ⚠️ UnifiedResponse.content is None, checking raw_response...")
                 if hasattr(response, 'raw_response') and response.raw_response:
-                    print(f"   🔍 Found raw_response, attempting extraction...")
+                    self._debug_log(f"   🔍 Found raw_response, attempting extraction...")
                     response = response.raw_response
                 else:
-                    print(f"   ⚠️ No raw_response found")
+                    self._debug_log(f"   ⚠️ No raw_response found")
                     return "", 'error'
         
         # ========== GEMINI-SPECIFIC HANDLING ==========
         if provider == 'gemini':
-            print(f"   🔍 [Gemini] Attempting specialized extraction...")
+            self._debug_log(f"   🔍 [Gemini] Attempting specialized extraction...")
             
             # Check for Gemini-specific response structure
             if hasattr(response, 'candidates'):
-                print(f"   🔍 [Gemini] Found candidates attribute")
+                self._debug_log(f"   🔍 [Gemini] Found candidates attribute")
                 if response.candidates:
                     candidate = response.candidates[0]
                     
                     # Check finish reason
                     if hasattr(candidate, 'finish_reason'):
                         finish_reason = str(candidate.finish_reason).lower()
-                        print(f"   🔍 [Gemini] Finish reason: {finish_reason}")
+                        self._debug_log(f"   🔍 [Gemini] Finish reason: {finish_reason}")
                         
                         # Map Gemini finish reasons
                         if 'max_tokens' in finish_reason:
@@ -4568,23 +4596,23 @@ class UnifiedClient:
                     # Extract content from candidate
                     if hasattr(candidate, 'content'):
                         content = candidate.content
-                        print(f"   🔍 [Gemini] Content object: {content}")
-                        print(f"   🔍 [Gemini] Content type: {type(content)}")
-                        print(f"   🔍 [Gemini] Content attributes: {[attr for attr in dir(content) if not attr.startswith('_')][:10]}")
+                        self._debug_log(f"   🔍 [Gemini] Content object: {content}")
+                        self._debug_log(f"   🔍 [Gemini] Content type: {type(content)}")
+                        self._debug_log(f"   🔍 [Gemini] Content attributes: {[attr for attr in dir(content) if not attr.startswith('_')][:10]}")
                         
                         # NEW: Try to access content as string directly first
                         try:
                             content_str = str(content)
                             if content_str and len(content_str) > 20 and 'role=' not in content_str:
-                                print(f"   ✅ [Gemini] Got content from string conversion: {len(content_str)} chars")
+                                self._debug_log(f"   ✅ [Gemini] Got content from string conversion: {len(content_str)} chars")
                                 return content_str, finish_reason
                         except Exception as e:
-                            print(f"   ⚠️ [Gemini] String conversion failed: {e}")
+                            self._debug_log(f"   ⚠️ [Gemini] String conversion failed: {e}")
                         
                         # Content might have parts - FIX: Add None check for parts
                         if hasattr(content, 'parts') and content.parts is not None:
                             parts_count = self._safe_len(content.parts, "gemini_content_parts")
-                            print(f"   🔍 [Gemini] Found {parts_count} parts in content")
+                            self._debug_log(f"   🔍 [Gemini] Found {parts_count} parts in content")
                             text_parts = []
                             
                             for i, part in enumerate(content.parts):
@@ -4594,19 +4622,19 @@ class UnifiedClient:
                             
                             if text_parts:
                                 result = ''.join(text_parts)
-                                print(f"   ✅ [Gemini] Extracted from parts: {len(result)} chars")
+                                self._debug_log(f"   ✅ [Gemini] Extracted from parts: {len(result)} chars")
                                 return result, finish_reason
                                 
                             else:
                                 # NEW: Handle case where parts exist but contain no text
                                 parts_count = self._safe_len(content.parts, "gemini_empty_parts")
-                                print(f"   ⚠️ [Gemini] Parts found but no text extracted from {parts_count} parts")           
+                                self._debug_log(f"   ⚠️ [Gemini] Parts found but no text extracted from {parts_count} parts")           
                                 # Don't return here, try other methods
                         
                         # Try direct text access on content
                         elif hasattr(content, 'text'):
                             if content.text:
-                                print(f"   ✅ [Gemini] Got text from content.text: {len(content.text)} chars")
+                                self._debug_log(f"   ✅ [Gemini] Got text from content.text: {len(content.text)} chars")
                                 return content.text, finish_reason
                         
                         # NEW: Try accessing raw content data
@@ -5883,7 +5911,7 @@ class UnifiedClient:
                 
                 # Check stop flag before logging stagger message
                 if not self._is_stop_requested():
-                    print(f"⏳ [{thread_name}] Staggering API call by {api_delay:.1f}s")
+                    self._debug_log(f"⏳ [{thread_name}] Staggering API call by {api_delay:.1f}s")
                 
                 # Sleep outside lock
                 time.sleep(api_delay)
@@ -5894,7 +5922,7 @@ class UnifiedClient:
                         tls = self._get_thread_local_client()
                         label = getattr(tls, 'current_request_label', None)
                         if label:
-                            print(f"📤 [{thread_name}] Sending {label} to API...")
+                            self._debug_log(f"📤 [{thread_name}] Sending {label} to API...")
                     except Exception:
                         pass
             else:
@@ -6130,17 +6158,23 @@ class UnifiedClient:
         for attempt in range(max_retries):
             try:
                 if self._cancelled:
-                    raise UnifiedClientError("Operation cancelled")
+                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                 return call()
             except UnifiedClientError:
                 # Already normalized; propagate
                 raise
             except Exception as e:
+                # Suppress noise if we are stopping/cleaning up or the SDK surfaced a cancellation
+                err_str = str(e)
+                is_cancel = getattr(self, '_cancelled', False) or ('cancelled' in err_str.lower()) or ('canceled' in err_str.lower())
+                if is_cancel:
+                    # Normalize and stop retry/printing
+                    raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                 if attempt < max_retries - 1:
-                    print(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
+                    self._debug_log(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
-                print(f"{provider_name} SDK error after all retries: {e}")
+                self._debug_log(f"{provider_name} SDK error after all retries: {e}")
                 raise UnifiedClientError(f"{provider_name} SDK error: {e}")
 
     def _build_openai_headers(self, provider: str, api_key: str, headers: Optional[dict]) -> dict:
