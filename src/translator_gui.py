@@ -18,6 +18,7 @@ from ttkbootstrap.constants import *
 from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
 from metadata_batch_translator import MetadataBatchTranslatorUI
+from model_options import get_model_options
 
 # Support worker-mode dispatch in frozen builds to avoid requiring Python interpreter
 # This allows spawning the same .exe with a special flag to run helper tasks.
@@ -2477,6 +2478,8 @@ Recent translations to summarize:
         """Setup bindings for manual model input in combobox with autocomplete"""
         # Bind to key release events for live filtering and autofill
         self.model_combo.bind('<KeyRelease>', self._on_model_combo_keyrelease)
+        # Commit best match on Enter
+        self.model_combo.bind('<Return>', self._commit_model_autocomplete)
         # Also bind to FocusOut to catch when user clicks away after typing
         self.model_combo.bind('<FocusOut>', self.on_model_change)
         # Keep the existing binding for dropdown selection
@@ -2560,6 +2563,39 @@ Recent translations to summarize:
             except Exception:
                 pass
 
+    def _commit_model_autocomplete(self, event=None):
+        """On Enter, commit to the best matching model (prefix preferred, then contains)."""
+        try:
+            combo = self.model_combo
+            typed = combo.get()
+            source = getattr(self, '_model_all_values', []) or list(combo['values'])
+            match = None
+            if typed:
+                lowered = typed.lower()
+                pref = [v for v in source if v.lower().startswith(lowered)]
+                cont = [v for v in source if lowered in v.lower()] if not pref else []
+                match = pref[0] if pref else (cont[0] if cont else None)
+            if match and match != typed:
+                combo.set(match)
+            # Move cursor to end and clear any selection
+            try:
+                combo.icursor('end')
+                try:
+                    combo.selection_clear()
+                except Exception:
+                    combo.selection_range(0, 0)
+            except Exception:
+                pass
+            # Update prev text and trigger change
+            self._model_prev_text = combo.get()
+            self.on_model_change()
+        except Exception as e:
+            try:
+                logging.debug(f"Model combobox enter-commit error: {e}")
+            except Exception:
+                pass
+        return "break"
+
     def _ensure_model_dropdown_open(self):
         """Open the combobox dropdown if it isn't already visible."""
         try:
@@ -2603,125 +2639,7 @@ Recent translations to summarize:
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         default_model = self.config.get('model', 'gemini-2.0-flash')
         self.model_var = tk.StringVar(value=default_model)
-        models = [
-            # OpenAI Models
-            "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1",
-            "gpt-3.5-turbo", "gpt-3.5-turbo-16k", "gpt-4", "gpt-4-32k",
-            "gpt-5-mini","gpt-5","gpt-5-nano",
-            "o1-preview", "o1-mini", "o3", "o4-mini",
-            
-            # Google Gemini Models
-            "gemini-2.0-flash","gemini-2.0-flash-lite",
-            "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-pro", "gemini-pro-vision",
-            
-            # Anthropic Claude Models
-            "claude-opus-4-20250514", "claude-sonnet-4-20250514",
-            "claude-3-5-sonnet-20241022", "claude-3-7-sonnet-20250219",
-            "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
-            "claude-2.1", "claude-2", "claude-instant-1.2",
-            
-            # Grok Models
-            "grok-grok-4-0709", "grok-3", "grok-3-mini",
-            
-            # Vertex AI Model Garden - Claude models (confirmed)
-            "claude-4-opus@20250514",
-            "claude-4-sonnet@20250514",
-            "claude-opus-4@20250514",
-            "claude-sonnet-4@20250514",
-            "claude-3-7-sonnet@20250219",
-            "claude-3-5-sonnet@20240620",
-            "claude-3-5-sonnet-v2@20241022",
-            "claude-3-opus@20240229",
-            "claude-3-sonnet@20240229",
-            "claude-3-haiku@20240307",
-
-            
-            # Alternative format with vertex_ai prefix
-            "vertex/claude-3-7-sonnet@20250219",
-            "vertex/claude-3-5-sonnet@20240620",
-            "vertex/claude-3-opus@20240229",
-            "vertex/claude-4-opus@20250514",
-            "vertex/claude-4-sonnet@20250514",
-            "vertex/gemini-1.5-pro",
-            "vertex/gemini-1.5-flash",
-            "vertex/gemini-2.0-flash",
-            "vertex/gemini-2.5-pro",
-            "vertex/gemini-2.5-flash",
-            "vertex/gemini-2.5-flash-lite",
-
-            # Chute AI
-            "chutes/openai/gpt-oss-120b",
-            "chutes/deepseek-ai/DeepSeek-V3.1",
-            
-            # DeepSeek Models
-            "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
-            
-            # Mistral Models
-            "mistral-large", "mistral-medium", "mistral-small", "mistral-tiny",
-            "mixtral-8x7b-instruct", "mixtral-8x22b", "codestral-latest",
-            
-            # Meta Llama Models (via Together/other providers)
-            "llama-2-7b-chat", "llama-2-13b-chat", "llama-2-70b-chat",
-            "llama-3-8b-instruct", "llama-3-70b-instruct", "codellama-34b-instruct",
-            
-            # Yi Models
-            "yi-34b-chat", "yi-34b-chat-200k", "yi-6b-chat",
-            
-            # Qwen Models
-            "qwen-72b-chat", "qwen-14b-chat", "qwen-7b-chat", "qwen-plus", "qwen-turbo",
-            
-            # Cohere Models
-            "command", "command-light", "command-nightly", "command-r", "command-r-plus",
-            
-            # AI21 Models
-            "j2-ultra", "j2-mid", "j2-light", "jamba-instruct",
-            
-            # Perplexity Models
-            "perplexity-70b-online", "perplexity-7b-online", "pplx-70b-online", "pplx-7b-online",
-            
-            # Groq Models (usually with suffix)
-            "llama-3-70b-groq", "llama-3-8b-groq", "mixtral-8x7b-groq",
-            
-            # Chinese Models
-            "glm-4", "glm-3-turbo", "chatglm-6b", "chatglm2-6b", "chatglm3-6b",
-            "baichuan-13b-chat", "baichuan2-13b-chat",
-            "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k",
-            
-            # Other Models
-            "falcon-40b-instruct", "falcon-7b-instruct",
-            "phi-2", "phi-3-mini", "phi-3-small", "phi-3-medium",
-            "orca-2-13b", "orca-2-7b",
-            "vicuna-13b", "vicuna-7b",
-            "alpaca-7b",
-            "wizardlm-70b", "wizardlm-13b",
-            "openchat-3.5",
-            
-            # For POE, prefix with 'poe/'
-            "poe/gpt-4", "poe/gpt-4o", "poe/gpt-4.5", "poe/gpt-4.1",
-            "poe/claude-3-opus", "poe/claude-4-opus", "poe/claude-3-sonnet", "poe/claude-4-sonnet",
-            "poe/claude", "poe/Assistant",
-            "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
-            
-            # For OR, prevfix with 'or/'
-            "or/google/gemini-2.5-pro",
-            "or/google/gemini-2.5-flash",
-            "or/google/gemini-2.5-flash-lite",
-            "or/openai/gpt-5",
-            "or/openai/gpt-5-mini",
-            "or/openai/gpt-5-nano",
-            "or/openai/chatgpt-4o-latest",   
-            "or/deepseek/deepseek-r1-0528:free", 
-            "or/google/gemma-3-27b-it:free",
-            
-            # For ElectronHub, prefix with 'eh/'
-            "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
-            "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
-            "eh/gemini-pro", "eh/deepseek-coder-33b",
-            
-            # Last Resort
-            "deepl",  # Will use DeepL API
-            "google-translate",  # Will use Google Cloud Translate
-        ]
+        models = get_model_options()
         self._model_all_values = models
         self.model_combo = tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal")
         self.model_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)

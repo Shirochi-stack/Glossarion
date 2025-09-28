@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from datetime import datetime, timedelta
 import logging
+from model_options import get_model_options
 # Dialog for configuring per-key endpoint
 try:
     from individual_endpoint_dialog import IndividualEndpointDialog
@@ -398,6 +399,9 @@ class MultiAPIKeyDialog:
         self.parent = parent
         self.translator_gui = translator_gui
         self.dialog = None
+        # Keep a reference for icon image to avoid GC
+        self._icon_photo_ref = None
+
         self.key_pool = APIKeyPool()
         self.tree = None
         self.test_results = queue.Queue()
@@ -414,6 +418,29 @@ class MultiAPIKeyDialog:
                                                       max_width_ratio=0.9, 
                                                       max_height_ratio=1.55)
         
+    def _set_icon(self, window):
+        """Set Halgakos.ico as window icon if available."""
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                try:
+                    window.iconbitmap(ico_path)
+                except Exception:
+                    pass
+                # Try iconphoto for better scaling
+                try:
+                    from PIL import Image, ImageTk
+                    img = Image.open(ico_path)
+                    if img.mode != 'RGBA':
+                        img = img.convert('RGBA')
+                    self._icon_photo_ref = ImageTk.PhotoImage(img)
+                    window.iconphoto(False, self._icon_photo_ref)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _load_keys_from_config(self):
         """Load API keys from translator GUI config"""
         if hasattr(self.translator_gui, 'config'):
@@ -614,8 +641,12 @@ class MultiAPIKeyDialog:
         # Fallback Model
         tk.Label(add_fallback_frame, text="Model:").grid(row=0, column=3, sticky=tk.W, padx=(20, 10), pady=5)
         self.fallback_model_var = tk.StringVar()
-        self.fallback_model_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_model_var)
-        self.fallback_model_entry.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        fallback_models = get_model_options()
+        self.fallback_model_combo = tb.Combobox(add_fallback_frame, textvariable=self.fallback_model_var,
+                                               values=fallback_models, state='normal')
+        self.fallback_model_combo.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        # Attach gentle autofill
+        self._attach_model_autofill(self.fallback_model_combo, self.fallback_model_var)
         
         # Add fallback button
         tb.Button(add_fallback_frame, text="Add Fallback Key", 
@@ -900,8 +931,10 @@ class MultiAPIKeyDialog:
         # Create simple dialog (same style as main tree)
         dialog = tk.Toplevel(self.dialog)
         dialog.title(f"Change Model for {len(selected)} Fallback Keys")
-        dialog.geometry("400x120")
+        dialog.geometry("400x130")
         dialog.transient(self.dialog)
+        # Set icon
+        self._set_icon(dialog)
         
         # Center the dialog
         dialog.update_idletasks()
@@ -920,17 +953,14 @@ class MultiAPIKeyDialog:
         # Model entry with dropdown
         model_var = tk.StringVar()
         
-        # Common models for quick selection
-        common_models = [
-            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
-            "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-mini",
-            "claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku",
-            "claude-opus-4-20250514", "claude-sonnet-4-20250514"
-        ]
+        # Full model list (same as main GUI)
+        all_models = get_model_options()
         
-        model_combo = ttk.Combobox(main_frame, values=common_models, 
-                                   textvariable=model_var, width=35)
+        model_combo = ttk.Combobox(main_frame, values=all_models, 
+                                   textvariable=model_var, width=35, height=12)
         model_combo.pack(pady=(0, 10))
+        # Attach gentle autofill
+        self._attach_model_autofill(model_combo, model_var)
         
         # Get current model from first selected item as default
         selected_indices = [self.fallback_tree.index(item) for item in selected]
@@ -938,10 +968,6 @@ class MultiAPIKeyDialog:
             current_model = fallback_keys[selected_indices[0]].get('model', '')
             model_var.set(current_model)
             model_combo.select_range(0, tk.END)  # Select all text for easy replacement
-        
-        # Cancel button only
-        tb.Button(main_frame, text="Cancel", command=dialog.destroy,
-                 bootstyle="secondary", width=10).pack()
         
         def apply_change(event=None):
             new_model = model_var.get().strip()
@@ -1212,7 +1238,7 @@ class MultiAPIKeyDialog:
             
             # Enable input widgets
             self.fallback_key_entry.config(state=state)
-            self.fallback_model_entry.config(state=state)
+            self.fallback_model_combo.config(state=state)
             self.fallback_google_creds_entry.config(state=state)
             self.fallback_google_region_entry.config(state=state)
             self.fallback_azure_endpoint_entry.config(state=state)
@@ -1236,7 +1262,7 @@ class MultiAPIKeyDialog:
             
             # Disable input widgets
             self.fallback_key_entry.config(state=state)
-            self.fallback_model_entry.config(state=state)
+            self.fallback_model_combo.config(state=state)
             self.fallback_google_creds_entry.config(state=state)
             self.fallback_google_region_entry.config(state=state)
             self.fallback_azure_endpoint_entry.config(state=state)
@@ -1448,8 +1474,11 @@ class MultiAPIKeyDialog:
         # Model
         tk.Label(add_frame, text="Model:").grid(row=0, column=3, sticky=tk.W, padx=(20, 10), pady=5)
         self.model_var = tk.StringVar()
-        self.model_entry = tb.Entry(add_frame, textvariable=self.model_var)
-        self.model_entry.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        add_models = get_model_options()
+        self.model_combo = tb.Combobox(add_frame, textvariable=self.model_var, values=add_models, state='normal')
+        self.model_combo.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        # Attach gentle autofill
+        self._attach_model_autofill(self.model_combo, self.model_var)
         
         # Row 1: Cooldown and optional credentials
         tk.Label(add_frame, text="Cooldown (s):").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=5)
@@ -1532,6 +1561,9 @@ class MultiAPIKeyDialog:
         
         # Initially hide the endpoint fields
         self._toggle_individual_endpoint_fields()
+        
+        # Setup inline editor hooks to use model options as a dropdown too
+        # (Optional enhancement could be added later)
         
         # Row 5: (Copy Current Key button moved up next to Add Key)
     
@@ -1956,8 +1988,10 @@ class MultiAPIKeyDialog:
         # Create simple dialog
         dialog = tk.Toplevel(self.dialog)
         dialog.title(f"Change Model for {len(selected)} Keys")
-        dialog.geometry("400x120")
+        dialog.geometry("400x130")
         dialog.transient(self.dialog)
+        # Set icon
+        self._set_icon(dialog)
         
         # Center the dialog
         dialog.update_idletasks()
@@ -1976,28 +2010,21 @@ class MultiAPIKeyDialog:
         # Model entry with dropdown
         model_var = tk.StringVar()
         
-        # Common models for quick selection
-        common_models = [
-            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
-            "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-mini",
-            "claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku",
-            "claude-opus-4-20250514", "claude-sonnet-4-20250514"
-        ]
+        # Full model list (same as main GUI)
+        all_models = get_model_options()
         
-        model_combo = ttk.Combobox(main_frame, values=common_models, 
-                                   textvariable=model_var, width=35)
+        model_combo = ttk.Combobox(main_frame, values=all_models, 
+                                   textvariable=model_var, width=35, height=12)
         model_combo.pack(pady=(0, 10))
         
+        # Attach gentle autofill
+        self._attach_model_autofill(model_combo, model_var)
         # Get current model from first selected item as default
         selected_indices = [self.tree.index(item) for item in selected]
         if selected_indices and selected_indices[0] < len(self.key_pool.keys):
             current_model = self.key_pool.keys[selected_indices[0]].model
             model_var.set(current_model)
             model_combo.select_range(0, tk.END)  # Select all text for easy replacement
-        
-        # Cancel button only
-        tb.Button(main_frame, text="Cancel", command=dialog.destroy,
-                 bootstyle="secondary", width=10).pack()
         
         def apply_change(event=None):
             new_model = model_var.get().strip()
@@ -2149,6 +2176,131 @@ class MultiAPIKeyDialog:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
     
+    def _attach_model_autofill(self, combo: ttk.Combobox, var: tk.StringVar, on_change=None):
+        """Attach the same gentle autofill/scroll behavior as the main GUI.
+        - No filtering; keeps full list intact.
+        - Gentle autofill only when appending at end; Backspace/Delete respected.
+        - Scroll/highlight match if dropdown is open.
+        """
+        import tkinter as _tk
+        import logging as _logging
+
+        # Store full values list on the widget
+        try:
+            combo._all_values = list(combo['values'])
+        except Exception:
+            combo._all_values = []
+        combo._prev_text = var.get() if var else combo.get()
+
+        def _scroll_to_value(_combo: ttk.Combobox, value: str):
+            try:
+                values = getattr(_combo, '_all_values', []) or list(_combo['values'])
+                if value not in values:
+                    return
+                index = values.index(value)
+                popdown = _combo.tk.eval(f'ttk::combobox::PopdownWindow {_combo._w}')
+                listbox = f'{popdown}.f.l'
+                tkobj = _combo.tk
+                tkobj.call(listbox, 'see', index)
+                tkobj.call(listbox, 'selection', 'clear', 0, 'end')
+                tkobj.call(listbox, 'selection', 'set', index)
+                tkobj.call(listbox, 'activate', index)
+            except Exception:
+                pass
+
+        def _on_keyrelease(event=None):
+            try:
+                typed = combo.get()
+                prev = getattr(combo, '_prev_text', '')
+                keysym = (getattr(event, 'keysym', '') or '').lower()
+
+                if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
+                    return
+
+                source = getattr(combo, '_all_values', []) or list(combo['values'])
+
+                first_match = None
+                if typed:
+                    lowered = typed.lower()
+                    pref = [v for v in source if v.lower().startswith(lowered)]
+                    cont = [v for v in source if lowered in v.lower()] if not pref else []
+                    if pref:
+                        first_match = pref[0]
+                    elif cont:
+                        first_match = cont[0]
+
+                grew = len(typed) > len(prev) and typed.startswith(prev)
+                is_del = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
+                try:
+                    at_end = combo.index(_tk.INSERT) == len(typed)
+                except Exception:
+                    at_end = True
+                try:
+                    has_sel = combo.selection_present()
+                except Exception:
+                    has_sel = False
+
+                # Gentle autofill
+                if first_match and grew and at_end and not has_sel and not is_del:
+                    if first_match.lower().startswith(typed.lower()) and first_match != typed:
+                        combo.set(first_match)
+                        try:
+                            combo.icursor(len(typed))
+                            combo.selection_range(len(typed), len(first_match))
+                        except Exception:
+                            pass
+
+                # If dropdown is open, scroll/highlight (no auto-open)
+                if first_match:
+                    _scroll_to_value(combo, first_match)
+
+                combo._prev_text = typed
+                if on_change and typed != prev:
+                    on_change()
+            except Exception as e:
+                try:
+                    _logging.debug(f"Combobox autocomplete error: {e}")
+                except Exception:
+                    pass
+
+        combo.bind('<KeyRelease>', _on_keyrelease)
+        
+        def _on_return(event=None):
+            try:
+                typed = combo.get()
+                source = getattr(combo, '_all_values', []) or list(combo['values'])
+                match = None
+                if typed:
+                    lowered = typed.lower()
+                    pref = [v for v in source if v.lower().startswith(lowered)]
+                    cont = [v for v in source if lowered in v.lower()] if not pref else []
+                    match = pref[0] if pref else (cont[0] if cont else None)
+                if match and match != typed:
+                    combo.set(match)
+                # Place caret at end and clear selection
+                try:
+                    combo.icursor('end')
+                    try:
+                        combo.selection_clear()
+                    except Exception:
+                        combo.selection_range(0, 0)
+                except Exception:
+                    pass
+                combo._prev_text = combo.get()
+                if on_change:
+                    on_change()
+            except Exception as e:
+                try:
+                    _logging.debug(f"Combobox enter-commit error: {e}")
+                except Exception:
+                    pass
+            # Do not return "break" so outer dialogs bound to <Return> still fire
+            return None
+
+        combo.bind('<Return>', _on_return)
+        combo.bind('<<ComboboxSelected>>', lambda e: on_change() if on_change else None)
+        combo.bind('<FocusOut>', lambda e: on_change() if on_change else None)
+
     def _toggle_key_visibility(self):
         """Toggle API key visibility"""
         if self.api_key_entry.cget('show') == '*':
@@ -2170,7 +2322,7 @@ class MultiAPIKeyDialog:
         # No need to show/hide fallback section based on multi-key mode
         
         # Update other UI elements
-        for widget in [self.api_key_entry, self.model_entry]:
+        for widget in [self.api_key_entry, self.model_combo]:
             if widget:
                 widget.config(state=tk.NORMAL if enabled else tk.DISABLED)
         
