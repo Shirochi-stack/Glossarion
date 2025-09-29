@@ -2376,7 +2376,7 @@ class MangaTranslationTab:
 
         # Minimum Font Size (Auto mode lower bound)
         self.min_size_frame = tk.Frame(self.sizing_group)
-        # Don't pack yet - let _toggle_font_size_mode handle it
+        self.min_size_frame.pack(fill=tk.X, pady=5)  # ALWAYS VISIBLE
 
         tk.Label(self.min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
@@ -2400,7 +2400,7 @@ class MangaTranslationTab:
     
         # Maximum Font Size (Auto mode upper bound)
         self.max_size_frame = tk.Frame(self.sizing_group)
-        # Don't pack yet - let _toggle_font_size_mode handle it
+        self.max_size_frame.pack(fill=tk.X, pady=5)  # ALWAYS VISIBLE
 
         tk.Label(self.max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
@@ -3028,38 +3028,26 @@ class MangaTranslationTab:
         """Toggle between auto, fixed size and multiplier modes"""
         mode = self.font_size_mode_var.get()
         
-        # Check if frames exist before trying to pack/unpack them
+        # Handle main frames (fixed size and multiplier)
         if hasattr(self, 'fixed_size_frame') and hasattr(self, 'multiplier_frame'):
             if mode == "fixed":
                 self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
                 self.multiplier_frame.pack_forget()
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack_forget()
-                # Show min/max controls for fixed mode (they act as constraints when font size = 0)
-                if hasattr(self, 'min_size_frame'):
-                    self.min_size_frame.pack(fill=tk.X, pady=5)
-                if hasattr(self, 'max_size_frame'):
-                    self.max_size_frame.pack(fill=tk.X, pady=5)
             elif mode == "multiplier":
                 self.fixed_size_frame.pack_forget()
                 self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack(fill=tk.X, pady=(5, 0))
-                # Hide min/max controls for multiplier mode
-                if hasattr(self, 'min_size_frame'):
-                    self.min_size_frame.pack_forget()
-                if hasattr(self, 'max_size_frame'):
-                    self.max_size_frame.pack_forget()
             else:  # auto
                 self.fixed_size_frame.pack_forget()
                 self.multiplier_frame.pack_forget()
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack_forget()
-                # Hide min/max controls for auto mode - pure auto sizing
-                if hasattr(self, 'min_size_frame'):
-                    self.min_size_frame.pack_forget()
-                if hasattr(self, 'max_size_frame'):
-                    self.max_size_frame.pack_forget()
+        
+        # MIN/MAX FIELDS ARE ALWAYS VISIBLE - NEVER HIDE THEM
+        # They are packed at creation time and stay visible in all modes
         
         # Only save if we're not initializing
         if not hasattr(self, '_initializing') or not self._initializing:
