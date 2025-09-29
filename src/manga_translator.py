@@ -164,6 +164,11 @@ class MangaTranslator:
         self.log_callback = log_callback
         self.config = main_gui.config
         self.manga_settings = self.config.get('manga_settings', {})
+        # Concise logging flag from Advanced settings
+        try:
+            self.concise_logs = bool(self.manga_settings.get('advanced', {}).get('concise_logs', False))
+        except Exception:
+            self.concise_logs = False
 
         # Initialize attributes
         self.current_image = None
@@ -1205,7 +1210,6 @@ class MangaTranslator:
                 pass
             if self._check_stop():
                 break
-            time.sleep(0.5)
             time.sleep(0.1)  # Brief pause for stability
             self._log("💤 RAM gate pausing briefly for stability", "debug")
         if waited and context_msg:
@@ -1628,6 +1632,50 @@ class MangaTranslator:
             if not any(keyword in message for keyword in essential_stop_keywords):
                 return
             
+        # Concise pipeline logs: keep only high-level messages and errors/warnings
+        if getattr(self, 'concise_logs', False):
+            if level in ("error", "warning"):
+                pass
+            else:
+                keep_prefixes = (
+                    # Pipeline boundaries and IO
+                    "📷 STARTING", "📁 Input", "📁 Output",
+                    # Step markers
+                    "📍 [STEP",
+                    # Step 1 essentials
+                    "🔍 Detecting text regions",  # start of detection on file
+                    "📄 Detected",                # format detected
+                    "Using OCR provider:",       # provider line
+                    "Using Azure Read API",      # azure-specific run mode
+                    "⚠️ Converting image to PNG", # azure PNG compatibility
+                    "🤖 Using AI bubble detection", # BD merge mode
+                    "🤖 Using RTEDR_onnx",         # selected BD
+                    "✅ Detected",                # detected N regions after merging
+                    # Detectors/inpainter readiness
+                    "🤖 Using bubble detector", "🎨 Using local inpainter",
+                    # Step 2: key actions
+                    "🔀 Running",  # Running translation and inpainting concurrently
+                    "📄 Using FULL PAGE CONTEXT",  # Explicit mode notice
+                    "📄 Full page context mode",   # Alternate phrasing
+                    "📄 Full page context translation",  # Start/summary
+                    "🎭 Creating text mask", "📊 Mask breakdown", "📏 Applying",
+                    "🎨 Inpainting", "🧽 Using local inpainting",
+                    # Detection and summary
+                    "📊 Bubble detection complete", "✅ Detection complete",
+                    # Mapping/translation summary
+                    "📊 Mapping", "📊 Full page context translation complete",
+                    # Rendering
+                    "✍️ Rendering", "✅ ENHANCED text rendering complete",
+                    # Output and final summary
+                    "💾 Saved output", "✅ TRANSLATION PIPELINE COMPLETE",
+                    "📊 Translation Summary", "✅ Successful", "❌ Failed",
+                    # Cleanup
+                    "🔑 Auto cleanup", "🔑 Translator instance preserved"
+                )
+                _msg = message.lstrip() if isinstance(message, str) else message
+                if not any(_msg.startswith(p) for p in keep_prefixes):
+                    return
+        
         # In batch mode, only log important messages
         if self.batch_mode:
             # Skip verbose/debug messages in batch mode
@@ -2279,7 +2327,6 @@ class MangaTranslator:
                         break
                     
                     time.sleep(poll_interval)
-                    time.sleep(0.1)  # Brief pause for stability
                     self._log("💤 Azure OCR polling pausing briefly for stability", "debug")
                     wait_time += poll_interval
                 
@@ -3556,12 +3603,11 @@ class MangaTranslator:
             result = self.vision_client.get_read_result(operation_id)
             if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
                 break
-            time.sleep(0.5)
             time.sleep(0.1)  # Brief pause for stability
             logger.debug("💤 Azure text detection pausing briefly for stability")
         
         regions = []
-        confidence_threshold = ocr_settings.get('confidence_threshold', 0.8)
+        confidence_threshold = ocr_settings.get('confidence_threshold', 0.6)
         
         if result.status == OperationStatusCodes.succeeded:
             for page in result.analyze_result.read_results:
@@ -5387,9 +5433,10 @@ class MangaTranslator:
         
         return mask
     
-    def _get_or_init_shared_local_inpainter(self, local_method: str, model_path: str):
+    def _get_or_init_shared_local_inpainter(self, local_method: str, model_path: str, force_reload: bool = False):
         """Return a shared LocalInpainter for (local_method, model_path) with minimal locking.
         If another thread is loading the same model, wait on its event instead of competing.
+        Set force_reload=True only when the method or model_path actually changed.
         """
         from local_inpainter import LocalInpainter
         key = (local_method, model_path or '')
@@ -5430,7 +5477,7 @@ class MangaTranslator:
                 loaded_ok = False
                 if model_path and os.path.exists(model_path):
                     try:
-                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
+                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=force_reload)
                     except Exception as e:
                         self._log(f"⚠️ Inpainter load failed: {e}", "warning")
                         loaded_ok = False
@@ -5763,7 +5810,7 @@ class MangaTranslator:
                 
                 # Obtain shared/local instance with microsecond-scale locking
                 # Use shared pool to avoid long locks during heavy I/O
-                inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=need_reload)
                 if inp_shared is not None:
                     self.local_inpainter = inp_shared
                     if getattr(self.local_inpainter, 'model_loaded', False):
@@ -5821,7 +5868,7 @@ class MangaTranslator:
                         for attempt in range(2):
                             try:
                                 self._log(f"📥 Loading {local_method} model... (attempt {attempt+1})", "info")
-                                if self.local_inpainter.load_model(local_method, model_path, force_reload=True):
+                                if self.local_inpainter.load_model(local_method, model_path, force_reload=need_reload):
                                     loaded_ok = True
                                     break
                             except Exception as e:
@@ -8151,7 +8198,7 @@ class MangaTranslator:
         # Simplified header for batch mode
         if not self.batch_mode:
             self._log(f"\n{'='*60}")
-            self._log(f"🖼️ STARTING MANGA TRANSLATION PIPELINE")
+            self._log(f"📷 STARTING MANGA TRANSLATION PIPELINE")
             self._log(f"📁 Input: {image_path}")
             self._log(f"📁 Output: {output_path or 'Auto-generated'}")
             self._log(f"{'='*60}\n")

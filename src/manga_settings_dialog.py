@@ -48,7 +48,7 @@ class MangaSettingsDialog:
                 'denoise_strength': 10,
                 'max_image_dimension': 2000,
                 'max_image_pixels': 2000000,
-                'chunk_height': 1000,
+                'chunk_height': 2000,
                 'chunk_overlap': 100,
                 # Inpainting tiling
                 'inpaint_tiling_enabled': False,  # Off by default
@@ -106,6 +106,11 @@ class MangaSettingsDialog:
                 'quantize_models': False,
                 'onnx_quantize': False,
                 'torch_precision': 'auto',
+                # HD strategy defaults (mirrors comic-translate)
+                'hd_strategy': 'resize',                # 'original' | 'resize' | 'crop'
+                'hd_strategy_resize_limit': 1536,       # long-edge cap for resize
+                'hd_strategy_crop_margin': 16,          # pixels padding around cropped ROIs
+                'hd_strategy_crop_trigger_size': 1024,  # only crop if long edge exceeds this
                 # RAM cap defaults
                 'ram_cap_enabled': False,
                 'ram_cap_mb': 4096,
@@ -813,6 +818,106 @@ class MangaSettingsDialog:
         chunk_frame = tk.LabelFrame(content_frame, text="Large Image Processing", padx=15, pady=10)
         chunk_frame.pack(fill='x', padx=20, pady=(10, 0), before=compression_frame)
         self.preprocessing_controls.append(chunk_frame)
+        
+        # HD Strategy (Inpainting acceleration)
+        hd_frame = tk.LabelFrame(chunk_frame, text="Inpainting HD Strategy", padx=10, pady=8)
+        hd_frame.pack(fill='x', pady=(5, 10))
+        
+        # Strategy selector
+        strat_row = tk.Frame(hd_frame)
+        strat_row.pack(fill='x', pady=4)
+        tk.Label(strat_row, text="Strategy:", width=20, anchor='w').pack(side='left')
+        self.hd_strategy_var = tk.StringVar(value=self.settings.get('advanced', {}).get('hd_strategy', 'resize'))
+        self.hd_strategy_combo = ttk.Combobox(
+            strat_row,
+            textvariable=self.hd_strategy_var,
+            values=['original', 'resize', 'crop'],
+            state='readonly',
+            width=12
+        )
+        self.hd_strategy_combo.pack(side='left', padx=10)
+        tk.Label(strat_row, text="(original = legacy full-image; resize/crop = faster)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # Resize limit row
+        self.hd_resize_row = tk.Frame(hd_frame)
+        self.hd_resize_row.pack(fill='x', pady=4)
+        tk.Label(self.hd_resize_row, text="Resize limit (long edge):", width=20, anchor='w').pack(side='left')
+        self.hd_resize_limit_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('hd_strategy_resize_limit', 1536)))
+        self.hd_resize_limit_spin = tb.Spinbox(
+            self.hd_resize_row,
+            from_=512,
+            to=4096,
+            textvariable=self.hd_resize_limit_var,
+            increment=64,
+            width=10
+        )
+        self.hd_resize_limit_spin.pack(side='left', padx=10)
+        tk.Label(self.hd_resize_row, text="px").pack(side='left')
+        
+        # Crop params rows
+        self.hd_crop_margin_row = tk.Frame(hd_frame)
+        self.hd_crop_margin_row.pack(fill='x', pady=4)
+        tk.Label(self.hd_crop_margin_row, text="Crop margin:", width=20, anchor='w').pack(side='left')
+        self.hd_crop_margin_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('hd_strategy_crop_margin', 16)))
+        self.hd_crop_margin_spin = tb.Spinbox(
+            self.hd_crop_margin_row,
+            from_=0,
+            to=256,
+            textvariable=self.hd_crop_margin_var,
+            increment=2,
+            width=10
+        )
+        self.hd_crop_margin_spin.pack(side='left', padx=10)
+        tk.Label(self.hd_crop_margin_row, text="px").pack(side='left')
+        
+        self.hd_crop_trigger_row = tk.Frame(hd_frame)
+        self.hd_crop_trigger_row.pack(fill='x', pady=4)
+        tk.Label(self.hd_crop_trigger_row, text="Crop trigger size:", width=20, anchor='w').pack(side='left')
+        self.hd_crop_trigger_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('hd_strategy_crop_trigger_size', 1024)))
+        self.hd_crop_trigger_spin = tb.Spinbox(
+            self.hd_crop_trigger_row,
+            from_=256,
+            to=4096,
+            textvariable=self.hd_crop_trigger_var,
+            increment=64,
+            width=10
+        )
+        self.hd_crop_trigger_spin.pack(side='left', padx=10)
+        tk.Label(self.hd_crop_trigger_row, text="px (apply crop only if long edge > trigger)").pack(side='left')
+        
+        # Toggle rows based on current selection
+        def _on_hd_strategy_change(*_):
+            strat = self.hd_strategy_var.get()
+            try:
+                if strat == 'resize':
+                    self.hd_resize_row.pack(fill='x', pady=4)
+                    self.hd_crop_margin_row.pack_forget()
+                    self.hd_crop_trigger_row.pack_forget()
+                elif strat == 'crop':
+                    self.hd_resize_row.pack_forget()
+                    self.hd_crop_margin_row.pack(fill='x', pady=4)
+                    self.hd_crop_trigger_row.pack(fill='x', pady=4)
+                else:  # original
+                    self.hd_resize_row.pack_forget()
+                    self.hd_crop_margin_row.pack_forget()
+                    self.hd_crop_trigger_row.pack_forget()
+            except Exception:
+                pass
+        
+        self.hd_strategy_combo.bind('<<ComboboxSelected>>', _on_hd_strategy_change)
+        _on_hd_strategy_change()
+        
+        # Clarifying note about precedence with tiling
+        try:
+            tk.Label(
+                hd_frame,
+                text="Note: HD Strategy (resize/crop) takes precedence over Inpainting Tiling when it triggers.\nSet strategy to 'original' if you want tiling to control large-image behavior.",
+                font=('Arial', 9),
+                fg='gray',
+                justify='left'
+            ).pack(anchor='w', pady=(2, 2))
+        except Exception:
+            pass
         
         # Chunk height
         self.chunk_frame = chunk_frame
@@ -2693,6 +2798,25 @@ class MangaSettingsDialog:
             bootstyle="round-toggle"
         ).pack(anchor='w')
         
+        # New: Concise pipeline logs (reduce noise)
+        self.concise_logs_var = tk.BooleanVar(value=bool(self.settings.get('advanced', {}).get('concise_logs', True)))
+        def _save_concise():
+            try:
+                self.settings.setdefault('advanced', {})['concise_logs'] = bool(self.concise_logs_var.get())
+                if hasattr(self, 'config'):
+                    self.config['manga_settings'] = self.settings
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+            except Exception:
+                pass
+        tb.Checkbutton(
+            debug_frame,
+            text="Concise pipeline logs (reduce noise)",
+            variable=self.concise_logs_var,
+            command=_save_concise,
+            bootstyle="round-toggle"
+        ).pack(anchor='w', pady=(5, 0))
+        
         self.save_intermediate = tk.IntVar(value=1 if self.settings['advanced']['save_intermediate'] else 0)
         tb.Checkbutton(
             debug_frame,
@@ -3695,6 +3819,21 @@ class MangaSettingsDialog:
             self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
             self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
             self.settings['advanced']['max_workers'] = self.max_workers.get()
+            
+            # Save HD strategy settings
+            try:
+                self.settings['advanced']['hd_strategy'] = str(self.hd_strategy_var.get())
+                self.settings['advanced']['hd_strategy_resize_limit'] = int(self.hd_resize_limit_var.get())
+                self.settings['advanced']['hd_strategy_crop_margin'] = int(self.hd_crop_margin_var.get())
+                self.settings['advanced']['hd_strategy_crop_trigger_size'] = int(self.hd_crop_trigger_var.get())
+                # Also reflect into environment for immediate effect in this session
+                os.environ['HD_STRATEGY'] = self.settings['advanced']['hd_strategy']
+                os.environ['HD_RESIZE_LIMIT'] = str(self.settings['advanced']['hd_strategy_resize_limit'])
+                os.environ['HD_CROP_MARGIN'] = str(self.settings['advanced']['hd_strategy_crop_margin'])
+                os.environ['HD_CROP_TRIGGER'] = str(self.settings['advanced']['hd_strategy_crop_trigger_size'])
+            except Exception:
+                pass
+            
             # Save parallel rendering toggle
             if hasattr(self, 'render_parallel_var'):
                 self.settings['advanced']['render_parallel'] = bool(self.render_parallel_var.get())

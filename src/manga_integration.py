@@ -5839,6 +5839,13 @@ class MangaTranslationTab:
             # Fixed mode - use the font size value directly
             font_size = self.font_size_var.get() if self.font_size_var.get() > 0 else None
         
+        # Apply concise logging toggle from Advanced settings
+        try:
+            adv_cfg = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+            self.translator.concise_logs = bool(adv_cfg.get('concise_logs', False))
+        except Exception:
+            pass
+        
         # Push rendering settings to translator
         self.translator.update_text_rendering_settings(
             bg_opacity=self.bg_opacity_var.get(),

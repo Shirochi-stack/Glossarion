@@ -421,6 +421,29 @@ class LocalInpainter:
             self.torch_precision = 'auto'
             self.int8_enabled = False
         
+        # HD strategy defaults (mirror of comic-translate behavior)
+        try:
+            adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+        except Exception:
+            adv_cfg = {}
+        try:
+            self.hd_strategy = str(os.environ.get('HD_STRATEGY', adv_cfg.get('hd_strategy', 'resize'))).lower()
+        except Exception:
+            self.hd_strategy = 'resize'
+        try:
+            self.hd_resize_limit = int(os.environ.get('HD_RESIZE_LIMIT', adv_cfg.get('hd_strategy_resize_limit', 1536)))
+        except Exception:
+            self.hd_resize_limit = 1536
+        try:
+            self.hd_crop_margin = int(os.environ.get('HD_CROP_MARGIN', adv_cfg.get('hd_strategy_crop_margin', 16)))
+        except Exception:
+            self.hd_crop_margin = 16
+        try:
+            self.hd_crop_trigger_size = int(os.environ.get('HD_CROP_TRIGGER', adv_cfg.get('hd_strategy_crop_trigger_size', 1024)))
+        except Exception:
+            self.hd_crop_trigger_size = 1024
+        logger.info(f"HD strategy: {self.hd_strategy} (resize_limit={self.hd_resize_limit}, crop_margin={self.hd_crop_margin}, crop_trigger={self.hd_crop_trigger_size})")
+        
         # Stop flag support
         self.stop_flag = None
         self._stopped = False
@@ -1709,7 +1732,7 @@ class LocalInpainter:
         # Temporarily disable tiling
         old_tiling = self.tiling_enabled
         self.tiling_enabled = False
-        result = self.inpaint(tile_img, tile_mask, refinement)
+        result = self.inpaint(tile_img, tile_mask, refinement, _skip_hd=True)
         self.tiling_enabled = old_tiling
         return result
 
@@ -1807,8 +1830,10 @@ class LocalInpainter:
         except Exception as e:
             logger.debug(f"Diag log failed: {e}")
 
-    def inpaint(self, image, mask, refinement='normal', _retry_attempt: int = 0):
-        """Inpaint - compatible with JIT, checkpoint, and ONNX models"""
+    def inpaint(self, image, mask, refinement='normal', _retry_attempt: int = 0, _skip_hd: bool = False, _skip_tiling: bool = False):
+        """Inpaint - compatible with JIT, checkpoint, and ONNX models
+        Implements HD strategy (Resize/Crop) similar to comic-translate to speed up large images.
+        """
         # Check for stop at start
         if self._check_stop():
             self._log("⏹️ Inpainting stopped by user", "warning")
@@ -1822,6 +1847,49 @@ class LocalInpainter:
             # Store original dimensions
             orig_h, orig_w = image.shape[:2]
             
+            # HD strategy (mirror of comic-translate): optional RESIZE or CROP before core inpainting
+            if not _skip_hd:
+                try:
+                    strategy = getattr(self, 'hd_strategy', 'resize') or 'resize'
+                except Exception:
+                    strategy = 'resize'
+                H, W = orig_h, orig_w
+                if strategy == 'resize' and max(H, W) > max(16, int(getattr(self, 'hd_resize_limit', 1536))):
+                    limit = max(16, int(getattr(self, 'hd_resize_limit', 1536)))
+                    ratio = float(limit) / float(max(H, W))
+                    new_w = max(1, int(W * ratio + 0.5))
+                    new_h = max(1, int(H * ratio + 0.5))
+                    image_small = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                    mask_small = mask if len(mask.shape) == 2 else cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    mask_small = cv2.resize(mask_small, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                    result_small = self.inpaint(image_small, mask_small, refinement, 0, _skip_hd=True, _skip_tiling=True)
+                    result_full = cv2.resize(result_small, (W, H), interpolation=cv2.INTER_LANCZOS4)
+                    # Paste only masked area
+                    mask_gray = mask_small  # already gray but at small size
+                    mask_gray = cv2.resize(mask_gray, (W, H), interpolation=cv2.INTER_NEAREST)
+                    m = mask_gray > 0
+                    out = image.copy()
+                    out[m] = result_full[m]
+                    return out
+                elif strategy == 'crop' and max(H, W) > max(16, int(getattr(self, 'hd_crop_trigger_size', 1024))):
+                    mask_gray0 = mask if len(mask.shape) == 2 else cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    _, thresh = cv2.threshold(mask_gray0, 127, 255, cv2.THRESH_BINARY)
+                    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        out = image.copy()
+                        margin = max(0, int(getattr(self, 'hd_crop_margin', 16)))
+                        for cnt in contours:
+                            x, y, w, h = cv2.boundingRect(cnt)
+                            l = max(0, x - margin); t = max(0, y - margin)
+                            r = min(W, x + w + margin); b = min(H, y + h + margin)
+                            if r <= l or b <= t:
+                                continue
+                            crop_img = image[t:b, l:r]
+                            crop_mask = mask_gray0[t:b, l:r]
+                            patch = self.inpaint(crop_img, crop_mask, refinement, 0, _skip_hd=True, _skip_tiling=True)
+                            out[t:b, l:r] = patch
+                        return out
+            
             if len(mask.shape) == 3:
                 mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
             
@@ -1834,7 +1902,7 @@ class LocalInpainter:
             logger.info(f"🔍 Tiling check: enabled={self.tiling_enabled}, tile_size={self.tile_size}, image_size={orig_h}x{orig_w}")
 
             # If tiling is enabled and image is larger than tile size
-            if self.tiling_enabled and (orig_h > self.tile_size or orig_w > self.tile_size):
+            if (not _skip_tiling) and self.tiling_enabled and (orig_h > self.tile_size or orig_w > self.tile_size):
                 logger.info(f"🔲 Using tiled inpainting: {self.tile_size}x{self.tile_size} tiles with {self.tile_overlap}px overlap")
                 return self._inpaint_tiled(image, mask, self.tile_size, self.tile_overlap, refinement)
                 
