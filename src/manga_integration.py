@@ -2248,15 +2248,15 @@ class MangaTranslationTab:
 
         # Font Settings group (consolidated)
         self.sizing_group = tk.LabelFrame(render_frame, text="Font Settings", padx=10, pady=8)
-        self.sizing_group.pack(fill=tk.X, padx=10, pady=(6, 4))
+        self.sizing_group.pack(fill=tk.X, padx=10, pady=(15, 15))
  
         # Font size selection with mode toggle
         # Sizing Algorithm (moved above font size mode)
         algo_group_top = tk.LabelFrame(self.sizing_group, text="Sizing Algorithm", padx=10, pady=8)
         algo_group_top.pack(fill=tk.X, pady=(6, 0))
         for value, text in [
-            ('smart', 'Smart'),
             ('conservative', 'Conservative'),
+            ('smart', 'Smart'),
             ('aggressive', 'Aggressive')
         ]:
             rb = ttk.Radiobutton(
@@ -2430,14 +2430,19 @@ class MangaTranslationTab:
         fit_row = tk.Frame(self.sizing_group)
         fit_row.pack(fill=tk.X, pady=(0, 6))
         tk.Label(fit_row, text="Auto Fit Style:", width=14, anchor='w').pack(side=tk.LEFT)
+        
+        # Create a container with proper padding for the radio buttons
+        fit_buttons = tk.Frame(fit_row)
+        fit_buttons.pack(side=tk.LEFT, padx=(15, 0))
+        
         for value, text in [('compact','Compact'), ('balanced','Balanced'), ('readable','Readable')]:
             ttk.Radiobutton(
-                fit_row,
+                fit_buttons,
                 text=text,
                 variable=self.auto_fit_style_var,
                 value=value,
                 command=self._save_rendering_settings
-            ).pack(side=tk.LEFT, padx=(0,10))
+            ).pack(side=tk.LEFT, padx=(0,15))
 
         # Behavior toggles
         tb.Checkbutton(
@@ -2490,14 +2495,14 @@ class MangaTranslationTab:
         row_presets.pack(fill=tk.X, pady=(6, 2))
         tk.Label(row_presets, text="Quick Presets:", width=14, anchor='w').pack(side=tk.LEFT)
         btns = tk.Frame(row_presets)
-        btns.pack(side=tk.LEFT)
-        ttk.Button(btns, text="Small Bubbles", width=14, command=lambda: self._set_font_preset('small')).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Balanced", width=14, command=lambda: self._set_font_preset('balanced')).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Large Text", width=14, command=lambda: self._set_font_preset('large')).pack(side=tk.LEFT, padx=4)
+        btns.pack(side=tk.LEFT, padx=(10, 0))  # Add left padding to the button container
+        ttk.Button(btns, text="Small Bubbles", width=14, command=lambda: self._set_font_preset('small')).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        ttk.Button(btns, text="Balanced", width=14, command=lambda: self._set_font_preset('balanced')).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        ttk.Button(btns, text="Large Text", width=14, command=lambda: self._set_font_preset('large')).pack(side=tk.LEFT, padx=(0, 0), pady=2)
 
         # Text wrapping mode (moved into Font Settings)
         wrap_frame = tk.Frame(self.sizing_group)
-        wrap_frame.pack(fill=tk.X, pady=(6, 4))
+        wrap_frame.pack(fill=tk.X, pady=(12, 4))
 
         self.strict_wrap_checkbox = tb.Checkbutton(
             wrap_frame,
@@ -2552,7 +2557,7 @@ class MangaTranslationTab:
         
         # Font color selection (moved into Font Settings)
         color_frame = tk.Frame(self.sizing_group)
-        color_frame.pack(fill=tk.X, pady=(6, 4))
+        color_frame.pack(fill=tk.X, pady=(6, 12))
         
         tk.Label(color_frame, text="Font Color:", width=14, anchor='w').pack(side=tk.LEFT)
         
@@ -2600,7 +2605,7 @@ class MangaTranslationTab:
         
         # Text Shadow settings (moved into Font Settings)
         shadow_header = tk.Frame(self.sizing_group)
-        shadow_header.pack(fill=tk.X, pady=(8, 4))
+        shadow_header.pack(fill=tk.X, pady=(4, 4))
         
         # Shadow enabled checkbox
         tb.Checkbutton(
@@ -2617,7 +2622,7 @@ class MangaTranslationTab:
         
         # Shadow color
         shadow_color_frame = tk.Frame(self.shadow_controls)
-        shadow_color_frame.pack(fill=tk.X, pady=2)
+        shadow_color_frame.pack(fill=tk.X, pady=(2, 8))
         
         tk.Label(shadow_color_frame, text="Shadow Color:", width=15, anchor='w').pack(side=tk.LEFT)
         
@@ -2697,8 +2702,14 @@ class MangaTranslationTab:
         blur_frame.pack(fill=tk.X, pady=2)
         
         tk.Label(blur_frame, text="Shadow Blur:", width=15, anchor='w').pack(side=tk.LEFT)
-        tk.Scale(blur_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.shadow_blur_var,
-                length=150, command=lambda v: self._save_rendering_settings()).pack(side=tk.LEFT, padx=10)
+        shadow_blur_scale = tk.Scale(blur_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.shadow_blur_var,
+                length=150, command=lambda v: self._on_shadow_blur_changed(v))
+        shadow_blur_scale.pack(side=tk.LEFT, padx=10)
+        
+        # Shadow blur value label
+        self.shadow_blur_value_label = tk.Label(blur_frame, text=f"{int(self.shadow_blur_var.get())}", width=3)
+        self.shadow_blur_value_label.pack(side=tk.LEFT, padx=(5, 10))
+        
         tk.Label(blur_frame, text="(0=sharp, 10=blurry)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
         
         # Initially disable shadow controls
@@ -2706,7 +2717,7 @@ class MangaTranslationTab:
         
         # Output settings
         output_frame = tk.Frame(settings_frame)
-        output_frame.pack(fill=tk.X, pady=(10, 0))
+        output_frame.pack(fill=tk.X, pady=(5, 0))
         
         self.create_subfolder_var = tk.BooleanVar(value=self.main_gui.config.get('manga_create_subfolder', True))
         tb.Checkbutton(
@@ -3054,6 +3065,15 @@ class MangaTranslationTab:
             pass
         self._save_rendering_settings()
     
+    def _on_shadow_blur_changed(self, value):
+        """Update shadow blur value label and save"""
+        try:
+            if hasattr(self, 'shadow_blur_value_label'):
+                self.shadow_blur_value_label.config(text=f"{int(float(value))}")
+        except Exception:
+            pass
+        self._save_rendering_settings()
+    
     def _update_color_preview(self, event):
         """Update the font color preview"""
         r = self.text_color_r.get()
@@ -3115,6 +3135,11 @@ class MangaTranslationTab:
                 self.bubble_size_factor_var.set(False)
                 self.line_spacing_var.set(1.4)
                 self.max_lines_var.set(12)
+            
+            # Manually update the line spacing label since .set() doesn't trigger the callback
+            if hasattr(self, 'line_spacing_value_label'):
+                self.line_spacing_value_label.config(text=f"{float(self.line_spacing_var.get()):.2f}")
+            
             self._save_rendering_settings()
         except Exception:
             pass
