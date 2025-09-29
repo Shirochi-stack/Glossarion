@@ -2753,6 +2753,23 @@ class MangaSettingsDialog:
             """Disable LOCAL parallel processing options when singleton mode is enabled.
             Note: This does NOT affect parallel API calls (batch translation).
             """
+            # Update settings immediately to avoid background preloads
+            try:
+                if 'advanced' not in self.settings:
+                    self.settings['advanced'] = {}
+                if self.use_singleton_models.get():
+                    # Turn off local parallelism and panel preloads
+                    self.settings['advanced']['parallel_processing'] = False
+                    self.settings['advanced']['parallel_panel_translation'] = False
+                    self.settings['advanced']['preload_local_inpainting_for_panels'] = False
+                # Persist to config if available
+                if hasattr(self, 'config'):
+                    self.config['manga_settings'] = self.settings
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+            except Exception:
+                pass
+            
             if self.use_singleton_models.get():
                 # Disable LOCAL parallel processing toggles (but NOT API batch translation)
                 self.parallel_processing.set(0)

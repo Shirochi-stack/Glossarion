@@ -5473,6 +5473,13 @@ class MangaTranslator:
         """Preload N local inpainting instances sequentially into the shared pool for parallel panel translation.
         Returns the number of instances successfully preloaded.
         """
+        # Respect singleton mode: do not create extra instances/spares
+        if getattr(self, 'use_singleton_models', False):
+            try:
+                self._log("🧰 Skipping local inpainting preload (singleton mode)", "debug")
+            except Exception:
+                pass
+            return 0
         try:
             from local_inpainter import LocalInpainter
         except Exception:
@@ -5532,6 +5539,13 @@ class MangaTranslator:
         Honors advanced toggles for panel/region parallelism to pick a reasonable parallelism.
         Returns number of instances successfully preloaded.
         """
+        # Respect singleton mode: do not create extra instances/spares
+        if getattr(self, 'use_singleton_models', False):
+            try:
+                self._log("🧰 Skipping concurrent local inpainting preload (singleton mode)", "debug")
+            except Exception:
+                pass
+            return 0
         try:
             from local_inpainter import LocalInpainter
         except Exception:
