@@ -5647,13 +5647,13 @@ class MangaTranslationTab:
                     # Distribute stop flags to all components
                     self._distribute_stop_flags()
                     
-                    # Set cloud inpainting if configured (only once!)
+                # Provide Replicate API key to translator if present, but DO NOT force-enable cloud mode here.
+                # Actual inpainting mode is chosen by the UI and applied in _apply_rendering_settings.
                 saved_api_key = self.main_gui.config.get('replicate_api_key', '')
                 if saved_api_key:
-                    self.translator.use_cloud_inpainting = True
                     self.translator.replicate_api_key = saved_api_key
                 
-                # Apply text rendering settings
+                # Apply text rendering settings (this sets skip/cloud/local based on UI)
                 self._apply_rendering_settings()
                 
                 try:
@@ -5861,125 +5861,128 @@ class MangaTranslationTab:
     
     def _apply_rendering_settings(self):
         """Apply current rendering settings to translator"""
-        if self.translator:
-            # Get text color as tuple
-            text_color = (
-                self.text_color_r.get(),
-                self.text_color_g.get(),
-                self.text_color_b.get()
-            )
-            
-            # Get shadow color as tuple
-            shadow_color = (
-                self.shadow_color_r.get(),
-                self.shadow_color_g.get(),
-                self.shadow_color_b.get()
-            )
-            
-            # Determine font size value based on mode
-            if self.font_size_mode_var.get() == 'multiplier':
-                # Pass negative value to indicate multiplier mode
-                font_size = -self.font_size_multiplier_var.get()
+        if not self.translator:
+            return
+        
+        # Get text color and shadow color
+        text_color = (
+            self.text_color_r.get(),
+            self.text_color_g.get(),
+            self.text_color_b.get()
+        )
+        shadow_color = (
+            self.shadow_color_r.get(),
+            self.shadow_color_g.get(),
+            self.shadow_color_b.get()
+        )
+        
+        # Determine font size value based on mode
+        if self.font_size_mode_var.get() == 'multiplier':
+            # Pass negative value to indicate multiplier mode
+            font_size = -self.font_size_multiplier_var.get()
+        else:
+            # Fixed mode - use the font size value directly
+            font_size = self.font_size_var.get() if self.font_size_var.get() > 0 else None
+        
+        # Push rendering settings to translator
+        self.translator.update_text_rendering_settings(
+            bg_opacity=self.bg_opacity_var.get(),
+            bg_style=self.bg_style_var.get(),
+            bg_reduction=self.bg_reduction_var.get(),
+            font_style=self.selected_font_path,
+            font_size=font_size,
+            text_color=text_color,
+            shadow_enabled=self.shadow_enabled_var.get(),
+            shadow_color=shadow_color,
+            shadow_offset_x=self.shadow_offset_x_var.get(),
+            shadow_offset_y=self.shadow_offset_y_var.get(),
+            shadow_blur=self.shadow_blur_var.get(),
+            force_caps_lock=self.force_caps_lock_var.get()
+        )
+        
+        # Free-text-only background opacity toggle -> pass through to translator
+        try:
+            if hasattr(self, 'free_text_only_bg_opacity_var'):
+                self.translator.free_text_only_bg_opacity = bool(self.free_text_only_bg_opacity_var.get())
+        except Exception:
+            pass
+        
+        # Update font mode and multiplier explicitly
+        self.translator.font_size_mode = self.font_size_mode_var.get()
+        self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
+        self.translator.min_readable_size = self.min_readable_size_var.get()
+        self.translator.max_font_size_limit = self.max_font_size_var.get()
+        self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
+        self.translator.force_caps_lock = self.force_caps_lock_var.get()
+        
+        # Update constrain to bubble setting
+        if hasattr(self, 'constrain_to_bubble_var'):
+            self.translator.constrain_to_bubble = self.constrain_to_bubble_var.get()
+        
+        # Handle inpainting mode (radio: skip/local/cloud/hybrid)
+        mode = None
+        if hasattr(self, 'inpainting_mode_var'):
+            mode = self.inpainting_mode_var.get()
+        else:
+            mode = 'local'
+        
+        # Persist selected mode on translator
+        self.translator.inpaint_mode = mode
+        
+        if mode == 'skip':
+            self.translator.skip_inpainting = True
+            self.translator.use_cloud_inpainting = False
+            self._log("  Inpainting: Skipped", "info")
+        elif mode == 'cloud':
+            self.translator.skip_inpainting = False
+            saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+            if saved_api_key:
+                self.translator.use_cloud_inpainting = True
+                self.translator.replicate_api_key = saved_api_key
+                self._log("  Inpainting: Cloud (Replicate)", "info")
             else:
-                # Fixed mode - use the font size value directly
-                font_size = self.font_size_var.get() if self.font_size_var.get() > 0 else None
-            
-            self.translator.update_text_rendering_settings(
-                bg_opacity=self.bg_opacity_var.get(),
-                bg_style=self.bg_style_var.get(),
-                bg_reduction=self.bg_reduction_var.get(),
-                font_style=self.selected_font_path,
-                font_size=font_size,
-                text_color=text_color,
-                shadow_enabled=self.shadow_enabled_var.get(),
-                shadow_color=shadow_color,
-                shadow_offset_x=self.shadow_offset_x_var.get(),
-                shadow_offset_y=self.shadow_offset_y_var.get(),
-                shadow_blur=self.shadow_blur_var.get(),
-                force_caps_lock=self.force_caps_lock_var.get()
-            )
-
-            # Free-text-only background opacity toggle -> pass through to translator
-            try:
-                if hasattr(self, 'free_text_only_bg_opacity_var'):
-                    self.translator.free_text_only_bg_opacity = bool(self.free_text_only_bg_opacity_var.get())
-            except Exception:
-                pass
-            
-            # Update font mode and multiplier explicitly
-            self.translator.font_size_mode = self.font_size_mode_var.get()
-            self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
-            self.translator.min_readable_size = self.min_readable_size_var.get()
-            self.translator.max_font_size_limit = self.max_font_size_var.get()
-            self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
-            self.translator.force_caps_lock = self.force_caps_lock_var.get()
-            
-            # Update constrain to bubble setting
+                self.translator.use_cloud_inpainting = False
+                self._log("  Inpainting: Local (no Replicate key, fallback)", "warning")
+        elif mode == 'hybrid':
+            self.translator.skip_inpainting = False
+            self.translator.use_cloud_inpainting = False
+            self._log("  Inpainting: Hybrid", "info")
+        else:
+            # Local (default)
+            self.translator.skip_inpainting = False
+            self.translator.use_cloud_inpainting = False
+            self._log("  Inpainting: Local", "info")
+        
+        # Persist free-text-only BG opacity setting to config as well
+        try:
+            if hasattr(self, 'free_text_only_bg_opacity_var'):
+                self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_var.get())
+        except Exception:
+            pass
+        
+        # Log the applied rendering and inpainting settings
+        self._log(f"Applied rendering settings:", "info")
+        self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
+        import os
+        self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
+        self._log(f"  Minimum Font Size: {self.min_readable_size_var.get()}pt", "info")
+        self._log(f"  Maximum Font Size: {self.max_font_size_var.get()}pt", "info")
+        self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_var.get() else 'Disabled (allow overflow)'}", "info")
+        if self.font_size_mode_var.get() == 'multiplier':
+            self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_var.get():.1f}x)", "info")
             if hasattr(self, 'constrain_to_bubble_var'):
-                self.translator.constrain_to_bubble = self.constrain_to_bubble_var.get()
-            
-            # Handle inpainting mode (3 radio buttons: skip/local/cloud)
-            if hasattr(self, 'inpainting_mode_var'):
-                mode = self.inpainting_mode_var.get()
-                
-                if mode == 'skip':
-                    self.translator.skip_inpainting = True
-                    self.translator.use_cloud_inpainting = False
-                    self._log("  Inpainting: Skipped", "info")
-                elif mode == 'local':
-                    self.translator.skip_inpainting = False
-                    self.translator.use_cloud_inpainting = False
-                    self._log("  Inpainting: Local", "info")
-                elif mode == 'cloud':
-                    self.translator.skip_inpainting = False
-                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-                    if saved_api_key:
-                        self.translator.use_cloud_inpainting = True
-                        self.translator.replicate_api_key = saved_api_key
-                        self._log("  Inpainting: Cloud (Replicate)", "info")
-                    else:
-                        # Fallback to local if no API key
-                        self.translator.use_cloud_inpainting = False
-                        self._log("  Inpainting: Local (no Replicate key, fallback)", "warning")
-            
-            # Set full page context mode
-            self.translator.set_full_page_context(
-                enabled=self.full_page_context_var.get(),
-                custom_prompt=self.full_page_context_prompt
-            )
-            
-        # Update logging to include new settings
-            # Persist free-text-only BG opacity setting to config as well
-            try:
-                if hasattr(self, 'free_text_only_bg_opacity_var'):
-                    self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_var.get())
-            except Exception:
-                pass
-
-            self._log(f"Applied rendering settings:", "info")
-            self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
-            self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
-            self._log(f"  Minimum Font Size: {self.min_readable_size_var.get()}pt", "info")
-            self._log(f"  Maximum Font Size: {self.max_font_size_var.get()}pt", "info")
-            self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_var.get() else 'Disabled (allow overflow)'}", "info")
-            
-            # Log font size mode
-            if self.font_size_mode_var.get() == 'multiplier':
-                self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_var.get():.1f}x)", "info")
-                if hasattr(self, 'constrain_to_bubble_var'):
-                    constraint_status = "constrained" if self.constrain_to_bubble_var.get() else "unconstrained"
-                    self._log(f"  Text Constraint: {constraint_status}", "info")
-            else:
-                size_text = f"{self.font_size_var.get()}pt" if self.font_size_var.get() > 0 else "Auto"
-                self._log(f"  Font Size: Fixed ({size_text})", "info")
-            
-            self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
-            self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
-            try:
-                self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_var').get() else 'Disabled'}", "info")
-            except Exception:
-                pass
-            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+                constraint_status = "constrained" if self.constrain_to_bubble_var.get() else "unconstrained"
+                self._log(f"  Text Constraint: {constraint_status}", "info")
+        else:
+            size_text = f"{self.font_size_var.get()}pt" if self.font_size_var.get() > 0 else "Auto"
+            self._log(f"  Font Size: Fixed ({size_text})", "info")
+        self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
+        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
+        try:
+            self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_var').get() else 'Disabled'}", "info")
+        except Exception:
+            pass
+        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
     
     def _translation_worker(self):
         """Worker thread for translation"""

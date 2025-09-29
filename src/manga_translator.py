@@ -5486,43 +5486,40 @@ class MangaTranslator:
 
     def inpaint_regions(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """Inpaint using configured method (cloud, local, or hybrid)"""
-        if self.skip_inpainting:
+        # Primary source of truth is the runtime flags set by the UI.
+        if getattr(self, 'skip_inpainting', False):
             self._log("   ⏭️ Skipping inpainting (preserving original art)", "info")
             return image.copy()
         
-        inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
+        # Cloud mode explicitly selected in UI
+        if getattr(self, 'use_cloud_inpainting', False):
+            return self._cloud_inpaint(image, mask)
         
-        if inpaint_method == 'local':
-            # Resolve method and model path from config
-            local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
-            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
-
-            # Use a thread-local inpainter instance
-            inp = self._get_thread_local_inpainter(local_method, model_path)
-            if inp and getattr(inp, 'model_loaded', False):
-                self._log("   🧽 Using local inpainting", "info")
-                return inp.inpaint(image, mask)
-            else:
-                # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
-                try:
-                    shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
-                    if shared_inp and getattr(shared_inp, 'model_loaded', False):
-                        self._log("   ✅ Using shared inpainting instance", "info")
-                        return shared_inp.inpaint(image, mask)
-                except Exception:
-                    pass
-                self._log("   ⚠️ Local inpainting model not loaded; returning original image", "warning")
-                return image.copy()
-        
-        elif inpaint_method == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
+        # Hybrid mode if UI requested it (fallback to settings key if present)
+        mode = getattr(self, 'inpaint_mode', None) or self.manga_settings.get('inpainting', {}).get('method')
+        if mode == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
             self._log("   🔄 Using hybrid ensemble inpainting", "info")
             return self.hybrid_inpainter.inpaint_ensemble(image, mask)
         
-        elif inpaint_method == 'cloud' and hasattr(self, 'use_cloud_inpainting') and self.use_cloud_inpainting:
-            return self._cloud_inpaint(image, mask)
+        # Default to local inpainting
+        local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+        model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
         
+        # Use a thread-local inpainter instance
+        inp = self._get_thread_local_inpainter(local_method, model_path)
+        if inp and getattr(inp, 'model_loaded', False):
+            self._log("   🧽 Using local inpainting", "info")
+            return inp.inpaint(image, mask)
         else:
-            self._log(f"   ⚠️ No valid inpainting method '{inpaint_method}' available, returning original", "error")
+            # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
+            try:
+                shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                if shared_inp and getattr(shared_inp, 'model_loaded', False):
+                    self._log("   ✅ Using shared inpainting instance", "info")
+                    return shared_inp.inpaint(image, mask)
+            except Exception:
+                pass
+            self._log("   ⚠️ Local inpainting model not loaded; returning original image", "warning")
             return image.copy()
             
     def _cloud_inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -7043,12 +7040,15 @@ class MangaTranslator:
                 except Exception as e:
                     self._log(f"Failed to create singleton bubble detector: {e}", "error")
                     return None
+            else:
+                self._log("🤖 Using bubble detector (already loaded)", "info")
             MangaTranslator._singleton_refs += 1
             return MangaTranslator._singleton_bubble_detector
     
     def _initialize_singleton_local_inpainter(self):
         """Initialize singleton local inpainter instance"""
         with MangaTranslator._singleton_lock:
+            was_existing = MangaTranslator._singleton_local_inpainter is not None
             if MangaTranslator._singleton_local_inpainter is None:
                 try:
                     from local_inpainter import LocalInpainter
@@ -7083,7 +7083,8 @@ class MangaTranslator:
             self.local_inpainter = MangaTranslator._singleton_local_inpainter
             self.inpainter = self.local_inpainter
             MangaTranslator._singleton_refs += 1
-            self._log("🎨 Using singleton local inpainter instance", "debug")
+            if was_existing:
+                self._log("🎨 Using local inpainter (already loaded)", "info")
     
     def _get_thread_bubble_detector(self):
         """Get or initialize bubble detector (singleton or thread-local based on settings)"""
@@ -7496,9 +7497,9 @@ class MangaTranslator:
                 loaded, det = self._is_bubble_detector_loaded(ocr_settings)
                 det_name = 'YOLO' if det == 'yolo' else ('RT-DETR' if det == 'rtdetr' else 'RTEDR_onnx')
                 if loaded:
-                    self._log(f"🤖 Using bubble detector ({det_name}) - already loaded", "debug")
+                    self._log("🤖 Using bubble detector (already loaded)", "info")
                 else:
-                    self._log(f"🤖 Bubble detector ({det_name}) will load on first use", "debug")
+                    self._log("🤖 Bubble detector will load on first use", "debug")
         except Exception:
             pass
         try:
@@ -7506,9 +7507,9 @@ class MangaTranslator:
             if local_method:
                 label = local_method.upper()
                 if loaded:
-                    self._log(f"🎨 Using local inpainter ({label}) - already loaded", "debug")
+                    self._log("🎨 Using local inpainter (already loaded)", "info")
                 else:
-                    self._log(f"🎨 Local inpainter ({label}) will load on first use", "debug")
+                    self._log("🎨 Local inpainter will load on first use", "debug")
         except Exception:
             pass
 
