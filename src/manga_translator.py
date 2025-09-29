@@ -71,6 +71,10 @@ class MangaTranslator:
     _detector_pool_lock = threading.Lock()
     _detector_pool = {}  # (detector_type, model_id_or_path) -> {'spares': list[BubbleDetector]}
 
+    # Bubble detector singleton loading coordination
+    _singleton_bd_event = threading.Event()
+    _singleton_bd_loading = False
+
     # SINGLETON PATTERN: Shared model instances across all translators
     _singleton_lock = threading.Lock()
     _singleton_bubble_detector = None
@@ -177,6 +181,9 @@ class MangaTranslator:
         self.bubble_detector = None
         # Default: do NOT use singleton models unless explicitly enabled
         self.use_singleton_models = self.manga_settings.get('advanced', {}).get('use_singleton_models', False)
+        
+        # For bubble detector specifically, prefer a singleton so it stays resident in RAM
+        self.use_singleton_bubble_detector = self.manga_settings.get('advanced', {}).get('use_singleton_bubble_detector', True)
         
         # Processing flags
         self.is_processing = False
@@ -736,7 +743,7 @@ class MangaTranslator:
                 # Instance-level bubble detector
                 if hasattr(self, 'bubble_detector') and self.bubble_detector is not None:
                     # Check if using singleton mode - don't unload shared instance
-                    if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
+                    if (getattr(self, 'use_singleton_bubble_detector', False)) or (hasattr(self, 'use_singleton_models') and self.use_singleton_models):
                         self._log("   Skipping bubble detector cleanup (singleton mode)", "debug")
                         # Just clear our reference, don't unload the shared instance
                         self.bubble_detector = None
@@ -752,18 +759,19 @@ class MangaTranslator:
                         self.bubble_detector = None
                         self._log("   ✓ Bubble detector cleaned up", "debug")
                     
-                # Also clean class-level shared RT-DETR models
-                try:
-                    from bubble_detector import BubbleDetector
-                    if hasattr(BubbleDetector, '_rtdetr_shared_model'):
-                        BubbleDetector._rtdetr_shared_model = None
-                    if hasattr(BubbleDetector, '_rtdetr_shared_processor'):
-                        BubbleDetector._rtdetr_shared_processor = None
-                    if hasattr(BubbleDetector, '_rtdetr_loaded'):
-                        BubbleDetector._rtdetr_loaded = False
-                    self._log("      ✓ Cleared shared RT-DETR cache", "debug")
-                except Exception:
-                    pass
+                # Also clean class-level shared RT-DETR models unless keeping singleton warm
+                if not getattr(self, 'use_singleton_bubble_detector', False):
+                    try:
+                        from bubble_detector import BubbleDetector
+                        if hasattr(BubbleDetector, '_rtdetr_shared_model'):
+                            BubbleDetector._rtdetr_shared_model = None
+                        if hasattr(BubbleDetector, '_rtdetr_shared_processor'):
+                            BubbleDetector._rtdetr_shared_processor = None
+                        if hasattr(BubbleDetector, '_rtdetr_loaded'):
+                            BubbleDetector._rtdetr_loaded = False
+                        self._log("      ✓ Cleared shared RT-DETR cache", "debug")
+                    except Exception:
+                        pass
                 # Clear preloaded detector spares
                 try:
                     with MangaTranslator._detector_pool_lock:
@@ -1934,6 +1942,29 @@ class MangaTranslator:
                         regions = self._google_ocr_rois_batched(rois, ocr_settings, max(1, ocr_batch_size), max_cc, page_hash)
                         self._log(f"✅ Google OCR batched over {len(rois)} ROIs → {len(regions)} regions (cc={max_cc})", "info")
                         return regions
+
+                # Start local inpainter preload while Google OCR runs (only if not already loaded)
+                try:
+                    if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
+                        already_loaded, _lm = self._is_local_inpainter_loaded()
+                        if not already_loaded:
+                            import threading as _threading
+                            local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
+                            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                            # New event per image to coordinate with inpaint_regions
+                            self._inpaint_preload_event = _threading.Event()
+                            def _preload_inp():
+                                try:
+                                    self.preload_local_inpainters(local_method, model_path, 1)
+                                finally:
+                                    try:
+                                        self._inpaint_preload_event.set()
+                                    except Exception:
+                                        pass
+                            _threading.Thread(target=_preload_inp, name="InpaintPreload@GoogleOCR", daemon=True).start()
+                except Exception:
+                    pass
+
                 # Create Vision API image object (full-page fallback)
                 image = vision.Image(content=processed_image_data)
                 
@@ -2079,6 +2110,28 @@ class MangaTranslator:
                         regions = self._azure_ocr_rois_concurrent(rois, ocr_settings, azure_workers, page_hash)
                         self._log(f"✅ Azure OCR concurrent over {len(rois)} ROIs → {len(regions)} regions (workers={azure_workers})", "info")
                         return regions
+
+                # Start local inpainter preload while Azure OCR runs (only if not already loaded)
+                try:
+                    if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
+                        already_loaded, _lm = self._is_local_inpainter_loaded()
+                        if not already_loaded:
+                            import threading as _threading
+                            local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
+                            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                            # New event per image to coordinate with inpaint_regions
+                            self._inpaint_preload_event = _threading.Event()
+                            def _preload_inp():
+                                try:
+                                    self.preload_local_inpainters(local_method, model_path, 1)
+                                finally:
+                                    try:
+                                        self._inpaint_preload_event.set()
+                                    except Exception:
+                                        pass
+                            _threading.Thread(target=_preload_inp, name="InpaintPreload@AzureOCR", daemon=True).start()
+                except Exception:
+                    pass
                 
                 # Ensure Azure-supported format regardless of original extension
                 file_ext = os.path.splitext(image_path)[1].lower()
@@ -2375,7 +2428,28 @@ class MangaTranslator:
                     self._log(f"❌ {self.ocr_provider} is not installed", "error")
                     self._log(f"   Please install it from the GUI settings", "error")
                     raise Exception(f"{self.ocr_provider} OCR provider is not installed")
-
+                
+                # Start local inpainter preload while provider is being readied/used (non-cloud path only; only if not already loaded)
+                try:
+                    if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
+                        already_loaded, _lm = self._is_local_inpainter_loaded()
+                        if not already_loaded:
+                            import threading as _threading
+                            local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
+                            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                            self._inpaint_preload_event = _threading.Event()
+                            def _preload_inp():
+                                try:
+                                    self.preload_local_inpainters(local_method, model_path, 1)
+                                finally:
+                                    try:
+                                        self._inpaint_preload_event.set()
+                                    except Exception:
+                                        pass
+                            _threading.Thread(target=_preload_inp, name="InpaintPreload@OCRProvider", daemon=True).start()
+                except Exception:
+                    pass
+                
                 if not provider_status['loaded']:
                     # Check if Qwen2-VL - if it's supposedly not loaded but actually is, skip
                     if self.ocr_provider == 'Qwen2-VL':
@@ -5360,7 +5434,8 @@ class MangaTranslator:
         desired = max(0, int(count) - len(spares))
         if desired <= 0:
             return 0
-        self._log(f"🧰 Preloading {desired} local inpainting instance(s) for parallel panels", "info")
+        ctx = " for parallel panels" if int(count) > 1 else ""
+        self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx}", "info")
         for i in range(desired):
             try:
                 inp = LocalInpainter()
@@ -5679,6 +5754,15 @@ class MangaTranslator:
         if mode == 'hybrid' and hasattr(self, 'hybrid_inpainter'):
             self._log("   🔄 Using hybrid ensemble inpainting", "info")
             return self.hybrid_inpainter.inpaint_ensemble(image, mask)
+        
+        # If a background preload is running, wait until it's finished before inpainting
+        try:
+            if hasattr(self, '_inpaint_preload_event') and self._inpaint_preload_event and not self._inpaint_preload_event.is_set():
+                self._log("   ⏳ Waiting for local inpainting models to finish preloading...", "info")
+                # Wait with a generous timeout, but proceed afterward regardless
+                self._inpaint_preload_event.wait(timeout=300)
+        except Exception:
+            pass
         
         # Default to local inpainting
         local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
@@ -7209,20 +7293,63 @@ class MangaTranslator:
         return None  # Will use default font
     
     def _get_singleton_bubble_detector(self):
-        """Get or initialize the singleton bubble detector instance"""
+        """Get or initialize the singleton bubble detector instance with load coordination."""
+        start_time = None
         with MangaTranslator._singleton_lock:
-            if MangaTranslator._singleton_bubble_detector is None:
-                try:
-                    from bubble_detector import BubbleDetector
-                    MangaTranslator._singleton_bubble_detector = BubbleDetector()
-                    self._log("🤖 Created singleton bubble detector instance", "info")
-                except Exception as e:
-                    self._log(f"Failed to create singleton bubble detector: {e}", "error")
-                    return None
-            else:
+            if MangaTranslator._singleton_bubble_detector is not None:
                 self._log("🤖 Using bubble detector (already loaded)", "info")
-            MangaTranslator._singleton_refs += 1
-            return MangaTranslator._singleton_bubble_detector
+                MangaTranslator._singleton_refs += 1
+                return MangaTranslator._singleton_bubble_detector
+            # If another thread is loading, wait for it
+            if MangaTranslator._singleton_bd_loading:
+                self._log("⏳ Waiting for bubble detector to finish loading (singleton)", "debug")
+                evt = MangaTranslator._singleton_bd_event
+                # Drop the lock while waiting
+                pass
+            else:
+                # Mark as loading and proceed to load outside lock
+                MangaTranslator._singleton_bd_loading = True
+                MangaTranslator._singleton_bd_event.clear()
+                start_time = time.time()
+                # Release lock and perform heavy load
+                pass
+        # Outside the lock: perform load or wait
+        if start_time is None:
+            # We are a waiter
+            try:
+                MangaTranslator._singleton_bd_event.wait(timeout=300)
+            except Exception:
+                pass
+            with MangaTranslator._singleton_lock:
+                if MangaTranslator._singleton_bubble_detector is not None:
+                    MangaTranslator._singleton_refs += 1
+                return MangaTranslator._singleton_bubble_detector
+        else:
+            # We are the loader
+            try:
+                from bubble_detector import BubbleDetector
+                bd = BubbleDetector()
+                # Optionally: defer model load until first actual call inside BD; keeping instance resident
+                with MangaTranslator._singleton_lock:
+                    MangaTranslator._singleton_bubble_detector = bd
+                    MangaTranslator._singleton_refs += 1
+                    MangaTranslator._singleton_bd_loading = False
+                    try:
+                        MangaTranslator._singleton_bd_event.set()
+                    except Exception:
+                        pass
+                elapsed = time.time() - start_time
+                self._log(f"🤖 Created singleton bubble detector instance (took {elapsed:.2f}s)", "info")
+                return bd
+            except Exception as e:
+                with MangaTranslator._singleton_lock:
+                    MangaTranslator._singleton_bd_loading = False
+                    try:
+                        MangaTranslator._singleton_bd_event.set()
+                    except Exception:
+                        pass
+                self._log(f"Failed to create singleton bubble detector: {e}", "error")
+                return None
     
     def _initialize_singleton_local_inpainter(self):
         """Initialize singleton local inpainter instance"""
@@ -7269,8 +7396,8 @@ class MangaTranslator:
         """Get or initialize bubble detector (singleton or thread-local based on settings).
         Will consume a preloaded detector if available for current settings.
         """
-        if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
-            # Use singleton instance
+        if getattr(self, 'use_singleton_bubble_detector', False) or (hasattr(self, 'use_singleton_models') and self.use_singleton_models):
+            # Use singleton instance (preferred)
             if self.bubble_detector is None:
                 self.bubble_detector = self._get_singleton_bubble_detector()
             return self.bubble_detector
@@ -7676,20 +7803,24 @@ class MangaTranslator:
             return False, det
 
     def _is_local_inpainter_loaded(self) -> Tuple[bool, Optional[str]]:
-        """Check if the local inpainter model is already loaded.
-        Returns (loaded, local_method) or (False, None) if not applicable.
-        Safe: does not trigger a load.
+        """Check if a local inpainter model is already loaded for current settings.
+        Returns (loaded, local_method) or (False, None).
+        This respects UI flags: skip_inpainting / use_cloud_inpainting.
         """
+        try:
+            # If skipping or using cloud, this does not apply
+            if getattr(self, 'skip_inpainting', False) or getattr(self, 'use_cloud_inpainting', False):
+                return False, None
+        except Exception:
+            pass
         inpaint_cfg = self.manga_settings.get('inpainting', {}) if hasattr(self, 'manga_settings') else {}
-        if str(inpaint_cfg.get('method', 'cloud')) != 'local':
-            return False, None
         local_method = inpaint_cfg.get('local_method', 'anime')
         try:
             model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
         except Exception:
             model_path = ''
         # Singleton path
-        if getattr(self, 'use_singleton_models', True):
+        if getattr(self, 'use_singleton_models', False):
             inp = getattr(MangaTranslator, '_singleton_local_inpainter', None)
             return (bool(getattr(inp, 'model_loaded', False)), local_method)
         # Thread-local/pooled path
@@ -7699,8 +7830,13 @@ class MangaTranslator:
         try:
             key = (local_method, model_path or '')
             rec = MangaTranslator._inpaint_pool.get(key)
-            if rec and rec.get('loaded') and rec.get('inpainter') is not None:
-                return True, local_method
+            # Consider the shared 'inpainter' loaded or any spare that is model_loaded
+            if rec:
+                if rec.get('loaded') and rec.get('inpainter') is not None and getattr(rec['inpainter'], 'model_loaded', False):
+                    return True, local_method
+                for spare in rec.get('spares') or []:
+                    if getattr(spare, 'model_loaded', False):
+                        return True, local_method
         except Exception:
             pass
         return False, local_method
@@ -7868,132 +8004,162 @@ class MangaTranslator:
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                 self._save_debug_image(image_path, regions, debug_base_dir=output_dir)
             
-            # Step 2: Translate regions
-            self._log(f"\n📍 [STEP 2] Translation Phase")
+            # Step 2: Translation & Inpainting (concurrent)
+            self._log(f"\n📍 [STEP 2] Translation & Inpainting Phase (concurrent)")
             
-            if self.full_page_context_enabled:
-                # Full page context translation mode
-                self._log(f"\n📄 Using FULL PAGE CONTEXT mode")
-                self._log("   This mode sends all text together for more consistent translations", "info")
-                
-                if self._check_stop():
-                    result['interrupted'] = True
-                    self._log("\n⏹️ Translation stopped before processing", "warning")
-                    return result
-                
-                translations = self.translate_full_page_context(regions, image_path)
-                
-                if translations:
-                    # Count how many were translated (they're already applied in translate_full_page_context)
-                    translated_count = sum(1 for r in regions if hasattr(r, 'translated_text') and r.translated_text and r.translated_text != r.text)
-                    self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions)} regions translated")
-                else:
-                    self._log("❌ Full page context translation failed", "error")
-                    result['errors'].append("Full page context translation failed")
-                    
-            else:
-                # Individual translation mode with parallel processing support
-                self._log(f"\n📝 Using INDIVIDUAL translation mode")
-                
-                if self.manga_settings.get('advanced', {}).get('parallel_processing', False):
-                    self._log("⚡ Parallel processing ENABLED")
-                    regions = self._translate_regions_parallel(regions, image_path)
-                else:
-                    regions = self.translate_regions(regions, image_path)
-
-            # Check if we should continue after translation
-            if self._check_stop():
-                result['interrupted'] = True
-                self._log("⏹️ Translation cancelled before image processing", "warning")
-                result['regions'] = [r.to_dict() for r in regions]
-                return result
-
-            if not any(region.translated_text for region in regions):
-                result['interrupted'] = True
-                self._log("⏹️ No regions were translated - translation was interrupted", "warning")
-                result['regions'] = [r.to_dict() for r in regions]
-                return result
-            
-            # Step 3: Render translated text
-            self._log(f"\n📍 [STEP 3] Image Processing Phase")
-            
-            # Load image with OpenCV
+            # Load image once (used by inpainting task); keep PIL fallback for Unicode paths
             import cv2
             self._log(f"🖼️ Loading image with OpenCV...")
             try:
                 image = cv2.imread(image_path)
-                
                 if image is None:
                     self._log(f"   Using PIL to handle Unicode path...", "info")
                     from PIL import Image as PILImage
                     import numpy as np
-                    
                     pil_image = PILImage.open(image_path)
                     image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                     self._log(f"   ✅ Successfully loaded with PIL", "info")
-                    
             except Exception as e:
                 error_msg = f"Failed to load image: {image_path} - {str(e)}"
                 self._log(f"❌ {error_msg}", "error")
                 result['errors'].append(error_msg)
                 return result
-
+            
             self._log(f"   Image dimensions: {image.shape[1]}x{image.shape[0]}")
             
-            # Save intermediate preprocessing image if enabled
+            # Save intermediate original image if enabled
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                 self._save_intermediate_image(image_path, image, "original", debug_base_dir=output_dir)
             
-            # Check if we should skip inpainting
-            if self.skip_inpainting:
-                # User wants to preserve original art
-                self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
-                self._log(f"   Background opacity: {int(self.text_bg_opacity/255*100)}%", "info")
-                inpainted = image.copy()
-            else:
-                self._log(f"🎭 Creating text mask...")
+            # Check if we should continue before kicking off tasks
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation stopped before concurrent phase", "warning")
+                return result
+            
+            # Helper tasks
+            def _task_translate():
                 try:
-                    self._block_if_over_cap("mask creation")
-                except Exception:
-                    pass
-                mask = self.create_text_mask(image, regions)
-                
-                # Save mask and overlay only if 'Save intermediate images' is enabled
-                if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                    try:
-                        debug_dir = os.path.join(output_dir, 'debug')
-                        os.makedirs(debug_dir, exist_ok=True)
-                        base_name = os.path.splitext(os.path.basename(image_path))[0]
-                        mask_path = os.path.join(debug_dir, f"{base_name}_mask.png")
-                        cv2.imwrite(mask_path, mask)
-                        mask_percentage = ((mask > 0).sum() / mask.size) * 100
-                        self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
-                        self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
-                        
-                        # Save mask overlay visualization
-                        mask_viz = image.copy()
-                        mask_viz[mask > 0] = [0, 0, 255]  # Simple red overlay
-                        viz_path = os.path.join(debug_dir, f"{base_name}_mask_overlay.png")
-                        cv2.imwrite(viz_path, mask_viz)
-                        self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
-                        
-                        if mask_percentage > 50:
-                            self._log(f"   ⚠️ WARNING: Mask covers {mask_percentage:.1f}% - this might be too much!", "warning")
-                    except Exception as e:
-                        self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
+                    if self.full_page_context_enabled:
+                        # Full page context translation mode
+                        self._log(f"\n📄 Using FULL PAGE CONTEXT mode")
+                        self._log("   This mode sends all text together for more consistent translations", "info")
+                        if self._check_stop():
+                            return False
+                        translations = self.translate_full_page_context(regions, image_path)
+                        if translations:
+                            translated_count = sum(1 for r in regions if getattr(r, 'translated_text', None) and r.translated_text and r.translated_text != r.text)
+                            self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions)} regions translated")
+                            return True
+                        else:
+                            self._log("❌ Full page context translation failed", "error")
+                            result['errors'].append("Full page context translation failed")
+                            return False
+                    else:
+                        # Individual translation mode with parallel processing support
+                        self._log(f"\n📝 Using INDIVIDUAL translation mode")
+                        if self.manga_settings.get('advanced', {}).get('parallel_processing', False):
+                            self._log("⚡ Parallel processing ENABLED")
+                            _ = self._translate_regions_parallel(regions, image_path)
+                        else:
+                            _ = self.translate_regions(regions, image_path)
+                        return True
+                except Exception as te:
+                    self._log(f"❌ Translation task error: {te}", "error")
+                    return False
+            
+            def _task_inpaint():
+                try:
+                    if getattr(self, 'skip_inpainting', False):
+                        self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
+                        return image.copy()
                     
-                    # Also save intermediate copies
-                    self._save_intermediate_image(image_path, mask, "mask", debug_base_dir=output_dir)
-                
-                self._log(f"🎨 Inpainting to remove original text")
-                try:
-                    self._block_if_over_cap("inpainting")
-                except Exception:
-                    pass
-                inpainted = self.inpaint_regions(image, mask)
-                
-                if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
-                    self._save_intermediate_image(image_path, inpainted, "inpainted", debug_base_dir=output_dir)
+                    self._log(f"🎭 Creating text mask...")
+                    try:
+                        self._block_if_over_cap("mask creation")
+                    except Exception:
+                        pass
+                    mask_local = self.create_text_mask(image, regions)
+                    
+                    # Save mask and overlay only if 'Save intermediate images' is enabled
+                    if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                        try:
+                            debug_dir = os.path.join(output_dir, 'debug')
+                            os.makedirs(debug_dir, exist_ok=True)
+                            base_name = os.path.splitext(os.path.basename(image_path))[0]
+                            mask_path = os.path.join(debug_dir, f"{base_name}_mask.png")
+                            cv2.imwrite(mask_path, mask_local)
+                            mask_percentage = ((mask_local > 0).sum() / mask_local.size) * 100
+                            self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
+                            self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                            
+                            # Save mask overlay visualization
+                            mask_viz_local = image.copy()
+                            mask_viz_local[mask_local > 0] = [0, 0, 255]
+                            viz_path = os.path.join(debug_dir, f"{base_name}_mask_overlay.png")
+                            cv2.imwrite(viz_path, mask_viz_local)
+                            self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
+                        except Exception as e:
+                            self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
+                            
+                        # Also save intermediate copies
+                        try:
+                            self._save_intermediate_image(image_path, mask_local, "mask", debug_base_dir=output_dir)
+                        except Exception:
+                            pass
+                    
+                    self._log(f"🎨 Inpainting to remove original text")
+                    try:
+                        self._block_if_over_cap("inpainting")
+                    except Exception:
+                        pass
+                    inpainted_local = self.inpaint_regions(image, mask_local)
+                    
+                    if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
+                        try:
+                            self._save_intermediate_image(image_path, inpainted_local, "inpainted", debug_base_dir=output_dir)
+                        except Exception:
+                            pass
+                    return inpainted_local
+                except Exception as ie:
+                    self._log(f"❌ Inpainting task error: {ie}", "error")
+                    return image.copy()
+            
+            # Gate on advanced setting (default enabled)
+            adv = self.manga_settings.get('advanced', {})
+            run_concurrent = adv.get('concurrent_inpaint_translate', True)
+            
+            if run_concurrent:
+                self._log("🔀 Running translation and inpainting concurrently", "info")
+                with ThreadPoolExecutor(max_workers=2) as _executor:
+                    fut_translate = _executor.submit(_task_translate)
+                    fut_inpaint = _executor.submit(_task_inpaint)
+                    # Wait for completion
+                    try:
+                        translate_ok = fut_translate.result()
+                    except Exception:
+                        translate_ok = False
+                    try:
+                        inpainted = fut_inpaint.result()
+                    except Exception:
+                        inpainted = image.copy()
+            else:
+                self._log("↪️ Concurrent mode disabled — running sequentially", "info")
+                translate_ok = _task_translate()
+                inpainted = _task_inpaint()
+            
+            # After concurrent phase, validate translation
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation cancelled before rendering", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+            
+            if not any(getattr(region, 'translated_text', None) for region in regions):
+                result['interrupted'] = True
+                self._log("⏹️ No regions were translated - translation was interrupted", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
             
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
@@ -8295,10 +8461,12 @@ class MangaTranslator:
             # IMPORTANT: Properly unload bubble detector
             if hasattr(self, 'bubble_detector') and self.bubble_detector:
                 try:
-                    if hasattr(self.bubble_detector, 'unload'):
-                        self.bubble_detector.unload(release_shared=True)
+                    if not getattr(self, 'use_singleton_bubble_detector', False):
+                        if hasattr(self.bubble_detector, 'unload'):
+                            self.bubble_detector.unload(release_shared=True)
+                        self._log("   ✓ Bubble detector cleared", "debug")
+                    # In all cases, clear our instance reference
                     self.bubble_detector = None
-                    self._log("   ✓ Bubble detector cleared", "debug")
                 except Exception as e:
                     self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
             

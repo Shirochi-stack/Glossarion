@@ -334,56 +334,42 @@ class MangaTranslationTab:
         self._log("🔄 Stop flags distributed to all components", "debug")
     
     def _preflight_bubble_detector(self, ocr_settings: dict) -> bool:
-        """Try to ensure the bubble detector is ready before starting translation.
-        Returns True if a detector is ready (loaded), False otherwise.
-        This mitigates aggressive cleanup by retrying RT-DETR load briefly.
+        """Check if bubble detector is preloaded in the pool or already loaded.
+        Returns True if a ready instance or preloaded spare is available; no heavy loads are performed here.
         """
         try:
-            # Only act when bubble detection is enabled
+            import time as _time
+            start = _time.time()
             if not ocr_settings.get('bubble_detection_enabled', False):
                 return False
-            detector_type = ocr_settings.get('detector_type', 'rtdetr')
+            det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
 
-            # Use translator helper if available
-            for attempt in range(3):
-                try:
-                    bd = None
-                    if hasattr(self, 'translator') and self.translator and hasattr(self.translator, '_ensure_bubble_detector_ready'):
-                        bd = self.translator._ensure_bubble_detector_ready(ocr_settings)
-                        if bd is not None:
-                            self.translator.bubble_detector = bd
-                            if getattr(bd, 'rtdetr_loaded', False) or getattr(bd, 'model_loaded', False):
-                                if attempt > 0:
-                                    self._log("✅ Bubble detector ready after retry", "info")
-                                else:
-                                    self._log("🤖 Bubble detector ready", "debug")
-                                return True
-                    # Fallback: try loading explicitly
-                    try:
-                        from bubble_detector import BubbleDetector
-                    except Exception:
-                        return False
-                    bd = BubbleDetector()
-                    if detector_type == 'rtdetr':
-                        model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or 'ogkalu/comic-text-and-bubble-detector'
-                        ok = bd.load_rtdetr_model(model_id=model_id)
-                    else:
-                        model_path = ocr_settings.get('bubble_model_path')
-                        ok = bd.load_model(model_path) if model_path else False
-                    if ok:
-                        if hasattr(self, 'translator') and self.translator:
-                            self.translator.bubble_detector = bd
-                        self._log(f"🤖 Bubble detector preloaded ({'RT-DETR' if detector_type=='rtdetr' else 'YOLO'})", "info")
+            # 1) If translator already has a ready detector, report success
+            try:
+                bd = getattr(self, 'translator', None) and getattr(self.translator, 'bubble_detector', None)
+                if bd and (getattr(bd, 'rtdetr_loaded', False) or getattr(bd, 'rtdetr_onnx_loaded', False) or getattr(bd, 'model_loaded', False)):
+                    self._log("🤖 Bubble detector already loaded", "debug")
+                    return True
+            except Exception:
+                pass
+
+            # 2) Check shared preload pool for spares
+            try:
+                from manga_translator import MangaTranslator
+                key = (det_type, model_id)
+                with MangaTranslator._detector_pool_lock:
+                    rec = MangaTranslator._detector_pool.get(key)
+                    spares = (rec or {}).get('spares') or []
+                    if len(spares) > 0:
+                        self._log(f"🤖 Preflight: found {len(spares)} preloaded bubble detector spare(s) for key={key}", "info")
                         return True
-                except Exception as e:
-                    self._log(f"⚠️ Bubble detector preflight attempt {attempt+1} failed: {e}", "debug")
-                # Brief wait before retry
-                try:
-                    time.sleep(0.4)
-                except Exception:
-                    pass
-            # After retries
-            self._log("⚠️ Bubble detector preflight failed; will fall back to proximity merge if needed", "warning")
+            except Exception:
+                pass
+
+            # 3) No spares/ready detector yet; do not load here. Just report timing and return False.
+            elapsed = _time.time() - start
+            self._log(f"⏱️ Preflight checked bubble detector pool in {elapsed:.2f}s — no ready instance", "debug")
             return False
         except Exception:
             return False
@@ -5517,97 +5503,66 @@ class MangaTranslationTab:
             self.translator.reset_history_manager()
 
         # Set environment variables for custom-api provider
-        if ocr_config['provider'] == 'custom-api':
-            import os  # Import os for environment variables
-            env_vars = self.main_gui._get_environment_variables(
-                epub_path='',  # Not needed for manga
-                api_key=api_key
-            )
-            
-            # Apply all environment variables EXCEPT SYSTEM_PROMPT
-            for key, value in env_vars.items():
-                if key == 'SYSTEM_PROMPT':
-                    # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
-                    continue
-                os.environ[key] = str(value)
-            
-            # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
-            os.environ['OCR_SYSTEM_PROMPT'] = (
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
-            )
-            
-            self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
+            if ocr_config['provider'] == 'custom-api':
+                import os  # Import os for environment variables
+                env_vars = self.main_gui._get_environment_variables(
+                    epub_path='',  # Not needed for manga
+                    api_key=api_key
+                )
+                
+                # Apply all environment variables EXCEPT SYSTEM_PROMPT
+                for key, value in env_vars.items():
+                    if key == 'SYSTEM_PROMPT':
+                        # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
+                        continue
+                    os.environ[key] = str(value)
+                
+                # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
+                os.environ['OCR_SYSTEM_PROMPT'] = (
+                "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+                "CRITICAL RULES:\n"
+                "1. DO NOT TRANSLATE ANYTHING\n"
+                "2. DO NOT MODIFY THE TEXT\n"
+                "3. DO NOT EXPLAIN OR COMMENT\n"
+                "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+                "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+                "If you see Korean text, output it in Korean.\n"
+                "If you see Japanese text, output it in Japanese.\n"
+                "If you see Chinese text, output it in Chinese.\n"
+                "If you see English text, output it in English.\n\n"
+                "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+                "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+                "between every word/character.\n\n"
+                "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+                "there are clear visual breaks.\n\n"
+                "NEVER translate. ONLY extract exactly what is written.\n"
+                "Output ONLY the raw text, nothing else."
+                )
+                
+                self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
 
-            # Respect user settings: only set default detector values when bubble detection is OFF.
-            try:
-                ms = self.main_gui.config.setdefault('manga_settings', {})
-                ocr_set = ms.setdefault('ocr', {})
-                changed = False
-                bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
+                # Respect user settings: only set default detector values when bubble detection is OFF.
+                try:
+                    ms = self.main_gui.config.setdefault('manga_settings', {})
+                    ocr_set = ms.setdefault('ocr', {})
+                    changed = False
+                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
 
-                if not bubble_enabled:
-                    # User has bubble detection OFF -> set non-intrusive defaults only
-                    if 'detector_type' not in ocr_set:
-                        ocr_set['detector_type'] = 'rtdetr_onnx'
-                        changed = True
-                    if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
-                        # Default HF repo (detector.onnx lives here)
-                        ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
-                        changed = True
-                    if changed and hasattr(self.main_gui, 'save_config'):
-                        self.main_gui.save_config(show_message=False)
-                    # Do NOT preload when detection is off
+                    if not bubble_enabled:
+                        # User has bubble detection OFF -> set non-intrusive defaults only
+                        if 'detector_type' not in ocr_set:
+                            ocr_set['detector_type'] = 'rtdetr_onnx'
+                            changed = True
+                        if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                            # Default HF repo (detector.onnx lives here)
+                            ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                            changed = True
+                        if changed and hasattr(self.main_gui, 'save_config'):
+                            self.main_gui.save_config(show_message=False)
+                    # Do not preload bubble detector for custom-api here; it will load on use or via panel preloading
                     self._preloaded_bd = None
-                else:
-                    # Bubble detection is ON → do not override user's detector choice
-                    # Optionally warm up based on current detector type
-                    detector_type = str(ocr_set.get('detector_type', '')).lower()
-                    try:
-                        from bubble_detector import BubbleDetector
-                        self._preloaded_bd = BubbleDetector()
-                        if detector_type == 'rtdetr_onnx':
-                            self._log("📥 Warming up RTEDR_onnx for custom-api OCR", "info")
-                            model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
-                            self._preloaded_bd.load_rtdetr_onnx_model(model_id=model_id)
-                            # Stagger subsequent heavy initializations to prevent CPU spike
-                            try:
-                                import time as _time
-                                _time.sleep(1.0)
-                            except Exception:
-                                pass
-                        elif detector_type == 'rtdetr':
-                            self._log("📥 Warming up RT-DETR (PyTorch) for custom-api OCR", "info")
-                            model_id = ocr_set.get('rtdetr_model_url') or ocr_set.get('bubble_model_path')
-                            self._preloaded_bd.load_rtdetr_model(model_id=model_id)
-                            try:
-                                import time as _time
-                                _time.sleep(1.0)
-                            except Exception:
-                                pass
-                        else:
-                            # YOLO or custom – no preload here
-                            self._preloaded_bd = None
-                    except Exception:
-                        self._preloaded_bd = None
-            except Exception:
-                self._preloaded_bd = None
+                except Exception:
+                    self._preloaded_bd = None
         
         # Initialize translator if needed (or if it was reset or client was cleared during shutdown)
         needs_new_translator = (not hasattr(self, 'translator')) or (self.translator is None)
@@ -6019,6 +5974,13 @@ class MangaTranslationTab:
             # Decouple from global parallel processing: panel concurrency is governed ONLY by panel settings
             effective_workers = requested_panel_workers if (panel_parallel and len(self.selected_files) > 1) else 1
 
+            # Hint translator about preferred BD ownership: use singleton only when not using panel parallelism
+            try:
+                if hasattr(self, 'translator') and self.translator:
+                    self.translator.use_singleton_bubble_detector = not (panel_parallel and effective_workers > 1)
+            except Exception:
+                pass
+
             # Model preloading phase
             self._log("🔧 Model preloading phase", "info")
             # Log current counters (diagnostic)
@@ -6028,28 +5990,7 @@ class MangaTranslationTab:
                     self._log(f"   Preload counters before: inpaint_spares={st.get('inpaint_spares',0)}, detector_spares={st.get('detector_spares',0)}", "debug")
             except Exception:
                 pass
-            # Warm up local inpainting instances for panel parallel mode to avoid per-thread model loading logs
-            try:
-                if (
-                    effective_workers > 1
-                    and hasattr(self, 'translator')
-                    and self.translator
-                    and getattr(self.translator, 'inpaint_mode', 'local') == 'local'
-                    and not getattr(self.translator, 'use_cloud_inpainting', False)
-                ):
-                    method = (
-                        self.translator.manga_settings.get('inpainting', {}).get('local_method', 'anime')
-                        if hasattr(self.translator, 'manga_settings') else 'anime'
-                    )
-                    model_path = self.main_gui.config.get(f'manga_{method}_model_path', '')
-                    self._log(f"🧰 Preloading local inpainting instances for {effective_workers} panel worker(s)...", "info")
-                    try:
-                        self.translator.preload_local_inpainters(method, model_path, effective_workers)
-                    except Exception as _e:
-                        self._log(f"⚠️ Preload skipped: {_e}", "warning")
-            except Exception:
-                pass
-            # Warm up bubble detector instances if AI bubble detection is enabled
+            # 1) Warm up bubble detector instances first (so detection can start immediately)
             try:
                 ocr_set = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) or {}
                 if (
@@ -6057,15 +5998,25 @@ class MangaTranslationTab:
                     and ocr_set.get('bubble_detection_enabled', True)
                     and hasattr(self, 'translator')
                     and self.translator
-                    and not getattr(self.translator, 'use_singleton_models', False)
                 ):
+                    # For parallel panel translation, prefer thread-local detectors (avoid singleton for concurrency)
+                    try:
+                        self.translator.use_singleton_bubble_detector = False
+                    except Exception:
+                        pass
                     self._log(f"🧰 Preloading bubble detector instances for {effective_workers} panel worker(s)...", "info")
                     try:
+                        import time as _time
+                        t0 = _time.time()
                         self.translator.preload_bubble_detectors(ocr_set, effective_workers)
+                        dt = _time.time() - t0
+                        self._log(f"⏱️ Bubble detector preload finished in {dt:.2f}s", "info")
                     except Exception as _e:
                         self._log(f"⚠️ Bubble detector preload skipped: {_e}", "warning")
             except Exception:
                 pass
+            # 2) Skip local inpainting preloading here — it will be kicked off during OCR phase
+            inpaint_preload_event = None
             # Log updated counters (diagnostic)
             try:
                 st2 = self.translator.get_preload_counters() if hasattr(self.translator, 'get_preload_counters') else None
