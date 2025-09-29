@@ -1943,7 +1943,7 @@ class MangaTranslator:
                         self._log(f"✅ Google OCR batched over {len(rois)} ROIs → {len(regions)} regions (cc={max_cc})", "info")
                         return regions
 
-                # Start local inpainter preload while Google OCR runs (only if not already loaded)
+                # Start local inpainter preload while Google OCR runs (background; multiple if panel-parallel)
                 try:
                     if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
                         already_loaded, _lm = self._is_local_inpainter_loaded()
@@ -1951,17 +1951,27 @@ class MangaTranslator:
                             import threading as _threading
                             local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
                             model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
-                            # New event per image to coordinate with inpaint_regions
-                            self._inpaint_preload_event = _threading.Event()
-                            def _preload_inp():
+                            adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+                            # Determine desired instances from panel-parallel settings
+                            desired = 1
+                            if adv.get('parallel_panel_translation', False):
                                 try:
-                                    self.preload_local_inpainters(local_method, model_path, 1)
-                                finally:
+                                    desired = max(1, int(adv.get('panel_max_workers', 2)))
+                                except Exception:
+                                    desired = 2
+                            # Honor advanced toggle for panel-local preload; for non-panel (desired==1) always allow
+                            allow = True if desired == 1 else bool(adv.get('preload_local_inpainting_for_panels', True))
+                            if allow:
+                                self._inpaint_preload_event = _threading.Event()
+                                def _preload_inp_many():
                                     try:
-                                        self._inpaint_preload_event.set()
-                                    except Exception:
-                                        pass
-                            _threading.Thread(target=_preload_inp, name="InpaintPreload@GoogleOCR", daemon=True).start()
+                                        self.preload_local_inpainters_concurrent(local_method, model_path, desired)
+                                    finally:
+                                        try:
+                                            self._inpaint_preload_event.set()
+                                        except Exception:
+                                            pass
+                                _threading.Thread(target=_preload_inp_many, name="InpaintPreload@GoogleOCR", daemon=True).start()
                 except Exception:
                     pass
 
@@ -2111,7 +2121,7 @@ class MangaTranslator:
                         self._log(f"✅ Azure OCR concurrent over {len(rois)} ROIs → {len(regions)} regions (workers={azure_workers})", "info")
                         return regions
 
-                # Start local inpainter preload while Azure OCR runs (only if not already loaded)
+                # Start local inpainter preload while Azure OCR runs (background; multiple if panel-parallel)
                 try:
                     if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
                         already_loaded, _lm = self._is_local_inpainter_loaded()
@@ -2119,17 +2129,25 @@ class MangaTranslator:
                             import threading as _threading
                             local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
                             model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
-                            # New event per image to coordinate with inpaint_regions
-                            self._inpaint_preload_event = _threading.Event()
-                            def _preload_inp():
+                            adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+                            desired = 1
+                            if adv.get('parallel_panel_translation', False):
                                 try:
-                                    self.preload_local_inpainters(local_method, model_path, 1)
-                                finally:
+                                    desired = max(1, int(adv.get('panel_max_workers', 2)))
+                                except Exception:
+                                    desired = 2
+                            allow = True if desired == 1 else bool(adv.get('preload_local_inpainting_for_panels', True))
+                            if allow:
+                                self._inpaint_preload_event = _threading.Event()
+                                def _preload_inp_many():
                                     try:
-                                        self._inpaint_preload_event.set()
-                                    except Exception:
-                                        pass
-                            _threading.Thread(target=_preload_inp, name="InpaintPreload@AzureOCR", daemon=True).start()
+                                        self.preload_local_inpainters_concurrent(local_method, model_path, desired)
+                                    finally:
+                                        try:
+                                            self._inpaint_preload_event.set()
+                                        except Exception:
+                                            pass
+                                _threading.Thread(target=_preload_inp_many, name="InpaintPreload@AzureOCR", daemon=True).start()
                 except Exception:
                     pass
                 
@@ -2429,7 +2447,7 @@ class MangaTranslator:
                     self._log(f"   Please install it from the GUI settings", "error")
                     raise Exception(f"{self.ocr_provider} OCR provider is not installed")
                 
-                # Start local inpainter preload while provider is being readied/used (non-cloud path only; only if not already loaded)
+                # Start local inpainter preload while provider is being readied/used (non-cloud path only; background)
                 try:
                     if not getattr(self, 'skip_inpainting', False) and not getattr(self, 'use_cloud_inpainting', False):
                         already_loaded, _lm = self._is_local_inpainter_loaded()
@@ -2437,16 +2455,25 @@ class MangaTranslator:
                             import threading as _threading
                             local_method = (self.manga_settings.get('inpainting', {}) or {}).get('local_method', 'anime')
                             model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
-                            self._inpaint_preload_event = _threading.Event()
-                            def _preload_inp():
+                            adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+                            desired = 1
+                            if adv.get('parallel_panel_translation', False):
                                 try:
-                                    self.preload_local_inpainters(local_method, model_path, 1)
-                                finally:
+                                    desired = max(1, int(adv.get('panel_max_workers', 2)))
+                                except Exception:
+                                    desired = 2
+                            allow = True if desired == 1 else bool(adv.get('preload_local_inpainting_for_panels', True))
+                            if allow:
+                                self._inpaint_preload_event = _threading.Event()
+                                def _preload_inp_many():
                                     try:
-                                        self._inpaint_preload_event.set()
-                                    except Exception:
-                                        pass
-                            _threading.Thread(target=_preload_inp, name="InpaintPreload@OCRProvider", daemon=True).start()
+                                        self.preload_local_inpainters_concurrent(local_method, model_path, desired)
+                                    finally:
+                                        try:
+                                            self._inpaint_preload_event.set()
+                                        except Exception:
+                                            pass
+                                _threading.Thread(target=_preload_inp_many, name="InpaintPreload@OCRProvider", daemon=True).start()
                 except Exception:
                     pass
                 
@@ -5014,33 +5041,65 @@ class MangaTranslator:
         return text
     
     def _sanitize_unicode_characters(self, text: str) -> str:
-        """Remove invalid Unicode characters, replacement characters, and box symbols"""
+        """Remove invalid Unicode characters, replacement characters, and box symbols.
+        Also more aggressively exclude square-like glyphs that leak as 'cubes' in some fonts.
+        """
         if not text:
             return text
         
         import re
         original = text
         
+        
         # Remove Unicode replacement character (�) and similar invalid symbols
         text = text.replace('\ufffd', '')  # Unicode replacement character
-        text = text.replace('□', '')      # White square (often used as fallback)
-        text = text.replace('◇', '')      # White diamond
-        text = text.replace('◆', '')      # Black diamond  
-        text = text.replace('■', '')      # Black square
-        text = text.replace('▢', '')      # White square with rounded corners
-        text = text.replace('▣', '')      # White square containing black small square
-        text = text.replace('▤', '')      # Square with horizontal fill
-        text = text.replace('▥', '')      # Square with vertical fill
-        text = text.replace('▦', '')      # Square with orthogonal crosshatch fill
-        text = text.replace('▧', '')      # Square with upper left to lower right fill
-        text = text.replace('▨', '')      # Square with upper right to lower left fill
-        text = text.replace('▩', '')      # Square with diagonal crosshatch fill
         
-        # Remove other common replacement/fallback characters
-        text = text.replace('\u25a1', '') # White square
-        text = text.replace('\u25a0', '') # Black square
-        text = text.replace('\u2b1c', '') # White large square
-        text = text.replace('\u2b1b', '') # Black large square
+        # Geometric squares and variants (broad sweep)
+        geo_squares = [
+            '□','■','▢','▣','▤','▥','▦','▧','▨','▩','◻','⬛','⬜',
+            '\u25a1','\u25a0','\u2b1c','\u2b1b'
+        ]
+        for s in geo_squares:
+            text = text.replace(s, '')
+        
+        # Extra cube-like CJK glyphs commonly misrendered in non-CJK fonts
+        # (unconditionally removed per user request)
+        cube_likes = [
+            '口',  # U+53E3
+            '囗',  # U+56D7
+            '日',  # U+65E5 (often boxy)
+            '曰',  # U+66F0
+            '田',  # U+7530
+            '回',  # U+56DE
+            'ロ',  # U+30ED (Katakana RO)
+            'ﾛ',  # U+FF9B (Halfwidth RO)
+            'ㅁ',  # U+3141 (Hangul MIEUM)
+            '丨',  # U+4E28 (CJK radical two) tall bar
+        ]
+        for s in cube_likes:
+            text = text.replace(s, '')
+        
+        # Remove entire ranges that commonly render as boxes/blocks
+        # Box Drawing, Block Elements, Geometric Shapes (full range), plus a common white/black large square range already handled
+        text = re.sub(r'[\u2500-\u257F\u2580-\u259F\u25A0-\u25FF]', '', text)
+        
+        # Optional debug: log culprits found in original text (before removal)
+        try:
+            culprits = re.findall(r'[\u2500-\u257F\u2580-\u259F\u25A0-\u25FF\u2B1B\u2B1C\u53E3\u56D7\u65E5\u66F0\u7530\u56DE\u30ED\uFF9B\u3141\u4E28]', original)
+            if culprits:
+                as_codes = [f'U+{ord(c):04X}' for c in culprits]
+                self._log(f"🧊 Removed box-like glyphs: {', '.join(as_codes)}", "debug")
+        except Exception:
+            pass
+        
+        # If line is mostly ASCII, strip any remaining single CJK ideographs that stand alone
+        try:
+            ascii_count = sum(1 for ch in text if ord(ch) < 128)
+            ratio = ascii_count / max(1, len(text))
+            if ratio >= 0.8:
+                text = re.sub(r'(?:(?<=\s)|^)[\u3000-\u303F\u3040-\u30FF\u3400-\u9FFF\uFF00-\uFFEF](?=(?:\s)|$)', '', text)
+        except Exception:
+            pass
         
         # Remove invisible and zero-width characters
         text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
@@ -5050,14 +5109,15 @@ class MangaTranslator:
         
         # Remove any remaining characters that can't be properly encoded
         try:
-            # Try to encode/decode to catch problematic characters
             text = text.encode('utf-8', errors='ignore').decode('utf-8')
         except UnicodeError:
             pass
         
-        # Log if we made changes
         if text != original:
-            self._log(f"🔧 Sanitized Unicode: '{original}' → '{text}'", "debug")
+            try:
+                self._log(f"🔧 Sanitized Unicode: '{original}' → '{text}'", "debug")
+            except Exception:
+                pass
         
         return text
     
@@ -5465,6 +5525,92 @@ class MangaTranslator:
             except Exception as e:
                 self._log(f"⚠️ Preload error: {e}", "warning")
         self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
+        return created
+
+    def preload_local_inpainters_concurrent(self, local_method: str, model_path: str, count: int, max_parallel: int = None) -> int:
+        """Preload N local inpainting instances concurrently into the shared pool.
+        Honors advanced toggles for panel/region parallelism to pick a reasonable parallelism.
+        Returns number of instances successfully preloaded.
+        """
+        try:
+            from local_inpainter import LocalInpainter
+        except Exception:
+            self._log("❌ Local inpainter module not available for preloading", "error")
+            return 0
+        key = (local_method, model_path or '')
+        # Determine desired number based on existing spares
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if not rec:
+                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                MangaTranslator._inpaint_pool[key] = rec
+            spares = (rec.get('spares') or [])
+        desired = max(0, int(count) - len(spares))
+        if desired <= 0:
+            return 0
+        # Determine max_parallel from advanced settings if not provided
+        if max_parallel is None:
+            adv = {}
+            try:
+                adv = self.main_gui.config.get('manga_settings', {}).get('advanced', {}) if hasattr(self, 'main_gui') else {}
+            except Exception:
+                adv = {}
+            if adv.get('parallel_panel_translation', False):
+                try:
+                    max_parallel = max(1, int(adv.get('panel_max_workers', 2)))
+                except Exception:
+                    max_parallel = 2
+            elif adv.get('parallel_processing', False):
+                try:
+                    max_parallel = max(1, int(adv.get('max_workers', 4)))
+                except Exception:
+                    max_parallel = 2
+            else:
+                max_parallel = 1
+        max_parallel = max(1, min(int(max_parallel), int(desired)))
+        ctx = " for parallel panels" if int(count) > 1 else ""
+        self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx} (parallel={max_parallel})", "info")
+        # Resolve model path once
+        resolved_path = model_path
+        if not resolved_path or not os.path.exists(resolved_path):
+            try:
+                probe_inp = LocalInpainter()
+                resolved_path = probe_inp.download_jit_model(local_method)
+            except Exception as e:
+                self._log(f"⚠️ JIT download failed for concurrent preload: {e}", "warning")
+                resolved_path = None
+        tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        created = 0
+        def _one():
+            try:
+                inp = LocalInpainter()
+                inp.tiling_enabled = tiling_settings.get('enabled', False)
+                inp.tile_size = tiling_settings.get('tile_size', 512)
+                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                if resolved_path and os.path.exists(resolved_path):
+                    ok = inp.load_model_with_retry(local_method, resolved_path, force_reload=False)
+                    if ok and getattr(inp, 'model_loaded', False):
+                        with MangaTranslator._inpaint_pool_lock:
+                            rec2 = MangaTranslator._inpaint_pool.get(key) or {'spares': []}
+                            if 'spares' not in rec2 or rec2['spares'] is None:
+                                rec2['spares'] = []
+                            rec2['spares'].append(inp)
+                            MangaTranslator._inpaint_pool[key] = rec2
+                        return True
+            except Exception as e:
+                self._log(f"⚠️ Concurrent preload error: {e}", "warning")
+            return False
+        with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+            futs = [ex.submit(_one) for _ in range(desired)]
+            for f in as_completed(futs):
+                try:
+                    if f.result():
+                        created += 1
+                except Exception:
+                    pass
+        self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
+        return created
         return created
 
     @classmethod
@@ -6086,6 +6232,98 @@ class MangaTranslator:
         
         return adjusted_regions
 
+    # Emote-only mixed font fallback (Meiryo) — primary font remains unchanged
+    def _get_emote_fallback_font(self, font_size: int):
+        """Return a Meiryo Bold fallback font if available (preferred), else Meiryo.
+        Does not change the primary font; used only for emote glyphs.
+        """
+        try:
+            from PIL import ImageFont as _ImageFont
+            import os as _os
+            # Prefer Meiryo Bold TTC first; try common face indices, then regular Meiryo
+            candidates = [
+                ("C:/Windows/Fonts/meiryob.ttc", [0,1,2,3]),  # Meiryo Bold (and variants) TTC
+                ("C:/Windows/Fonts/meiryo.ttc",  [1,0,2,3]),  # Try bold-ish index first if present
+            ]
+            for path, idxs in candidates:
+                if _os.path.exists(path):
+                    for idx in idxs:
+                        try:
+                            return _ImageFont.truetype(path, font_size, index=idx)
+                        except Exception:
+                            continue
+            return None
+        except Exception:
+            return None
+
+    def _is_emote_char(self, ch: str) -> bool:
+        # Strict whitelist of emote-like symbols to render with Meiryo
+        EMOTES = set([
+            '\u2661', # ♡
+            '\u2665', # ♥
+            '\u2764', # ❤
+            '\u2605', # ★
+            '\u2606', # ☆
+            '\u266A', # ♪
+            '\u266B', # ♫
+            '\u203B', # ※
+        ])
+        return ch in EMOTES
+
+    def _line_width_emote_mixed(self, draw, text: str, primary_font, emote_font) -> int:
+        if not emote_font:
+            bbox = draw.textbbox((0, 0), text, font=primary_font)
+            return (bbox[2] - bbox[0])
+        w = 0
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            # Treat VS16/VS15 as zero-width modifiers
+            if ch in ('\ufe0f', '\ufe0e'):
+                i += 1
+                continue
+            f = emote_font if self._is_emote_char(ch) else primary_font
+            try:
+                bbox = draw.textbbox((0, 0), ch, font=f)
+                w += (bbox[2] - bbox[0])
+            except Exception:
+                w += max(1, int(getattr(primary_font, 'size', 12) * 0.6))
+            i += 1
+        return w
+
+    def _draw_text_line_emote_mixed(self, draw, line: str, x: int, y: int, primary_font, emote_font,
+                                    fill_rgba, outline_rgba, outline_width: int,
+                                    shadow_enabled: bool, shadow_color_rgba, shadow_off):
+        cur_x = x
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch in ('\ufe0f', '\ufe0e'):
+                i += 1
+                continue
+            f = emote_font if (emote_font and self._is_emote_char(ch)) else primary_font
+            # measure
+            try:
+                bbox = draw.textbbox((0, 0), ch, font=f)
+                cw = bbox[2] - bbox[0]
+            except Exception:
+                cw = max(1, int(getattr(primary_font, 'size', 12) * 0.6))
+            # shadow
+            if shadow_enabled:
+                sx, sy = shadow_off
+                draw.text((cur_x + sx, y + sy), ch, font=f, fill=shadow_color_rgba)
+            # outline
+            if outline_width > 0:
+                for dx in range(-outline_width, outline_width + 1):
+                    for dy in range(-outline_width, outline_width + 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        draw.text((cur_x + dx, y + dy), ch, font=f, fill=outline_rgba)
+            # main
+            draw.text((cur_x, y), ch, font=f, fill=fill_rgba)
+            cur_x += cw
+            i += 1
+
     
     def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Enhanced text rendering with customizable backgrounds and styles"""
@@ -6191,8 +6429,9 @@ class MangaTranslator:
                         region.translated_text, w, h, region_draw, region
                     )
                 
-                # Load font
+                # Load font(s)
                 font = self._get_font(font_size)
+                emote_font = self._get_emote_fallback_font(font_size)
                 
                 # Calculate text layout
                 line_height = font_size * 1.2
@@ -6208,30 +6447,36 @@ class MangaTranslator:
                     pass
                 if draw_bg:
                     self._draw_text_background(region_draw, x, y, w, h, lines, font, 
-                                             font_size, start_y)
+                                             font_size, start_y, emote_font)
                 
                 # Draw text on the same region overlay
                 for i, line in enumerate(lines):
-                    text_bbox = region_draw.textbbox((0, 0), line, font=font)
-                    text_width = text_bbox[2] - text_bbox[0]
+                    if emote_font is not None:
+                        text_width = self._line_width_emote_mixed(region_draw, line, font, emote_font)
+                    else:
+                        text_bbox = region_draw.textbbox((0, 0), line, font=font)
+                        text_width = text_bbox[2] - text_bbox[0]
                     
                     text_x = x + (w - text_width) // 2
                     text_y = start_y + i * line_height
                     
-                    if self.shadow_enabled:
-                        self._draw_text_shadow(region_draw, text_x, text_y, line, font)
-                    
                     outline_width = max(1, font_size // self.outline_width_factor)
-                    
-                    # Draw outline
-                    for dx in range(-outline_width, outline_width + 1):
-                        for dy in range(-outline_width, outline_width + 1):
-                            if dx != 0 or dy != 0:
-                                region_draw.text((text_x + dx, text_y + dy), line, 
-                                        font=font, fill=self.outline_color + (255,))
-                    
-                    # Draw main text
-                    region_draw.text((text_x, text_y), line, font=font, fill=self.text_color + (255,))
+                    if emote_font is not None:
+                        self._draw_text_line_emote_mixed(
+                            region_draw, line, text_x, text_y, font, emote_font,
+                            self.text_color + (255,), self.outline_color + (255,), outline_width,
+                            self.shadow_enabled, self.shadow_color + (255,) if isinstance(self.shadow_color, tuple) and len(self.shadow_color)==3 else (0,0,0,255),
+                            (self.shadow_offset_x, self.shadow_offset_y)
+                        )
+                    else:
+                        if self.shadow_enabled:
+                            self._draw_text_shadow(region_draw, text_x, text_y, line, font)
+                        for dx in range(-outline_width, outline_width + 1):
+                            for dy in range(-outline_width, outline_width + 1):
+                                if dx != 0 or dy != 0:
+                                    region_draw.text((text_x + dx, text_y + dy), line, 
+                                            font=font, fill=self.outline_color + (255,))
+                        region_draw.text((text_x, text_y), line, font=font, fill=self.text_color + (255,))
                 
                 # Composite this region onto the main image
                 pil_image = Image.alpha_composite(pil_image, region_overlay)
@@ -6292,6 +6537,7 @@ class MangaTranslator:
                 
                 # Draw text
                 for i, line in enumerate(lines):
+                    # Mixed fallback not supported in legacy path; keep primary measurement
                     text_bbox = draw.textbbox((0, 0), line, font=font)
                     text_width = text_bbox[2] - text_bbox[0]
                     
@@ -6338,8 +6584,10 @@ class MangaTranslator:
 
     def _draw_text_background(self, draw: ImageDraw, x: int, y: int, w: int, h: int,
                             lines: List[str], font: ImageFont, font_size: int, 
-                            start_y: int):
-        """Draw background behind text with selected style"""
+                            start_y: int, emote_font: ImageFont = None):
+        """Draw background behind text with selected style.
+        If emote_font is provided, measure lines with emote-only mixing.
+        """
         # Early return if opacity is 0 (fully transparent)
         if self.text_bg_opacity == 0:
             return
@@ -6349,8 +6597,11 @@ class MangaTranslator:
         max_width = 0
         
         for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_width = bbox[2] - bbox[0]
+            if emote_font is not None:
+                line_width = self._line_width_emote_mixed(draw, line, font, emote_font)
+            else:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
             max_width = max(max_width, line_width)
         
         # Apply size reduction

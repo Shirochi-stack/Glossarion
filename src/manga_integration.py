@@ -2010,7 +2010,7 @@ class MangaTranslationTab:
         method_selection_frame = tk.Frame(self.inpaint_method_frame)
         method_selection_frame.pack(side=tk.LEFT, padx=5)
 
-        self.inpaint_method_var = tk.StringVar(value=self.main_gui.config.get('manga_inpaint_method', 'cloud'))
+        self.inpaint_method_var = tk.StringVar(value=self.main_gui.config.get('manga_inpaint_method', 'local'))
 
         tb.Radiobutton(
             method_selection_frame,
@@ -2983,8 +2983,8 @@ class MangaTranslationTab:
         
         # Initialize with defaults
         self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
-        # Free-text-only background opacity (default off)
-        self.free_text_only_bg_opacity_var = tk.BooleanVar(value=config.get('manga_free_text_only_bg_opacity', False))
+        # Free-text-only background opacity (default on)
+        self.free_text_only_bg_opacity_var = tk.BooleanVar(value=config.get('manga_free_text_only_bg_opacity', True))
         # Persist on change like other controls
         self.free_text_only_bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())
         self.bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace right after creation
@@ -2999,7 +2999,7 @@ class MangaTranslationTab:
         self.font_size_var.trace('w', lambda *args: self._save_rendering_settings())
         
         self.selected_font_path = config.get('manga_font_path', None)
-        self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', True))
+        self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', False))
         self.inpaint_quality_var = tk.StringVar(value=config.get('manga_inpaint_quality', 'high'))
         self.inpaint_dilation_var = tk.IntVar(value=config.get('manga_inpaint_dilation', 15))
         self.inpaint_passes_var = tk.IntVar(value=config.get('manga_inpaint_passes', 2))
@@ -3010,7 +3010,7 @@ class MangaTranslationTab:
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
         self.font_size_multiplier_var.trace('w', lambda *args: self._save_rendering_settings())
         
-        self.force_caps_lock_var = tk.BooleanVar(value=config.get('manga_force_caps_lock', False))
+        self.force_caps_lock_var = tk.BooleanVar(value=config.get('manga_force_caps_lock', True))
         self.force_caps_lock_var.trace('w', lambda *args: self._save_rendering_settings())
         
         self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
@@ -6004,18 +6004,19 @@ class MangaTranslationTab:
                         self.translator.use_singleton_bubble_detector = False
                     except Exception:
                         pass
-                    self._log(f"🧰 Preloading bubble detector instances for {effective_workers} panel worker(s)...", "info")
+                    desired_bd = min(int(effective_workers), max(1, int(len(self.selected_files) or 1)))
+                    self._log(f"🧰 Preloading bubble detector instances for {desired_bd} panel worker(s)...", "info")
                     try:
                         import time as _time
                         t0 = _time.time()
-                        self.translator.preload_bubble_detectors(ocr_set, effective_workers)
+                        self.translator.preload_bubble_detectors(ocr_set, desired_bd)
                         dt = _time.time() - t0
                         self._log(f"⏱️ Bubble detector preload finished in {dt:.2f}s", "info")
                     except Exception as _e:
                         self._log(f"⚠️ Bubble detector preload skipped: {_e}", "warning")
             except Exception:
                 pass
-            # 2) Skip local inpainting preloading here — it will be kicked off during OCR phase
+            # 2) Skip up-front LOCAL inpainting preload — it will run in the OCR phase in the background
             inpaint_preload_event = None
             # Log updated counters (diagnostic)
             try:
@@ -6183,7 +6184,7 @@ class MangaTranslationTab:
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, effective_workers)) as executor:
                     futures = []
-                    stagger_ms = int(advanced.get('panel_start_stagger_ms', 100))
+                    stagger_ms = int(advanced.get('panel_start_stagger_ms', 30))
                     for idx, filepath in enumerate(self.selected_files):
                         if self.stop_flag.is_set():
                             break

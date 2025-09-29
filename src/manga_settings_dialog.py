@@ -2829,6 +2829,19 @@ class MangaSettingsDialog:
         panel_frame = tk.LabelFrame(content_frame, text="Parallel Panel Translation", padx=15, pady=10)
         panel_frame.pack(fill='x', padx=20, pady=(10, 0))
 
+        # New: Preload local inpainting for panels (default ON)
+        preload_row = tk.Frame(panel_frame)
+        preload_row.pack(fill='x', pady=5)
+        self.preload_local_panels_var = tk.BooleanVar(
+            value=self.settings.get('advanced', {}).get('preload_local_inpainting_for_panels', True)
+        )
+        tb.Checkbutton(
+            preload_row,
+            text="Preload local inpainting instances for panel-parallel runs",
+            variable=self.preload_local_panels_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+
         self.parallel_panel_var = tk.BooleanVar(
             value=self.settings.get('advanced', {}).get('parallel_panel_translation', False)
         )
@@ -2897,7 +2910,7 @@ class MangaSettingsDialog:
         stagger_row.pack(fill='x', pady=5)
         tk.Label(stagger_row, text="Panel start stagger:", width=20, anchor='w').pack(side='left')
         self.panel_stagger_ms_var = tk.IntVar(
-            value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 500)
+            value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 30)
         )
         panel_stagger_spinbox = tb.Spinbox(
             stagger_row,
@@ -3185,7 +3198,9 @@ class MangaSettingsDialog:
             if hasattr(self, 'unload_models_var'): self.unload_models_var.set(bool(adv.get('unload_models_after_translation', False)))
             if hasattr(self, 'parallel_panel_var'): self.parallel_panel_var.set(bool(adv.get('parallel_panel_translation', False)))
             if hasattr(self, 'panel_max_workers_var'): self.panel_max_workers_var.set(int(adv.get('panel_max_workers', 2)))
-            if hasattr(self, 'panel_stagger_ms_var'): self.panel_stagger_ms_var.set(int(adv.get('panel_start_stagger_ms', 500)))
+            if hasattr(self, 'panel_stagger_ms_var'): self.panel_stagger_ms_var.set(int(adv.get('panel_start_stagger_ms', 30)))
+            # New: preload local inpainting for parallel panels (default True)
+            if hasattr(self, 'preload_local_panels_var'): self.preload_local_panels_var.set(bool(adv.get('preload_local_inpainting_for_panels', True)))
             if hasattr(self, 'auto_convert_onnx_var'): self.auto_convert_onnx_var.set(bool(adv.get('auto_convert_to_onnx', False)))
             if hasattr(self, 'auto_convert_onnx_bg_var'): self.auto_convert_onnx_bg_var.set(bool(adv.get('auto_convert_to_onnx_background', True)))
             if hasattr(self, 'quantize_models_var'): self.quantize_models_var.set(bool(adv.get('quantize_models', False)))
@@ -3241,6 +3256,14 @@ class MangaSettingsDialog:
                 pass
             try:
                 self._toggle_workers()
+            except Exception:
+                pass
+            
+            # Build/attach advanced control for local inpainting preload if not present
+            try:
+                if not hasattr(self, 'preload_local_panels_var') and hasattr(self, '_create_advanced_tab_ui'):
+                    # If there is a helper to build advanced UI, we rely on it. Otherwise, attach to existing advanced frame if available.
+                    pass
             except Exception:
                 pass
             try:
@@ -3647,6 +3670,9 @@ class MangaSettingsDialog:
             self.settings['advanced']['parallel_panel_translation'] = bool(self.parallel_panel_var.get())
             self.settings['advanced']['panel_max_workers'] = int(self.panel_max_workers_var.get())
             self.settings['advanced']['panel_start_stagger_ms'] = int(self.panel_stagger_ms_var.get())
+            # New: preload local inpainting for panels
+            if hasattr(self, 'preload_local_panels_var'):
+                self.settings['advanced']['preload_local_inpainting_for_panels'] = bool(self.preload_local_panels_var.get())
             
             # Memory management settings
             self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models.get())
