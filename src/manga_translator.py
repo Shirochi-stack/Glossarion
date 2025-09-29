@@ -67,6 +67,10 @@ class MangaTranslator:
     _inpaint_pool_lock = threading.Lock()
     _inpaint_pool = {}  # (method, model_path) -> {'inpainter': obj|None, 'loaded': bool, 'event': threading.Event()}
     
+    # Detector preloading pool for non-singleton bubble detector instances
+    _detector_pool_lock = threading.Lock()
+    _detector_pool = {}  # (detector_type, model_id_or_path) -> {'spares': list[BubbleDetector]}
+
     # SINGLETON PATTERN: Shared model instances across all translators
     _singleton_lock = threading.Lock()
     _singleton_bubble_detector = None
@@ -760,6 +764,16 @@ class MangaTranslator:
                     self._log("      ✓ Cleared shared RT-DETR cache", "debug")
                 except Exception:
                     pass
+                # Clear preloaded detector spares
+                try:
+                    with MangaTranslator._detector_pool_lock:
+                        for rec in MangaTranslator._detector_pool.values():
+                            try:
+                                rec['spares'] = []
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             except Exception as e:
                 self._log(f"   Warning: Bubble detector cleanup failed: {e}", "debug")
 
@@ -815,6 +829,17 @@ class MangaTranslator:
                                         self._log(f"      ✓ Unloaded pooled inpainter: {key}", "debug")
                                 except Exception:
                                     pass
+                            # Drop any spare instances as well
+                            try:
+                                for spare in rec.get('spares') or []:
+                                    try:
+                                        if hasattr(spare, 'unload'):
+                                            spare.unload()
+                                    except Exception:
+                                        pass
+                                rec['spares'] = []
+                            except Exception:
+                                pass
                         except Exception:
                             pass
                     MangaTranslator._inpaint_pool.clear()
@@ -5296,6 +5321,160 @@ class MangaTranslator:
             rec2 = MangaTranslator._inpaint_pool.get(key)
             return rec2['inpainter'] if rec2 else None
 
+    @classmethod
+    def _count_preloaded_inpainters(cls) -> int:
+        try:
+            with cls._inpaint_pool_lock:
+                total = 0
+                for rec in cls._inpaint_pool.values():
+                    try:
+                        total += len(rec.get('spares') or [])
+                    except Exception:
+                        pass
+                return total
+        except Exception:
+            return 0
+
+    def preload_local_inpainters(self, local_method: str, model_path: str, count: int) -> int:
+        """Preload N local inpainting instances sequentially into the shared pool for parallel panel translation.
+        Returns the number of instances successfully preloaded.
+        """
+        try:
+            from local_inpainter import LocalInpainter
+        except Exception:
+            self._log("❌ Local inpainter module not available for preloading", "error")
+            return 0
+        key = (local_method, model_path or '')
+        created = 0
+        # Ensure pool record exists
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if not rec:
+                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                MangaTranslator._inpaint_pool[key] = rec
+            if 'spares' not in rec or rec['spares'] is None:
+                rec['spares'] = []
+            spares = rec['spares']
+        # Prepare tiling settings
+        tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
+        desired = max(0, int(count) - len(spares))
+        if desired <= 0:
+            return 0
+        self._log(f"🧰 Preloading {desired} local inpainting instance(s) for parallel panels", "info")
+        for i in range(desired):
+            try:
+                inp = LocalInpainter()
+                inp.tiling_enabled = tiling_settings.get('enabled', False)
+                inp.tile_size = tiling_settings.get('tile_size', 512)
+                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                # Resolve model path if needed
+                resolved = model_path
+                if not resolved or not os.path.exists(resolved):
+                    try:
+                        resolved = inp.download_jit_model(local_method)
+                    except Exception as e:
+                        self._log(f"⚠️ Preload JIT download failed: {e}", "warning")
+                        resolved = None
+                if resolved and os.path.exists(resolved):
+                    ok = inp.load_model_with_retry(local_method, resolved, force_reload=False)
+                    if ok and getattr(inp, 'model_loaded', False):
+                        with MangaTranslator._inpaint_pool_lock:
+                            rec = MangaTranslator._inpaint_pool.get(key) or {'spares': []}
+                            if 'spares' not in rec or rec['spares'] is None:
+                                rec['spares'] = []
+                            rec['spares'].append(inp)
+                            MangaTranslator._inpaint_pool[key] = rec
+                        created += 1
+                else:
+                    self._log("⚠️ Preload skipped: no model path available", "warning")
+            except Exception as e:
+                self._log(f"⚠️ Preload error: {e}", "warning")
+        self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
+        return created
+
+    @classmethod
+    def _count_preloaded_detectors(cls) -> int:
+        try:
+            with cls._detector_pool_lock:
+                return sum(len((rec or {}).get('spares') or []) for rec in cls._detector_pool.values())
+        except Exception:
+            return 0
+
+    @classmethod
+    def get_preload_counters(cls) -> Dict[str, int]:
+        """Return current counters for preloaded instances (for diagnostics/logging)."""
+        try:
+            with cls._inpaint_pool_lock:
+                inpaint_spares = sum(len((rec or {}).get('spares') or []) for rec in cls._inpaint_pool.values())
+                inpaint_keys = len(cls._inpaint_pool)
+            with cls._detector_pool_lock:
+                detector_spares = sum(len((rec or {}).get('spares') or []) for rec in cls._detector_pool.values())
+                detector_keys = len(cls._detector_pool)
+            return {
+                'inpaint_spares': inpaint_spares,
+                'inpaint_keys': inpaint_keys,
+                'detector_spares': detector_spares,
+                'detector_keys': detector_keys,
+            }
+        except Exception:
+            return {'inpaint_spares': 0, 'inpaint_keys': 0, 'detector_spares': 0, 'detector_keys': 0}
+
+    def preload_bubble_detectors(self, ocr_settings: Dict[str, Any], count: int) -> int:
+        """Preload N bubble detector instances (non-singleton) for panel parallelism.
+        Only applies when not using singleton models.
+        """
+        try:
+            from bubble_detector import BubbleDetector
+        except Exception:
+            self._log("❌ BubbleDetector module not available for preloading", "error")
+            return 0
+        # Skip if singleton mode
+        if getattr(self, 'use_singleton_models', False):
+            return 0
+        det_type = (ocr_settings or {}).get('detector_type', 'rtdetr_onnx')
+        model_id = (ocr_settings or {}).get('rtdetr_model_url') or (ocr_settings or {}).get('bubble_model_path') or ''
+        key = (det_type, model_id)
+        created = 0
+        with MangaTranslator._detector_pool_lock:
+            rec = MangaTranslator._detector_pool.get(key)
+            if not rec:
+                rec = {'spares': []}
+                MangaTranslator._detector_pool[key] = rec
+            spares = rec.get('spares')
+            if spares is None:
+                spares = []
+                rec['spares'] = spares
+        desired = max(0, int(count) - len(spares))
+        if desired <= 0:
+            return 0
+        self._log(f"🧰 Preloading {desired} bubble detector instance(s) [{det_type}]", "info")
+        for i in range(desired):
+            try:
+                bd = BubbleDetector()
+                ok = False
+                if det_type == 'rtdetr_onnx':
+                    ok = bool(bd.load_rtdetr_onnx_model(model_id=model_id))
+                elif det_type == 'rtdetr':
+                    ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                elif det_type == 'yolo':
+                    if model_id:
+                        ok = bool(bd.load_model(model_id))
+                else:
+                    # auto: prefer RT-DETR
+                    ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                if ok:
+                    with MangaTranslator._detector_pool_lock:
+                        rec = MangaTranslator._detector_pool.get(key) or {'spares': []}
+                        if 'spares' not in rec or rec['spares'] is None:
+                            rec['spares'] = []
+                        rec['spares'].append(bd)
+                        MangaTranslator._detector_pool[key] = rec
+                    created += 1
+            except Exception as e:
+                self._log(f"⚠️ Bubble detector preload error: {e}", "warning")
+        self._log(f"✅ Preloaded {created} bubble detector instance(s)", "info")
+        return created
+
     def _initialize_local_inpainter(self):
         """Initialize local inpainting if configured"""
         try:
@@ -7087,7 +7266,9 @@ class MangaTranslator:
                 self._log("🎨 Using local inpainter (already loaded)", "info")
     
     def _get_thread_bubble_detector(self):
-        """Get or initialize bubble detector (singleton or thread-local based on settings)"""
+        """Get or initialize bubble detector (singleton or thread-local based on settings).
+        Will consume a preloaded detector if available for current settings.
+        """
         if hasattr(self, 'use_singleton_models') and self.use_singleton_models:
             # Use singleton instance
             if self.bubble_detector is None:
@@ -7099,8 +7280,25 @@ class MangaTranslator:
                 self._thread_local = threading.local()
             if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
                 from bubble_detector import BubbleDetector
-                self._thread_local.bubble_detector = BubbleDetector()
-                self._log("🤖 Created thread-local bubble detector", "debug")
+                # Try to consume a preloaded spare for the current detector settings
+                try:
+                    ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
+                    det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                    key = (det_type, model_id)
+                    with MangaTranslator._detector_pool_lock:
+                        rec = MangaTranslator._detector_pool.get(key)
+                        if rec and isinstance(rec, dict):
+                            spares = rec.get('spares') or []
+                            if spares:
+                                self._thread_local.bubble_detector = spares.pop(0)
+                                self._log("🤖 Using preloaded bubble detector instance", "info")
+                except Exception:
+                    pass
+                # If still not set, create a fresh detector
+                if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
+                    self._thread_local.bubble_detector = BubbleDetector()
+                    self._log("🤖 Created thread-local bubble detector", "debug")
             return self._thread_local.bubble_detector
     
     def _get_thread_local_inpainter(self, local_method: str, model_path: str):
@@ -7123,6 +7321,24 @@ class MangaTranslator:
             tl.local_inpainters = {}
         key = (local_method or 'anime', model_path or '')
         if key not in tl.local_inpainters or tl.local_inpainters[key] is None:
+            # First, try to use a preloaded spare instance from the shared pool
+            try:
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if rec and isinstance(rec, dict):
+                    spares = rec.get('spares') or []
+                    if spares:
+                        tl.local_inpainters[key] = spares.pop(0)
+                        self._log("🎨 Using preloaded local inpainting instance", "info")
+                        return tl.local_inpainters[key]
+                    # If there's a fully loaded shared instance but no spares, use it as a last resort
+                    if rec.get('loaded') and rec.get('inpainter') is not None:
+                        tl.local_inpainters[key] = rec.get('inpainter')
+                        self._log("🎨 Using shared preloaded inpainting instance", "info")
+                        return tl.local_inpainters[key]
+            except Exception:
+                pass
+            
+            # No preloaded instance available: create and load thread-local instance
             try:
                 from local_inpainter import LocalInpainter
                 # Use a per-thread config path to avoid concurrent JSON writes
@@ -7918,7 +8134,7 @@ class MangaTranslator:
                         is_parallel_panel = False
                         try:
                             if hasattr(self, 'manga_settings'):
-                                is_parallel_panel = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', True)
+                                is_parallel_panel = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', False)
                         except Exception:
                             pass
                         

@@ -6013,11 +6013,66 @@ class MangaTranslationTab:
             
             # Panel-level parallelization setting (LOCAL threading for panels)
             advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
-            panel_parallel = bool(advanced.get('parallel_panel_translation', True))
+            panel_parallel = bool(advanced.get('parallel_panel_translation', False))
             requested_panel_workers = int(advanced.get('panel_max_workers', 2))
 
             # Decouple from global parallel processing: panel concurrency is governed ONLY by panel settings
             effective_workers = requested_panel_workers if (panel_parallel and len(self.selected_files) > 1) else 1
+
+            # Model preloading phase
+            self._log("🔧 Model preloading phase", "info")
+            # Log current counters (diagnostic)
+            try:
+                st = self.translator.get_preload_counters() if hasattr(self.translator, 'get_preload_counters') else None
+                if st:
+                    self._log(f"   Preload counters before: inpaint_spares={st.get('inpaint_spares',0)}, detector_spares={st.get('detector_spares',0)}", "debug")
+            except Exception:
+                pass
+            # Warm up local inpainting instances for panel parallel mode to avoid per-thread model loading logs
+            try:
+                if (
+                    effective_workers > 1
+                    and hasattr(self, 'translator')
+                    and self.translator
+                    and getattr(self.translator, 'inpaint_mode', 'local') == 'local'
+                    and not getattr(self.translator, 'use_cloud_inpainting', False)
+                ):
+                    method = (
+                        self.translator.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                        if hasattr(self.translator, 'manga_settings') else 'anime'
+                    )
+                    model_path = self.main_gui.config.get(f'manga_{method}_model_path', '')
+                    self._log(f"🧰 Preloading local inpainting instances for {effective_workers} panel worker(s)...", "info")
+                    try:
+                        self.translator.preload_local_inpainters(method, model_path, effective_workers)
+                    except Exception as _e:
+                        self._log(f"⚠️ Preload skipped: {_e}", "warning")
+            except Exception:
+                pass
+            # Warm up bubble detector instances if AI bubble detection is enabled
+            try:
+                ocr_set = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) or {}
+                if (
+                    effective_workers > 1
+                    and ocr_set.get('bubble_detection_enabled', True)
+                    and hasattr(self, 'translator')
+                    and self.translator
+                    and not getattr(self.translator, 'use_singleton_models', False)
+                ):
+                    self._log(f"🧰 Preloading bubble detector instances for {effective_workers} panel worker(s)...", "info")
+                    try:
+                        self.translator.preload_bubble_detectors(ocr_set, effective_workers)
+                    except Exception as _e:
+                        self._log(f"⚠️ Bubble detector preload skipped: {_e}", "warning")
+            except Exception:
+                pass
+            # Log updated counters (diagnostic)
+            try:
+                st2 = self.translator.get_preload_counters() if hasattr(self.translator, 'get_preload_counters') else None
+                if st2:
+                    self._log(f"   Preload counters after: inpaint_spares={st2.get('inpaint_spares',0)}, detector_spares={st2.get('detector_spares',0)}", "debug")
+            except Exception:
+                pass
 
             if panel_parallel and len(self.selected_files) > 1 and effective_workers > 1:
                 self._log(f"🚀 Parallel PANEL translation ENABLED ({effective_workers} workers)", "info")

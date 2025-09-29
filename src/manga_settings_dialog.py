@@ -96,7 +96,7 @@ class MangaSettingsDialog:
                 'save_intermediate': False,
                 'parallel_processing': True,
                 'max_workers': 2,
-                'parallel_panel_translation': True,
+                'parallel_panel_translation': False,
                 'panel_max_workers': 2,
                 'use_singleton_models': False,
                 'auto_cleanup_models': False,
@@ -725,6 +725,22 @@ class MangaSettingsDialog:
         compression_toggle.pack(anchor='w')
         self.compression_toggle = compression_toggle
         
+        # Hook toggle to enable/disable compression fields
+        def _toggle_compression_enabled():
+            enabled = bool(self.compression_enabled_var.get())
+            state = 'normal' if enabled else 'disabled'
+            try:
+                self.compression_format_combo.config(state='readonly' if enabled else 'disabled')
+            except Exception:
+                pass
+            for w in [getattr(self, 'jpeg_quality_spin', None), getattr(self, 'png_level_spin', None), getattr(self, 'webp_quality_spin', None)]:
+                try:
+                    if w is not None:
+                        w.config(state=state)
+                except Exception:
+                    pass
+        compression_toggle.config(command=_toggle_compression_enabled)
+        
         # Format selection
         format_row = tk.Frame(compression_frame)
         format_row.pack(fill='x', pady=5)
@@ -787,10 +803,15 @@ class MangaSettingsDialog:
         # Hook to toggle visibility based on format
         self.compression_format_combo.bind('<<ComboboxSelected>>', lambda e: self._toggle_compression_format())
         self._toggle_compression_format()
+        # Apply enabled/disabled state for compression fields initially
+        try:
+            _toggle_compression_enabled()
+        except Exception:
+            pass
         
-        # Chunk settings for large images
+        # Chunk settings for large images (moved above compression)
         chunk_frame = tk.LabelFrame(content_frame, text="Large Image Processing", padx=15, pady=10)
-        chunk_frame.pack(fill='x', padx=20, pady=(10, 0))
+        chunk_frame.pack(fill='x', padx=20, pady=(10, 0), before=compression_frame)
         self.preprocessing_controls.append(chunk_frame)
         
         # Chunk height
@@ -856,6 +877,7 @@ class MangaSettingsDialog:
             tiling_frame,
             text="Enable automatic tiling for inpainting (processes large images in tiles)",
             variable=self.inpaint_tiling_enabled,
+            command=lambda: self._toggle_tiling_controls(),
             bootstyle="round-toggle"
         )
         tiling_enable_cb.pack(anchor='w', pady=(5, 10))
@@ -881,6 +903,11 @@ class MangaSettingsDialog:
         self.tile_size_spinbox.pack(side='left', padx=10)
 
         tk.Label(tile_size_frame, text="pixels").pack(side='left')
+        # Initial tiling fields state
+        try:
+            self._toggle_tiling_controls()
+        except Exception:
+            pass
 
         # Tile overlap
         tile_overlap_frame = tk.Frame(tiling_frame)
@@ -1109,50 +1136,6 @@ class MangaSettingsDialog:
             fg='gray',
             justify='left'
         ).pack(anchor='w', pady=(10, 0))
-        
-        # Performance settings  
-        perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
-        perf_frame.pack(fill='x', padx=20, pady=(10, 0))
-        
-        # Batch size for processing
-        batch_frame = tk.Frame(perf_frame)
-        batch_frame.pack(fill='x', pady=5)
-        
-        tk.Label(batch_frame, text="Batch Size:", width=15, anchor='w').pack(side='left')
-        
-        self.inpaint_batch_size = tk.IntVar(
-            value=self.settings.get('inpainting', {}).get('batch_size', 1)
-        )
-        
-        tb.Spinbox(
-            batch_frame,
-            from_=1,
-            to=10,
-            textvariable=self.inpaint_batch_size,
-            width=10
-        ).pack(side='left', padx=10)
-        
-        tk.Label(
-            batch_frame,
-            text="(Process multiple regions at once)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side='left')
-        
-        # Cache settings
-        cache_frame = tk.Frame(perf_frame)
-        cache_frame.pack(fill='x', pady=5)
-        
-        self.enable_cache_var = tk.BooleanVar(
-            value=self.settings.get('inpainting', {}).get('enable_cache', True)
-        )
-        
-        tb.Checkbutton(
-            cache_frame,
-            text="Enable inpainting cache (speeds up repeated processing)",
-            variable=self.enable_cache_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
         
         # Note about method selection
         info_frame = tk.Frame(content_frame)
@@ -1460,6 +1443,12 @@ class MangaSettingsDialog:
                 self.chunk_overlap_unit_label.config(fg='white')
         except Exception:
             pass
+        # Ensure tiling fields respect their own toggle regardless of preprocessing state
+        try:
+            if hasattr(self, '_toggle_tiling_controls'):
+                self._toggle_tiling_controls()
+        except Exception:
+            pass
     def _toggle_frame_children(self, frame, enabled):
         """Recursively enable/disable all children of a frame"""
         for child in frame.winfo_children():
@@ -1497,6 +1486,22 @@ class MangaSettingsDialog:
             except Exception:
                 pass
 
+    def _toggle_tiling_controls(self):
+        """Enable/disable tiling size/overlap fields based on tiling toggle."""
+        try:
+            enabled = bool(self.inpaint_tiling_enabled.get())
+        except Exception:
+            enabled = False
+        state = 'normal' if enabled else 'disabled'
+        try:
+            self.tile_size_spinbox.config(state=state)
+        except Exception:
+            pass
+        try:
+            self.tile_overlap_spinbox.config(state=state)
+        except Exception:
+            pass
+
     def _toggle_compression_format(self):
         """Show only the controls relevant to the selected format (hide others)."""
         fmt = getattr(self, 'compression_format_var', tk.StringVar(value='jpeg')).get()
@@ -1521,6 +1526,23 @@ class MangaSettingsDialog:
         except Exception:
             pass
     
+    def _toggle_ocr_batching_controls(self):
+        """Show/hide OCR batching rows based on enable toggle."""
+        try:
+            enabled = bool(self.ocr_batch_enabled_var.get())
+        except Exception:
+            enabled = False
+        try:
+            if hasattr(self, 'ocr_bs_row') and self.ocr_bs_row:
+                (self.ocr_bs_row.pack if enabled else self.ocr_bs_row.pack_forget)()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'ocr_cc_row') and self.ocr_cc_row:
+                (self.ocr_cc_row.pack if enabled else self.ocr_cc_row.pack_forget)()
+        except Exception:
+            pass
+
     def _create_ocr_tab(self, notebook):
         """Create OCR settings tab with all options"""
         frame = ttk.Frame(notebook)
@@ -1893,11 +1915,13 @@ class MangaSettingsDialog:
             ocr_batch_frame,
             text="Enable OCR batching (independent of translation batching)",
             variable=self.ocr_batch_enabled_var,
+            command=lambda: self._toggle_ocr_batching_controls(),
             bootstyle="round-toggle"
         ).pack(anchor='w')
-
+        
         # OCR batch size
         ocr_bs_row = tk.Frame(ocr_batch_frame)
+        self.ocr_bs_row = ocr_bs_row
         ocr_bs_row.pack(fill='x', pady=5)
         tk.Label(ocr_bs_row, text="OCR Batch Size:", width=20, anchor='w').pack(side='left')
         self.ocr_batch_size_var = tk.IntVar(value=int(self.settings['ocr'].get('ocr_batch_size', 8)))
@@ -1913,6 +1937,7 @@ class MangaSettingsDialog:
 
         # OCR Max Concurrency
         ocr_cc_row = tk.Frame(ocr_batch_frame)
+        self.ocr_cc_row = ocr_cc_row
         ocr_cc_row.pack(fill='x', pady=5)
         tk.Label(ocr_cc_row, text="OCR Max Concurrency:", width=20, anchor='w').pack(side='left')
         self.ocr_max_conc_var = tk.IntVar(value=int(self.settings['ocr'].get('ocr_max_concurrency', 2)))
@@ -1925,6 +1950,12 @@ class MangaSettingsDialog:
         )
         self.ocr_max_conc_spin.pack(side='left', padx=10)
         tk.Label(ocr_cc_row, text="(Google: concurrent requests; Azure: workers, capped at 4)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # Apply initial visibility for OCR batching controls
+        try:
+            self._toggle_ocr_batching_controls()
+        except Exception:
+            pass
 
         # ROI sizing
         roi_frame_local = tk.LabelFrame(content_frame, text="ROI Locality Controls", padx=15, pady=10)
@@ -1943,6 +1974,7 @@ class MangaSettingsDialog:
         # ROI padding ratio
         roi_pad_row = tk.Frame(roi_frame_local)
         roi_pad_row.pack(fill='x', pady=5)
+        self.roi_pad_row = roi_pad_row
         tk.Label(roi_pad_row, text="ROI Padding Ratio:", width=20, anchor='w').pack(side='left')
         self.roi_padding_ratio_var = tk.DoubleVar(value=float(self.settings['ocr'].get('roi_padding_ratio', 0.08)))
         roi_pad_scale = tk.Scale(
@@ -1960,6 +1992,7 @@ class MangaSettingsDialog:
         # ROI min side / area
         roi_min_row = tk.Frame(roi_frame_local)
         roi_min_row.pack(fill='x', pady=5)
+        self.roi_min_row = roi_min_row
         tk.Label(roi_min_row, text="Min ROI Side:", width=20, anchor='w').pack(side='left')
         self.roi_min_side_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_min_side_px', 12)))
         self.roi_min_side_spin = tb.Spinbox(
@@ -1974,6 +2007,7 @@ class MangaSettingsDialog:
 
         roi_area_row = tk.Frame(roi_frame_local)
         roi_area_row.pack(fill='x', pady=5)
+        self.roi_area_row = roi_area_row
         tk.Label(roi_area_row, text="Min ROI Area:", width=20, anchor='w').pack(side='left')
         self.roi_min_area_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_min_area_px', 100)))
         self.roi_min_area_spin = tb.Spinbox(
@@ -1989,6 +2023,7 @@ class MangaSettingsDialog:
         # ROI max side (0 disables)
         roi_max_row = tk.Frame(roi_frame_local)
         roi_max_row.pack(fill='x', pady=5)
+        self.roi_max_row = roi_max_row
         tk.Label(roi_max_row, text="ROI Max Side (0=off):", width=20, anchor='w').pack(side='left')
         self.roi_max_side_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_max_side', 0)))
         self.roi_max_side_spin = tb.Spinbox(
@@ -2668,7 +2703,7 @@ class MangaSettingsDialog:
         
         # Performance settings
         perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
-        perf_frame.pack(fill='x', padx=20)
+        # Defer packing until after memory_frame so this section appears below it
         
         self.parallel_processing = tk.IntVar(value=1 if self.settings['advanced']['parallel_processing'] else 0)
         parallel_cb = tb.Checkbutton(
@@ -2705,6 +2740,9 @@ class MangaSettingsDialog:
         # Memory management section
         memory_frame = tk.LabelFrame(content_frame, text="Memory Management", padx=15, pady=10)
         memory_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        # Now pack performance BELOW memory management
+        perf_frame.pack(fill='x', padx=20)
         
         # Singleton mode for model instances
         self.use_singleton_models = tk.BooleanVar(
@@ -2812,6 +2850,32 @@ class MangaSettingsDialog:
             command=_toggle_panel_controls
         )
         panel_cb.pack(anchor='w')
+        
+        # Inpainting Performance (moved from Inpainting tab)
+        inpaint_perf = tk.LabelFrame(perf_frame, text="Inpainting Performance", padx=15, pady=10)
+        inpaint_perf.pack(fill='x', padx=0, pady=(10,0))
+        inpaint_bs_row = tk.Frame(inpaint_perf)
+        inpaint_bs_row.pack(fill='x', pady=5)
+        tk.Label(inpaint_bs_row, text="Batch Size:", width=20, anchor='w').pack(side='left')
+        self.inpaint_batch_size = getattr(self, 'inpaint_batch_size', tk.IntVar(value=self.settings.get('inpainting', {}).get('batch_size', 10)))
+        tb.Spinbox(
+            inpaint_bs_row,
+            from_=1,
+            to=32,
+            textvariable=self.inpaint_batch_size,
+            width=10
+        ).pack(side='left', padx=10)
+        tk.Label(inpaint_bs_row, text="(process multiple regions at once)", font=('Arial',9), fg='gray').pack(side='left')
+        
+        cache_row = tk.Frame(inpaint_perf)
+        cache_row.pack(fill='x', pady=5)
+        self.enable_cache_var = getattr(self, 'enable_cache_var', tk.BooleanVar(value=self.settings.get('inpainting', {}).get('enable_cache', True)))
+        tb.Checkbutton(
+            cache_row,
+            text="Enable inpainting cache (speeds up repeated processing)",
+            variable=self.enable_cache_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
 
         panels_row = tk.Frame(panel_frame)
         panels_row.pack(fill='x', pady=5)
