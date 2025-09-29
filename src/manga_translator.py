@@ -185,6 +185,9 @@ class MangaTranslator:
             self.batch_mode = os.getenv('BATCH_TRANSLATION', '0') == '1'
         except Exception:
             self.batch_mode = False
+        
+        # OCR ROI cache (image_hash + bbox + provider + lang + mode -> text)
+        self.ocr_roi_cache = {}
         try:
             self.batch_size = int(os.getenv('BATCH_SIZE', '1'))
         except Exception:
@@ -1839,13 +1842,28 @@ class MangaTranslator:
             confidence_threshold = ocr_settings.get('confidence_threshold', 0.1)
             
             # Load and preprocess image if enabled
-            if preprocessing.get('enabled', True):
+            if preprocessing.get('enabled', False):
                 self._log("📐 Preprocessing enabled - enhancing image quality")
                 processed_image_data = self._preprocess_image(image_path, preprocessing)
             else:
-                # Read image file without preprocessing
-                with open(image_path, 'rb') as image_file:
-                    processed_image_data = image_file.read()
+                # Read image with optional compression (separate from preprocessing)
+                try:
+                    comp_cfg = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+                    if comp_cfg.get('enabled', False):
+                        processed_image_data = self._load_image_with_compression_only(image_path, comp_cfg)
+                    else:
+                        with open(image_path, 'rb') as image_file:
+                            processed_image_data = image_file.read()
+                except Exception:
+                    with open(image_path, 'rb') as image_file:
+                        processed_image_data = image_file.read()
+            
+            # Compute per-image hash for caching (based on uploaded bytes)
+            try:
+                import hashlib
+                page_hash = hashlib.sha1(processed_image_data).hexdigest()
+            except Exception:
+                page_hash = None
             
             regions = []
             
@@ -1857,7 +1875,41 @@ class MangaTranslator:
                     self._ensure_google_client()
                 except Exception:
                     pass
-                # Create Vision API image object
+                # If bubble detection is enabled and batch variables suggest batching, do ROI-based batched OCR
+                try:
+                    use_roi_locality = ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('roi_locality_enabled', False)
+                    # Determine OCR batching enable
+                    if 'ocr_batch_enabled' in ocr_settings:
+                        ocr_batch_enabled = bool(ocr_settings.get('ocr_batch_enabled'))
+                    else:
+                        ocr_batch_enabled = (os.getenv('BATCH_OCR', '0') == '1') or (os.getenv('BATCH_TRANSLATION', '0') == '1') or getattr(self, 'batch_mode', False)
+                    # Determine OCR batch size
+                    bs = int(ocr_settings.get('ocr_batch_size') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('OCR_BATCH_SIZE', '0') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('BATCH_SIZE', str(getattr(self, 'batch_size', 1))) or 1)
+                    ocr_batch_size = max(1, bs)
+                except Exception:
+                    use_roi_locality = False
+                    ocr_batch_enabled = False
+                    ocr_batch_size = 1
+                if use_roi_locality and (ocr_batch_enabled or ocr_batch_size > 1):
+                    rois = self._prepare_ocr_rois_from_bubbles(image_path, ocr_settings, preprocessing, page_hash)
+                    if rois:
+                        # Determine concurrency for Google: OCR_MAX_CONCURRENCY env or min(BATCH_SIZE,2)
+                        try:
+                            max_cc = int(ocr_settings.get('ocr_max_concurrency') or 0)
+                            if max_cc <= 0:
+                                max_cc = int(os.getenv('OCR_MAX_CONCURRENCY', '0') or 0)
+                            if max_cc <= 0:
+                                max_cc = min(max(1, ocr_batch_size), 2)
+                        except Exception:
+                            max_cc = min(max(1, ocr_batch_size), 2)
+                        regions = self._google_ocr_rois_batched(rois, ocr_settings, max(1, ocr_batch_size), max_cc, page_hash)
+                        self._log(f"✅ Google OCR batched over {len(rois)} ROIs → {len(regions)} regions (cc={max_cc})", "info")
+                        return regions
+                # Create Vision API image object (full-page fallback)
                 image = vision.Image(content=processed_image_data)
                 
                 # Build image context with all parameters
@@ -1970,17 +2022,59 @@ class MangaTranslator:
                 import time
                 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
                 
-                # Check if image needs format conversion for Azure
-                file_ext = os.path.splitext(image_path)[1].lower()
-                azure_supported_formats = ['.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.tiff']
+                # ROI-based concurrent OCR when bubble detection is enabled and batching is requested
+                try:
+                    use_roi_locality = ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('roi_locality_enabled', False)
+                    if 'ocr_batch_enabled' in ocr_settings:
+                        ocr_batch_enabled = bool(ocr_settings.get('ocr_batch_enabled'))
+                    else:
+                        ocr_batch_enabled = (os.getenv('BATCH_OCR', '0') == '1') or (os.getenv('BATCH_TRANSLATION', '0') == '1') or getattr(self, 'batch_mode', False)
+                    bs = int(ocr_settings.get('ocr_batch_size') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('OCR_BATCH_SIZE', '0') or 0)
+                    if bs <= 0:
+                        bs = int(os.getenv('BATCH_SIZE', str(getattr(self, 'batch_size', 1))) or 1)
+                    ocr_batch_size = max(1, bs)
+                except Exception:
+                    use_roi_locality = False
+                    ocr_batch_enabled = False
+                    ocr_batch_size = 1
+                if use_roi_locality and (ocr_batch_enabled or ocr_batch_size > 1):
+                    rois = self._prepare_ocr_rois_from_bubbles(image_path, ocr_settings, preprocessing, page_hash)
+                    if rois:
+                        # Azure recommended: 2–4 workers; derive from batch size
+                        try:
+                            azure_workers = int(ocr_settings.get('ocr_max_concurrency') or 0)
+                            if azure_workers <= 0:
+                                azure_workers = min(4, max(1, ocr_batch_size))
+                            else:
+                                azure_workers = min(4, max(1, azure_workers))
+                        except Exception:
+                            azure_workers = 2
+                        regions = self._azure_ocr_rois_concurrent(rois, ocr_settings, azure_workers, page_hash)
+                        self._log(f"✅ Azure OCR concurrent over {len(rois)} ROIs → {len(regions)} regions (workers={azure_workers})", "info")
+                        return regions
                 
-                if file_ext == '.webp' or file_ext not in azure_supported_formats:
-                    self._log(f"⚠️ Converting {file_ext} to PNG for Azure compatibility")
-                    from PIL import Image
-                    img = Image.open(io.BytesIO(processed_image_data))
-                    buffer = io.BytesIO()
-                    img.save(buffer, format='PNG')
-                    processed_image_data = buffer.getvalue()
+                # Ensure Azure-supported format regardless of original extension
+                file_ext = os.path.splitext(image_path)[1].lower()
+                azure_supported_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.tiff']
+                try:
+                    from PIL import Image as _PILImage
+                    img_probe = _PILImage.open(io.BytesIO(processed_image_data))
+                    fmt = (img_probe.format or '').lower()
+                except Exception:
+                    fmt = ''
+                needs_convert = (file_ext not in azure_supported_exts) or (fmt not in ['jpeg', 'jpg', 'png', 'bmp', 'tiff'])
+                if needs_convert:
+                    self._log("⚠️ Converting image to PNG for Azure compatibility")
+                    try:
+                        from PIL import Image as _PILImage
+                        img2 = _PILImage.open(io.BytesIO(processed_image_data))
+                        buffer = io.BytesIO()
+                        img2.save(buffer, format='PNG')
+                        processed_image_data = buffer.getvalue()
+                    except Exception:
+                        pass
                 
                 # Create stream from image data
                 image_stream = io.BytesIO(processed_image_data)
@@ -2945,6 +3039,373 @@ class MangaTranslator:
         
         return cropped
 
+    def _prepare_ocr_rois_from_bubbles(self, image_path: str, ocr_settings: Dict, preprocessing: Dict, page_hash: str) -> List[Dict[str, Any]]:
+        """Prepare ROI crops (bytes) from bubble detection to use with OCR locality.
+        - Enhancements/resizing are gated by preprocessing['enabled'].
+        - Compression/encoding is controlled by manga_settings['compression'] independently.
+        Returns list of dicts: {id, bbox, bytes, type}
+        """
+        try:
+            # Run bubble detector and collect text-containing boxes
+            detections = self._load_bubble_detector(ocr_settings, image_path)
+            if not detections:
+                return []
+            regions = []
+            for key in ('text_bubbles', 'text_free'):
+                for i, (bx, by, bw, bh) in enumerate(detections.get(key, []) or []):
+                    regions.append({'type': 'text_bubble' if key == 'text_bubbles' else 'free_text',
+                                    'bbox': (int(bx), int(by), int(bw), int(bh)),
+                                    'id': f"{key}_{i}"})
+            if not regions:
+                return []
+
+            # Open original image once
+            pil = Image.open(image_path)
+            if pil.mode != 'RGB':
+                pil = pil.convert('RGB')
+
+            pad_ratio = float(ocr_settings.get('roi_padding_ratio', 0.08))  # 8% padding default
+            preproc_enabled = bool(preprocessing.get('enabled', False))
+            # Compression settings (separate from preprocessing)
+            comp = {}
+            try:
+                comp = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+            except Exception:
+                comp = {}
+            comp_enabled = bool(comp.get('enabled', False))
+            comp_format = str(comp.get('format', 'jpeg')).lower()
+            jpeg_q = int(comp.get('jpeg_quality', 85))
+            png_lvl = int(comp.get('png_compress_level', 6))
+            webp_q = int(comp.get('webp_quality', 85))
+
+            out = []
+            W, H = pil.size
+            # Pre-filter tiny ROIs (skip before cropping)
+            min_side_px = int(ocr_settings.get('roi_min_side_px', 12))
+            min_area_px = int(ocr_settings.get('roi_min_area_px', 100))
+            for rec in regions:
+                x, y, w, h = rec['bbox']
+                if min(w, h) < max(1, min_side_px) or (w * h) < max(1, min_area_px):
+                    # Skip tiny ROI
+                    continue
+                # Apply padding
+                px = int(w * pad_ratio)
+                py = int(h * pad_ratio)
+                x1 = max(0, x - px)
+                y1 = max(0, y - py)
+                x2 = min(W, x + w + px)
+                y2 = min(H, y + h + py)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                crop = pil.crop((x1, y1, x2, y2))
+
+                # Quality-affecting steps only when preprocessing enabled
+                if preproc_enabled:
+                    try:
+                        # Enhance contrast/sharpness/brightness if configured
+                        c = float(preprocessing.get('contrast_threshold', 0.4))
+                        s = float(preprocessing.get('sharpness_threshold', 0.3))
+                        g = float(preprocessing.get('enhancement_strength', 1.5))
+                        if c:
+                            crop = ImageEnhance.Contrast(crop).enhance(1 + c)
+                        if s:
+                            crop = ImageEnhance.Sharpness(crop).enhance(1 + s)
+                        if g and g != 1.0:
+                            crop = ImageEnhance.Brightness(crop).enhance(g)
+                        # Optional ROI resize limit (short side cap)
+                        roi_max_side = int(ocr_settings.get('roi_max_side', 0) or 0)
+                        if roi_max_side and (crop.width > roi_max_side or crop.height > roi_max_side):
+                            ratio = min(roi_max_side / crop.width, roi_max_side / crop.height)
+                            crop = crop.resize((max(1, int(crop.width * ratio)), max(1, int(crop.height * ratio))), Image.Resampling.LANCZOS)
+                    except Exception:
+                        pass
+                # Encoding/Compression independent of preprocessing
+                from io import BytesIO
+                buf = BytesIO()
+                try:
+                    if comp_enabled:
+                        if comp_format in ('jpeg', 'jpg'):
+                            if crop.mode != 'RGB':
+                                crop = crop.convert('RGB')
+                            crop.save(buf, format='JPEG', quality=max(1, min(95, jpeg_q)), optimize=True, progressive=True)
+                        elif comp_format == 'png':
+                            crop.save(buf, format='PNG', optimize=True, compress_level=max(0, min(9, png_lvl)))
+                        elif comp_format == 'webp':
+                            crop.save(buf, format='WEBP', quality=max(1, min(100, webp_q)))
+                        else:
+                            crop.save(buf, format='PNG', optimize=True)
+                    else:
+                        # Default lossless PNG
+                        crop.save(buf, format='PNG', optimize=True)
+                    img_bytes = buf.getvalue()
+                except Exception:
+                    buf = BytesIO()
+                    crop.save(buf, format='PNG', optimize=True)
+                    img_bytes = buf.getvalue()
+
+                out.append({
+                    'id': rec['id'],
+                    'bbox': (x, y, w, h),  # keep original bbox without padding for placement
+                    'bytes': img_bytes,
+                    'type': rec['type'],
+                    'page_hash': page_hash
+                })
+            return out
+        except Exception as e:
+            self._log(f"⚠️ ROI preparation failed: {e}", "warning")
+            return []
+
+    def _google_ocr_rois_batched(self, rois: List[Dict[str, Any]], ocr_settings: Dict, batch_size: int, max_concurrency: int, page_hash: str) -> List[TextRegion]:
+        """Batch OCR of ROI crops using Google Vision batchAnnotateImages.
+        - Uses bounded concurrency for multiple batches in flight.
+        - Consults and updates an in-memory ROI OCR cache.
+        """
+        try:
+            from google.cloud import vision as _vision
+        except Exception:
+            self._log("❌ Google Vision SDK not available for ROI batching", "error")
+            return []
+
+        lang_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+        detection_mode = ocr_settings.get('text_detection_mode', 'document')
+        feature_type = _vision.Feature.Type.DOCUMENT_TEXT_DETECTION if detection_mode == 'document' else _vision.Feature.Type.TEXT_DETECTION
+        feature = _vision.Feature(type=feature_type)
+
+        results: List[TextRegion] = []
+        min_text_length = int(ocr_settings.get('min_text_length', 2))
+        exclude_english = bool(ocr_settings.get('exclude_english_text', True))
+
+        # Check cache first and build work list of uncached ROIs
+        work_rois = []
+        for roi in rois:
+            x, y, w, h = roi['bbox']
+            cache_key = ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode)
+            cached_text = self.ocr_roi_cache.get(cache_key)
+            if cached_text:
+                region = TextRegion(
+                    text=cached_text,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    region.should_inpaint = True
+                except Exception:
+                    pass
+                results.append(region)
+            else:
+                roi['cache_key'] = cache_key
+                work_rois.append(roi)
+
+        if not work_rois:
+            return results
+
+        # Create batches
+        batch_size = max(1, batch_size)
+        batches = [work_rois[i:i+batch_size] for i in range(0, len(work_rois), batch_size)]
+        max_concurrency = max(1, int(max_concurrency or 1))
+
+        def do_batch(batch):
+            requests = []
+            for roi in batch:
+                img = _vision.Image(content=roi['bytes'])
+                ctx = _vision.ImageContext(language_hints=list(lang_hints))
+                req = _vision.AnnotateImageRequest(image=img, features=[feature], image_context=ctx)
+                requests.append(req)
+            return self.vision_client.batch_annotate_images(requests=requests), batch
+
+        # Execute with concurrency
+        if max_concurrency == 1 or len(batches) == 1:
+            iter_batches = [(self.vision_client.batch_annotate_images(requests=[
+                _vision.AnnotateImageRequest(image=_vision.Image(content=roi['bytes']), features=[feature], image_context=_vision.ImageContext(language_hints=list(lang_hints)))
+                for roi in batch
+            ]), batch) for batch in batches]
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            iter_batches = []
+            with ThreadPoolExecutor(max_workers=max_concurrency) as ex:
+                futures = [ex.submit(do_batch, b) for b in batches]
+                for fut in as_completed(futures):
+                    try:
+                        iter_batches.append(fut.result())
+                    except Exception as e:
+                        self._log(f"⚠️ Google batch failed: {e}", "warning")
+                        continue
+
+        # Consume responses and update cache
+        for resp, batch in iter_batches:
+            for roi, ann in zip(batch, resp.responses):
+                if getattr(ann, 'error', None) and ann.error.message:
+                    self._log(f"⚠️ ROI OCR error: {ann.error.message}", "warning")
+                    continue
+                text = ''
+                try:
+                    if getattr(ann, 'full_text_annotation', None) and ann.full_text_annotation.text:
+                        text = ann.full_text_annotation.text
+                    elif ann.text_annotations:
+                        text = ann.text_annotations[0].description
+                except Exception:
+                    text = ''
+                text = (text or '').strip()
+                text_clean = self._sanitize_unicode_characters(self._fix_encoding_issues(text))
+                if len(text_clean.strip()) < min_text_length:
+                    continue
+                if exclude_english and self._is_primarily_english(text_clean):
+                    continue
+                x, y, w, h = roi['bbox']
+                # Update cache
+                try:
+                    ck = roi.get('cache_key') or ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode)
+                    self.ocr_roi_cache[ck] = text_clean
+                except Exception:
+                    pass
+                region = TextRegion(
+                    text=text_clean,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    region.should_inpaint = True
+                except Exception:
+                    pass
+                results.append(region)
+        return results
+
+    def _azure_ocr_rois_concurrent(self, rois: List[Dict[str, Any]], ocr_settings: Dict, max_workers: int, page_hash: str) -> List[TextRegion]:
+        """Concurrent ROI OCR for Azure Read API. Each ROI is sent as a separate call.
+        Concurrency is bounded by max_workers. Consults/updates cache.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+        import io
+        results: List[TextRegion] = []
+
+        # Read settings
+        reading_order = ocr_settings.get('azure_reading_order', 'natural')
+        model_version = ocr_settings.get('azure_model_version', 'latest')
+        language_hints = ocr_settings.get('language_hints', ['ja'])
+        read_params = {'raw': True, 'readingOrder': reading_order}
+        if model_version != 'latest':
+            read_params['model-version'] = model_version
+        if len(language_hints) == 1:
+            lang_mapping = {'zh': 'zh-Hans', 'zh-TW': 'zh-Hant', 'zh-CN': 'zh-Hans', 'ja': 'ja', 'ko': 'ko', 'en': 'en'}
+            read_params['language'] = lang_mapping.get(language_hints[0], language_hints[0])
+
+        min_text_length = int(ocr_settings.get('min_text_length', 2))
+        exclude_english = bool(ocr_settings.get('exclude_english_text', True))
+
+        # Check cache first and split into cached vs work rois
+        cached_regions: List[TextRegion] = []
+        work_rois: List[Dict[str, Any]] = []
+        for roi in rois:
+            x, y, w, h = roi['bbox']
+            cache_key = ("azure", page_hash, x, y, w, h, tuple(language_hints), model_version, reading_order)
+            text_cached = self.ocr_roi_cache.get(cache_key)
+            if text_cached:
+                region = TextRegion(
+                    text=text_cached,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    region.should_inpaint = True
+                except Exception:
+                    pass
+                cached_regions.append(region)
+            else:
+                roi['cache_key'] = cache_key
+                work_rois.append(roi)
+
+        def ocr_one(roi):
+            try:
+                # Ensure Azure-supported format for ROI (convert WEBP etc. to PNG if needed)
+                data = roi['bytes']
+                try:
+                    from PIL import Image as _PILImage
+                    im = _PILImage.open(io.BytesIO(data))
+                    fmt = (im.format or '').lower()
+                    if fmt not in ['jpeg', 'jpg', 'png', 'bmp', 'tiff']:
+                        buf2 = io.BytesIO()
+                        im.save(buf2, format='PNG')
+                        data = buf2.getvalue()
+                except Exception:
+                    pass
+                stream = io.BytesIO(data)
+                read_response = self.vision_client.read_in_stream(stream, **read_params)
+                op_loc = read_response.headers.get('Operation-Location') if hasattr(read_response, 'headers') else None
+                if not op_loc:
+                    return None
+                op_id = op_loc.split('/')[-1]
+                # Poll
+                import time
+                waited = 0.0
+                poll_interval = float(ocr_settings.get('azure_poll_interval', 0.5))
+                max_wait = float(ocr_settings.get('azure_max_wait', 60))
+                while waited < max_wait:
+                    result = self.vision_client.get_read_result(op_id)
+                    if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
+                        break
+                    time.sleep(poll_interval)
+                    waited += poll_interval
+                if result.status != OperationStatusCodes.succeeded:
+                    return None
+                # Aggregate text lines
+                texts = []
+                for page in result.analyze_result.read_results:
+                    for line in page.lines:
+                        t = self._sanitize_unicode_characters(self._fix_encoding_issues(line.text or ''))
+                        if t:
+                            texts.append(t)
+                text_all = ' '.join(texts).strip()
+                if len(text_all) < min_text_length:
+                    return None
+                if exclude_english and self._is_primarily_english(text_all):
+                    return None
+                x, y, w, h = roi['bbox']
+                # Update cache
+                try:
+                    ck = roi.get('cache_key')
+                    if ck:
+                        self.ocr_roi_cache[ck] = text_all
+                except Exception:
+                    pass
+                region = TextRegion(
+                    text=text_all,
+                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                    bounding_box=(x, y, w, h),
+                    confidence=0.95,
+                    region_type='ocr_roi'
+                )
+                try:
+                    region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
+                    region.should_inpaint = True
+                except Exception:
+                    pass
+                return region
+            except Exception:
+                return None
+
+        # Combine cached and new results
+        results.extend(cached_regions)
+        
+        if work_rois:
+            max_workers = max(1, min(max_workers, len(work_rois)))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                fut_map = {ex.submit(ocr_one, r): r for r in work_rois}
+                for fut in as_completed(fut_map):
+                    reg = fut.result()
+                    if reg is not None:
+                        results.append(reg)
+        return results
+
     def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
         """Detect text using Azure Computer Vision"""
         import io
@@ -3008,8 +3469,35 @@ class MangaTranslator:
         
         return regions
 
+    def _load_image_with_compression_only(self, image_path: str, comp: Dict) -> bytes:
+        """Load image and apply compression settings only (no enhancements/resizing)."""
+        from io import BytesIO
+        pil = Image.open(image_path)
+        if pil.mode != 'RGB':
+            pil = pil.convert('RGB')
+        buf = BytesIO()
+        try:
+            fmt = str(comp.get('format', 'jpeg')).lower()
+            if fmt in ('jpeg', 'jpg'):
+                q = max(1, min(95, int(comp.get('jpeg_quality', 85))))
+                pil.save(buf, format='JPEG', quality=q, optimize=True, progressive=True)
+            elif fmt == 'png':
+                lvl = max(0, min(9, int(comp.get('png_compress_level', 6))))
+                pil.save(buf, format='PNG', optimize=True, compress_level=lvl)
+            elif fmt == 'webp':
+                wq = max(1, min(100, int(comp.get('webp_quality', 85))))
+                pil.save(buf, format='WEBP', quality=wq)
+            else:
+                pil.save(buf, format='PNG', optimize=True)
+        except Exception:
+            pil.save(buf, format='PNG', optimize=True)
+        return buf.getvalue()
+
     def _preprocess_image(self, image_path: str, preprocessing_settings: Dict) -> bytes:
-        """Preprocess image for better OCR results"""
+        """Preprocess image for better OCR results
+        - Enhancements/resizing controlled by preprocessing_settings
+        - Compression controlled by manga_settings['compression'] independently
+        """
         try:
             # Open image with PIL
             pil_image = Image.open(image_path)
@@ -3052,10 +3540,39 @@ class MangaTranslator:
                 pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
                 self._log(f"   Resized image to {new_size[0]}x{new_size[1]}")
             
-            # Convert back to bytes
+            # Convert back to bytes with compression settings from global config
             from io import BytesIO
             buffered = BytesIO()
-            pil_image.save(buffered, format="PNG", optimize=True)
+            comp = {}
+            try:
+                comp = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+            except Exception:
+                comp = {}
+            try:
+                if comp.get('enabled', False):
+                    fmt = str(comp.get('format', 'jpeg')).lower()
+                    if fmt in ('jpeg', 'jpg'):
+                        if pil_image.mode != 'RGB':
+                            pil_image = pil_image.convert('RGB')
+                        quality = max(1, min(95, int(comp.get('jpeg_quality', 85))))
+                        pil_image.save(buffered, format='JPEG', quality=quality, optimize=True, progressive=True)
+                        self._log(f"   Compressed image as JPEG (q={quality})")
+                    elif fmt == 'png':
+                        level = max(0, min(9, int(comp.get('png_compress_level', 6))))
+                        pil_image.save(buffered, format='PNG', optimize=True, compress_level=level)
+                        self._log(f"   Compressed image as PNG (level={level})")
+                    elif fmt == 'webp':
+                        q = max(1, min(100, int(comp.get('webp_quality', 85))))
+                        pil_image.save(buffered, format='WEBP', quality=q)
+                        self._log(f"   Compressed image as WEBP (q={q})")
+                    else:
+                        pil_image.save(buffered, format='PNG', optimize=True)
+                        self._log("   Unknown compression format; saved as optimized PNG")
+                else:
+                    pil_image.save(buffered, format='PNG', optimize=True)
+            except Exception as _e:
+                self._log(f"   ⚠️ Compression failed ({_e}); saved as optimized PNG", "warning")
+                pil_image.save(buffered, format='PNG', optimize=True)
             return buffered.getvalue()
             
         except Exception as e:

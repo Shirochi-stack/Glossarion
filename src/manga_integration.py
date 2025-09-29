@@ -6433,16 +6433,15 @@ class MangaTranslationTab:
                 self._log("🔑 Auto cleanup disabled - models will remain in RAM for faster subsequent translations", "info")
             
             # IMPORTANT: Reset the entire translator instance to free ALL memory
-            # This ensures the translator object itself is completely removed from RAM
+            # Controlled by a separate "Unload models after translation" toggle
             try:
                 # Check if we should reset the translator instance
-                reset_translator = True  # Default to true for maximum memory savings
+                reset_translator = False  # default disabled
                 try:
                     advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
-                    # Only reset if auto_cleanup is enabled (same toggle controls both)
-                    reset_translator = advanced_settings.get('auto_cleanup_models', True)
+                    reset_translator = bool(advanced_settings.get('unload_models_after_translation', False))
                 except Exception:
-                    pass
+                    reset_translator = False
                 
                 if reset_translator:
                     self._log("\n🗑️ Resetting translator instance to free all memory...", "info")

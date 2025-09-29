@@ -49,9 +49,17 @@ class MangaSettingsDialog:
                 'max_image_pixels': 2000000,
                 'chunk_height': 1000,
                 'chunk_overlap': 100,
+                # Inpainting tiling
                 'inpaint_tiling_enabled': False,  # Off by default
                 'inpaint_tile_size': 512,  # Default tile size
                 'inpaint_tile_overlap': 64  # Overlap to avoid seams
+            },
+            'compression': {
+                'enabled': False,
+                'format': 'jpeg',
+                'jpeg_quality': 85,
+                'png_compress_level': 6,
+                'webp_quality': 85
             },
 'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
@@ -61,6 +69,7 @@ class MangaSettingsDialog:
                 'text_detection_mode': 'document',
                 'enable_rotation_correction': True,
                 'bubble_detection_enabled': False,
+                'roi_locality_enabled': False,
                 'bubble_model_path': '',
                 'bubble_confidence': 0.5,
                 'detector_type': 'rtdetr',
@@ -79,28 +88,29 @@ class MangaSettingsDialog:
                 'english_exclude_min_chars': 4,
                 'english_exclude_short_tokens': False
             },
-'advanced': {
-            'format_detection': True,
-            'webtoon_mode': 'auto',
-            'debug_mode': False,
-            'save_intermediate': False,
-            'parallel_processing': False,
-            'max_workers': 4,
-            'parallel_panel_translation': False,
-            'panel_max_workers': 2,
-            'auto_cleanup_models': False,  # Less aggressive by default
-            'auto_convert_to_onnx': False,  # Disabled by default
-            'auto_convert_to_onnx_background': True,
-            'quantize_models': False,
-            'onnx_quantize': False,
-            'torch_precision': 'auto',
-            # RAM cap defaults
-            'ram_cap_enabled': False,
-            'ram_cap_mb': 4096,
-            'ram_cap_mode': 'soft',
-            'ram_gate_timeout_sec': 15.0,
-            'ram_min_floor_over_baseline_mb': 256
-            },
+            'advanced': {
+                'format_detection': True,
+                'webtoon_mode': 'auto',
+                'debug_mode': False,
+                'save_intermediate': False,
+                'parallel_processing': False,
+                'max_workers': 4,
+                'parallel_panel_translation': False,
+                'panel_max_workers': 2,
+                'auto_cleanup_models': True,
+                'unload_models_after_translation': False,
+                'auto_convert_to_onnx': False,  # Disabled by default
+                'auto_convert_to_onnx_background': True,
+                'quantize_models': False,
+                'onnx_quantize': False,
+                'torch_precision': 'auto',
+                # RAM cap defaults
+                'ram_cap_enabled': False,
+                'ram_cap_mb': 4096,
+                'ram_cap_mode': 'soft',
+                'ram_gate_timeout_sec': 15.0,
+                'ram_min_floor_over_baseline_mb': 256
+                },
             'inpainting': {
                 'batch_size': 1,
                 'enable_cache': True,
@@ -696,6 +706,85 @@ class MangaSettingsDialog:
         self.preprocessing_controls.append(self.pixels_spinbox)
         
         tk.Label(pixels_frame, text="pixels").pack(side='left')
+        
+        # Compression section
+        compression_frame = tk.LabelFrame(content_frame, text="Image Compression (applies to OCR uploads)", padx=15, pady=10)
+        compression_frame.pack(fill='x', padx=20, pady=(10, 0))
+        # Do NOT add compression controls to preprocessing_controls; keep independent of preprocessing toggle
+        
+        # Enable compression toggle
+        self.compression_enabled_var = tk.BooleanVar(value=self.settings.get('compression', {}).get('enabled', False))
+        compression_toggle = tb.Checkbutton(
+            compression_frame,
+            text="Enable compression for OCR uploads",
+            variable=self.compression_enabled_var,
+            bootstyle="round-toggle",
+        )
+        compression_toggle.pack(anchor='w')
+        self.compression_toggle = compression_toggle
+        
+        # Format selection
+        format_row = tk.Frame(compression_frame)
+        format_row.pack(fill='x', pady=5)
+        tk.Label(format_row, text="Format:", width=20, anchor='w').pack(side='left')
+        self.compression_format_var = tk.StringVar(value=self.settings.get('compression', {}).get('format', 'jpeg'))
+        self.compression_format_combo = ttk.Combobox(
+            format_row,
+            textvariable=self.compression_format_var,
+            values=['jpeg', 'png', 'webp'],
+            state='readonly',
+            width=10
+        )
+        self.compression_format_combo.pack(side='left', padx=10)
+        
+        # JPEG quality
+        self.jpeg_row = tk.Frame(compression_frame)
+        self.jpeg_row.pack(fill='x', pady=5)
+        tk.Label(self.jpeg_row, text="JPEG Quality:", width=20, anchor='w').pack(side='left')
+        self.jpeg_quality_var = tk.IntVar(value=self.settings.get('compression', {}).get('jpeg_quality', 85))
+        self.jpeg_quality_spin = tb.Spinbox(
+            self.jpeg_row,
+            from_=1,
+            to=95,
+            textvariable=self.jpeg_quality_var,
+            width=10
+        )
+        self.jpeg_quality_spin.pack(side='left', padx=10)
+        tk.Label(self.jpeg_row, text="(higher = better quality, larger size)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # PNG compression level
+        self.png_row = tk.Frame(compression_frame)
+        self.png_row.pack(fill='x', pady=5)
+        tk.Label(self.png_row, text="PNG Compression:", width=20, anchor='w').pack(side='left')
+        self.png_level_var = tk.IntVar(value=self.settings.get('compression', {}).get('png_compress_level', 6))
+        self.png_level_spin = tb.Spinbox(
+            self.png_row,
+            from_=0,
+            to=9,
+            textvariable=self.png_level_var,
+            width=10
+        )
+        self.png_level_spin.pack(side='left', padx=10)
+        tk.Label(self.png_row, text="(0 = fastest, 9 = smallest)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # WEBP quality
+        self.webp_row = tk.Frame(compression_frame)
+        self.webp_row.pack(fill='x', pady=5)
+        tk.Label(self.webp_row, text="WEBP Quality:", width=20, anchor='w').pack(side='left')
+        self.webp_quality_var = tk.IntVar(value=self.settings.get('compression', {}).get('webp_quality', 85))
+        self.webp_quality_spin = tb.Spinbox(
+            self.webp_row,
+            from_=1,
+            to=100,
+            textvariable=self.webp_quality_var,
+            width=10
+        )
+        self.webp_quality_spin.pack(side='left', padx=10)
+        tk.Label(self.webp_row, text="(higher = better quality, larger size)", font=('Arial', 9), fg='gray').pack(side='left')
+        
+        # Hook to toggle visibility based on format
+        self.compression_format_combo.bind('<<ComboboxSelected>>', lambda e: self._toggle_compression_format())
+        self._toggle_compression_format()
         
         # Chunk settings for large images
         chunk_frame = tk.LabelFrame(content_frame, text="Large Image Processing", padx=15, pady=10)
@@ -1319,7 +1408,9 @@ class MangaSettingsDialog:
             'tile_size_spinbox', 'tile_overlap_spinbox',
             'chunk_frame', 'chunk_height_spinbox', 'chunk_overlap_spinbox',
             'chunk_height_label', 'chunk_overlap_label',
-            'chunk_height_unit_label', 'chunk_overlap_unit_label'
+            'chunk_height_unit_label', 'chunk_overlap_unit_label',
+            # Compression controls should always be active (separate from preprocessing)
+            'compression_frame', 'compression_toggle', 'compression_format_combo', 'jpeg_quality_spin', 'png_level_spin', 'webp_quality_spin'
         ]:
             if hasattr(self, name):
                 always_on.append(getattr(self, name))
@@ -1370,12 +1461,63 @@ class MangaSettingsDialog:
     def _toggle_frame_children(self, frame, enabled):
         """Recursively enable/disable all children of a frame"""
         for child in frame.winfo_children():
-            if isinstance(child, (tk.Scale, tb.Spinbox, tb.Checkbutton)):
-                child.config(state='normal' if enabled else 'disabled')
+            if isinstance(child, (tk.Scale, tb.Spinbox, tb.Checkbutton, ttk.Combobox)):
+                try:
+                    child.config(state='readonly' if (enabled and isinstance(child, ttk.Combobox)) else ('normal' if enabled else 'disabled'))
+                except Exception:
+                    child.config(state='normal' if enabled else 'disabled')
             elif isinstance(child, tk.Label):
                 child.config(fg='white' if enabled else 'gray')
             elif isinstance(child, tk.Frame):
                 self._toggle_frame_children(child, enabled)
+
+    def _toggle_roi_locality_controls(self):
+        """Show/hide ROI locality controls based on toggle."""
+        try:
+            enabled = self.roi_locality_var.get()
+        except Exception:
+            enabled = False
+        # Rows to manage
+        rows = [
+            getattr(self, 'roi_pad_row', None),
+            getattr(self, 'roi_min_row', None),
+            getattr(self, 'roi_area_row', None),
+            getattr(self, 'roi_max_row', None)
+        ]
+        for row in rows:
+            try:
+                if row is None: continue
+                if enabled:
+                    # Only pack if not already managed
+                    row.pack(fill='x', pady=5)
+                else:
+                    row.pack_forget()
+            except Exception:
+                pass
+
+    def _toggle_compression_format(self):
+        """Show only the controls relevant to the selected format (hide others)."""
+        fmt = getattr(self, 'compression_format_var', tk.StringVar(value='jpeg')).get()
+        try:
+            # Hide all rows first
+            for row in [getattr(self, 'jpeg_row', None), getattr(self, 'png_row', None), getattr(self, 'webp_row', None)]:
+                try:
+                    if row is not None:
+                        row.pack_forget()
+                except Exception:
+                    pass
+            # Show the selected one
+            if fmt == 'jpeg':
+                if hasattr(self, 'jpeg_row') and self.jpeg_row is not None:
+                    self.jpeg_row.pack(fill='x', pady=5)
+            elif fmt == 'png':
+                if hasattr(self, 'png_row') and self.png_row is not None:
+                    self.png_row.pack(fill='x', pady=5)
+            else:  # webp
+                if hasattr(self, 'webp_row') and self.webp_row is not None:
+                    self.webp_row.pack(fill='x', pady=5)
+        except Exception:
+            pass
     
     def _create_ocr_tab(self, notebook):
         """Create OCR settings tab with all options"""
@@ -1738,6 +1880,126 @@ class MangaSettingsDialog:
             variable=self.enable_rotation,
             bootstyle="round-toggle"
         ).pack(anchor='w')
+
+        # OCR batching and locality settings
+        ocr_batch_frame = tk.LabelFrame(content_frame, text="OCR Batching & Concurrency", padx=15, pady=10)
+        ocr_batch_frame.pack(fill='x', padx=20, pady=(10, 0))
+
+        # Enable OCR batching
+        self.ocr_batch_enabled_var = tk.BooleanVar(value=self.settings['ocr'].get('ocr_batch_enabled', True))
+        tb.Checkbutton(
+            ocr_batch_frame,
+            text="Enable OCR batching (independent of translation batching)",
+            variable=self.ocr_batch_enabled_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+
+        # OCR batch size
+        ocr_bs_row = tk.Frame(ocr_batch_frame)
+        ocr_bs_row.pack(fill='x', pady=5)
+        tk.Label(ocr_bs_row, text="OCR Batch Size:", width=20, anchor='w').pack(side='left')
+        self.ocr_batch_size_var = tk.IntVar(value=int(self.settings['ocr'].get('ocr_batch_size', 8)))
+        self.ocr_batch_size_spin = tb.Spinbox(
+            ocr_bs_row,
+            from_=1,
+            to=32,
+            textvariable=self.ocr_batch_size_var,
+            width=10
+        )
+        self.ocr_batch_size_spin.pack(side='left', padx=10)
+        tk.Label(ocr_bs_row, text="(Google: items/request; Azure: drives concurrency)", font=('Arial', 9), fg='gray').pack(side='left')
+
+        # OCR Max Concurrency
+        ocr_cc_row = tk.Frame(ocr_batch_frame)
+        ocr_cc_row.pack(fill='x', pady=5)
+        tk.Label(ocr_cc_row, text="OCR Max Concurrency:", width=20, anchor='w').pack(side='left')
+        self.ocr_max_conc_var = tk.IntVar(value=int(self.settings['ocr'].get('ocr_max_concurrency', 2)))
+        self.ocr_max_conc_spin = tb.Spinbox(
+            ocr_cc_row,
+            from_=1,
+            to=8,
+            textvariable=self.ocr_max_conc_var,
+            width=10
+        )
+        self.ocr_max_conc_spin.pack(side='left', padx=10)
+        tk.Label(ocr_cc_row, text="(Google: concurrent requests; Azure: workers, capped at 4)", font=('Arial', 9), fg='gray').pack(side='left')
+
+        # ROI sizing
+        roi_frame_local = tk.LabelFrame(content_frame, text="ROI Locality Controls", padx=15, pady=10)
+        roi_frame_local.pack(fill='x', padx=20, pady=(10, 0))
+
+        # ROI locality toggle (now inside this section)
+        self.roi_locality_var = tk.BooleanVar(value=self.settings['ocr'].get('roi_locality_enabled', False))
+        tb.Checkbutton(
+            roi_frame_local,
+            text="Enable ROI-based OCR locality and batching (uses bubble detection)",
+            variable=self.roi_locality_var,
+            command=self._toggle_roi_locality_controls,
+            bootstyle="round-toggle"
+        ).pack(anchor='w', pady=(0,5))
+
+        # ROI padding ratio
+        roi_pad_row = tk.Frame(roi_frame_local)
+        roi_pad_row.pack(fill='x', pady=5)
+        tk.Label(roi_pad_row, text="ROI Padding Ratio:", width=20, anchor='w').pack(side='left')
+        self.roi_padding_ratio_var = tk.DoubleVar(value=float(self.settings['ocr'].get('roi_padding_ratio', 0.08)))
+        roi_pad_scale = tk.Scale(
+            roi_pad_row,
+            from_=0.0,
+            to=0.30,
+            resolution=0.01,
+            orient='horizontal',
+            variable=self.roi_padding_ratio_var,
+            length=200
+        )
+        roi_pad_scale.pack(side='left', padx=10)
+        tk.Label(roi_pad_row, textvariable=self.roi_padding_ratio_var, width=5).pack(side='left')
+
+        # ROI min side / area
+        roi_min_row = tk.Frame(roi_frame_local)
+        roi_min_row.pack(fill='x', pady=5)
+        tk.Label(roi_min_row, text="Min ROI Side:", width=20, anchor='w').pack(side='left')
+        self.roi_min_side_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_min_side_px', 12)))
+        self.roi_min_side_spin = tb.Spinbox(
+            roi_min_row,
+            from_=1,
+            to=64,
+            textvariable=self.roi_min_side_var,
+            width=10
+        )
+        self.roi_min_side_spin.pack(side='left', padx=10)
+        tk.Label(roi_min_row, text="px").pack(side='left')
+
+        roi_area_row = tk.Frame(roi_frame_local)
+        roi_area_row.pack(fill='x', pady=5)
+        tk.Label(roi_area_row, text="Min ROI Area:", width=20, anchor='w').pack(side='left')
+        self.roi_min_area_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_min_area_px', 100)))
+        self.roi_min_area_spin = tb.Spinbox(
+            roi_area_row,
+            from_=1,
+            to=5000,
+            textvariable=self.roi_min_area_var,
+            width=10
+        )
+        self.roi_min_area_spin.pack(side='left', padx=10)
+        tk.Label(roi_area_row, text="px^2").pack(side='left')
+
+        # ROI max side (0 disables)
+        roi_max_row = tk.Frame(roi_frame_local)
+        roi_max_row.pack(fill='x', pady=5)
+        tk.Label(roi_max_row, text="ROI Max Side (0=off):", width=20, anchor='w').pack(side='left')
+        self.roi_max_side_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_max_side', 0)))
+        self.roi_max_side_spin = tb.Spinbox(
+            roi_max_row,
+            from_=0,
+            to=2048,
+            textvariable=self.roi_max_side_var,
+            width=10
+        )
+        self.roi_max_side_spin.pack(side='left', padx=10)
+
+        # Apply initial visibility based on toggle
+        self._toggle_roi_locality_controls()
 
         # AI Bubble Detection Settings
         bubble_frame = tk.LabelFrame(content_frame, text="AI Bubble Detection", padx=15, pady=10)
@@ -2522,6 +2784,18 @@ class MangaSettingsDialog:
         )
         cleanup_cb.pack(anchor='w')
         
+        # Unload models after translation (disabled by default)
+        self.unload_models_var = tk.BooleanVar(
+            value=self.settings.get('advanced', {}).get('unload_models_after_translation', False)
+        )
+        unload_cb = tb.Checkbutton(
+            memory_frame,
+            text="Unload models after translation (reset translator instance)",
+            variable=self.unload_models_var,
+            bootstyle="round-toggle"
+        )
+        unload_cb.pack(anchor='w', pady=(4,0))
+        
         # Add a note about parallel processing
         note_label = tk.Label(
             memory_frame,
@@ -3034,7 +3308,14 @@ class MangaSettingsDialog:
             self.settings['preprocessing']['max_image_pixels'] = self.max_pixels.get()
             self.settings['preprocessing']['chunk_height'] = self.chunk_height.get()
             self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap.get()
-            
+            # Compression (saved separately from preprocessing)
+            if 'compression' not in self.settings:
+                self.settings['compression'] = {}
+            self.settings['compression']['enabled'] = bool(self.compression_enabled_var.get()) if hasattr(self, 'compression_enabled_var') else False
+            self.settings['compression']['format'] = str(self.compression_format_var.get()) if hasattr(self, 'compression_format_var') else 'jpeg'
+            self.settings['compression']['jpeg_quality'] = int(self.jpeg_quality_var.get()) if hasattr(self, 'jpeg_quality_var') else 85
+            self.settings['compression']['png_compress_level'] = int(self.png_level_var.get()) if hasattr(self, 'png_level_var') else 6
+            self.settings['compression']['webp_quality'] = int(self.webp_quality_var.get()) if hasattr(self, 'webp_quality_var') else 85
             # TILING SETTINGS - save under preprocessing (primary) and mirror under 'tiling' for backward compatibility
             self.settings['preprocessing']['inpaint_tiling_enabled'] = self.inpaint_tiling_enabled.get()
             self.settings['preprocessing']['inpaint_tile_size'] = self.inpaint_tile_size.get()
@@ -3059,6 +3340,15 @@ class MangaSettingsDialog:
             self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
             self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
             self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
+            self.settings['ocr']['roi_locality_enabled'] = bool(self.roi_locality_var.get()) if hasattr(self, 'roi_locality_var') else True
+            # OCR batching & locality
+            self.settings['ocr']['ocr_batch_enabled'] = bool(self.ocr_batch_enabled_var.get()) if hasattr(self, 'ocr_batch_enabled_var') else True
+            self.settings['ocr']['ocr_batch_size'] = int(self.ocr_batch_size_var.get()) if hasattr(self, 'ocr_batch_size_var') else 8
+            self.settings['ocr']['ocr_max_concurrency'] = int(self.ocr_max_conc_var.get()) if hasattr(self, 'ocr_max_conc_var') else 2
+            self.settings['ocr']['roi_padding_ratio'] = float(self.roi_padding_ratio_var.get()) if hasattr(self, 'roi_padding_ratio_var') else 0.08
+            self.settings['ocr']['roi_min_side_px'] = int(self.roi_min_side_var.get()) if hasattr(self, 'roi_min_side_var') else 12
+            self.settings['ocr']['roi_min_area_px'] = int(self.roi_min_area_var.get()) if hasattr(self, 'roi_min_area_var') else 100
+            self.settings['ocr']['roi_max_side'] = int(self.roi_max_side_var.get()) if hasattr(self, 'roi_max_side_var') else 0
             self.settings['ocr']['english_exclude_threshold'] = self.english_exclude_threshold.get()
             self.settings['ocr']['english_exclude_min_chars'] = self.english_exclude_min_chars.get()
             self.settings['ocr']['english_exclude_short_tokens'] = self.english_exclude_short_tokens.get()
@@ -3126,6 +3416,7 @@ class MangaSettingsDialog:
             # Memory management settings
             self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models.get())
             self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_models.get())
+            self.settings['advanced']['unload_models_after_translation'] = bool(getattr(self, 'unload_models_var', tk.BooleanVar(value=False)).get())
             
             # ONNX auto-convert settings (persist and apply to environment)
             if hasattr(self, 'auto_convert_onnx_var'):
