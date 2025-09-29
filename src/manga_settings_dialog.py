@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, Callable
 from bubble_detector import BubbleDetector
 import logging
 import time
+import copy
 
 # Use the same logging infrastructure initialized by translator_gui
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ class MangaSettingsDialog:
                 'max_workers': 4,
                 'parallel_panel_translation': False,
                 'panel_max_workers': 2,
-                'auto_cleanup_models': True,
+                'auto_cleanup_models': False,
                 'unload_models_after_translation': False,
                 'auto_convert_to_onnx': False,  # Disabled by default
                 'auto_convert_to_onnx_background': True,
@@ -2019,50 +2020,6 @@ class MangaSettingsDialog:
         )
         bubble_enable_cb.pack(anchor='w')
 
-        # Global Max detections (default)
-        maxdet_frame_global = tk.Frame(bubble_frame)
-        maxdet_frame_global.pack(fill='x', pady=(10, 0))
-        tk.Label(maxdet_frame_global, text="Max detections (default):", width=20, anchor='w').pack(side='left')
-        self.bubble_max_detections_var = tk.IntVar(
-            value=self.settings['ocr'].get('bubble_max_detections', 100)
-        )
-        tb.Spinbox(
-            maxdet_frame_global,
-            from_=1,
-            to=1000,
-            textvariable=self.bubble_max_detections_var,
-            width=10
-        ).pack(side='left', padx=10)
-        tk.Label(maxdet_frame_global, text="(fallback if per-detector not set)").pack(side='left')
-
-        # Per-detector caps
-        maxdet_frame_y = tk.Frame(bubble_frame)
-        maxdet_frame_y.pack(fill='x', pady=(6, 0))
-        tk.Label(maxdet_frame_y, text="Max detections (YOLO):", width=20, anchor='w').pack(side='left')
-        self.bubble_max_det_yolo_var = tk.IntVar(
-            value=self.settings['ocr'].get('bubble_max_detections_yolo', self.bubble_max_detections_var.get())
-        )
-        tb.Spinbox(
-            maxdet_frame_y,
-            from_=1,
-            to=2000,
-            textvariable=self.bubble_max_det_yolo_var,
-            width=10
-        ).pack(side='left', padx=10)
-
-        maxdet_frame_r = tk.Frame(bubble_frame)
-        maxdet_frame_r.pack(fill='x', pady=(6, 0))
-        tk.Label(maxdet_frame_r, text="Max detections (RT-DETR):", width=20, anchor='w').pack(side='left')
-        self.bubble_max_det_rtdetr_var = tk.IntVar(
-            value=self.settings['ocr'].get('bubble_max_detections_rtdetr', self.bubble_max_detections_var.get())
-        )
-        tb.Spinbox(
-            maxdet_frame_r,
-            from_=1,
-            to=2000,
-            textvariable=self.bubble_max_det_rtdetr_var,
-            width=10
-        ).pack(side='left', padx=10)
 
         # Detector type dropdown - PUT THIS DIRECTLY IN bubble_frame
         detector_type_frame = tk.Frame(bubble_frame)
@@ -2278,6 +2235,21 @@ class MangaSettingsDialog:
         self.rtdetr_conf_label = self.bubble_conf_label
 
         # Status label
+        # YOLO-specific: Max detections (only visible for YOLO)
+        self.yolo_maxdet_row = tk.Frame(self.yolo_settings_frame)
+        self.yolo_maxdet_row.pack_forget()
+        tk.Label(self.yolo_maxdet_row, text="Max detections:", width=12, anchor='w').pack(side='left')
+        self.bubble_max_det_yolo_var = tk.IntVar(
+            value=self.settings['ocr'].get('bubble_max_detections_yolo', 100)
+        )
+        tb.Spinbox(
+            self.yolo_maxdet_row,
+            from_=1,
+            to=2000,
+            textvariable=self.bubble_max_det_yolo_var,
+            width=10
+        ).pack(side='left', padx=(0,10))
+
         self.bubble_status_label = tk.Label(
             bubble_frame,
             text="",
@@ -2310,7 +2282,8 @@ class MangaSettingsDialog:
             self.bubble_model_entry,
             self.bubble_browse_btn,
             self.bubble_clear_btn,
-            self.bubble_conf_scale
+            self.bubble_conf_scale,
+            self.yolo_maxdet_row
         ]
 
         # Initialize control states
@@ -2371,8 +2344,15 @@ class MangaSettingsDialog:
         # Show/hide RT-DETR specific controls
         if 'RT-DETR' in detector or 'RTEDR_onnx' in detector:
             self.rtdetr_classes_frame.pack(fill='x', pady=(10, 0), after=self.rtdetr_load_btn.master)
+            # Hide YOLO-only max det row
+            self.yolo_maxdet_row.pack_forget()
         else:
             self.rtdetr_classes_frame.pack_forget()
+            # Show YOLO-only max det row for YOLO models
+            if 'YOLO' in detector or 'Yolo' in detector or 'yolo' in detector or detector == 'Custom Model':
+                self.yolo_maxdet_row.pack(fill='x', pady=(6,0))
+            else:
+                self.yolo_maxdet_row.pack_forget()
         
         # Always show settings frame
         self.yolo_settings_frame.pack(fill='x', pady=(10, 0))
@@ -2774,7 +2754,7 @@ class MangaSettingsDialog:
         singleton_note.pack(anchor='w', pady=(2, 10), padx=(20, 0))
         
         self.auto_cleanup_models = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('auto_cleanup_models', True)
+            value=self.settings.get('advanced', {}).get('auto_cleanup_models', False)
         )
         cleanup_cb = tb.Checkbutton(
             memory_frame,
@@ -3023,6 +3003,198 @@ class MangaSettingsDialog:
         enabled = bool(self.parallel_processing.get())
         self.workers_spinbox.config(state='normal' if enabled else 'disabled')
         self.workers_label.config(fg='white' if enabled else 'gray')
+
+    def _apply_defaults_to_controls(self):
+        """Apply default values to all visible Tk variables/controls across tabs without rebuilding the dialog."""
+        try:
+            # Use current in-memory settings (which we set to defaults above)
+            s = self.settings if isinstance(getattr(self, 'settings', None), dict) else self.default_settings
+            pre = s.get('preprocessing', {})
+            comp = s.get('compression', {})
+            ocr = s.get('ocr', {})
+            adv = s.get('advanced', {})
+            inp = s.get('inpainting', {})
+            font = s.get('font_sizing', {})
+
+            # Preprocessing
+            if hasattr(self, 'preprocess_enabled'): self.preprocess_enabled.set(bool(pre.get('enabled', False)))
+            if hasattr(self, 'auto_detect'): self.auto_detect.set(bool(pre.get('auto_detect_quality', True)))
+            if hasattr(self, 'contrast_threshold'): self.contrast_threshold.set(float(pre.get('contrast_threshold', 0.4)))
+            if hasattr(self, 'sharpness_threshold'): self.sharpness_threshold.set(float(pre.get('sharpness_threshold', 0.3)))
+            if hasattr(self, 'enhancement_strength'): self.enhancement_strength.set(float(pre.get('enhancement_strength', 1.5)))
+            if hasattr(self, 'noise_threshold'): self.noise_threshold.set(int(pre.get('noise_threshold', 20)))
+            if hasattr(self, 'denoise_strength'): self.denoise_strength.set(int(pre.get('denoise_strength', 10)))
+            if hasattr(self, 'max_dimension'): self.max_dimension.set(int(pre.get('max_image_dimension', 2000)))
+            if hasattr(self, 'max_pixels'): self.max_pixels.set(int(pre.get('max_image_pixels', 2000000)))
+            if hasattr(self, 'chunk_height'): self.chunk_height.set(int(pre.get('chunk_height', 1000)))
+            if hasattr(self, 'chunk_overlap'): self.chunk_overlap.set(int(pre.get('chunk_overlap', 100)))
+            # Compression
+            if hasattr(self, 'compression_enabled_var'): self.compression_enabled_var.set(bool(comp.get('enabled', False)))
+            if hasattr(self, 'compression_format_var'): self.compression_format_var.set(str(comp.get('format', 'jpeg')))
+            if hasattr(self, 'jpeg_quality_var'): self.jpeg_quality_var.set(int(comp.get('jpeg_quality', 85)))
+            if hasattr(self, 'png_level_var'): self.png_level_var.set(int(comp.get('png_compress_level', 6)))
+            if hasattr(self, 'webp_quality_var'): self.webp_quality_var.set(int(comp.get('webp_quality', 85)))
+            # Tiling
+            if hasattr(self, 'inpaint_tiling_enabled'): self.inpaint_tiling_enabled.set(bool(pre.get('inpaint_tiling_enabled', False)))
+            if hasattr(self, 'inpaint_tile_size'): self.inpaint_tile_size.set(int(pre.get('inpaint_tile_size', 512)))
+            if hasattr(self, 'inpaint_tile_overlap'): self.inpaint_tile_overlap.set(int(pre.get('inpaint_tile_overlap', 64)))
+
+            # OCR basic
+            if hasattr(self, 'confidence_threshold'): self.confidence_threshold.set(float(ocr.get('confidence_threshold', 0.7)))
+            if hasattr(self, 'detection_mode'): self.detection_mode.set(str(ocr.get('text_detection_mode', 'document')))
+            if hasattr(self, 'merge_nearby_threshold'): self.merge_nearby_threshold.set(int(ocr.get('merge_nearby_threshold', 20)))
+            if hasattr(self, 'enable_rotation'): self.enable_rotation.set(bool(ocr.get('enable_rotation_correction', True)))
+
+            # Language checkboxes
+            try:
+                if hasattr(self, 'lang_vars') and isinstance(self.lang_vars, dict):
+                    langs = set(ocr.get('language_hints', ['ja', 'ko', 'zh']))
+                    for code, var in self.lang_vars.items():
+                        var.set(code in langs)
+            except Exception:
+                pass
+
+            # OCR batching/locality
+            if hasattr(self, 'ocr_batch_enabled_var'): self.ocr_batch_enabled_var.set(bool(ocr.get('ocr_batch_enabled', True)))
+            if hasattr(self, 'ocr_batch_size_var'): self.ocr_batch_size_var.set(int(ocr.get('ocr_batch_size', 8)))
+            if hasattr(self, 'ocr_max_conc_var'): self.ocr_max_conc_var.set(int(ocr.get('ocr_max_concurrency', 2)))
+            if hasattr(self, 'roi_locality_var'): self.roi_locality_var.set(bool(ocr.get('roi_locality_enabled', False)))
+            if hasattr(self, 'roi_padding_ratio_var'): self.roi_padding_ratio_var.set(float(ocr.get('roi_padding_ratio', 0.08)))
+            if hasattr(self, 'roi_min_side_var'): self.roi_min_side_var.set(int(ocr.get('roi_min_side_px', 12)))
+            if hasattr(self, 'roi_min_area_var'): self.roi_min_area_var.set(int(ocr.get('roi_min_area_px', 100)))
+            if hasattr(self, 'roi_max_side_var'): self.roi_max_side_var.set(int(ocr.get('roi_max_side', 0)))
+
+            # English filters
+            if hasattr(self, 'exclude_english_var'): self.exclude_english_var.set(bool(ocr.get('exclude_english_text', False)))
+            if hasattr(self, 'english_exclude_threshold'): self.english_exclude_threshold.set(float(ocr.get('english_exclude_threshold', 0.7)))
+            if hasattr(self, 'english_exclude_min_chars'): self.english_exclude_min_chars.set(int(ocr.get('english_exclude_min_chars', 4)))
+            if hasattr(self, 'english_exclude_short_tokens'): self.english_exclude_short_tokens.set(bool(ocr.get('english_exclude_short_tokens', False)))
+
+            # Azure
+            if hasattr(self, 'azure_merge_multiplier'): self.azure_merge_multiplier.set(float(ocr.get('azure_merge_multiplier', 3.0)))
+            if hasattr(self, 'azure_reading_order'): self.azure_reading_order.set(str(ocr.get('azure_reading_order', 'natural')))
+            if hasattr(self, 'azure_model_version'): self.azure_model_version.set(str(ocr.get('azure_model_version', 'latest')))
+            if hasattr(self, 'azure_max_wait'): self.azure_max_wait.set(int(ocr.get('azure_max_wait', 60)))
+            if hasattr(self, 'azure_poll_interval'): self.azure_poll_interval.set(float(ocr.get('azure_poll_interval', 0.5)))
+            try:
+                self._update_azure_label()
+            except Exception:
+                pass
+
+            # Bubble detector
+            if hasattr(self, 'bubble_detection_enabled'): self.bubble_detection_enabled.set(bool(ocr.get('bubble_detection_enabled', False)))
+            # Detector type mapping to UI labels
+            if hasattr(self, 'detector_type'):
+                dt = str(ocr.get('detector_type', 'rtdetr_onnx'))
+                if dt == 'rtdetr_onnx': self.detector_type.set('RTEDR_onnx')
+                elif dt == 'rtdetr': self.detector_type.set('RT-DETR')
+                elif dt == 'yolo': self.detector_type.set('YOLOv8 Speech')
+                elif dt == 'custom': self.detector_type.set('Custom Model')
+                else: self.detector_type.set('RTEDR_onnx')
+            if hasattr(self, 'bubble_model_path'): self.bubble_model_path.set(str(ocr.get('bubble_model_path', '')))
+            if hasattr(self, 'bubble_confidence'): self.bubble_confidence.set(float(ocr.get('bubble_confidence', 0.5)))
+            if hasattr(self, 'detect_empty_bubbles'): self.detect_empty_bubbles.set(bool(ocr.get('detect_empty_bubbles', True)))
+            if hasattr(self, 'detect_text_bubbles'): self.detect_text_bubbles.set(bool(ocr.get('detect_text_bubbles', True)))
+            if hasattr(self, 'detect_free_text'): self.detect_free_text.set(bool(ocr.get('detect_free_text', True)))
+            if hasattr(self, 'bubble_max_det_yolo_var'): self.bubble_max_det_yolo_var.set(int(ocr.get('bubble_max_detections_yolo', 100)))
+
+            # Inpainting
+            if hasattr(self, 'inpaint_batch_size'): self.inpaint_batch_size.set(int(inp.get('batch_size', 1)))
+            if hasattr(self, 'enable_cache_var'): self.enable_cache_var.set(bool(inp.get('enable_cache', True)))
+            if hasattr(self, 'mask_dilation_var'): self.mask_dilation_var.set(int(s.get('mask_dilation', 0)))
+            if hasattr(self, 'use_all_iterations_var'): self.use_all_iterations_var.set(bool(s.get('use_all_iterations', True)))
+            if hasattr(self, 'all_iterations_var'): self.all_iterations_var.set(int(s.get('all_iterations', 2)))
+            if hasattr(self, 'text_bubble_iterations_var'): self.text_bubble_iterations_var.set(int(s.get('text_bubble_dilation_iterations', 2)))
+            if hasattr(self, 'empty_bubble_iterations_var'): self.empty_bubble_iterations_var.set(int(s.get('empty_bubble_dilation_iterations', 3)))
+            if hasattr(self, 'free_text_iterations_var'): self.free_text_iterations_var.set(int(s.get('free_text_dilation_iterations', 0)))
+
+            # Advanced
+            if hasattr(self, 'format_detection'): self.format_detection.set(1 if adv.get('format_detection', True) else 0)
+            if hasattr(self, 'webtoon_mode'): self.webtoon_mode.set(str(adv.get('webtoon_mode', 'auto')))
+            if hasattr(self, 'debug_mode'): self.debug_mode.set(1 if adv.get('debug_mode', False) else 0)
+            if hasattr(self, 'save_intermediate'): self.save_intermediate.set(1 if adv.get('save_intermediate', False) else 0)
+            if hasattr(self, 'parallel_processing'): self.parallel_processing.set(1 if adv.get('parallel_processing', False) else 0)
+            if hasattr(self, 'max_workers'): self.max_workers.set(int(adv.get('max_workers', 4)))
+            if hasattr(self, 'use_singleton_models'): self.use_singleton_models.set(bool(adv.get('use_singleton_models', True)))
+            if hasattr(self, 'auto_cleanup_models'): self.auto_cleanup_models.set(bool(adv.get('auto_cleanup_models', False)))
+            if hasattr(self, 'unload_models_var'): self.unload_models_var.set(bool(adv.get('unload_models_after_translation', False)))
+            if hasattr(self, 'parallel_panel_var'): self.parallel_panel_var.set(bool(adv.get('parallel_panel_translation', False)))
+            if hasattr(self, 'panel_max_workers_var'): self.panel_max_workers_var.set(int(adv.get('panel_max_workers', 2)))
+            if hasattr(self, 'panel_stagger_ms_var'): self.panel_stagger_ms_var.set(int(adv.get('panel_start_stagger_ms', 500)))
+            if hasattr(self, 'auto_convert_onnx_var'): self.auto_convert_onnx_var.set(bool(adv.get('auto_convert_to_onnx', False)))
+            if hasattr(self, 'auto_convert_onnx_bg_var'): self.auto_convert_onnx_bg_var.set(bool(adv.get('auto_convert_to_onnx_background', True)))
+            if hasattr(self, 'quantize_models_var'): self.quantize_models_var.set(bool(adv.get('quantize_models', False)))
+            if hasattr(self, 'onnx_quantize_var'): self.onnx_quantize_var.set(bool(adv.get('onnx_quantize', False)))
+            if hasattr(self, 'torch_precision_var'): self.torch_precision_var.set(str(adv.get('torch_precision', 'auto')))
+
+            # Font sizing tab
+            if hasattr(self, 'font_algorithm_var'): self.font_algorithm_var.set(str(font.get('algorithm', 'smart')))
+            if hasattr(self, 'min_font_size_var'): self.min_font_size_var.set(int(font.get('min_size', 10)))
+            if hasattr(self, 'max_font_size_var'): self.max_font_size_var.set(int(font.get('max_size', 40)))
+            if hasattr(self, 'min_readable_var'): self.min_readable_var.set(int(font.get('min_readable', 14)))
+            if hasattr(self, 'prefer_larger_var'): self.prefer_larger_var.set(bool(font.get('prefer_larger', True)))
+            if hasattr(self, 'bubble_size_factor_var'): self.bubble_size_factor_var.set(bool(font.get('bubble_size_factor', True)))
+            if hasattr(self, 'line_spacing_var'): self.line_spacing_var.set(float(font.get('line_spacing', 1.3)))
+            if hasattr(self, 'max_lines_var'): self.max_lines_var.set(int(font.get('max_lines', 10)))
+            try:
+                if hasattr(self, '_on_font_mode_change'):
+                    self._on_font_mode_change()
+            except Exception:
+                pass
+
+            # Rendering controls (if present in this dialog)
+            if hasattr(self, 'font_size_mode_var'): self.font_size_mode_var.set(str(s.get('rendering', {}).get('font_size_mode', 'auto')))
+            if hasattr(self, 'fixed_font_size_var'): self.fixed_font_size_var.set(int(s.get('rendering', {}).get('fixed_font_size', 16)))
+            if hasattr(self, 'font_scale_var'): self.font_scale_var.set(float(s.get('rendering', {}).get('font_scale', 1.0)))
+            if hasattr(self, 'auto_fit_style_var'): self.auto_fit_style_var.set(str(s.get('rendering', {}).get('auto_fit_style', 'balanced')))
+
+            # Cloud API tab
+            if hasattr(self, 'cloud_model_var'): self.cloud_model_var.set(str(s.get('cloud_inpaint_model', 'ideogram-v2')))
+            if hasattr(self, 'custom_version_var'): self.custom_version_var.set(str(s.get('cloud_custom_version', '')))
+            if hasattr(self, 'cloud_prompt_var'): self.cloud_prompt_var.set(str(s.get('cloud_inpaint_prompt', 'clean background, smooth surface')))
+            if hasattr(self, 'cloud_negative_prompt_var'): self.cloud_negative_prompt_var.set(str(s.get('cloud_negative_prompt', 'text, writing, letters')))
+            if hasattr(self, 'cloud_steps_var'): self.cloud_steps_var.set(int(s.get('cloud_inference_steps', 20)))
+            if hasattr(self, 'cloud_timeout_var'): self.cloud_timeout_var.set(int(s.get('cloud_timeout', 60)))
+
+            # Trigger dependent UI updates
+            try:
+                self._toggle_preprocessing()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, '_on_cloud_model_change'):
+                    self._on_cloud_model_change()
+            except Exception:
+                pass
+            try:
+                self._toggle_iteration_controls()
+            except Exception:
+                pass
+            try:
+                self._toggle_roi_locality_controls()
+            except Exception:
+                pass
+            try:
+                self._toggle_workers()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'compression_format_combo'):
+                    self._toggle_compression_format()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'detector_type'):
+                    self._on_detector_type_changed()
+            except Exception:
+                pass
+            try:
+                self.dialog.update_idletasks()
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort application only
+            pass
 
     def _create_font_sizing_tab(self, notebook):
         """Create font sizing settings tab with improved controls"""
@@ -3362,9 +3534,7 @@ class MangaSettingsDialog:
             self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
             self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
             self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_path.get()
-            self.settings['ocr']['bubble_max_detections'] = int(self.bubble_max_detections_var.get())
             self.settings['ocr']['bubble_max_detections_yolo'] = int(self.bubble_max_det_yolo_var.get())
-            self.settings['ocr']['bubble_max_detections_rtdetr'] = int(self.bubble_max_det_rtdetr_var.get())
             
             # Save the detector type properly
             if hasattr(self, 'detector_type'):
@@ -3553,18 +3723,56 @@ class MangaSettingsDialog:
             from tkinter import messagebox
             messagebox.showerror("Save Error", f"Failed to save settings: {e}")
 
+    def _reset_defaults(self):
+        """Reset by removing manga_settings from config and reinitializing the dialog."""
+        from tkinter import messagebox
+        if not messagebox.askyesno("Reset Settings", "Reset all manga settings to defaults?\nThis will remove custom manga settings from config.json."):
+            return
+        # Remove manga_settings key to force defaults
+        try:
+            if isinstance(self.config, dict) and 'manga_settings' in self.config:
+                del self.config['manga_settings']
+        except Exception:
+            pass
+        # Persist changes
+        try:
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config()
+            elif hasattr(self.main_gui, 'save_configuration'):
+                self.main_gui.save_configuration()
+            elif hasattr(self.main_gui, 'config_file') and isinstance(self.main_gui.config_file, str):
+                with open(self.main_gui.config_file, 'w', encoding='utf-8') as f:
+                    import json
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            try:
+                if hasattr(self.main_gui, 'CONFIG_FILE') and isinstance(self.main_gui.CONFIG_FILE, str):
+                    with open(self.main_gui.CONFIG_FILE, 'w', encoding='utf-8') as f:
+                        import json
+                        json.dump(self.config, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+        # Close and reopen dialog so defaults apply
+        try:
+            if hasattr(self.dialog, '_cleanup_scrolling'):
+                self.dialog._cleanup_scrolling()
+        except Exception:
+            pass
+        try:
+            self.dialog.destroy()
+        except Exception:
+            pass
+        try:
+            MangaSettingsDialog(parent=self.parent, main_gui=self.main_gui, config=self.config, callback=self.callback)
+        except Exception:
+            try:
+                messagebox.showinfo("Reset", "Settings reset. Please reopen the dialog.")
+            except Exception:
+                pass
+
     def _cancel(self):
         """Cancel without saving"""
         if hasattr(self.dialog, '_cleanup_scrolling'):
             self.dialog._cleanup_scrolling()
         self.dialog.destroy()
 
-    def _reset_defaults(self):
-        """Reset all settings to defaults"""
-        if messagebox.askyesno("Reset Settings", "Reset all settings to defaults?"):
-            self.settings = self.default_settings.copy()
-            # Close and recreate dialog
-            if hasattr(self.dialog, '_cleanup_scrolling'):
-                self.dialog._cleanup_scrolling()
-            self.dialog.destroy()
-            self.show_dialog()

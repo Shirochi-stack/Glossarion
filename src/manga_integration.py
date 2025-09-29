@@ -6382,10 +6382,10 @@ class MangaTranslationTab:
         
         finally:
             # Check if auto cleanup is enabled in settings
-            auto_cleanup_enabled = True  # Default to true for backward compatibility
+            auto_cleanup_enabled = False  # Default disabled by default
             try:
                 advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
-                auto_cleanup_enabled = advanced_settings.get('auto_cleanup_models', True)
+                auto_cleanup_enabled = advanced_settings.get('auto_cleanup_models', False)
             except Exception:
                 pass
             

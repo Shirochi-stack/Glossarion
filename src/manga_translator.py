@@ -7435,6 +7435,83 @@ class MangaTranslator:
             return None
 
 
+    def _is_bubble_detector_loaded(self, ocr_settings: Dict[str, Any]) -> Tuple[bool, str]:
+        """Check if the configured bubble detector's model is already loaded.
+        Returns (loaded, detector_type). Safe: does not trigger a load.
+        """
+        try:
+            bd = self._get_thread_bubble_detector()
+        except Exception:
+            return False, ocr_settings.get('detector_type', 'rtdetr_onnx')
+        det = ocr_settings.get('detector_type', 'rtdetr_onnx')
+        try:
+            if det == 'rtdetr_onnx':
+                return bool(getattr(bd, 'rtdetr_onnx_loaded', False)), det
+            elif det == 'rtdetr':
+                return bool(getattr(bd, 'rtdetr_loaded', False)), det
+            elif det == 'yolo':
+                return bool(getattr(bd, 'model_loaded', False)), det
+            else:
+                # Auto or unknown – consider any ready model as loaded
+                ready = bool(getattr(bd, 'rtdetr_loaded', False) or getattr(bd, 'rtdetr_onnx_loaded', False) or getattr(bd, 'model_loaded', False))
+                return ready, det
+        except Exception:
+            return False, det
+
+    def _is_local_inpainter_loaded(self) -> Tuple[bool, Optional[str]]:
+        """Check if the local inpainter model is already loaded.
+        Returns (loaded, local_method) or (False, None) if not applicable.
+        Safe: does not trigger a load.
+        """
+        inpaint_cfg = self.manga_settings.get('inpainting', {}) if hasattr(self, 'manga_settings') else {}
+        if str(inpaint_cfg.get('method', 'cloud')) != 'local':
+            return False, None
+        local_method = inpaint_cfg.get('local_method', 'anime')
+        try:
+            model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+        except Exception:
+            model_path = ''
+        # Singleton path
+        if getattr(self, 'use_singleton_models', True):
+            inp = getattr(MangaTranslator, '_singleton_local_inpainter', None)
+            return (bool(getattr(inp, 'model_loaded', False)), local_method)
+        # Thread-local/pooled path
+        inp = getattr(self, 'local_inpainter', None)
+        if inp is not None and getattr(inp, 'model_loaded', False):
+            return True, local_method
+        try:
+            key = (local_method, model_path or '')
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if rec and rec.get('loaded') and rec.get('inpainter') is not None:
+                return True, local_method
+        except Exception:
+            pass
+        return False, local_method
+
+    def _log_model_status(self):
+        """Emit concise status lines for already-loaded heavy models to avoid confusing 'loading' logs."""
+        try:
+            ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
+            if ocr_settings.get('bubble_detection_enabled', False):
+                loaded, det = self._is_bubble_detector_loaded(ocr_settings)
+                det_name = 'YOLO' if det == 'yolo' else ('RT-DETR' if det == 'rtdetr' else 'RTEDR_onnx')
+                if loaded:
+                    self._log(f"🤖 Using bubble detector ({det_name}) - already loaded", "debug")
+                else:
+                    self._log(f"🤖 Bubble detector ({det_name}) will load on first use", "debug")
+        except Exception:
+            pass
+        try:
+            loaded, local_method = self._is_local_inpainter_loaded()
+            if local_method:
+                label = local_method.upper()
+                if loaded:
+                    self._log(f"🎨 Using local inpainter ({label}) - already loaded", "debug")
+                else:
+                    self._log(f"🎨 Local inpainter ({label}) will load on first use", "debug")
+        except Exception:
+            pass
+
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
                      batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
         """Process a single manga image through the full pipeline"""
@@ -7462,6 +7539,12 @@ class MangaTranslator:
             self._log(f"{'='*60}\n")
         else:
             self._log(f"\n[{batch_index}/{batch_total}] Processing: {os.path.basename(image_path)}")
+        
+        # Before heavy work, report model status to avoid confusing 'loading' logs later
+        try:
+            self._log_model_status()
+        except Exception:
+            pass
         
         result = {
             'success': False,
@@ -7802,10 +7885,10 @@ class MangaTranslator:
                 # Deep cleanup control - respects user settings and parallel processing
                 try:
                     # Check if auto cleanup is enabled in settings
-                    auto_cleanup_enabled = True  # Default to true for backward compatibility
+                    auto_cleanup_enabled = False  # Default disabled by default
                     try:
                         if hasattr(self, 'manga_settings'):
-                            auto_cleanup_enabled = self.manga_settings.get('advanced', {}).get('auto_cleanup_models', True)
+                            auto_cleanup_enabled = self.manga_settings.get('advanced', {}).get('auto_cleanup_models', False)
                     except Exception:
                         pass
                     
