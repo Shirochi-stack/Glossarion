@@ -2374,17 +2374,14 @@ class MangaTranslationTab:
             fg='gray'
         ).pack(side=tk.LEFT, padx=5)
 
-        # Initialize visibility AFTER all frames are created
-        self._toggle_font_size_mode()
-
         # Minimum Font Size (Auto mode lower bound)
-        min_size_frame = tk.Frame(self.sizing_group)
-        min_size_frame.pack(fill=tk.X, pady=5)
+        self.min_size_frame = tk.Frame(self.sizing_group)
+        # Don't pack yet - let _toggle_font_size_mode handle it
 
-        tk.Label(min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        tk.Label(self.min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
         min_size_spinbox = ttk.Spinbox(
-            min_size_frame,
+            self.min_size_frame,
             from_=8,
             to=20,
             textvariable=self.auto_min_size_var,
@@ -2395,20 +2392,20 @@ class MangaTranslationTab:
         self._disable_spinbox_mousewheel(min_size_spinbox)
 
         tk.Label(
-            min_size_frame, 
+            self.min_size_frame, 
             text="(Auto mode won't go below this)", 
             font=('Arial', 9), 
             fg='gray'
         ).pack(side=tk.LEFT, padx=5)
     
         # Maximum Font Size (Auto mode upper bound)
-        max_size_frame = tk.Frame(self.sizing_group)
-        max_size_frame.pack(fill=tk.X, pady=5)
+        self.max_size_frame = tk.Frame(self.sizing_group)
+        # Don't pack yet - let _toggle_font_size_mode handle it
 
-        tk.Label(max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        tk.Label(self.max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
         max_size_spinbox = ttk.Spinbox(
-            max_size_frame,
+            self.max_size_frame,
             from_=20,
             to=100,
             textvariable=self.max_font_size_var,
@@ -2419,11 +2416,14 @@ class MangaTranslationTab:
         self._disable_spinbox_mousewheel(max_size_spinbox)
 
         tk.Label(
-            max_size_frame, 
+            self.max_size_frame, 
             text="(Limits maximum text size)", 
             font=('Arial', 9), 
             fg='gray'
         ).pack(side=tk.LEFT, padx=5)
+
+        # Initialize visibility AFTER all frames are created
+        self._toggle_font_size_mode()
 
 
         # Auto Fit Style (applies to Auto mode)
@@ -3035,16 +3035,31 @@ class MangaTranslationTab:
                 self.multiplier_frame.pack_forget()
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack_forget()
+                # Show min/max controls for fixed mode (they act as constraints when font size = 0)
+                if hasattr(self, 'min_size_frame'):
+                    self.min_size_frame.pack(fill=tk.X, pady=5)
+                if hasattr(self, 'max_size_frame'):
+                    self.max_size_frame.pack(fill=tk.X, pady=5)
             elif mode == "multiplier":
                 self.fixed_size_frame.pack_forget()
                 self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack(fill=tk.X, pady=(5, 0))
+                # Hide min/max controls for multiplier mode
+                if hasattr(self, 'min_size_frame'):
+                    self.min_size_frame.pack_forget()
+                if hasattr(self, 'max_size_frame'):
+                    self.max_size_frame.pack_forget()
             else:  # auto
                 self.fixed_size_frame.pack_forget()
                 self.multiplier_frame.pack_forget()
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack_forget()
+                # Hide min/max controls for auto mode - pure auto sizing
+                if hasattr(self, 'min_size_frame'):
+                    self.min_size_frame.pack_forget()
+                if hasattr(self, 'max_size_frame'):
+                    self.max_size_frame.pack_forget()
         
         # Only save if we're not initializing
         if not hasattr(self, '_initializing') or not self._initializing:
@@ -3113,24 +3128,24 @@ class MangaTranslationTab:
         try:
             if preset == 'small':
                 self.font_algorithm_var.set('conservative')
-                self.auto_min_size_var.set(12)
-                self.max_font_size_var.set(24)
+                self.auto_min_size_var.set(10)
+                self.max_font_size_var.set(32)
                 self.prefer_larger_var.set(False)
                 self.bubble_size_factor_var.set(True)
                 self.line_spacing_var.set(1.2)
                 self.max_lines_var.set(8)
             elif preset == 'balanced':
                 self.font_algorithm_var.set('smart')
-                self.auto_min_size_var.set(14)
-                self.max_font_size_var.set(40)
+                self.auto_min_size_var.set(12)
+                self.max_font_size_var.set(48)
                 self.prefer_larger_var.set(True)
                 self.bubble_size_factor_var.set(True)
                 self.line_spacing_var.set(1.3)
                 self.max_lines_var.set(10)
             elif preset == 'large':
                 self.font_algorithm_var.set('aggressive')
-                self.auto_min_size_var.set(16)
-                self.max_font_size_var.set(50)
+                self.auto_min_size_var.set(14)
+                self.max_font_size_var.set(64)
                 self.prefer_larger_var.set(True)
                 self.bubble_size_factor_var.set(False)
                 self.line_spacing_var.set(1.4)
@@ -3273,7 +3288,7 @@ class MangaTranslationTab:
         nested_render = nested_ms.get('rendering', {}) if isinstance(nested_ms.get('rendering', {}), dict) else {}
         nested_font = nested_ms.get('font_sizing', {}) if isinstance(nested_ms.get('font_sizing', {}), dict) else {}
         effective_max = font_max_top if font_max_top is not None else (
-            nested_render.get('auto_max_size', nested_font.get('max_size', 24))
+            nested_render.get('auto_max_size', nested_font.get('max_size', 48))
         )
         self.max_font_size_var = tk.IntVar(value=int(effective_max))
         self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  
