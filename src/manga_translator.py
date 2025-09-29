@@ -6391,68 +6391,49 @@ class MangaTranslator:
         if use_rgba_rendering:
             # Transparency-enabled rendering path
             pil_image = pil_image.convert('RGBA')
-            
-            for region in adjusted_regions:
-                if not region.translated_text:
-                    continue
-                    # ADD THIS DETAILED DEBUG
-                self._log(f"🔍 RENDER DEBUG for region:", "debug")
-                self._log(f"   Original text: '{region.text}'", "debug")
-                self._log(f"   Translated text: '{region.translated_text}'", "debug")
-                
-                self._log(f"DEBUG: Rendering - Original: '{region.text[:30]}...' -> Translated: '{region.translated_text[:30]}...'", "debug")
 
-                
-                # APPLY CAPS LOCK TRANSFORMATION HERE (First location)
+            # Decide parallel rendering from advanced settings
+            try:
+                adv = getattr(self, 'manga_settings', {}).get('advanced', {}) if hasattr(self, 'manga_settings') else {}
+            except Exception:
+                adv = {}
+            render_parallel = bool(adv.get('render_parallel', True))
+            max_workers = None
+            try:
+                max_workers = int(adv.get('max_workers', 4))
+            except Exception:
+                max_workers = 4
+
+            def _render_one(region, idx):
+                # Build a separate overlay for this region
+                from PIL import Image as _PIL
+                overlay = _PIL.new('RGBA', pil_image.size, (0,0,0,0))
+                draw = ImageDraw.Draw(overlay)
+                # Work on local copy of text for caps lock
+                tr_text = region.translated_text or ''
                 if self.force_caps_lock:
-                    region.translated_text = region.translated_text.upper()
-                
-                region_count += 1
-                self._log(f"  Rendering region {region_count}:", "info")
-                self._log(f"    ACTUAL TEXT: [{region.translated_text}]", "info")
-                self._log(f"    TEXT LENGTH: {len(region.translated_text)}", "info")
-                
-                # Create a separate layer for this region only
-                region_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
-                region_draw = ImageDraw.Draw(region_overlay)
-                
+                    tr_text = tr_text.upper()
                 x, y, w, h = region.bounding_box
-                
-                # Find optimal font size
+                # Fit text
                 if self.custom_font_size:
-                    # Fixed size specified
                     font_size = self.custom_font_size
-                    # Pass the region to use vertices
                     if hasattr(region, 'vertices') and region.vertices:
                         _, _, safe_w, safe_h = self.get_safe_text_area(region)
-                        lines = self._wrap_text(region.translated_text, 
-                                              self._get_font(font_size), 
-                                              safe_w, region_draw)
+                        lines = self._wrap_text(tr_text, self._get_font(font_size), safe_w, draw)
                     else:
-                        lines = self._wrap_text(region.translated_text, 
-                                              self._get_font(font_size), 
-                                              int(w * 0.8), region_draw)
+                        lines = self._wrap_text(tr_text, self._get_font(font_size), int(w*0.8), draw)
                 elif self.font_size_mode == 'multiplier':
-                    # Use dynamic sizing with multiplier - pass region for vertices
-                    font_size, lines = self._fit_text_to_region(
-                        region.translated_text, w, h, region_draw, region
-                    )
+                    font_size, lines = self._fit_text_to_region(tr_text, w, h, draw, region)
                 else:
-                    # Auto mode - use standard fitting - pass region for vertices
-                    font_size, lines = self._fit_text_to_region(
-                        region.translated_text, w, h, region_draw, region
-                    )
-                
-                # Load font(s)
+                    font_size, lines = self._fit_text_to_region(tr_text, w, h, draw, region)
+                # Fonts
                 font = self._get_font(font_size)
                 emote_font = self._get_emote_fallback_font(font_size)
-                
-                # Calculate text layout
+                # Layout
                 line_height = font_size * 1.2
                 total_height = len(lines) * line_height
                 start_y = y + (h - total_height) // 2
-                
-                # Draw background if opacity > 0 (optionally only for free text)
+                # BG
                 draw_bg = self.text_bg_opacity > 0
                 try:
                     if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
@@ -6460,41 +6441,60 @@ class MangaTranslator:
                 except Exception:
                     pass
                 if draw_bg:
-                    self._draw_text_background(region_draw, x, y, w, h, lines, font, 
-                                             font_size, start_y, emote_font)
-                
-                # Draw text on the same region overlay
+                    self._draw_text_background(draw, x, y, w, h, lines, font, font_size, start_y, emote_font)
+                # Text
                 for i, line in enumerate(lines):
                     if emote_font is not None:
-                        text_width = self._line_width_emote_mixed(region_draw, line, font, emote_font)
+                        text_width = self._line_width_emote_mixed(draw, line, font, emote_font)
                     else:
-                        text_bbox = region_draw.textbbox((0, 0), line, font=font)
-                        text_width = text_bbox[2] - text_bbox[0]
-                    
-                    text_x = x + (w - text_width) // 2
-                    text_y = start_y + i * line_height
-                    
-                    outline_width = max(1, font_size // self.outline_width_factor)
+                        tb = draw.textbbox((0,0), line, font=font)
+                        text_width = tb[2]-tb[0]
+                    tx = x + (w - text_width)//2
+                    ty = start_y + i*line_height
+                    ow = max(1, font_size // self.outline_width_factor)
                     if emote_font is not None:
-                        self._draw_text_line_emote_mixed(
-                            region_draw, line, text_x, text_y, font, emote_font,
-                            self.text_color + (255,), self.outline_color + (255,), outline_width,
-                            self.shadow_enabled, self.shadow_color + (255,) if isinstance(self.shadow_color, tuple) and len(self.shadow_color)==3 else (0,0,0,255),
-                            (self.shadow_offset_x, self.shadow_offset_y)
-                        )
+                        self._draw_text_line_emote_mixed(draw, line, tx, ty, font, emote_font,
+                                                         self.text_color + (255,), self.outline_color + (255,), ow,
+                                                         self.shadow_enabled,
+                                                         self.shadow_color + (255,) if isinstance(self.shadow_color, tuple) and len(self.shadow_color)==3 else (0,0,0,255),
+                                                         (self.shadow_offset_x, self.shadow_offset_y))
                     else:
                         if self.shadow_enabled:
-                            self._draw_text_shadow(region_draw, text_x, text_y, line, font)
-                        for dx in range(-outline_width, outline_width + 1):
-                            for dy in range(-outline_width, outline_width + 1):
-                                if dx != 0 or dy != 0:
-                                    region_draw.text((text_x + dx, text_y + dy), line, 
-                                            font=font, fill=self.outline_color + (255,))
-                        region_draw.text((text_x, text_y), line, font=font, fill=self.text_color + (255,))
-                
-                # Composite this region onto the main image
-                pil_image = Image.alpha_composite(pil_image, region_overlay)
-            
+                            self._draw_text_shadow(draw, tx, ty, line, font)
+                        for dx in range(-ow, ow+1):
+                            for dy in range(-ow, ow+1):
+                                if dx!=0 or dy!=0:
+                                    draw.text((tx+dx, ty+dy), line, font=font, fill=self.outline_color + (255,))
+                        draw.text((tx, ty), line, font=font, fill=self.text_color + (255,))
+                return overlay
+
+            overlays = []
+            if render_parallel and len(adjusted_regions) > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                workers = max(1, min(max_workers, len(adjusted_regions)))
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    fut_to_idx = {ex.submit(_render_one, r, i): i for i, r in enumerate(adjusted_regions) if r.translated_text}
+                    # Collect in order
+                    temp = {}
+                    for fut in as_completed(fut_to_idx):
+                        i = fut_to_idx[fut]
+                        try:
+                            temp[i] = fut.result()
+                        except Exception:
+                            temp[i] = None
+                    overlays = [temp.get(i) for i in range(len(adjusted_regions))]
+            else:
+                for i, r in enumerate(adjusted_regions):
+                    if not r.translated_text:
+                        overlays.append(None)
+                        continue
+                    overlays.append(_render_one(r, i))
+
+            # Composite overlays sequentially
+            for ov in overlays:
+                if ov is not None:
+                    pil_image = Image.alpha_composite(pil_image, ov)
+
             # Convert back to RGB
             pil_image = pil_image.convert('RGB')
         

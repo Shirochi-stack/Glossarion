@@ -2705,6 +2705,17 @@ class MangaSettingsDialog:
         perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
         # Defer packing until after memory_frame so this section appears below it
         
+        # New: Parallel rendering (per-region overlays)
+        self.render_parallel_var = tk.BooleanVar(
+            value=self.settings.get('advanced', {}).get('render_parallel', True)
+        )
+        tb.Checkbutton(
+            perf_frame,
+            text="Enable parallel rendering (per-region overlays)",
+            variable=self.render_parallel_var,
+            bootstyle="round-toggle"
+        ).pack(anchor='w')
+        
         self.parallel_processing = tk.IntVar(value=1 if self.settings['advanced']['parallel_processing'] else 0)
         parallel_cb = tb.Checkbutton(
             perf_frame,
@@ -2714,6 +2725,7 @@ class MangaSettingsDialog:
             command=self._toggle_workers
         )
         parallel_cb.pack(anchor='w')
+        
         
         # Max workers
         workers_frame = tk.Frame(perf_frame)
@@ -3683,6 +3695,9 @@ class MangaSettingsDialog:
             self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
             self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
             self.settings['advanced']['max_workers'] = self.max_workers.get()
+            # Save parallel rendering toggle
+            if hasattr(self, 'render_parallel_var'):
+                self.settings['advanced']['render_parallel'] = bool(self.render_parallel_var.get())
             # Panel-level parallel translation settings
             self.settings['advanced']['parallel_panel_translation'] = bool(self.parallel_panel_var.get())
             self.settings['advanced']['panel_max_workers'] = int(self.panel_max_workers_var.get())
