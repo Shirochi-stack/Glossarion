@@ -69,11 +69,11 @@ class MangaSettingsDialog:
                 'azure_merge_multiplier': 3.0,
                 'text_detection_mode': 'document',
                 'enable_rotation_correction': True,
-                'bubble_detection_enabled': False,
+                'bubble_detection_enabled': True,
                 'roi_locality_enabled': False,
                 'bubble_model_path': '',
                 'bubble_confidence': 0.5,
-                'detector_type': 'rtdetr',
+                'detector_type': 'rtdetr_onnx',
                 'rtdetr_confidence': 0.3,
                 'detect_empty_bubbles': True,
                 'detect_text_bubbles': True,
@@ -94,10 +94,11 @@ class MangaSettingsDialog:
                 'webtoon_mode': 'auto',
                 'debug_mode': False,
                 'save_intermediate': False,
-                'parallel_processing': False,
-                'max_workers': 4,
-                'parallel_panel_translation': False,
+                'parallel_processing': True,
+                'max_workers': 2,
+                'parallel_panel_translation': True,
                 'panel_max_workers': 2,
+                'use_singleton_models': False,
                 'auto_cleanup_models': False,
                 'unload_models_after_translation': False,
                 'auto_convert_to_onnx': False,  # Disabled by default
@@ -113,7 +114,7 @@ class MangaSettingsDialog:
                 'ram_min_floor_over_baseline_mb': 256
                 },
             'inpainting': {
-                'batch_size': 1,
+                'batch_size': 10,
                 'enable_cache': True,
                 'method': 'local',
                 'local_method': 'anime'

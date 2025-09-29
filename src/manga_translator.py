@@ -171,8 +171,8 @@ class MangaTranslator:
         
         # Initialize bubble detector (will check singleton mode later)
         self.bubble_detector = None
-        # Default to singleton mode for memory efficiency
-        self.use_singleton_models = self.manga_settings.get('advanced', {}).get('use_singleton_models', True)
+        # Default: do NOT use singleton models unless explicitly enabled
+        self.use_singleton_models = self.manga_settings.get('advanced', {}).get('use_singleton_models', False)
         
         # Processing flags
         self.is_processing = False
@@ -396,8 +396,8 @@ class MangaTranslator:
         # advanced settings
         self.debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False)
         self.save_intermediate = self.manga_settings.get('advanced', {}).get('save_intermediate', False)
-        self.parallel_processing = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
-        self.max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        self.parallel_processing = self.manga_settings.get('advanced', {}).get('parallel_processing', True)
+        self.max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 2)
         # Deep cleanup control: if True, release models after every image (aggressive)
         self.force_deep_cleanup_each_image = self.manga_settings.get('advanced', {}).get('force_deep_cleanup_each_image', False)
         
@@ -7918,7 +7918,7 @@ class MangaTranslator:
                         is_parallel_panel = False
                         try:
                             if hasattr(self, 'manga_settings'):
-                                is_parallel_panel = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', False)
+                                is_parallel_panel = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', True)
                         except Exception:
                             pass
                         

@@ -162,7 +162,7 @@ class MangaTranslationTab:
             adv_cfg = {}
         # In singleton mode, reduce OpenCV thread usage to avoid CPU spikes
         try:
-            if bool(adv_cfg.get('use_singleton_models', True)):
+            if bool(adv_cfg.get('use_singleton_models', False)):
                 import cv2 as _cv2
                 try:
                     _cv2.setNumThreads(1)
@@ -6013,7 +6013,7 @@ class MangaTranslationTab:
             
             # Panel-level parallelization setting (LOCAL threading for panels)
             advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
-            panel_parallel = bool(advanced.get('parallel_panel_translation', False))
+            panel_parallel = bool(advanced.get('parallel_panel_translation', True))
             requested_panel_workers = int(advanced.get('panel_max_workers', 2))
 
             # Decouple from global parallel processing: panel concurrency is governed ONLY by panel settings
@@ -6399,7 +6399,7 @@ class MangaTranslationTab:
                     is_parallel_panel = False
                     try:
                         advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
-                        is_parallel_panel = advanced_settings.get('parallel_panel_translation', False)
+                        is_parallel_panel = advanced_settings.get('parallel_panel_translation', True)
                     except Exception:
                         pass
                     
