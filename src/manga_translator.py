@@ -350,7 +350,13 @@ class MangaTranslator:
         self.font_path = self._find_font()
         self.min_font_size = 10
         self.max_font_size = 60
-        self.min_readable_size = main_gui.config.get('manga_min_readable_size', 16)
+        try:
+            _ms = main_gui.config.get('manga_settings', {}) or {}
+            _rend = _ms.get('rendering', {}) or {}
+            _font = _ms.get('font_sizing', {}) or {}
+            self.min_readable_size = int(_rend.get('auto_min_size', _font.get('min_size', 16)))
+        except Exception:
+            self.min_readable_size = int(main_gui.config.get('manga_min_readable_size', 16))
         self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
         self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', False)
         
@@ -2199,26 +2205,91 @@ class MangaTranslator:
                 except Exception:
                     pass
                 
-                # Ensure Azure-supported format regardless of original extension
+                # Ensure Azure-supported format for the BYTES we are sending.
+                # If compression is enabled and produced an Azure-supported format (JPEG/PNG/BMP/TIFF),
+                # DO NOT force-convert to PNG. Only convert when the current bytes are in an unsupported format.
                 file_ext = os.path.splitext(image_path)[1].lower()
                 azure_supported_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.tiff']
+                azure_supported_fmts = ['jpeg', 'jpg', 'png', 'bmp', 'tiff']
+
+                # Probe the actual byte format we will upload
                 try:
                     from PIL import Image as _PILImage
                     img_probe = _PILImage.open(io.BytesIO(processed_image_data))
                     fmt = (img_probe.format or '').lower()
                 except Exception:
                     fmt = ''
-                needs_convert = (file_ext not in azure_supported_exts) or (fmt not in ['jpeg', 'jpg', 'png', 'bmp', 'tiff'])
+
+                # If original is a PDF, allow as-is (Azure supports PDF streams)
+                if file_ext == '.pdf':
+                    needs_convert = False
+                else:
+                    # Decide based on the detected format of the processed bytes
+                    needs_convert = fmt not in azure_supported_fmts
+
                 if needs_convert:
-                    self._log("⚠️ Converting image to PNG for Azure compatibility")
+                    # If compression settings are enabled and target format is Azure-supported, prefer that
+                    try:
+                        comp_cfg = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+                    except Exception:
+                        comp_cfg = {}
+
+                    # Determine if conversion is actually needed based on compression and current format
                     try:
                         from PIL import Image as _PILImage
                         img2 = _PILImage.open(io.BytesIO(processed_image_data))
-                        buffer = io.BytesIO()
-                        img2.save(buffer, format='PNG')
-                        processed_image_data = buffer.getvalue()
+                        fmt_lower = (img2.format or '').lower()
                     except Exception:
-                        pass
+                        img2 = None
+                        fmt_lower = ''
+
+                    accepted = {'jpeg', 'jpg', 'png', 'bmp', 'tiff'}
+                    convert_needed = False
+                    target_fmt = None
+
+                    if comp_cfg.get('enabled', False):
+                        cf = str(comp_cfg.get('format', '')).lower()
+                        desired = None
+                        if cf in ('jpeg', 'jpg'):
+                            desired = 'JPEG'
+                        elif cf == 'png':
+                            desired = 'PNG'
+                        elif cf == 'bmp':
+                            desired = 'BMP'
+                        elif cf == 'tiff':
+                            desired = 'TIFF'
+                        # If WEBP or others, desired remains None and we fall back to PNG only if unsupported
+
+                        if desired is not None:
+                            # Skip conversion if already in the desired supported format
+                            already_matches = ((fmt_lower in ('jpeg', 'jpg') and desired == 'JPEG') or (fmt_lower == desired.lower()))
+                            if not already_matches:
+                                convert_needed = True
+                                target_fmt = desired
+                        else:
+                            # Compression format not supported by Azure (e.g., WEBP); convert only if unsupported
+                            if fmt_lower not in accepted:
+                                convert_needed = True
+                                target_fmt = 'PNG'
+                    else:
+                        # No compression preference; convert only if unsupported by Azure
+                        if fmt_lower not in accepted:
+                            convert_needed = True
+                            target_fmt = 'PNG'
+
+                    if convert_needed:
+                        self._log(f"⚠️ Converting image to {target_fmt} for Azure compatibility")
+                        try:
+                            if img2 is None:
+                                from PIL import Image as _PILImage
+                                img2 = _PILImage.open(io.BytesIO(processed_image_data))
+                            buffer = io.BytesIO()
+                            if target_fmt == 'JPEG' and img2.mode != 'RGB':
+                                img2 = img2.convert('RGB')
+                            img2.save(buffer, format=target_fmt)
+                            processed_image_data = buffer.getvalue()
+                        except Exception:
+                            pass
                 
                 # Create stream from image data
                 image_stream = io.BytesIO(processed_image_data)
@@ -2530,6 +2601,7 @@ class MangaTranslator:
                         provider = self.ocr_manager.get_provider('Qwen2-VL')
                         if provider and hasattr(provider, 'model') and provider.model is not None:
                             self._log("✅ Qwen2-VL model actually already loaded, skipping reload")
+                            success = True
                         else:
                             # Only actually load if truly not loaded
                             model_size = self.ocr_config.get('model_size', '2') if hasattr(self, 'ocr_config') else '2'
@@ -2537,6 +2609,25 @@ class MangaTranslator:
                             success = self.ocr_manager.load_provider(self.ocr_provider, model_size=model_size)
                             if not success:
                                 raise Exception(f"Failed to load {self.ocr_provider} model")
+                    elif self.ocr_provider == 'custom-api':
+                        # Custom API needs to initialize UnifiedClient with credentials
+                        self._log("📡 Loading custom-api provider...")
+                        # Try to get API key and model from GUI if available
+                        load_kwargs = {}
+                        if hasattr(self, 'main_gui'):
+                            # Get API key from GUI
+                            if hasattr(self.main_gui, 'api_key_entry'):
+                                api_key = self.main_gui.api_key_entry.get()
+                                if api_key:
+                                    load_kwargs['api_key'] = api_key
+                            # Get model from GUI  
+                            if hasattr(self.main_gui, 'model_var'):
+                                model = self.main_gui.model_var.get()
+                                if model:
+                                    load_kwargs['model'] = model
+                        success = self.ocr_manager.load_provider(self.ocr_provider, **load_kwargs)
+                        if not success:
+                            raise Exception(f"Failed to initialize {self.ocr_provider}")
                     else:
                         # Other providers
                         success = self.ocr_manager.load_provider(self.ocr_provider)
@@ -3499,15 +3590,36 @@ class MangaTranslator:
 
         def ocr_one(roi):
             try:
-                # Ensure Azure-supported format for ROI (convert WEBP etc. to PNG if needed)
+                # Ensure Azure-supported format for ROI bytes; honor compression preference when possible
                 data = roi['bytes']
                 try:
                     from PIL import Image as _PILImage
                     im = _PILImage.open(io.BytesIO(data))
                     fmt = (im.format or '').lower()
                     if fmt not in ['jpeg', 'jpg', 'png', 'bmp', 'tiff']:
+                        # Choose conversion target based on compression settings if available
+                        try:
+                            comp_cfg = (self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {})
+                        except Exception:
+                            comp_cfg = {}
+                        target_fmt = 'PNG'
+                        try:
+                            if comp_cfg.get('enabled', False):
+                                cf = str(comp_cfg.get('format', '')).lower()
+                                if cf in ('jpeg', 'jpg'):
+                                    target_fmt = 'JPEG'
+                                elif cf == 'png':
+                                    target_fmt = 'PNG'
+                                elif cf == 'bmp':
+                                    target_fmt = 'BMP'
+                                elif cf == 'tiff':
+                                    target_fmt = 'TIFF'
+                        except Exception:
+                            pass
                         buf2 = io.BytesIO()
-                        im.save(buf2, format='PNG')
+                        if target_fmt == 'JPEG' and im.mode != 'RGB':
+                            im = im.convert('RGB')
+                        im.save(buf2, format=target_fmt)
                         data = buf2.getvalue()
                 except Exception:
                     pass
@@ -5280,9 +5392,9 @@ class MangaTranslator:
                     free_text_iterations = 0
                     self._log("📏 Auto iterations (B&W): text=2, empty=2, free=0", "info")
                 else:
-                    text_bubble_iterations = 2
-                    empty_bubble_iterations = 3
-                    free_text_iterations = 3
+                    text_bubble_iterations = 4
+                    empty_bubble_iterations = 4
+                    free_text_iterations = 4
                     self._log("📏 Auto iterations (Color): all=3", "info")
             except Exception:
                 # Fallback to configured behavior on any error

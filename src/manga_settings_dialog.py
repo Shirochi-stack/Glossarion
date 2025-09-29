@@ -463,7 +463,7 @@ class MangaSettingsDialog:
         self._create_ocr_tab(notebook)
         self._create_inpainting_tab(notebook)
         self._create_advanced_tab(notebook)
-        self._create_font_sizing_tab(notebook)
+        # NOTE: Font Sizing tab removed; controls are now in Manga Integration UI
         
         # Cloud API tab
         self.cloud_tab = ttk.Frame(notebook)
@@ -3437,203 +3437,6 @@ class MangaSettingsDialog:
             # Best-effort application only
             pass
 
-    def _create_font_sizing_tab(self, notebook):
-        """Create font sizing settings tab with improved controls"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Font Sizing")
-        
-        # Main content
-        content_frame = tk.Frame(frame)
-        content_frame.pack(fill='both', expand=True, padx=5, pady=5)
-        
-        # Algorithm selection
-        algo_frame = tk.LabelFrame(content_frame, text="Sizing Algorithm", padx=15, pady=10)
-        algo_frame.pack(fill='x', padx=20, pady=(20, 10))
-        
-        tk.Label(algo_frame, text="Select font sizing behavior:").pack(anchor='w', pady=(0, 10))
-        
-        self.font_algorithm_var = tk.StringVar(value=self.settings.get('font_sizing', {}).get('algorithm', 'smart'))
-        
-        algorithms = [
-            ('smart', 'Smart', 'Adapts to bubble size intelligently'),
-            ('conservative', 'Conservative', 'Prefers smaller, safer sizes'),
-            ('aggressive', 'Aggressive', 'Maximizes text size when possible')
-        ]
-        
-        for value, text, tooltip in algorithms:
-            rb = ttk.Radiobutton(
-                algo_frame,
-                text=text,
-                variable=self.font_algorithm_var,
-                value=value
-            )
-            rb.pack(anchor='w', padx=20, pady=2)
-            # Add tooltip
-            self._create_tooltip(rb, tooltip)
-        
-        # Size limits
-        limits_frame = tk.LabelFrame(content_frame, text="Size Limits", padx=15, pady=10)
-        limits_frame.pack(fill='x', padx=20, pady=(10, 0))
-        
-        # Minimum font size
-        min_frame = tk.Frame(limits_frame)
-        min_frame.pack(fill='x', pady=5)
-        
-        tk.Label(min_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side='left')
-        self.min_font_size_var = tk.IntVar(value=self.settings.get('font_sizing', {}).get('min_size', 10))
-        min_spinbox = tb.Spinbox(
-            min_frame,
-            from_=8,
-            to=20,
-            textvariable=self.min_font_size_var,
-            width=10
-        )
-        min_spinbox.pack(side='left', padx=10)
-        tk.Label(min_frame, text="pixels").pack(side='left')
-        
-        # Maximum font size
-        max_frame = tk.Frame(limits_frame)
-        max_frame.pack(fill='x', pady=5)
-        
-        tk.Label(max_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side='left')
-        self.max_font_size_var = tk.IntVar(value=self.settings.get('font_sizing', {}).get('max_size', 40))
-        max_spinbox = tb.Spinbox(
-            max_frame,
-            from_=20,
-            to=60,
-            textvariable=self.max_font_size_var,
-            width=10
-        )
-        max_spinbox.pack(side='left', padx=10)
-        tk.Label(max_frame, text="pixels").pack(side='left')
-        
-        # Readable minimum
-        readable_frame = tk.Frame(limits_frame)
-        readable_frame.pack(fill='x', pady=5)
-        
-        tk.Label(readable_frame, text="Minimum Readable:", width=20, anchor='w').pack(side='left')
-        self.min_readable_var = tk.IntVar(value=self.settings.get('font_sizing', {}).get('min_readable', 14))
-        readable_spinbox = tb.Spinbox(
-            readable_frame,
-            from_=10,
-            to=20,
-            textvariable=self.min_readable_var,
-            width=10
-        )
-        readable_spinbox.pack(side='left', padx=10)
-        tk.Label(readable_frame, text="pixels (won't go below this)").pack(side='left')
-        
-        # Behavior settings
-        behavior_frame = tk.LabelFrame(content_frame, text="Sizing Behavior", padx=15, pady=10)
-        behavior_frame.pack(fill='x', padx=20, pady=(10, 0))
-        
-        # Prefer larger text
-        self.prefer_larger_var = tk.BooleanVar(
-            value=self.settings.get('font_sizing', {}).get('prefer_larger', True)
-        )
-        tb.Checkbutton(
-            behavior_frame,
-            text="Prefer larger text when possible",
-            variable=self.prefer_larger_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=2)
-        
-        # Bubble size factor
-        self.bubble_size_factor_var = tk.BooleanVar(
-            value=self.settings.get('font_sizing', {}).get('bubble_size_factor', True)
-        )
-        tb.Checkbutton(
-            behavior_frame,
-            text="Scale font based on bubble size (smaller bubbles = smaller text)",
-            variable=self.bubble_size_factor_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=2)
-        
-        # Line spacing
-        spacing_frame = tk.Frame(behavior_frame)
-        spacing_frame.pack(fill='x', pady=(10, 5))
-        
-        tk.Label(spacing_frame, text="Line Spacing:", width=20, anchor='w').pack(side='left')
-        self.line_spacing_var = tk.DoubleVar(
-            value=self.settings.get('font_sizing', {}).get('line_spacing', 1.3)
-        )
-        spacing_scale = tk.Scale(
-            spacing_frame,
-            from_=1.0,
-            to=2.0,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.line_spacing_var,
-            length=200
-        )
-        spacing_scale.pack(side='left', padx=10)
-        tk.Label(spacing_frame, textvariable=self.line_spacing_var, width=5).pack(side='left')
-        
-        # Maximum lines
-        max_lines_frame = tk.Frame(behavior_frame)
-        max_lines_frame.pack(fill='x', pady=5)
-        
-        tk.Label(max_lines_frame, text="Max Lines Per Bubble:", width=20, anchor='w').pack(side='left')
-        self.max_lines_var = tk.IntVar(
-            value=self.settings.get('font_sizing', {}).get('max_lines', 10)
-        )
-        lines_spinbox = tb.Spinbox(
-            max_lines_frame,
-            from_=5,
-            to=20,
-            textvariable=self.max_lines_var,
-            width=10
-        )
-        lines_spinbox.pack(side='left', padx=10)
-        tk.Label(max_lines_frame, text="lines").pack(side='left')
-        
-        # Quick presets
-        preset_frame = tk.LabelFrame(content_frame, text="Quick Presets", padx=15, pady=10)
-        preset_frame.pack(fill='x', padx=20, pady=(10, 0))
-        
-        preset_buttons = tk.Frame(preset_frame)
-        preset_buttons.pack(fill='x', pady=5)
-        
-        tb.Button(
-            preset_buttons,
-            text="Small Bubbles",
-            command=lambda: self._set_font_preset('small'),
-            bootstyle="secondary",
-            width=15
-        ).pack(side='left', padx=5)
-        
-        tb.Button(
-            preset_buttons,
-            text="Balanced",
-            command=lambda: self._set_font_preset('balanced'),
-            bootstyle="secondary",
-            width=15
-        ).pack(side='left', padx=5)
-        
-        tb.Button(
-            preset_buttons,
-            text="Large Text",
-            command=lambda: self._set_font_preset('large'),
-            bootstyle="secondary",
-            width=15
-        ).pack(side='left', padx=5)
-        
-        # Help text
-        help_frame = tk.Frame(content_frame)
-        help_frame.pack(fill='x', padx=20, pady=(20, 0))
-        
-        help_text = tk.Label(
-            help_frame,
-            text="💡 Tips:\n"
-                 "• Smart algorithm adapts to different bubble sizes automatically\n"
-                 "• Conservative is best for dense text or small bubbles\n"
-                 "• Aggressive maximizes readability but may overflow bubbles\n"
-                 "• Bubble size factor prevents huge text in large bubbles",
-            font=('Arial', 9),
-            fg='gray',
-            justify='left'
-        )
-        help_text.pack(anchor='w')
 
     def _set_font_preset(self, preset: str):
         """Apply font sizing preset"""
@@ -3695,6 +3498,14 @@ class MangaSettingsDialog:
             
             # Update config
             self.config['manga_settings'] = self.settings
+
+            # Mirror only auto max to top-level config for backward compatibility; keep min nested
+            try:
+                auto_max = self.settings.get('rendering', {}).get('auto_max_size', None)
+                if auto_max is not None:
+                    self.config['manga_max_font_size'] = int(auto_max)
+            except Exception:
+                pass
             
             # Save to file immediately
             if hasattr(self.main_gui, 'save_config'):

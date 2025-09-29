@@ -132,7 +132,7 @@ class OCRProvider:
         """Install the provider"""
         raise NotImplementedError
     
-    def load_model(self) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Load the OCR model"""
         raise NotImplementedError
     
@@ -174,9 +174,10 @@ class CustomAPIProvider(OCRProvider):
             "Output ONLY the raw text, nothing else."
             ))
         
-        # Use existing temperature and token settings
+        # Use existing temperature and token settings  
         self.temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.01'))
-        self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
+        # Don't hardcode to 8192 - get fresh value when actually used
+        self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4096'))
         
         # Image settings from existing compression variables
         self.image_format = 'jpeg' if os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') != 'png' else 'png'
@@ -203,13 +204,21 @@ class CustomAPIProvider(OCRProvider):
         """No installation needed for API-based provider"""
         return self.check_installation()
     
-    def load_model(self) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Initialize UnifiedClient with current settings"""
         try:
             from unified_api_client import UnifiedClient
             
-            model = os.environ.get('MODEL', 'gpt-4o-mini')
-            api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+            # Support passing API key from GUI if available
+            if 'api_key' in kwargs:
+                api_key = kwargs['api_key']
+            else:
+                api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+            
+            if 'model' in kwargs:
+                model = kwargs['model']
+            else:
+                model = os.environ.get('MODEL', 'gpt-4o-mini')
             
             if not api_key:
                 self._log("❌ No API key configured", "error")
@@ -415,7 +424,8 @@ class CustomAPIProvider(OCRProvider):
         results = []
         
         try:
-            max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
+            # Get fresh max_tokens from environment - GUI will have set this
+            max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4096'))
             if not self.is_loaded:
                 if not self.load_model():
                     return results
@@ -630,7 +640,7 @@ class MangaOCRProvider(OCRProvider):
         except Exception:
             return False
     
-    def load_model(self) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Load the manga-ocr model, preferring a local directory to avoid re-downloading"""
         try:
             if not self.is_installed and not self.check_installation():
@@ -898,7 +908,7 @@ class Qwen2VL(OCRProvider):
         """Install requirements for Qwen2-VL"""
         pass
     
-    def load_model(self, model_size=None) -> bool:
+    def load_model(self, model_size=None, **kwargs) -> bool:
         """Load Qwen2-VL model with size selection"""
         self._log(f"DEBUG: load_model called with model_size={model_size}")
 
@@ -1232,7 +1242,7 @@ class EasyOCRProvider(OCRProvider):
         """Install easyocr"""
         pass
     
-    def load_model(self) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Load easyocr model"""
         try:
             if not self.is_installed and not self.check_installation():
@@ -1579,7 +1589,7 @@ class DocTROCRProvider(OCRProvider):
         """Install doctr"""
         pass
     
-    def load_model(self) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Load doctr model"""
         try:
             if not self.is_installed and not self.check_installation():
@@ -1689,7 +1699,7 @@ class RapidOCRProvider(OCRProvider):
         self._log("Run: pip install rapidocr-onnxruntime", "info")
         return False  # Always return False since we can't auto-install
     
-    def load_model(self) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Load RapidOCR model"""
         try:
             if not self.is_installed and not self.check_installation():
@@ -1796,7 +1806,8 @@ class OCRManager:
             'installed': provider.check_installation(),
             'loaded': provider.is_loaded
         }
-        self.log_callback(f"DEBUG: check_provider_status({name}) returning loaded={result['loaded']}", "debug")
+        if self.log_callback:
+            self.log_callback(f"DEBUG: check_provider_status({name}) returning loaded={result['loaded']}", "debug")
         return result
     
     def install_provider(self, name: str, progress_callback=None) -> bool:

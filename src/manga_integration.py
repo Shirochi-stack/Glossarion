@@ -1901,98 +1901,14 @@ class MangaTranslationTab:
             fg='gray'
         ).pack(side=tk.LEFT)
 
-        # Force Caps Lock Checkbox
-        force_caps_check = ttk.Checkbutton(
-            render_frame,
-            text="Force CAPS LOCK (All text in uppercase)",
-            variable=self.force_caps_lock_var,
-            command=self._apply_rendering_settings
-        )
-        force_caps_check.pack(anchor=tk.W, padx=20, pady=(0, 5))
         
-        # Background opacity slider
-        opacity_frame = tk.Frame(render_frame)
-        opacity_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(opacity_frame, text="Background Opacity:", width=20, anchor='w').pack(side=tk.LEFT)
-        
-        opacity_scale = tk.Scale(
-            opacity_frame,
-            from_=0,
-            to=255,
-            orient=tk.HORIZONTAL,
-            variable=self.bg_opacity_var,
-            command=self._update_opacity_label,
-            length=200
-        )
-        opacity_scale.pack(side=tk.LEFT, padx=10)
-        
-        self.opacity_label = tk.Label(opacity_frame, text="100%", width=5)
-        self.opacity_label.pack(side=tk.LEFT)
-        
-        # Initialize the label with the loaded value
-        self._update_opacity_label(self.bg_opacity_var.get())
+        # Inpainting section
+        inpaint_group = tk.LabelFrame(render_frame, text="Inpainting", padx=15, pady=10)
+        inpaint_group.pack(fill=tk.X, pady=(5, 10))
 
-        # Free text only background opacity toggle (applies BG opacity only to free-text regions)
-        ft_only_frame = tk.Frame(render_frame)
-        ft_only_frame.pack(fill=tk.X, pady=(0, 5))
-        tb.Checkbutton(
-            ft_only_frame,
-            text="Free text only background opacity",
-            variable=self.free_text_only_bg_opacity_var,
-            bootstyle="round-toggle",
-            command=self._apply_rendering_settings
-        ).pack(anchor='w')
-
-        # Background style selection
-        style_frame = tk.Frame(render_frame)
-        style_frame.pack(fill=tk.X, pady=5)
-
-        tk.Label(style_frame, text="Background Style:", width=20, anchor='w').pack(side=tk.LEFT)
-
-        # Radio buttons for background style
-        style_selection_frame = tk.Frame(style_frame)
-        style_selection_frame.pack(side=tk.LEFT, padx=10)
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Box",
-            variable=self.bg_style_var,
-            value="box",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Circle",
-            variable=self.bg_style_var,
-            value="circle",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Wrap",
-            variable=self.bg_style_var,
-            value="wrap",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
-
-        # Add tooltips or descriptions
-        style_help = tk.Label(
-            style_frame,
-            text="(Box: rounded rectangle, Circle: ellipse, Wrap: per-line)",
-            font=('Arial', 9),
-            fg='gray'
-        )
-        style_help.pack(side=tk.LEFT, padx=(10, 0))
- 
         # Skip inpainting toggle - store as instance variable
         self.skip_inpainting_checkbox = tb.Checkbutton(
-            render_frame, 
+            inpaint_group, 
             text="Skip Inpainter", 
             variable=self.skip_inpainting_var,
             bootstyle="round-toggle",
@@ -2001,7 +1917,7 @@ class MangaTranslationTab:
         self.skip_inpainting_checkbox.pack(anchor='w', pady=5)
 
         # Inpainting method selection (only visible when inpainting is enabled)
-        self.inpaint_method_frame = tk.Frame(render_frame)
+        self.inpaint_method_frame = tk.Frame(inpaint_group)
         self.inpaint_method_frame.pack(fill=tk.X, pady=5)
 
         tk.Label(self.inpaint_method_frame, text="Inpaint Method:", width=20, anchor='w').pack(side=tk.LEFT)
@@ -2040,7 +1956,7 @@ class MangaTranslationTab:
         ).pack(side=tk.LEFT)
 
         # Cloud settings frame
-        self.cloud_inpaint_frame = tk.Frame(render_frame)
+        self.cloud_inpaint_frame = tk.Frame(inpaint_group)
         self.cloud_inpaint_frame.pack(fill=tk.X, pady=5)
 
         # Quality selection for cloud
@@ -2061,7 +1977,7 @@ class MangaTranslationTab:
             ).pack(side=tk.LEFT, padx=10)
 
         # Conditional separator
-        self.inpaint_separator = ttk.Separator(render_frame, orient='horizontal')
+        self.inpaint_separator = ttk.Separator(inpaint_group, orient='horizontal')
         if not self.skip_inpainting_var.get():
             self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))
 
@@ -2102,7 +2018,7 @@ class MangaTranslationTab:
             ).pack(side=tk.LEFT, padx=(5, 0))
 
         # Local inpainting settings frame
-        self.local_inpaint_frame = tk.Frame(render_frame)
+        self.local_inpaint_frame = tk.Frame(inpaint_group)
 
         # Local model selection
         local_model_frame = tk.Frame(self.local_inpaint_frame)
@@ -2221,9 +2137,47 @@ class MangaTranslationTab:
 
         # Initialize visibility based on current settings
         self._toggle_inpaint_visibility()
+
+        # Background Settings (moved into inpainting section)
+        self.bg_settings_frame = tk.LabelFrame(inpaint_group, text="Background Settings", padx=10, pady=8)
+        self.bg_settings_frame.pack(fill=tk.X, pady=(10, 5))
         
+        # Free text only background opacity toggle (applies BG opacity only to free-text regions)
+        ft_only_frame = tk.Frame(self.bg_settings_frame)
+        ft_only_frame.pack(fill=tk.X, pady=(0, 5))
+        tb.Checkbutton(
+            ft_only_frame,
+            text="Free text only background opacity",
+            variable=self.free_text_only_bg_opacity_var,
+            bootstyle="round-toggle",
+            command=self._apply_rendering_settings
+        ).pack(anchor='w')
+
+        # Background opacity slider
+        opacity_frame = tk.Frame(self.bg_settings_frame)
+        opacity_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(opacity_frame, text="Background Opacity:", width=20, anchor='w').pack(side=tk.LEFT)
+        
+        opacity_scale = tk.Scale(
+            opacity_frame,
+            from_=0,
+            to=255,
+            orient=tk.HORIZONTAL,
+            variable=self.bg_opacity_var,
+            command=self._update_opacity_label,
+            length=200
+        )
+        opacity_scale.pack(side=tk.LEFT, padx=10)
+        
+        self.opacity_label = tk.Label(opacity_frame, text="100%", width=5)
+        self.opacity_label.pack(side=tk.LEFT)
+        
+        # Initialize the label with the loaded value
+        self._update_opacity_label(self.bg_opacity_var.get())
+
         # Background size reduction
-        reduction_frame = tk.Frame(render_frame)
+        reduction_frame = tk.Frame(self.bg_settings_frame)
         reduction_frame.pack(fill=tk.X, pady=5)
         
         tk.Label(reduction_frame, text="Background Size:", width=20, anchor='w').pack(side=tk.LEFT)
@@ -2245,9 +2199,77 @@ class MangaTranslationTab:
         
         # Initialize the label with the loaded value
         self._update_reduction_label(self.bg_reduction_var.get())
-        
+
+        # Background style selection
+        style_frame = tk.Frame(self.bg_settings_frame)
+        style_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(style_frame, text="Background Style:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        # Radio buttons for background style
+        style_selection_frame = tk.Frame(style_frame)
+        style_selection_frame.pack(side=tk.LEFT, padx=10)
+
+        tb.Radiobutton(
+            style_selection_frame,
+            text="Box",
+            variable=self.bg_style_var,
+            value="box",
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            style_selection_frame,
+            text="Circle",
+            variable=self.bg_style_var,
+            value="circle",
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            style_selection_frame,
+            text="Wrap",
+            variable=self.bg_style_var,
+            value="wrap",
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT)
+
+        # Add tooltips or descriptions
+        style_help = tk.Label(
+            style_frame,
+            text="(Box: rounded rectangle, Circle: ellipse, Wrap: per-line)",
+            font=('Arial', 9),
+            fg='gray'
+        )
+        style_help.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Font Settings group (consolidated)
+        self.sizing_group = tk.LabelFrame(render_frame, text="Font Settings", padx=10, pady=8)
+        self.sizing_group.pack(fill=tk.X, padx=10, pady=(6, 4))
+ 
         # Font size selection with mode toggle
-        font_frame = tk.Frame(render_frame)
+        # Sizing Algorithm (moved above font size mode)
+        algo_group_top = tk.LabelFrame(self.sizing_group, text="Sizing Algorithm", padx=10, pady=8)
+        algo_group_top.pack(fill=tk.X, pady=(6, 0))
+        for value, text in [
+            ('smart', 'Smart'),
+            ('conservative', 'Conservative'),
+            ('aggressive', 'Aggressive')
+        ]:
+            rb = ttk.Radiobutton(
+                algo_group_top,
+                text=text,
+                variable=self.font_algorithm_var,
+                value=value,
+                command=self._save_rendering_settings
+            )
+            rb.pack(side=tk.LEFT, padx=10)
+
+        # Font size selection with mode toggle
+        font_frame = tk.Frame(self.sizing_group)
         font_frame.pack(fill=tk.X, pady=5)
         
         # Mode selection frame
@@ -2259,6 +2281,15 @@ class MangaTranslationTab:
         # Radio buttons for mode selection
         mode_selection_frame = tk.Frame(mode_frame)
         mode_selection_frame.pack(side=tk.LEFT, padx=10)
+
+        tb.Radiobutton(
+            mode_selection_frame,
+            text="Auto",
+            variable=self.font_size_mode_var,
+            value="auto",
+            command=self._toggle_font_size_mode,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
 
         tb.Radiobutton(
             mode_selection_frame,
@@ -2346,23 +2377,22 @@ class MangaTranslationTab:
         # Initialize visibility AFTER all frames are created
         self._toggle_font_size_mode()
 
-        # Minimum font size setting (for auto mode)
-        min_size_frame = tk.Frame(render_frame)
+        # Minimum Font Size (Auto mode lower bound)
+        min_size_frame = tk.Frame(self.sizing_group)
         min_size_frame.pack(fill=tk.X, pady=5)
 
         tk.Label(min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
         min_size_spinbox = ttk.Spinbox(
             min_size_frame,
-            from_=10,
-            to=24,
-            textvariable=self.min_readable_size_var,
+            from_=8,
+            to=20,
+            textvariable=self.auto_min_size_var,
             width=10,
             command=self._save_rendering_settings
         )
         min_size_spinbox.pack(side=tk.LEFT, padx=10)
         self._disable_spinbox_mousewheel(min_size_spinbox)
-
 
         tk.Label(
             min_size_frame, 
@@ -2371,8 +2401,8 @@ class MangaTranslationTab:
             fg='gray'
         ).pack(side=tk.LEFT, padx=5)
     
-        # Maximum font size setting
-        max_size_frame = tk.Frame(render_frame)
+        # Maximum Font Size (Auto mode upper bound)
+        max_size_frame = tk.Frame(self.sizing_group)
         max_size_frame.pack(fill=tk.X, pady=5)
 
         tk.Label(max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
@@ -2395,41 +2425,114 @@ class MangaTranslationTab:
             fg='gray'
         ).pack(side=tk.LEFT, padx=5)
 
-        # Text wrapping mode
-        wrap_frame = tk.Frame(render_frame)
-        wrap_frame.pack(fill=tk.X, pady=5)
+
+        # Auto Fit Style (applies to Auto mode)
+        fit_row = tk.Frame(self.sizing_group)
+        fit_row.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(fit_row, text="Auto Fit Style:", width=14, anchor='w').pack(side=tk.LEFT)
+        for value, text in [('compact','Compact'), ('balanced','Balanced'), ('readable','Readable')]:
+            ttk.Radiobutton(
+                fit_row,
+                text=text,
+                variable=self.auto_fit_style_var,
+                value=value,
+                command=self._save_rendering_settings
+            ).pack(side=tk.LEFT, padx=(0,10))
+
+        # Behavior toggles
+        tb.Checkbutton(
+            self.sizing_group,
+            text="Prefer larger text",
+            variable=self.prefer_larger_var,
+            command=self._save_rendering_settings,
+            bootstyle="round-toggle"
+        ).pack(anchor='w', pady=2)
+        tb.Checkbutton(
+            self.sizing_group,
+            text="Scale with bubble size",
+            variable=self.bubble_size_factor_var,
+            command=self._save_rendering_settings,
+            bootstyle="round-toggle"
+        ).pack(anchor='w', pady=2)
+
+        # Line Spacing row with live value label
+        row_ls = tk.Frame(self.sizing_group)
+        row_ls.pack(fill=tk.X, pady=(6, 2))
+        tk.Label(row_ls, text="Line Spacing:", width=14, anchor='w').pack(side=tk.LEFT)
+        ls_scale = tk.Scale(
+            row_ls,
+            from_=1.0, to=2.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            variable=self.line_spacing_var,
+            command=lambda v: self._on_line_spacing_changed(v),
+            length=200
+        )
+        ls_scale.pack(side=tk.LEFT, padx=6)
+        self.line_spacing_value_label = tk.Label(row_ls, text=f"{float(self.line_spacing_var.get()):.2f}", width=5)
+        self.line_spacing_value_label.pack(side=tk.LEFT, padx=6)
+
+        # Max Lines
+        row_ml = tk.Frame(self.sizing_group)
+        row_ml.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(row_ml, text="Max Lines:", width=14, anchor='w').pack(side=tk.LEFT)
+        tb.Spinbox(
+            row_ml,
+            from_=5,
+            to=20,
+            textvariable=self.max_lines_var,
+            width=10,
+            command=self._save_rendering_settings
+        ).pack(side=tk.LEFT, padx=6)
+
+        # Quick Presets (horizontal) merged into sizing group
+        row_presets = tk.Frame(self.sizing_group)
+        row_presets.pack(fill=tk.X, pady=(6, 2))
+        tk.Label(row_presets, text="Quick Presets:", width=14, anchor='w').pack(side=tk.LEFT)
+        btns = tk.Frame(row_presets)
+        btns.pack(side=tk.LEFT)
+        ttk.Button(btns, text="Small Bubbles", width=14, command=lambda: self._set_font_preset('small')).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Balanced", width=14, command=lambda: self._set_font_preset('balanced')).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Large Text", width=14, command=lambda: self._set_font_preset('large')).pack(side=tk.LEFT, padx=4)
+
+        # Text wrapping mode (moved into Font Settings)
+        wrap_frame = tk.Frame(self.sizing_group)
+        wrap_frame.pack(fill=tk.X, pady=(6, 4))
 
         self.strict_wrap_checkbox = tb.Checkbutton(
             wrap_frame,
             text="Strict text wrapping (force text to fit within bubbles)",
             variable=self.strict_text_wrapping_var,
             command=self._save_rendering_settings,
-            bootstyle="primary"
+            bootstyle="round-toggle"
         )
-        self.strict_wrap_checkbox.pack(side=tk.LEFT)
+        self.strict_wrap_checkbox.pack(anchor='w')
 
         tk.Label(
             wrap_frame, 
             text="(Break words with hyphens if needed)", 
             font=('Arial', 9), 
             fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
+        ).pack(anchor='w', padx=(20, 0))
+
+        # Force CAPS LOCK directly below strict wrapping
+        force_caps_check = ttk.Checkbutton(
+            wrap_frame,
+            text="Force CAPS LOCK",
+            variable=self.force_caps_lock_var,
+            command=self._apply_rendering_settings,
+            bootstyle="round-toggle"
+        )
+        force_caps_check.pack(anchor='w', pady=(4, 0))
     
         # Update multiplier label with loaded value
         self._update_multiplier_label(self.font_size_multiplier_var.get())
         
-        font_size_spinbox.pack(side=tk.LEFT, padx=10)
-        # Also bind to save on manual entry
-        font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        font_size_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
+        # Font style selection (moved into Font Settings)
+        font_style_frame = tk.Frame(self.sizing_group)
+        font_style_frame.pack(fill=tk.X, pady=(6, 4))
         
-        tk.Label(font_frame, text="(0 = Auto)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
-        
-        # Font style selection
-        font_style_frame = tk.Frame(render_frame)
-        font_style_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(font_style_frame, text="Font Style:", width=20, anchor='w').pack(side=tk.LEFT)
+        tk.Label(font_style_frame, text="Font Style:", width=14, anchor='w').pack(side=tk.LEFT)
         
         # Font style will be set from loaded config in _load_rendering_settings
         self.font_combo = ttk.Combobox(
@@ -2447,11 +2550,11 @@ class MangaTranslationTab:
         self.font_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
         self.font_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
         
-        # Font color selection
-        color_frame = tk.Frame(render_frame)
-        color_frame.pack(fill=tk.X, pady=5)
+        # Font color selection (moved into Font Settings)
+        color_frame = tk.Frame(self.sizing_group)
+        color_frame.pack(fill=tk.X, pady=(6, 4))
         
-        tk.Label(color_frame, text="Font Color:", width=20, anchor='w').pack(side=tk.LEFT)
+        tk.Label(color_frame, text="Font Color:", width=14, anchor='w').pack(side=tk.LEFT)
         
         # Color button and preview
         color_button_frame = tk.Frame(color_frame)
@@ -2495,13 +2598,13 @@ class MangaTranslationTab:
         
         self._update_color_preview(None)  # Initialize with loaded colors
         
-        # Shadow settings frame
-        shadow_frame = tk.LabelFrame(render_frame, text="Text Shadow", padx=10, pady=5)
-        shadow_frame.pack(fill=tk.X, pady=10)
+        # Text Shadow settings (moved into Font Settings)
+        shadow_header = tk.Frame(self.sizing_group)
+        shadow_header.pack(fill=tk.X, pady=(8, 4))
         
         # Shadow enabled checkbox
         tb.Checkbutton(
-            shadow_frame,
+            shadow_header,
             text="Enable Shadow",
             variable=self.shadow_enabled_var,
             bootstyle="round-toggle",
@@ -2509,8 +2612,8 @@ class MangaTranslationTab:
         ).pack(anchor='w')
         
         # Shadow controls container
-        self.shadow_controls = tk.Frame(shadow_frame)
-        self.shadow_controls.pack(fill=tk.X, pady=5)
+        self.shadow_controls = tk.Frame(self.sizing_group)
+        self.shadow_controls.pack(fill=tk.X, pady=(2, 6))
         
         # Shadow color
         shadow_color_frame = tk.Frame(self.shadow_controls)
@@ -2862,6 +2965,34 @@ class MangaTranslationTab:
                 """Callback when settings are saved"""
                 # Update config with new settings
                 self.main_gui.config['manga_settings'] = settings
+
+                # Mirror critical font size values into nested settings (avoid legacy top-level min key)
+                try:
+                    rendering = settings.get('rendering', {}) if isinstance(settings, dict) else {}
+                    font_sizing = settings.get('font_sizing', {}) if isinstance(settings, dict) else {}
+                    min_from_dialog = rendering.get('auto_min_size', font_sizing.get('min_readable', font_sizing.get('min_size')))
+                    max_from_dialog = rendering.get('auto_max_size', font_sizing.get('max_size'))
+                    if min_from_dialog is not None:
+                        ms = self.main_gui.config.setdefault('manga_settings', {})
+                        rend = ms.setdefault('rendering', {})
+                        font = ms.setdefault('font_sizing', {})
+                        rend['auto_min_size'] = int(min_from_dialog)
+                        font['min_size'] = int(min_from_dialog)
+                        if hasattr(self, 'auto_min_size_var'):
+                            self.auto_min_size_var.set(int(min_from_dialog))
+                    if max_from_dialog is not None:
+                        self.main_gui.config['manga_max_font_size'] = int(max_from_dialog)
+                        if hasattr(self, 'max_font_size_var'):
+                            self.max_font_size_var.set(int(max_from_dialog))
+                except Exception:
+                    pass
+
+                # Persist mirrored values
+                try:
+                    if hasattr(self.main_gui, 'save_config'):
+                        self.main_gui.save_config(show_message=False)
+                except Exception:
+                    pass
                 
                 # Reload settings in translator if it exists
                 if self.translator:
@@ -2883,7 +3014,7 @@ class MangaTranslationTab:
             messagebox.showerror("Error", f"Failed to open settings dialog:\n{str(e)}")
         
     def _toggle_font_size_mode(self):
-        """Toggle between fixed size and multiplier modes"""
+        """Toggle between auto, fixed size and multiplier modes"""
         mode = self.font_size_mode_var.get()
         
         # Check if frames exist before trying to pack/unpack them
@@ -2891,15 +3022,18 @@ class MangaTranslationTab:
             if mode == "fixed":
                 self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
                 self.multiplier_frame.pack_forget()
-                # Hide constraint frame if it exists
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack_forget()
-            else:
+            elif mode == "multiplier":
                 self.fixed_size_frame.pack_forget()
                 self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
-                # Show constraint frame if it exists
                 if hasattr(self, 'constraint_frame'):
                     self.constraint_frame.pack(fill=tk.X, pady=(5, 0))
+            else:  # auto
+                self.fixed_size_frame.pack_forget()
+                self.multiplier_frame.pack_forget()
+                if hasattr(self, 'constraint_frame'):
+                    self.constraint_frame.pack_forget()
         
         # Only save if we're not initializing
         if not hasattr(self, '_initializing') or not self._initializing:
@@ -2909,6 +3043,15 @@ class MangaTranslationTab:
         """Update multiplier label"""
         self.multiplier_label.config(text=f"{float(value):.1f}x")
         # Auto-save on change
+        self._save_rendering_settings()
+
+    def _on_line_spacing_changed(self, value):
+        """Update line spacing value label and save"""
+        try:
+            if hasattr(self, 'line_spacing_value_label'):
+                self.line_spacing_value_label.config(text=f"{float(value):.2f}")
+        except Exception:
+            pass
         self._save_rendering_settings()
     
     def _update_color_preview(self, event):
@@ -2944,6 +3087,37 @@ class MangaTranslationTab:
         # Auto-save on change (but not during initialization)
         if not getattr(self, '_initializing', False):
             self._save_rendering_settings()
+
+    def _set_font_preset(self, preset: str):
+        """Apply font sizing preset (moved from dialog)"""
+        try:
+            if preset == 'small':
+                self.font_algorithm_var.set('conservative')
+                self.auto_min_size_var.set(12)
+                self.max_font_size_var.set(24)
+                self.prefer_larger_var.set(False)
+                self.bubble_size_factor_var.set(True)
+                self.line_spacing_var.set(1.2)
+                self.max_lines_var.set(8)
+            elif preset == 'balanced':
+                self.font_algorithm_var.set('smart')
+                self.auto_min_size_var.set(14)
+                self.max_font_size_var.set(40)
+                self.prefer_larger_var.set(True)
+                self.bubble_size_factor_var.set(True)
+                self.line_spacing_var.set(1.3)
+                self.max_lines_var.set(10)
+            elif preset == 'large':
+                self.font_algorithm_var.set('aggressive')
+                self.auto_min_size_var.set(16)
+                self.max_font_size_var.set(50)
+                self.prefer_larger_var.set(True)
+                self.bubble_size_factor_var.set(False)
+                self.line_spacing_var.set(1.4)
+                self.max_lines_var.set(12)
+            self._save_rendering_settings()
+        except Exception:
+            pass
     
     def _enable_widget_tree(self, widget):
         """Recursively enable a widget and its children"""
@@ -2966,6 +3140,28 @@ class MangaTranslationTab:
     def _load_rendering_settings(self):
         """Load text rendering settings from config"""
         config = self.main_gui.config
+
+        # One-time migration for legacy min font size key
+        try:
+            legacy_min = config.get('manga_min_readable_size', None)
+            if legacy_min is not None:
+                ms = config.setdefault('manga_settings', {})
+                rend = ms.setdefault('rendering', {})
+                font = ms.setdefault('font_sizing', {})
+                current_min = rend.get('auto_min_size', font.get('min_size'))
+                if current_min is None or int(current_min) < int(legacy_min):
+                    rend['auto_min_size'] = int(legacy_min)
+                    font['min_size'] = int(legacy_min)
+                # Remove legacy key
+                try:
+                    del config['manga_min_readable_size']
+                except Exception:
+                    pass
+                # Persist migration silently
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+        except Exception:
+            pass
         
         # Get inpainting settings from the nested location
         manga_settings = config.get('manga_settings', {})
@@ -3010,17 +3206,56 @@ class MangaTranslationTab:
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
         self.font_size_multiplier_var.trace('w', lambda *args: self._save_rendering_settings())
         
+        # Auto fit style for auto mode
+        try:
+            rend_cfg = (config.get('manga_settings', {}) or {}).get('rendering', {})
+        except Exception:
+            rend_cfg = {}
+        self.auto_fit_style_var = tk.StringVar(value=rend_cfg.get('auto_fit_style', 'balanced'))
+        self.auto_fit_style_var.trace('w', lambda *args: self._save_rendering_settings())
+        
+        # Auto minimum font size (from rendering or font_sizing)
+        try:
+            font_cfg = (config.get('manga_settings', {}) or {}).get('font_sizing', {})
+        except Exception:
+            font_cfg = {}
+        auto_min_default = rend_cfg.get('auto_min_size', font_cfg.get('min_size', 10))
+        self.auto_min_size_var = tk.IntVar(value=int(auto_min_default))
+        self.auto_min_size_var.trace('w', lambda *args: self._save_rendering_settings())
+        
         self.force_caps_lock_var = tk.BooleanVar(value=config.get('manga_force_caps_lock', True))
         self.force_caps_lock_var.trace('w', lambda *args: self._save_rendering_settings())
         
         self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
         self.constrain_to_bubble_var.trace('w', lambda *args: self._save_rendering_settings())
         
-        self.min_readable_size_var = tk.IntVar(value=config.get('manga_min_readable_size', 16))
-        self.min_readable_size_var.trace('w', lambda *args: self._save_rendering_settings()) 
+        # Advanced font sizing (from manga_settings.font_sizing)
+        font_settings = (config.get('manga_settings', {}) or {}).get('font_sizing', {})
+        self.font_algorithm_var = tk.StringVar(value=str(font_settings.get('algorithm', 'smart')))
+        self.font_algorithm_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.prefer_larger_var = tk.BooleanVar(value=bool(font_settings.get('prefer_larger', True)))
+        self.prefer_larger_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.bubble_size_factor_var = tk.BooleanVar(value=bool(font_settings.get('bubble_size_factor', True)))
+        self.bubble_size_factor_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.line_spacing_var = tk.DoubleVar(value=float(font_settings.get('line_spacing', 1.3)))
+        self.line_spacing_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.max_lines_var = tk.IntVar(value=int(font_settings.get('max_lines', 10)))
+        self.max_lines_var.trace('w', lambda *args: self._save_rendering_settings())
         
-        self.max_font_size_var = tk.IntVar(value=config.get('manga_max_font_size', 24))
+        # Determine effective max font size with fallback
+        font_max_top = config.get('manga_max_font_size', None)
+        nested_ms = config.get('manga_settings', {}) if isinstance(config.get('manga_settings', {}), dict) else {}
+        nested_render = nested_ms.get('rendering', {}) if isinstance(nested_ms.get('rendering', {}), dict) else {}
+        nested_font = nested_ms.get('font_sizing', {}) if isinstance(nested_ms.get('font_sizing', {}), dict) else {}
+        effective_max = font_max_top if font_max_top is not None else (
+            nested_render.get('auto_max_size', nested_font.get('max_size', 24))
+        )
+        self.max_font_size_var = tk.IntVar(value=int(effective_max))
         self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  
+        
+        # If top-level keys were missing, mirror max now (won't save during initialization)
+        if font_max_top is None:
+            self.main_gui.config['manga_max_font_size'] = int(effective_max)
         
         self.strict_text_wrapping_var = tk.BooleanVar(value=config.get('manga_strict_text_wrapping', False))
         self.strict_text_wrapping_var.trace('w', lambda *args: self._save_rendering_settings())
@@ -3191,15 +3426,6 @@ class MangaTranslationTab:
                 except tk.TclError:
                     pass  # Skip if variable is in invalid state
             
-            if hasattr(self, 'min_readable_size_var'):
-                try:
-                    value = self.min_readable_size_var.get()
-                    # Validate the value is reasonable
-                    if 0 <= value <= 100:
-                        self.main_gui.config['manga_min_readable_size'] = value
-                except (tk.TclError, ValueError):
-                    pass  # Skip if variable is in invalid state
-            
             if hasattr(self, 'max_font_size_var'):
                 try:
                     value = self.max_font_size_var.get()
@@ -3208,6 +3434,44 @@ class MangaTranslationTab:
                         self.main_gui.config['manga_max_font_size'] = value
                 except (tk.TclError, ValueError):
                     pass  # Skip if variable is in invalid state
+            
+            # Mirror these into nested manga_settings so the dialog and integration stay in sync
+            try:
+                ms = self.main_gui.config.setdefault('manga_settings', {})
+                rend = ms.setdefault('rendering', {})
+                font = ms.setdefault('font_sizing', {})
+                # Mirror bounds
+                try:
+                    rend['auto_min_size'] = int(self.auto_min_size_var.get())
+                    font['min_size'] = int(self.auto_min_size_var.get())
+                except Exception:
+                    pass
+                try:
+                    rend['auto_max_size'] = int(self.max_font_size_var.get())
+                    font['max_size'] = int(self.max_font_size_var.get())
+                except Exception:
+                    pass
+                # Persist advanced font sizing controls
+                if hasattr(self, 'font_algorithm_var'):
+                    font['algorithm'] = str(self.font_algorithm_var.get())
+                if hasattr(self, 'prefer_larger_var'):
+                    font['prefer_larger'] = bool(self.prefer_larger_var.get())
+                if hasattr(self, 'bubble_size_factor_var'):
+                    font['bubble_size_factor'] = bool(self.bubble_size_factor_var.get())
+                if hasattr(self, 'line_spacing_var'):
+                    try:
+                        font['line_spacing'] = float(self.line_spacing_var.get())
+                    except Exception:
+                        pass
+                if hasattr(self, 'max_lines_var'):
+                    try:
+                        font['max_lines'] = int(self.max_lines_var.get())
+                    except Exception:
+                        pass
+                if hasattr(self, 'auto_fit_style_var'):
+                    rend['auto_fit_style'] = str(self.auto_fit_style_var.get())
+            except Exception:
+                pass
             
             # Continue with other settings
             self.main_gui.config['manga_font_path'] = self.selected_font_path
@@ -5872,7 +6136,7 @@ class MangaTranslationTab:
         # Update font mode and multiplier explicitly
         self.translator.font_size_mode = self.font_size_mode_var.get()
         self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
-        self.translator.min_readable_size = self.min_readable_size_var.get()
+        self.translator.min_readable_size = self.auto_min_size_var.get()
         self.translator.max_font_size_limit = self.max_font_size_var.get()
         self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
         self.translator.force_caps_lock = self.force_caps_lock_var.get()
@@ -5927,7 +6191,7 @@ class MangaTranslationTab:
         self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
         import os
         self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
-        self._log(f"  Minimum Font Size: {self.min_readable_size_var.get()}pt", "info")
+        self._log(f"  Minimum Font Size: {self.auto_min_size_var.get()}pt", "info")
         self._log(f"  Maximum Font Size: {self.max_font_size_var.get()}pt", "info")
         self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_var.get() else 'Disabled (allow overflow)'}", "info")
         if self.font_size_mode_var.get() == 'multiplier':
