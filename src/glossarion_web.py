@@ -209,8 +209,10 @@ class GlossarionWeb:
             
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
-            # Reload config to ensure consistency (will be decrypted on load)
+            # Reload config to ensure consistency and decrypt it
             self.config = self.load_config()
+            if API_KEY_ENCRYPTION_AVAILABLE:
+                self.config = decrypt_config(self.config)
         except Exception as e:
             return f"❌ Failed to save config: {e}"
         return "✅ Configuration saved"
@@ -1045,13 +1047,21 @@ class GlossarionWeb:
                                 
                                 ocr_provider = gr.Radio(
                                     choices=["google", "azure", "custom-api"],
-                                    value="custom-api",  # Default to custom-api
+                                    value=self.config.get('ocr_provider', 'custom-api'),
                                     label="OCR Provider"
                                 )
                                 
-                                # Note: File component doesn't support pre-filling paths, user must re-upload each session
+                                # Show saved Google credentials path if available
+                                saved_google_path = self.config.get('google_vision_credentials', '')
+                                if saved_google_path and os.path.exists(saved_google_path):
+                                    gr.Markdown(f"✅ **Saved credentials found:** `{os.path.basename(saved_google_path)}`")
+                                    gr.Markdown("💡 *Using saved credentials. Upload a new file only if you want to change them.*")
+                                else:
+                                    gr.Markdown("⚠️ No saved Google credentials found. Please upload your JSON file.")
+                                
+                                # Note: File component doesn't support pre-filling paths due to browser security
                                 google_creds = gr.File(
-                                    label="Google Cloud Credentials JSON (if using Google)",
+                                    label="Google Cloud Credentials JSON (upload to update)",
                                     file_types=[".json"]
                                 )
                                 
@@ -1070,12 +1080,12 @@ class GlossarionWeb:
                                 
                                 bubble_detection = gr.Checkbox(
                                     label="Enable Bubble Detection",
-                                    value=True
+                                    value=self.config.get('bubble_detection_enabled', True)
                                 )
                                 
                                 inpainting = gr.Checkbox(
                                     label="Enable Text Removal (Inpainting)",
-                                    value=True
+                                    value=self.config.get('inpainting_enabled', True)
                                 )
                             
                             with gr.Accordion("✨ Text Visibility Settings", open=False):
@@ -1242,6 +1252,122 @@ class GlossarionWeb:
                     manga_api_key.change(
                         fn=lambda m, k: save_manga_credentials(m, k),
                         inputs=[manga_model, manga_api_key],
+                        outputs=None
+                    )
+                    
+                    # Auto-save Azure credentials on change
+                    def save_azure_credentials(key, endpoint):
+                        """Save Azure credentials to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            if key and key.strip():
+                                current_config['azure_vision_key'] = str(key).strip()
+                            if endpoint and endpoint.strip():
+                                current_config['azure_vision_endpoint'] = str(endpoint).strip()
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save Azure credentials: {e}")
+                            return None
+                    
+                    azure_key.change(
+                        fn=lambda k, e: save_azure_credentials(k, e),
+                        inputs=[azure_key, azure_endpoint],
+                        outputs=None
+                    )
+                    
+                    azure_endpoint.change(
+                        fn=lambda k, e: save_azure_credentials(k, e),
+                        inputs=[azure_key, azure_endpoint],
+                        outputs=None
+                    )
+                    
+                    # Auto-save OCR provider on change
+                    def save_ocr_provider(provider):
+                        """Save OCR provider to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            current_config['ocr_provider'] = provider
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save OCR provider: {e}")
+                            return None
+                    
+                    ocr_provider.change(
+                        fn=save_ocr_provider,
+                        inputs=[ocr_provider],
+                        outputs=None
+                    )
+                    
+                    # Auto-save bubble detection and inpainting on change
+                    def save_detection_settings(bubble_det, inpaint):
+                        """Save bubble detection and inpainting settings"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            current_config['bubble_detection_enabled'] = bubble_det
+                            current_config['inpainting_enabled'] = inpaint
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save detection settings: {e}")
+                            return None
+                    
+                    bubble_detection.change(
+                        fn=lambda b, i: save_detection_settings(b, i),
+                        inputs=[bubble_detection, inpainting],
+                        outputs=None
+                    )
+                    
+                    inpainting.change(
+                        fn=lambda b, i: save_detection_settings(b, i),
+                        inputs=[bubble_detection, inpainting],
+                        outputs=None
+                    )
+                    
+                    # Auto-save font size mode on change
+                    def save_font_mode(mode):
+                        """Save font size mode to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            current_config['manga_font_size_mode'] = mode
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save font mode: {e}")
+                            return None
+                    
+                    font_size_mode.change(
+                        fn=save_font_mode,
+                        inputs=[font_size_mode],
+                        outputs=None
+                    )
+                    
+                    # Auto-save background style on change
+                    def save_bg_style(style):
+                        """Save background style to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            current_config['manga_bg_style'] = style
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save bg style: {e}")
+                            return None
+                    
+                    bg_style.change(
+                        fn=save_bg_style,
+                        inputs=[bg_style],
                         outputs=None
                     )
                     
