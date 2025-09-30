@@ -56,19 +56,31 @@ class _MangaGuiLogHandler(logging.Handler):
         if msg == self._last_msg:
             return
         self._last_msg = msg
+        
+        # Map logging levels to our tag levels
+        lvl = record.levelname.lower()
+        tag = 'info'
+        if lvl.startswith('warn'):
+            tag = 'warning'
+        elif lvl.startswith('err') or lvl.startswith('crit'):
+            tag = 'error'
+        elif lvl.startswith('debug'):
+            tag = 'debug'
+        elif lvl.startswith('info'):
+            tag = 'info'
+        
+        # Always store to persistent log (even if GUI is closed)
+        try:
+            with MangaTranslationTab._persistent_log_lock:
+                if len(MangaTranslationTab._persistent_log) >= 1000:
+                    MangaTranslationTab._persistent_log.pop(0)
+                MangaTranslationTab._persistent_log.append((msg, tag))
+        except Exception:
+            pass
+        
+        # Also try to display in GUI if it exists
         try:
             if hasattr(self.gui_ref, '_log'):
-                # Map logging levels to our tag levels
-                lvl = record.levelname.lower()
-                tag = 'info'
-                if lvl.startswith('warn'):
-                    tag = 'warning'
-                elif lvl.startswith('err') or lvl.startswith('crit'):
-                    tag = 'error'
-                elif lvl.startswith('debug'):
-                    tag = 'debug'
-                elif lvl.startswith('info'):
-                    tag = 'info'
                 self.gui_ref._log(msg, tag)
         except Exception:
             pass
