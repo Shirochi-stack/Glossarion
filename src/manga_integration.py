@@ -38,6 +38,61 @@ try:
 except ImportError:
     UnifiedClient = None
 
+# Module-level function for multiprocessing (must be picklable)
+def _preload_models_worker(models_list, progress_queue):
+    """Worker function to preload models in separate process (module-level for pickling)"""
+    try:
+        total_steps = len(models_list)
+        
+        for idx, (model_type, model_key, model_name, model_path) in enumerate(models_list):
+            try:
+                # Send progress update
+                progress_percent = int((idx / total_steps) * 100)
+                progress_queue.put(('progress', progress_percent, model_name))
+                
+                if model_type == 'detector':
+                    from bubble_detector import BubbleDetector
+                    from manga_translator import MangaTranslator
+                    
+                    bd = BubbleDetector()
+                    
+                    if model_key == 'rtdetr_onnx':
+                        model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                        bd.load_rtdetr_onnx_model(model_repo)
+                    elif model_key == 'rtdetr':
+                        bd.load_rtdetr_model()
+                    elif model_key == 'yolo':
+                        if model_path:
+                            bd.load_model(model_path)
+                    
+                    progress_queue.put(('loaded', model_type, model_name))
+                    
+                elif model_type == 'inpainter':
+                    from local_inpainter import LocalInpainter
+                    
+                    inp = LocalInpainter()
+                    resolved_path = model_path
+                    
+                    if not resolved_path or not os.path.exists(resolved_path):
+                        try:
+                            resolved_path = inp.download_jit_model(model_key)
+                        except:
+                            resolved_path = None
+                    
+                    if resolved_path and os.path.exists(resolved_path):
+                        success = inp.load_model_with_retry(model_key, resolved_path)
+                        if success:
+                            progress_queue.put(('loaded', model_type, model_name))
+            
+            except Exception as e:
+                progress_queue.put(('error', model_name, str(e)))
+        
+        # Send completion signal
+        progress_queue.put(('complete', None, None))
+        
+    except Exception as e:
+        progress_queue.put(('error', 'Process', str(e)))
+
 class _MangaGuiLogHandler(logging.Handler):
     """Forward logging records into MangaTranslationTab._log."""
     def __init__(self, gui_ref, level=logging.INFO):
@@ -126,6 +181,11 @@ class MangaTranslationTab:
     # Class-level log storage to persist across window closures
     _persistent_log = []
     _persistent_log_lock = threading.RLock()
+    
+    # Class-level preload tracking to prevent duplicate loading
+    _preload_in_progress = False
+    _preload_lock = threading.RLock()
+    _preload_completed_models = set()  # Track which models have been loaded
     
     @classmethod
     def set_global_cancellation(cls, cancelled: bool):
@@ -265,6 +325,9 @@ class MangaTranslationTab:
         # Use QTimer for PySide6 dialog
         QTimer.singleShot(100, self._check_provider_status)
         
+        # Start model preloading in background
+        QTimer.singleShot(200, self._start_model_preloading)
+        
         # Now that everything is initialized, allow saving
         self._initializing = False
         
@@ -397,6 +460,134 @@ class MangaTranslationTab:
             return False
         except Exception:
             return False
+    
+    def _start_model_preloading(self):
+        """Start preloading models in separate process for true background loading"""
+        from multiprocessing import Process, Queue as MPQueue
+        import queue
+        
+        # Check if preload is already in progress
+        with MangaTranslationTab._preload_lock:
+            if MangaTranslationTab._preload_in_progress:
+                print("Model preloading already in progress, skipping...")
+                return
+        
+        # Get settings
+        manga_settings = self.main_gui.config.get('manga_settings', {})
+        ocr_settings = manga_settings.get('ocr', {})
+        inpaint_settings = manga_settings.get('inpainting', {})
+        
+        models_to_load = []
+        bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+        skip_inpainting = self.main_gui.config.get('manga_skip_inpainting', False)
+        inpainting_method = inpaint_settings.get('method', 'local')
+        inpainting_enabled = not skip_inpainting and inpainting_method == 'local'
+        
+        # Check if models need loading
+        try:
+            from manga_translator import MangaTranslator
+            
+            if bubble_detection_enabled:
+                detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                key = (detector_type, model_url)
+                model_id = f"detector_{detector_type}_{model_url}"
+                
+                # Skip if already loaded in this session
+                if model_id not in MangaTranslationTab._preload_completed_models:
+                    with MangaTranslator._detector_pool_lock:
+                        rec = MangaTranslator._detector_pool.get(key)
+                        if not rec or (not rec.get('spares') and not rec.get('loaded')):
+                            detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
+                            models_to_load.append(('detector', detector_type, detector_name, model_url))
+            
+            if inpainting_enabled:
+                local_method = inpaint_settings.get('local_method', 'anime')
+                model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                key = (local_method, model_path or '')
+                model_id = f"inpainter_{local_method}_{model_path}"
+                
+                # Skip if already loaded in this session
+                if model_id not in MangaTranslationTab._preload_completed_models:
+                    with MangaTranslator._inpaint_pool_lock:
+                        rec = MangaTranslator._inpaint_pool.get(key)
+                        if not rec or (not rec.get('loaded') and not rec.get('spares')):
+                            models_to_load.append(('inpainter', local_method, local_method.capitalize(), model_path))
+        except Exception as e:
+            print(f"Error checking models: {e}")
+            return
+        
+        if not models_to_load:
+            return
+        
+        # Set preload in progress flag
+        with MangaTranslationTab._preload_lock:
+            MangaTranslationTab._preload_in_progress = True
+        
+        # Show progress bar
+        self.preload_progress_frame.setVisible(True)
+        
+        # Create queue for IPC
+        progress_queue = MPQueue()
+        
+        # Start loading in separate process using module-level function
+        load_process = Process(target=_preload_models_worker, args=(models_to_load, progress_queue), daemon=True)
+        load_process.start()
+        
+        # Store models being loaded for tracking
+        models_being_loaded = []
+        for model_type, model_key, model_name, model_path in models_to_load:
+            if model_type == 'detector':
+                models_being_loaded.append(f"detector_{model_key}_{model_path}")
+            elif model_type == 'inpainter':
+                models_being_loaded.append(f"inpainter_{model_key}_{model_path}")
+        
+        # Monitor progress with QTimer
+        def check_progress():
+            try:
+                while True:
+                    try:
+                        msg = progress_queue.get_nowait()
+                        msg_type = msg[0]
+                        
+                        if msg_type == 'progress':
+                            _, progress, model_name = msg
+                            self.preload_progress_bar.setValue(progress)
+                            self.preload_status_label.setText(f"Loading {model_name}...")
+                        
+                        elif msg_type == 'loaded':
+                            _, model_type, model_name = msg
+                            print(f"✓ Loaded {model_name}")
+                        
+                        elif msg_type == 'error':
+                            _, model_name, error = msg
+                            print(f"✗ Failed to load {model_name}: {error}")
+                        
+                        elif msg_type == 'complete':
+                            self.preload_progress_bar.setValue(100)
+                            self.preload_status_label.setText("✓ Models ready")
+                            
+                            # Mark all models as completed
+                            with MangaTranslationTab._preload_lock:
+                                MangaTranslationTab._preload_completed_models.update(models_being_loaded)
+                                MangaTranslationTab._preload_in_progress = False
+                            
+                            QTimer.singleShot(2000, lambda: self.preload_progress_frame.setVisible(False))
+                            return
+                    
+                    except queue.Empty:
+                        break
+                
+                QTimer.singleShot(100, check_progress)
+            
+            except Exception as e:
+                print(f"Progress check error: {e}")
+                self.preload_progress_frame.setVisible(False)
+                # Reset flag on error
+                with MangaTranslationTab._preload_lock:
+                    MangaTranslationTab._preload_in_progress = False
+        
+        QTimer.singleShot(100, check_progress)
     
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox"""
@@ -1479,8 +1670,7 @@ class MangaTranslationTab:
         self._build_pyside6_interface(main_layout)
     
     def _build_pyside6_interface(self, main_layout):
-        
-        # Title
+        # Title (at the very top)
         title_frame = QWidget()
         title_layout = QHBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 0, 0, 0)
@@ -1509,6 +1699,53 @@ class MangaTranslationTab:
         
         # Store reference for updates
         self.status_label = status_label
+        
+        # Model Preloading Progress Bar (right after title, initially hidden)
+        self.preload_progress_frame = QWidget()
+        self.preload_progress_frame.setStyleSheet(
+            "background-color: #2d2d2d; "
+            "border: 2px solid #4a5568; "
+            "border-radius: 8px; "
+            "padding: 12px;"
+        )
+        preload_layout = QVBoxLayout(self.preload_progress_frame)
+        preload_layout.setContentsMargins(12, 12, 12, 12)
+        preload_layout.setSpacing(8)
+        
+        self.preload_status_label = QLabel("Loading models...")
+        preload_status_font = QFont("Segoe UI", 10)
+        preload_status_font.setBold(True)
+        self.preload_status_label.setFont(preload_status_font)
+        self.preload_status_label.setStyleSheet("color: #ffffff; background: transparent; border: none;")
+        self.preload_status_label.setAlignment(Qt.AlignCenter)
+        preload_layout.addWidget(self.preload_status_label)
+        
+        self.preload_progress_bar = QProgressBar()
+        self.preload_progress_bar.setRange(0, 100)
+        self.preload_progress_bar.setValue(0)
+        self.preload_progress_bar.setTextVisible(True)
+        self.preload_progress_bar.setMinimumHeight(30)
+        self.preload_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #4a5568;
+                border-radius: 8px;
+                text-align: center;
+                background-color: #1e1e1e;
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2d6a4f, stop:0.5 #1b4332, stop:1 #081c15);
+                border-radius: 6px;
+                margin: 1px;
+            }
+        """)
+        preload_layout.addWidget(self.preload_progress_bar)
+        
+        self.preload_progress_frame.setVisible(False)  # Hidden by default
+        main_layout.addWidget(self.preload_progress_frame)
         
         # Add instructions and Google Cloud setup
         if not (has_api_key and has_vision):
