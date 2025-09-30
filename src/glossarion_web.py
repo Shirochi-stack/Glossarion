@@ -404,26 +404,26 @@ class GlossarionWeb:
         bg_opacity,
         bg_style
     ):
-        """Translate manga images - GENERATOR that yields (logs, image, status) updates"""
+        """Translate manga images - GENERATOR that yields (logs, image, cbz_file, status) updates"""
         
         if not MANGA_TRANSLATION_AVAILABLE:
-            yield "❌ Manga translation modules not loaded", None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Manga translation modules not loaded", None, None, gr.update(value="❌ Error", visible=True)
             return
         
         if not image_files:
-            yield "❌ Please upload at least one image", None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Please upload at least one image", None, None, gr.update(value="❌ Error", visible=True)
             return
         
         if not api_key:
-            yield "❌ Please provide an API key", None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Please provide an API key", None, None, gr.update(value="❌ Error", visible=True)
             return
         
         if ocr_provider == "google" and not google_creds_path:
-            yield "❌ Please provide Google Cloud credentials JSON file", None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Please provide Google Cloud credentials JSON file", None, None, gr.update(value="❌ Error", visible=True)
             return
         
         if ocr_provider == "azure" and (not azure_key or not azure_endpoint):
-            yield "❌ Please provide Azure API key and endpoint", None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Please provide Azure API key and endpoint", None, None, gr.update(value="❌ Error", visible=True)
             return
         
         try:
@@ -483,9 +483,53 @@ class GlossarionWeb:
             # Prepare output directory
             output_dir = tempfile.mkdtemp(prefix="manga_translated_")
             translated_files = []
+            cbz_mode = False
+            cbz_output_path = None
             
-            total_images = len(image_files) if isinstance(image_files, list) else 1
+            # Check if any file is a CBZ/ZIP archive
+            import zipfile
             files_to_process = image_files if isinstance(image_files, list) else [image_files]
+            extracted_images = []
+            
+            for file in files_to_process:
+                file_path = file.name if hasattr(file, 'name') else file
+                if file_path.lower().endswith(('.cbz', '.zip')):
+                    # Extract CBZ
+                    cbz_mode = True
+                    translation_logs.append(f"📚 Extracting CBZ: {os.path.basename(file_path)}")
+                    extract_dir = tempfile.mkdtemp(prefix="cbz_extract_")
+                    
+                    try:
+                        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                            zip_ref.extractall(extract_dir)
+                        
+                        # Find all image files in extracted directory
+                        import glob
+                        for ext in ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.bmp', '*.gif']:
+                            extracted_images.extend(glob.glob(os.path.join(extract_dir, '**', ext), recursive=True))
+                        
+                        # Sort naturally (by filename)
+                        extracted_images.sort()
+                        translation_logs.append(f"✅ Extracted {len(extracted_images)} images from CBZ")
+                        
+                        # Prepare CBZ output path
+                        cbz_output_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}_translated.cbz")
+                    except Exception as e:
+                        translation_logs.append(f"❌ Error extracting CBZ: {str(e)}")
+                else:
+                    # Regular image file
+                    extracted_images.append(file_path)
+            
+            # Use extracted images if CBZ was processed, otherwise use original files
+            if extracted_images:
+                # Create mock file objects for extracted images
+                class MockFile:
+                    def __init__(self, path):
+                        self.name = path
+                
+                files_to_process = [MockFile(img) for img in extracted_images]
+            
+            total_images = len(files_to_process)
             
             # Merge web app config with SimpleConfig for MangaTranslator
             # This includes all the text visibility settings we just set
@@ -576,7 +620,7 @@ class GlossarionWeb:
                 )
             except Exception as e:
                 error_log = f"❌ Failed to initialize API client: {str(e)}"
-                yield error_log, None, gr.update(value=error_log, visible=True)
+                yield error_log, None, None, gr.update(value=error_log, visible=True)
                 return
             
             # Log storage - will be yielded as live updates
@@ -617,7 +661,7 @@ class GlossarionWeb:
                 )
             except Exception as e:
                 error_log = f"❌ Failed to initialize manga translator: {str(e)}"
-                yield error_log, None, gr.update(value=error_log, visible=True)
+                yield error_log, None, None, gr.update(value=error_log, visible=True)
                 return
             
             # Process each image with real progress tracking
@@ -644,7 +688,7 @@ class GlossarionWeb:
                     # Yield initial log update
                     last_yield_log_count[0] = len(translation_logs)
                     last_yield_time[0] = time.time()
-                    yield "\n".join(translation_logs), None, gr.update(visible=False)
+                    yield "\n".join(translation_logs), None, None, gr.update(visible=False)
                     
                     # Start processing in a thread so we can yield logs periodically
                     import threading
@@ -670,7 +714,7 @@ class GlossarionWeb:
                         if should_yield_logs():
                             last_yield_log_count[0] = len(translation_logs)
                             last_yield_time[0] = time.time()
-                            yield "\n".join(translation_logs), None, gr.update(visible=False)
+                            yield "\n".join(translation_logs), None, None, gr.update(visible=False)
                     
                     # Wait for thread to complete
                     process_thread.join(timeout=1)
@@ -684,13 +728,13 @@ class GlossarionWeb:
                             translation_logs.append(f"✅ Image {idx}/{total_images} COMPLETE: {filename} | Total: {len(translated_files)}/{total_images} done")
                             translation_logs.append("")
                             # Yield progress update with completed image
-                            yield "\n".join(translation_logs), gr.update(value=final_output, visible=True), gr.update(visible=False)
+                            yield "\n".join(translation_logs), gr.update(value=final_output, visible=True), None, gr.update(visible=False)
                         else:
                             translation_logs.append(f"⚠️ Image {idx}/{total_images}: Output file missing for {filename}")
                             translation_logs.append(f"⚠️ Warning: Output file not found for image {idx}")
                             translation_logs.append("")
                             # Yield progress update
-                            yield "\n".join(translation_logs), None, gr.update(visible=False)
+                            yield "\n".join(translation_logs), None, None, gr.update(visible=False)
                     else:
                         errors = result.get('errors', [])
                         error_msg = errors[0] if errors else 'Unknown error'
@@ -698,7 +742,7 @@ class GlossarionWeb:
                         translation_logs.append(f"⚠️ Error on image {idx}: {error_msg}")
                         translation_logs.append("")
                         # Yield progress update
-                        yield "\n".join(translation_logs), None, gr.update(visible=False)
+                        yield "\n".join(translation_logs), None, None, gr.update(visible=False)
                         
                         # If translation failed, save original with error overlay
                         from PIL import Image as PILImage, ImageDraw, ImageFont
@@ -731,27 +775,51 @@ class GlossarionWeb:
             translation_logs.append(f"✅ ALL COMPLETE! Successfully translated {len(translated_files)}/{total_images} images")
             translation_logs.append("="*60)
             
+            # If CBZ mode, compile translated images into CBZ archive
+            final_output_for_display = None
+            if cbz_mode and cbz_output_path and translated_files:
+                translation_logs.append("\n📦 Compiling translated images into CBZ archive...")
+                try:
+                    with zipfile.ZipFile(cbz_output_path, 'w', zipfile.ZIP_DEFLATED) as cbz:
+                        for img_path in translated_files:
+                            # Preserve original filename structure
+                            arcname = os.path.basename(img_path).replace("translated_", "")
+                            cbz.write(img_path, arcname)
+                    
+                    translation_logs.append(f"✅ CBZ archive created: {os.path.basename(cbz_output_path)}")
+                    translation_logs.append(f"📁 Archive location: {cbz_output_path}")
+                    final_output_for_display = cbz_output_path
+                except Exception as e:
+                    translation_logs.append(f"❌ Error creating CBZ: {str(e)}")
+            
             # Build final status
             final_status_lines = []
             if translated_files:
                 final_status_lines.append(f"✅ Successfully translated {len(translated_files)}/{total_images} image(s)!")
-                final_status_lines.append(f"\nOutput directory: {output_dir}")
+                if cbz_mode and cbz_output_path:
+                    final_status_lines.append(f"\n📦 CBZ Output: {cbz_output_path}")
+                else:
+                    final_status_lines.append(f"\nOutput directory: {output_dir}")
             else:
                 final_status_lines.append("❌ Translation failed - no images were processed")
             
             final_status_text = "\n".join(final_status_lines)
             
-            # Final yield with complete logs, image, and final status
-            # Format: (logs_textbox, output_image, status_textbox)
+            # Final yield with complete logs, image, CBZ, and final status
+            # Format: (logs_textbox, output_image, cbz_file, status_textbox)
             if translated_files:
-                yield "\n".join(translation_logs), gr.update(value=translated_files[0], visible=True), gr.update(value=final_status_text, visible=True)
+                # If CBZ mode, show CBZ file for download; otherwise show first image
+                if cbz_mode and cbz_output_path and os.path.exists(cbz_output_path):
+                    yield "\n".join(translation_logs), gr.update(value=translated_files[0], visible=True), gr.update(value=cbz_output_path, visible=True), gr.update(value=final_status_text, visible=True)
+                else:
+                    yield "\n".join(translation_logs), gr.update(value=translated_files[0], visible=True), gr.update(visible=False), gr.update(value=final_status_text, visible=True)
             else:
-                yield "\n".join(translation_logs), gr.update(visible=False), gr.update(value=final_status_text, visible=True)
+                yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value=final_status_text, visible=True)
                 
         except Exception as e:
             import traceback
             error_msg = f"❌ Error during manga translation:\n{str(e)}\n\n{traceback.format_exc()}"
-            yield error_msg, gr.update(visible=False), gr.update(value=error_msg, visible=True)
+            yield error_msg, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_msg, visible=True)
     
     def create_interface(self):
         """Create Gradio interface"""
@@ -809,9 +877,15 @@ class GlossarionWeb:
                     with gr.Row():
                         with gr.Column():
                             manga_images = gr.File(
-                                label="🖼️ Upload Manga Images",
-                                file_types=[".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"],
+                                label="🖼️ Upload Manga Images or CBZ",
+                                file_types=[".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".cbz", ".zip"],
                                 file_count="multiple"
+                            )
+                            
+                            translate_manga_btn = gr.Button(
+                                "🚀 Translate Manga",
+                                variant="primary",
+                                size="lg"
                             )
                             
                             manga_model = gr.Dropdown(
@@ -982,12 +1056,6 @@ class GlossarionWeb:
                                     value=self.config.get('manga_bg_style', 'circle'),
                                     label="Background Style"
                                 )
-                            
-                            translate_manga_btn = gr.Button(
-                                "🚀 Translate Manga",
-                                variant="primary",
-                                size="lg"
-                            )
                         
                         with gr.Column():
                             # Add logo and loading message at top
@@ -1016,6 +1084,7 @@ class GlossarionWeb:
                             )
                             
                             manga_output_image = gr.Image(label="📷 Translated Image Preview", visible=False)
+                            manga_cbz_output = gr.File(label="📦 Download Translated CBZ", visible=False)
                             manga_status = gr.Textbox(
                                 label="Final Status",
                                 lines=8,
@@ -1061,8 +1130,370 @@ class GlossarionWeb:
                             bg_opacity,
                             bg_style
                         ],
-                        outputs=[manga_logs, manga_output_image, manga_status]
+                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status]
                     )
+                
+                # Manga Settings Tab - NEW
+                with gr.Tab("🎬 Manga Settings"):
+                    gr.Markdown("### Advanced Manga Translation Settings")
+                    gr.Markdown("Configure bubble detection, inpainting, preprocessing, and rendering options.")
+                    
+                    with gr.Accordion("🕹️ Bubble Detection & Inpainting", open=True):
+                        gr.Markdown("#### Bubble Detection")
+                        
+                        detector_type = gr.Radio(
+                            choices=["rtdetr_onnx", "rtdetr", "yolo"],
+                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr_onnx'),
+                            label="Detector Type",
+                            interactive=True
+                        )
+                        
+                        rtdetr_confidence = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('rtdetr_confidence', 0.3),
+                            step=0.05,
+                            label="RT-DETR Confidence Threshold",
+                            interactive=True
+                        )
+                        
+                        bubble_confidence = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('bubble_confidence', 0.3),
+                            step=0.05,
+                            label="YOLO Bubble Confidence Threshold",
+                            interactive=True
+                        )
+                        
+                        detect_text_bubbles = gr.Checkbox(
+                            label="Detect Text Bubbles",
+                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detect_text_bubbles', True)
+                        )
+                        
+                        detect_empty_bubbles = gr.Checkbox(
+                            label="Detect Empty Bubbles",
+                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detect_empty_bubbles', True)
+                        )
+                        
+                        detect_free_text = gr.Checkbox(
+                            label="Detect Free Text (outside bubbles)",
+                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text', True)
+                        )
+                        
+                        gr.Markdown("#### Inpainting")
+                        
+                        local_inpaint_method = gr.Radio(
+                            choices=["anime_onnx", "anime", "lama", "lama_onnx", "aot", "aot_onnx"],
+                            value=self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx'),
+                            label="Local Inpainting Model",
+                            interactive=True
+                        )
+                        
+                        with gr.Row():
+                            download_models_btn = gr.Button(
+                                "📥 Download Models",
+                                variant="secondary",
+                                size="sm"
+                            )
+                            load_models_btn = gr.Button(
+                                "📂 Load Models",
+                                variant="secondary",
+                                size="sm"
+                            )
+                        
+                        gr.Markdown("#### Mask Dilation")
+                        
+                        auto_iterations = gr.Checkbox(
+                            label="Auto Iterations (Recommended)",
+                            value=self.config.get('manga_settings', {}).get('auto_iterations', True)
+                        )
+                        
+                        mask_dilation = gr.Slider(
+                            minimum=0,
+                            maximum=20,
+                            value=self.config.get('manga_settings', {}).get('mask_dilation', 0),
+                            step=1,
+                            label="General Mask Dilation",
+                            interactive=True
+                        )
+                        
+                        text_bubble_dilation = gr.Slider(
+                            minimum=0,
+                            maximum=20,
+                            value=self.config.get('manga_settings', {}).get('text_bubble_dilation_iterations', 2),
+                            step=1,
+                            label="Text Bubble Dilation Iterations",
+                            interactive=True
+                        )
+                        
+                        empty_bubble_dilation = gr.Slider(
+                            minimum=0,
+                            maximum=20,
+                            value=self.config.get('manga_settings', {}).get('empty_bubble_dilation_iterations', 3),
+                            step=1,
+                            label="Empty Bubble Dilation Iterations",
+                            interactive=True
+                        )
+                        
+                        free_text_dilation = gr.Slider(
+                            minimum=0,
+                            maximum=20,
+                            value=self.config.get('manga_settings', {}).get('free_text_dilation_iterations', 3),
+                            step=1,
+                            label="Free Text Dilation Iterations",
+                            interactive=True
+                        )
+                    
+                    with gr.Accordion("🖌️ Image Preprocessing", open=False):
+                        preprocessing_enabled = gr.Checkbox(
+                            label="Enable Preprocessing",
+                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('enabled', False)
+                        )
+                        
+                        auto_detect_quality = gr.Checkbox(
+                            label="Auto Detect Image Quality",
+                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('auto_detect_quality', True)
+                        )
+                        
+                        enhancement_strength = gr.Slider(
+                            minimum=1.0,
+                            maximum=3.0,
+                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('enhancement_strength', 1.5),
+                            step=0.1,
+                            label="Enhancement Strength",
+                            interactive=True
+                        )
+                        
+                        denoise_strength = gr.Slider(
+                            minimum=0,
+                            maximum=50,
+                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('denoise_strength', 10),
+                            step=1,
+                            label="Denoise Strength",
+                            interactive=True
+                        )
+                        
+                        max_image_dimension = gr.Number(
+                            label="Max Image Dimension (pixels)",
+                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('max_image_dimension', 2000),
+                            minimum=500
+                        )
+                        
+                        chunk_height = gr.Number(
+                            label="Chunk Height for Large Images",
+                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('chunk_height', 1000),
+                            minimum=500
+                        )
+                        
+                        gr.Markdown("#### HD Strategy for Inpainting")
+                        gr.Markdown("*Controls how large images are processed during inpainting*")
+                        
+                        hd_strategy = gr.Radio(
+                            choices=["original", "resize", "crop"],
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy', 'resize'),
+                            label="HD Strategy",
+                            interactive=True,
+                            info="original = legacy full-image; resize/crop = faster"
+                        )
+                        
+                        hd_strategy_resize_limit = gr.Slider(
+                            minimum=512,
+                            maximum=4096,
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy_resize_limit', 1536),
+                            step=64,
+                            label="Resize Limit (long edge, px)",
+                            info="For resize strategy",
+                            interactive=True
+                        )
+                        
+                        hd_strategy_crop_margin = gr.Slider(
+                            minimum=0,
+                            maximum=256,
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy_crop_margin', 16),
+                            step=2,
+                            label="Crop Margin (px)",
+                            info="For crop strategy",
+                            interactive=True
+                        )
+                        
+                        hd_strategy_crop_trigger = gr.Slider(
+                            minimum=256,
+                            maximum=4096,
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy_crop_trigger_size', 1024),
+                            step=64,
+                            label="Crop Trigger Size (px)",
+                            info="Apply crop only if long edge exceeds this",
+                            interactive=True
+                        )
+                        
+                        gr.Markdown("#### Image Tiling")
+                        gr.Markdown("*Alternative tiling strategy (note: HD Strategy takes precedence)*")
+                        
+                        tiling_enabled = gr.Checkbox(
+                            label="Enable Tiling",
+                            value=self.config.get('manga_settings', {}).get('tiling', {}).get('enabled', False)
+                        )
+                        
+                        tiling_tile_size = gr.Slider(
+                            minimum=256,
+                            maximum=1024,
+                            value=self.config.get('manga_settings', {}).get('tiling', {}).get('tile_size', 480),
+                            step=64,
+                            label="Tile Size (px)",
+                            interactive=True
+                        )
+                        
+                        tiling_tile_overlap = gr.Slider(
+                            minimum=0,
+                            maximum=128,
+                            value=self.config.get('manga_settings', {}).get('tiling', {}).get('tile_overlap', 64),
+                            step=16,
+                            label="Tile Overlap (px)",
+                            interactive=True
+                        )
+                    
+                    with gr.Accordion("🎨 Font & Text Rendering", open=False):
+                        gr.Markdown("#### Font Sizing Algorithm")
+                        
+                        font_algorithm = gr.Radio(
+                            choices=["smart", "simple"],
+                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('algorithm', 'smart'),
+                            label="Font Sizing Algorithm",
+                            interactive=True
+                        )
+                        
+                        prefer_larger = gr.Checkbox(
+                            label="Prefer Larger Fonts",
+                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('prefer_larger', True)
+                        )
+                        
+                        max_lines = gr.Slider(
+                            minimum=1,
+                            maximum=20,
+                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('max_lines', 10),
+                            step=1,
+                            label="Maximum Lines Per Bubble",
+                            interactive=True
+                        )
+                        
+                        line_spacing = gr.Slider(
+                            minimum=0.5,
+                            maximum=3.0,
+                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('line_spacing', 1.3),
+                            step=0.1,
+                            label="Line Spacing Multiplier",
+                            interactive=True
+                        )
+                        
+                        bubble_size_factor = gr.Checkbox(
+                            label="Use Bubble Size Factor",
+                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('bubble_size_factor', True)
+                        )
+                        
+                        auto_fit_style = gr.Radio(
+                            choices=["balanced", "aggressive", "conservative"],
+                            value=self.config.get('manga_settings', {}).get('rendering', {}).get('auto_fit_style', 'balanced'),
+                            label="Auto Fit Style",
+                            interactive=True
+                        )
+                    
+                    with gr.Accordion("⚙️ Advanced Options", open=False):
+                        gr.Markdown("#### Format Detection")
+                        
+                        format_detection = gr.Checkbox(
+                            label="Enable Format Detection (manga/webtoon)",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('format_detection', True)
+                        )
+                        
+                        webtoon_mode = gr.Radio(
+                            choices=["auto", "force_manga", "force_webtoon"],
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('webtoon_mode', 'auto'),
+                            label="Webtoon Mode",
+                            interactive=True
+                        )
+                        
+                        gr.Markdown("#### Performance")
+                        
+                        parallel_processing = gr.Checkbox(
+                            label="Enable Parallel Processing",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)
+                        )
+                        
+                        max_workers = gr.Slider(
+                            minimum=1,
+                            maximum=8,
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('max_workers', 2),
+                            step=1,
+                            label="Max Worker Threads",
+                            interactive=True
+                        )
+                        
+                        parallel_panel_translation = gr.Checkbox(
+                            label="Parallel Panel Translation",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+                        )
+                        
+                        panel_max_workers = gr.Slider(
+                            minimum=1,
+                            maximum=20,
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 10),
+                            step=1,
+                            label="Panel Max Workers",
+                            interactive=True
+                        )
+                        
+                        gr.Markdown("#### Model Optimization")
+                        
+                        torch_precision = gr.Radio(
+                            choices=["fp32", "fp16"],
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('torch_precision', 'fp16'),
+                            label="Torch Precision",
+                            interactive=True
+                        )
+                        
+                        auto_cleanup_models = gr.Checkbox(
+                            label="Auto Cleanup Models from Memory",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('auto_cleanup_models', False)
+                        )
+                        
+                        gr.Markdown("#### Debug Options")
+                        
+                        debug_mode = gr.Checkbox(
+                            label="Enable Debug Mode",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                        )
+                        
+                        save_intermediate = gr.Checkbox(
+                            label="Save Intermediate Files",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('save_intermediate', False)
+                        )
+                        
+                        concise_pipeline_logs = gr.Checkbox(
+                            label="Concise Pipeline Logs",
+                            value=self.config.get('concise_pipeline_logs', True)
+                        )
+                    
+                    # Button handlers for model management
+                    def download_models_handler():
+                        return "Model download functionality will be available soon. Models are automatically downloaded on first use."
+                    
+                    def load_models_handler():
+                        return "Models are loaded automatically when needed. Manual loading is not required."
+                    
+                    download_models_btn.click(
+                        fn=lambda: gr.Info("Models are automatically downloaded on first use."),
+                        inputs=None,
+                        outputs=None
+                    )
+                    
+                    load_models_btn.click(
+                        fn=lambda: gr.Info("Models are loaded automatically when translation starts."),
+                        inputs=None,
+                        outputs=None
+                    )
+                    
+                    gr.Markdown("\n---\n**Note:** These settings will be saved to your config and applied to all manga translations.")
                 
                 # Glossary Extraction Tab - TEMPORARILY HIDDEN
                 with gr.Tab("📝 Glossary Extraction", visible=False):
