@@ -1309,6 +1309,18 @@ class MangaTranslator:
                     if not bd.load_rtdetr_onnx_model():
                         self._log("⚠️ Failed to load RTEDR_onnx, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
+                    else:
+                        # Model loaded successfully - mark in pool for reuse
+                        try:
+                            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                            key = ('rtdetr_onnx', model_id)
+                            with MangaTranslator._detector_pool_lock:
+                                if key not in MangaTranslator._detector_pool:
+                                    MangaTranslator._detector_pool[key] = {'spares': []}
+                                # Mark this detector type as loaded for next run
+                                MangaTranslator._detector_pool[key]['loaded'] = True
+                        except Exception:
+                            pass
                 rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
                 detect_empty = ocr_settings.get('detect_empty_bubbles', True)
                 detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
@@ -1350,6 +1362,18 @@ class MangaTranslator:
                     if not bd.load_rtdetr_model():
                         self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
+                    else:
+                        # Model loaded successfully - mark in pool for reuse
+                        try:
+                            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                            key = ('rtdetr', model_id)
+                            with MangaTranslator._detector_pool_lock:
+                                if key not in MangaTranslator._detector_pool:
+                                    MangaTranslator._detector_pool[key] = {'spares': []}
+                                # Mark this detector type as loaded for next run
+                                MangaTranslator._detector_pool[key]['loaded'] = True
+                        except Exception:
+                            pass
                 
                 # Get settings
                 rtdetr_confidence = ocr_settings.get('rtdetr_confidence', 0.3)
@@ -7840,10 +7864,20 @@ class MangaTranslator:
                                 self._log("🤖 Using preloaded bubble detector instance", "info")
                 except Exception:
                     pass
-                # If still not set, create a fresh detector
+                # If still not set, create a fresh detector and store it for future use
                 if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
                     self._thread_local.bubble_detector = BubbleDetector()
                     self._log("🤖 Created thread-local bubble detector", "debug")
+                    
+                    # Store this new detector in the pool for future reuse
+                    try:
+                        with MangaTranslator._detector_pool_lock:
+                            if key not in MangaTranslator._detector_pool:
+                                MangaTranslator._detector_pool[key] = {'spares': []}
+                            # Note: We don't add the current one as it's in use,
+                            # but we've initialized the pool entry for future storage
+                    except Exception:
+                        pass
             return self._thread_local.bubble_detector
     
     def _get_thread_local_inpainter(self, local_method: str, model_path: str):
@@ -7927,6 +7961,19 @@ class MangaTranslator:
                     tl2.local_inpainters = {}
                 if getattr(inp, 'model_loaded', False):
                     tl2.local_inpainters[key] = inp
+                    
+                    # Store this loaded instance info in the pool for future reuse
+                    try:
+                        with MangaTranslator._inpaint_pool_lock:
+                            if key not in MangaTranslator._inpaint_pool:
+                                MangaTranslator._inpaint_pool[key] = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                            # Mark that we have a loaded instance available
+                            MangaTranslator._inpaint_pool[key]['loaded'] = True
+                            MangaTranslator._inpaint_pool[key]['inpainter'] = inp  # Store reference
+                            if MangaTranslator._inpaint_pool[key].get('event'):
+                                MangaTranslator._inpaint_pool[key]['event'].set()
+                    except Exception:
+                        pass
                 else:
                     # Ensure future calls will attempt a fresh init instead of using a half-initialized instance
                     tl2.local_inpainters[key] = None

@@ -2078,6 +2078,255 @@ Text to analyze:
             messagebox.showwarning("Not Available", "Manga translation modules not found.")
             return
         
+        # Check if we should show loading screen (if models are available to preload)
+        should_show_loading = self._check_manga_models_available()
+        
+        if should_show_loading:
+            # Show loading screen while preloading models
+            self._open_manga_with_loading()
+        else:
+            # Open directly without loading screen
+            self._open_manga_translator_direct()
+    
+    def _check_manga_models_available(self):
+        """Check if there are manga models available to preload"""
+        try:
+            # Check for bubble detector settings
+            ocr_settings = self.config.get('manga_settings', {}).get('ocr', {})
+            if ocr_settings.get('bubble_detection_enabled', False):
+                return True
+            
+            # Check for local inpainter settings
+            manga_settings = self.config.get('manga_settings', {})
+            inpaint_settings = manga_settings.get('inpainting', {})
+            if inpaint_settings.get('method', 'local') == 'local':
+                local_method = inpaint_settings.get('local_method', 'anime')
+                model_path = self.config.get(f'manga_{local_method}_model_path', '')
+                if model_path and os.path.exists(model_path):
+                    return True
+            
+            return False
+        except Exception:
+            return False
+    
+    def _open_manga_with_loading(self):
+        """Show loading screen, preload models, then open manga translator"""
+        import threading
+        import time
+        from tkinter import ttk
+        from manga_translator import MangaTranslator
+        
+        # Preflight check: Are models already preloaded?
+        manga_settings = self.config.get('manga_settings', {})
+        ocr_settings = manga_settings.get('ocr', {})
+        inpaint_settings = manga_settings.get('inpainting', {})
+        
+        models_needed = False
+        
+        # Check bubble detector
+        if ocr_settings.get('bubble_detection_enabled', False):
+            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+            key = (detector_type, model_url)
+            
+            with MangaTranslator._detector_pool_lock:
+                rec = MangaTranslator._detector_pool.get(key)
+                # Consider it loaded if we have spares OR if marked as loaded (from previous run)
+                if not rec or (not rec.get('spares') and not rec.get('loaded')):
+                    models_needed = True
+        
+        # Check inpainter
+        if inpaint_settings.get('method', 'local') == 'local':
+            local_method = inpaint_settings.get('local_method', 'anime')
+            model_path = self.config.get(f'manga_{local_method}_model_path', '')
+            key = (local_method, model_path or '')
+            
+            with MangaTranslator._inpaint_pool_lock:
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if not rec or (not rec.get('loaded') and not rec.get('spares')):
+                    models_needed = True
+        
+        # If models are already loaded, skip the loading screen entirely
+        if not models_needed:
+            print("Models already preloaded, opening manga translator directly")
+            self._open_manga_translator_direct()
+            return
+        
+        # Otherwise show loading screen
+        loading_dialog = tk.Toplevel(self.master)
+        loading_dialog.title("Loading Manga Translator")
+        loading_dialog.geometry("350x200")
+        loading_dialog.resizable(False, False)
+        loading_dialog.transient(self.master)
+        
+        # Don't grab_set yet - let's try without it to avoid freezing
+        
+        # Set icon
+        try:
+            load_application_icon(loading_dialog, self.base_dir)
+        except:
+            pass
+        
+        # Center the window
+        loading_dialog.update_idletasks()
+        x = (loading_dialog.winfo_screenwidth() // 2) - 175
+        y = (loading_dialog.winfo_screenheight() // 2) - 100
+        loading_dialog.geometry(f"350x200+{x}+{y}")
+        
+        # Create main frame
+        main_frame = ttk.Frame(loading_dialog, padding="20")
+        main_frame.pack(fill="both", expand=True)
+        
+        # Try to load icon
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                from PIL import Image, ImageTk
+                img = Image.open(ico_path)
+                img = img.resize((48, 48), Image.Resampling.LANCZOS)
+                self.loading_icon = ImageTk.PhotoImage(img)
+                icon_label = ttk.Label(main_frame, image=self.loading_icon)
+                icon_label.pack(pady=(0, 10))
+        except:
+            pass
+        
+        # Loading text
+        loading_text = ttk.Label(main_frame, text="Pre-loading models...",
+                                font=('TkDefaultFont', 11))
+        loading_text.pack(pady=(0, 5))
+        
+        # Status label
+        status_label = ttk.Label(main_frame, text="Please wait...",
+                                font=('TkDefaultFont', 9))
+        status_label.pack(pady=(0, 10))
+        
+        # Progress bar
+        progress_bar = ttk.Progressbar(main_frame, mode='indeterminate')
+        progress_bar.pack(pady=(10, 0), fill='x')
+        progress_bar.start(10)
+        
+        # Update the dialog to process events
+        loading_dialog.update()
+        
+        def finish_loading():
+            """Close loading dialog and open manga translator"""
+            try:
+                progress_bar.stop()
+                loading_dialog.destroy()
+            except:
+                pass
+            # Now open the manga translator
+            self._open_manga_translator_direct()
+        
+        def preload_models():
+            """Preload models in background thread"""
+            try:
+                status_label.config(text="Initializing...")
+                
+                # Import MangaTranslator to access its class-level pools
+                from manga_translator import MangaTranslator
+                
+                # Get manga settings
+                manga_settings = self.config.get('manga_settings', {})
+                ocr_settings = manga_settings.get('ocr', {})
+                inpaint_settings = manga_settings.get('inpainting', {})
+                
+                # Preload bubble detector if enabled
+                if ocr_settings.get('bubble_detection_enabled', False):
+                    status_label.config(text="Loading bubble detector...")
+                    try:
+                        from bubble_detector import BubbleDetector
+                        detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                        model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                        
+                        # Create and load the detector
+                        key = (detector_type, model_url)
+                        with MangaTranslator._detector_pool_lock:
+                            rec = MangaTranslator._detector_pool.get(key)
+                            if not rec or not rec.get('spares'):
+                                bd = BubbleDetector()
+                                
+                                # Actually trigger model loading
+                                if detector_type == 'rtdetr_onnx':
+                                    model_repo = model_url if model_url else 'ogkalu/comic-text-and-bubble-detector'
+                                    if hasattr(bd, '_ensure_rtdetr_onnx_loaded'):
+                                        bd._ensure_rtdetr_onnx_loaded(model_repo)
+                                    else:
+                                        # Trigger loading with dummy detection
+                                        import numpy as np
+                                        dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+                                        bd.detect_bubbles(dummy_img)
+                                
+                                # Store in pool
+                                if not rec:
+                                    rec = {'spares': []}
+                                    MangaTranslator._detector_pool[key] = rec
+                                rec['spares'].append(bd)
+                    except Exception as e:
+                        print(f"Bubble detector preload failed: {e}")
+                
+                # Preload local inpainter if in local mode
+                if inpaint_settings.get('method', 'local') == 'local':
+                    status_label.config(text="Loading inpainter...")
+                    try:
+                        from local_inpainter import LocalInpainter
+                        local_method = inpaint_settings.get('local_method', 'anime')
+                        model_path = self.config.get(f'manga_{local_method}_model_path', '')
+                        
+                        key = (local_method, model_path or '')
+                        with MangaTranslator._inpaint_pool_lock:
+                            rec = MangaTranslator._inpaint_pool.get(key)
+                            if not rec or (not rec.get('loaded') and not rec.get('spares')):
+                                inp = LocalInpainter()
+                                
+                                # Download/load model
+                                resolved_path = model_path
+                                if not resolved_path or not os.path.exists(resolved_path):
+                                    status_label.config(text="Downloading inpaint model...")
+                                    try:
+                                        resolved_path = inp.download_jit_model(local_method)
+                                    except:
+                                        resolved_path = None
+                                
+                                if resolved_path and os.path.exists(resolved_path):
+                                    success = inp.load_model_with_retry(local_method, resolved_path)
+                                    if success and getattr(inp, 'model_loaded', False):
+                                        # Store in pool
+                                        if not rec:
+                                            rec = {'inpainter': inp, 'loaded': True, 'event': threading.Event(), 'spares': []}
+                                            MangaTranslator._inpaint_pool[key] = rec
+                                            rec['event'].set()
+                                        else:
+                                            rec['inpainter'] = inp
+                                            rec['loaded'] = True
+                                            if rec.get('event'):
+                                                rec['event'].set()
+                    except Exception as e:
+                        print(f"Inpainter preload failed: {e}")
+                
+                status_label.config(text="Ready!")
+                time.sleep(0.3)
+                
+            except Exception as e:
+                print(f"Preload error: {e}")
+            finally:
+                # Schedule the dialog opening on the main thread
+                loading_dialog.after(0, finish_loading)
+        
+        # Run preloading in background thread
+        thread = threading.Thread(target=preload_models, daemon=True)
+        thread.start()
+        
+        # Keep the loading dialog responsive
+        # This will process events until the dialog is destroyed
+        try:
+            loading_dialog.wait_window()
+        except:
+            pass
+    
+    
+    def _open_manga_translator_direct(self):
+        """Open manga translator directly without loading screen"""
         # Use WindowManager to create scrollable dialog
         dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
             self.master,
