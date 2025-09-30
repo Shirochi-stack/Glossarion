@@ -579,10 +579,7 @@ class MangaTranslationTab:
                             print(f"✗ Failed to load {model_name}: {error}")
                         
                         elif msg_type == 'complete':
-                            # Child process downloaded/cached models, now load into main process pool
-                            self.preload_status_label.setText("✓ Loading into main process...")
-                            self._load_models_into_pool(models_to_load)
-                            
+                            # Child process cached models
                             self.preload_progress_bar.setValue(100)
                             self.preload_status_label.setText("✓ Models ready")
                             
@@ -590,6 +587,41 @@ class MangaTranslationTab:
                             with MangaTranslationTab._preload_lock:
                                 MangaTranslationTab._preload_completed_models.update(models_being_loaded)
                                 MangaTranslationTab._preload_in_progress = False
+                            
+                            # Load RT-DETR into pool in background (doesn't block GUI)
+                            def load_rtdetr_bg():
+                                try:
+                                    from manga_translator import MangaTranslator
+                                    from bubble_detector import BubbleDetector
+                                    
+                                    for model_type, model_key, model_name, model_path in models_to_load:
+                                        if model_type == 'detector' and model_key == 'rtdetr_onnx':
+                                            key = (model_key, model_path)
+                                            
+                                            # Check if already loaded
+                                            with MangaTranslator._detector_pool_lock:
+                                                rec = MangaTranslator._detector_pool.get(key)
+                                                if rec and rec.get('spares'):
+                                                    print(f"⏭️  {model_name} already in pool")
+                                                    continue
+                                            
+                                            # Load into pool
+                                            bd = BubbleDetector()
+                                            model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                                            bd.load_rtdetr_onnx_model(model_repo)
+                                            
+                                            with MangaTranslator._detector_pool_lock:
+                                                rec = MangaTranslator._detector_pool.get(key)
+                                                if not rec:
+                                                    rec = {'spares': []}
+                                                    MangaTranslator._detector_pool[key] = rec
+                                                rec['spares'].append(bd)
+                                                print(f"✓ Loaded {model_name} into pool (background)")
+                                except Exception as e:
+                                    print(f"✗ Background RT-DETR loading error: {e}")
+                            
+                            # Start background loading
+                            threading.Thread(target=load_rtdetr_bg, daemon=True).start()
                             
                             QTimer.singleShot(2000, lambda: self.preload_progress_frame.setVisible(False))
                             return
@@ -608,98 +640,10 @@ class MangaTranslationTab:
         
         QTimer.singleShot(100, check_progress)
     
-    def _load_models_into_pool(self, models_to_load):
-        """Load models into the main process pool (called after child process downloads)"""
-        try:
-            from manga_translator import MangaTranslator
-            import threading
-            
-            for model_type, model_key, model_name, model_path in models_to_load:
-                try:
-                    if model_type == 'detector':
-                        from bubble_detector import BubbleDetector
-                        key = (model_key, model_path)
-                        print(f"[DEBUG] Loading detector into pool with key: {key}")
-                        
-                        # Check if already loaded
-                        with MangaTranslator._detector_pool_lock:
-                            rec = MangaTranslator._detector_pool.get(key)
-                            if rec and (rec.get('spares') or rec.get('loaded')):
-                                print(f"⏭️  {model_name} already in pool, skipping")
-                        
-                        # Only load if not already in pool
-                        if not (rec and (rec.get('spares') or rec.get('loaded'))):
-                            with MangaTranslator._detector_pool_lock:
-                                bd = BubbleDetector()
-                                
-                                if model_key == 'rtdetr_onnx':
-                                    model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
-                                    bd.load_rtdetr_onnx_model(model_repo)
-                                elif model_key == 'rtdetr':
-                                    bd.load_rtdetr_model()
-                                elif model_key == 'yolo':
-                                    if model_path:
-                                        bd.load_model(model_path)
-                                
-                                rec = MangaTranslator._detector_pool.get(key)
-                                if not rec:
-                                    rec = {'spares': []}
-                                    MangaTranslator._detector_pool[key] = rec
-                                rec['spares'].append(bd)
-                                
-                                # Verify model is actually loaded
-                                loaded_flag = getattr(bd, 'rtdetr_onnx_loaded', False) if model_key == 'rtdetr_onnx' else \
-                                              getattr(bd, 'rtdetr_loaded', False) if model_key == 'rtdetr' else \
-                                              getattr(bd, 'model_loaded', False)
-                                print(f"✓ Loaded {model_name} into main process pool (loaded={loaded_flag})")
-                    
-                    elif model_type == 'inpainter':
-                        from local_inpainter import LocalInpainter
-                        key = (model_key, model_path or '')
-                        
-                        # Check if already loaded
-                        with MangaTranslator._inpaint_pool_lock:
-                            rec = MangaTranslator._inpaint_pool.get(key)
-                            if rec and (rec.get('loaded') or rec.get('spares')):
-                                print(f"⏭️  {model_name} already in pool, skipping")
-                        
-                        # Only load if not already in pool
-                        if not (rec and (rec.get('loaded') or rec.get('spares'))):
-                            with MangaTranslator._inpaint_pool_lock:
-                                inp = LocalInpainter()
-                                
-                                resolved_path = model_path
-                                if not resolved_path or not os.path.exists(resolved_path):
-                                    try:
-                                        resolved_path = inp.download_jit_model(model_key)
-                                    except:
-                                        resolved_path = None
-                                
-                                if resolved_path and os.path.exists(resolved_path):
-                                    success = inp.load_model_with_retry(model_key, resolved_path)
-                                    if success and getattr(inp, 'model_loaded', False):
-                                        if not rec:
-                                            rec = {'inpainter': inp, 'loaded': True, 'event': threading.Event(), 'spares': []}
-                                            MangaTranslator._inpaint_pool[key] = rec
-                                            rec['event'].set()
-                                        else:
-                                            rec['inpainter'] = inp
-                                            rec['loaded'] = True
-                                            if rec.get('event'):
-                                                rec['event'].set()
-                                        print(f"✓ Loaded {model_name} into main process pool")
-                
-                except Exception as e:
-                    print(f"✗ Failed to load {model_name} into main pool: {e}")
-        
-        except Exception as e:
-            print(f"✗ Error loading models into pool: {e}")
-    
     def _disable_spinbox_mousewheel(self, spinbox):
-        """Disable mousewheel scrolling on a spinbox"""
-        spinbox.bind("<MouseWheel>", lambda e: "break")
-        spinbox.bind("<Button-4>", lambda e: "break")  # Linux scroll up
-        spinbox.bind("<Button-5>", lambda e: "break")  # Linux scroll down
+        """Disable mousewheel scrolling on a spinbox (PySide6)"""
+        # Override wheelEvent to prevent scrolling
+        spinbox.wheelEvent = lambda event: None
 
     def _download_hf_model(self):
         """Download HuggingFace models with progress tracking"""
@@ -1943,14 +1887,21 @@ class MangaTranslationTab:
         api_label.setStyleSheet("color: gray;")
         api_layout.addWidget(api_label)
         
-        # Show current model
+        # Show current model from main GUI
         current_model = 'Unknown'
-        if hasattr(self.main_gui, 'model_var'):
-            current_model = self.main_gui.model_var  # In PySide6, this might be a direct value
-        elif hasattr(self.main_gui, 'model_combo'):
-            current_model = self.main_gui.model_combo.currentText() if hasattr(self.main_gui.model_combo, 'currentText') else str(self.main_gui.model_combo)
-        elif hasattr(self.main_gui, 'config'):
-            current_model = self.main_gui.config.get('model', 'Unknown')
+        try:
+            if hasattr(self.main_gui, 'model_combo') and hasattr(self.main_gui.model_combo, 'currentText'):
+                # PySide6 QComboBox
+                current_model = self.main_gui.model_combo.currentText()
+            elif hasattr(self.main_gui, 'model_var'):
+                # Tkinter StringVar
+                current_model = self.main_gui.model_var.get() if hasattr(self.main_gui.model_var, 'get') else str(self.main_gui.model_var)
+            elif hasattr(self.main_gui, 'config'):
+                # Fallback to config
+                current_model = self.main_gui.config.get('model', 'Unknown')
+        except Exception as e:
+            print(f"Error getting model: {e}")
+            current_model = 'Unknown'
         
         model_label = QLabel(f"Model: {current_model}")
         model_font = QFont("Arial", 10)
@@ -2661,6 +2612,7 @@ class MangaTranslationTab:
         self.reduction_slider.setValue(self.bg_reduction_value)
         self.reduction_slider.setMinimumWidth(100)
         self.reduction_slider.valueChanged.connect(self._update_reduction_label)
+        self._disable_spinbox_mousewheel(self.reduction_slider)
         reduction_layout.addWidget(self.reduction_slider)
         
         self.reduction_label = QLabel("100%")
@@ -2816,6 +2768,7 @@ class MangaTranslationTab:
         self.font_size_spinbox.setValue(self.font_size_value)
         self.font_size_spinbox.setMinimumWidth(100)
         self.font_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self._disable_spinbox_mousewheel(self.font_size_spinbox)
         fixed_size_layout.addWidget(self.font_size_spinbox)
 
         fixed_help_label = QLabel("(0 = Auto)")
@@ -2844,6 +2797,7 @@ class MangaTranslationTab:
         self.multiplier_slider.setValue(self.font_size_multiplier_value)
         self.multiplier_slider.setMinimumWidth(100)
         self.multiplier_slider.valueChanged.connect(self._update_multiplier_label)
+        self._disable_spinbox_mousewheel(self.multiplier_slider)
         multiplier_layout.addWidget(self.multiplier_slider)
 
         self.multiplier_label = QLabel("1.0x")
@@ -2898,6 +2852,7 @@ class MangaTranslationTab:
         self.min_size_spinbox.setValue(self.auto_min_size_value)
         self.min_size_spinbox.setMinimumWidth(100)
         self.min_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self._disable_spinbox_mousewheel(self.min_size_spinbox)
         min_size_layout.addWidget(self.min_size_spinbox)
 
         min_help_label = QLabel("(Auto mode won't go below this)")
@@ -2925,6 +2880,7 @@ class MangaTranslationTab:
         self.max_size_spinbox.setValue(self.max_font_size_value)
         self.max_size_spinbox.setMinimumWidth(100)
         self.max_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self._disable_spinbox_mousewheel(self.max_size_spinbox)
         max_size_layout.addWidget(self.max_size_spinbox)
 
         max_help_label = QLabel("(Limits maximum text size)")
@@ -2990,6 +2946,7 @@ class MangaTranslationTab:
         self.line_spacing_spinbox.setValue(self.line_spacing_value)
         self.line_spacing_spinbox.setMinimumWidth(100)
         self.line_spacing_spinbox.valueChanged.connect(self._on_line_spacing_changed)
+        self._disable_spinbox_mousewheel(self.line_spacing_spinbox)
         ls_layout.addWidget(self.line_spacing_spinbox)
         
         self.line_spacing_value_label = QLabel(f"{self.line_spacing_value:.2f}")
@@ -3015,6 +2972,7 @@ class MangaTranslationTab:
         self.max_lines_spinbox.setValue(self.max_lines_value)
         self.max_lines_spinbox.setMinimumWidth(100)
         self.max_lines_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self._disable_spinbox_mousewheel(self.max_lines_spinbox)
         ml_layout.addWidget(self.max_lines_spinbox)
         ml_layout.addStretch()
         
@@ -3239,6 +3197,7 @@ class MangaTranslationTab:
         self.shadow_offset_x_spinbox.setValue(self.shadow_offset_x_value)
         self.shadow_offset_x_spinbox.setMinimumWidth(60)
         self.shadow_offset_x_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self._disable_spinbox_mousewheel(self.shadow_offset_x_spinbox)
         offset_layout.addWidget(self.shadow_offset_x_spinbox)
         
         # Y offset
@@ -3251,6 +3210,7 @@ class MangaTranslationTab:
         self.shadow_offset_y_spinbox.setValue(self.shadow_offset_y_value)
         self.shadow_offset_y_spinbox.setMinimumWidth(60)
         self.shadow_offset_y_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self._disable_spinbox_mousewheel(self.shadow_offset_y_spinbox)
         offset_layout.addWidget(self.shadow_offset_y_spinbox)
         offset_layout.addStretch()
         
@@ -3272,6 +3232,7 @@ class MangaTranslationTab:
         self.shadow_blur_spinbox.setValue(self.shadow_blur_value)
         self.shadow_blur_spinbox.setMinimumWidth(100)
         self.shadow_blur_spinbox.valueChanged.connect(self._on_shadow_blur_changed)
+        self._disable_spinbox_mousewheel(self.shadow_blur_spinbox)
         blur_layout.addWidget(self.shadow_blur_spinbox)
         
         # Shadow blur value label
@@ -3708,13 +3669,29 @@ class MangaTranslationTab:
                 self.line_spacing_value = 1.4
                 self.max_lines_value = 12
             
-            # Manually update the line spacing label
+            # Update all spinboxes with new values
+            if hasattr(self, 'min_size_spinbox'):
+                self.min_size_spinbox.setValue(self.auto_min_size_value)
+            if hasattr(self, 'max_size_spinbox'):
+                self.max_size_spinbox.setValue(self.max_font_size_value)
+            if hasattr(self, 'line_spacing_spinbox'):
+                self.line_spacing_spinbox.setValue(self.line_spacing_value)
+            if hasattr(self, 'max_lines_spinbox'):
+                self.max_lines_spinbox.setValue(self.max_lines_value)
+            
+            # Update checkboxes
+            if hasattr(self, 'prefer_larger_checkbox'):
+                self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
+            if hasattr(self, 'bubble_size_factor_checkbox'):
+                self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
+            
+            # Update the line spacing label
             if hasattr(self, 'line_spacing_value_label'):
                 self.line_spacing_value_label.setText(f"{float(self.line_spacing_value):.2f}")
             
             self._save_rendering_settings()
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(f"Error setting preset: {e}", "debug")
     
     def _enable_widget_tree(self, widget):
         """Recursively enable a widget and its children (PySide6 version)"""
@@ -4822,9 +4799,11 @@ class MangaTranslationTab:
         
         return fonts
     
-    def _on_font_selected(self, event):
+    def _on_font_selected(self, event=None):
         """Handle font selection"""
-        selected = self.font_style_var.get()
+        if not hasattr(self, 'font_style_value'):
+            return
+        selected = self.font_style_value.currentText()
         
         if selected == "Default":
             self.selected_font_path = None
@@ -4844,13 +4823,12 @@ class MangaTranslationTab:
             if font_path:
                 # Add to combo box
                 font_name = os.path.basename(font_path)
-                current_values = list(self.font_combo['values'])
                 
                 # Insert before "Browse Custom Font..." option
                 if font_name not in [n for n in self.font_mapping.keys()]:
-                    current_values.insert(-1, font_name)
-                    self.font_combo['values'] = current_values
-                    self.font_combo.set(font_name)
+                    # Add to combo box (PySide6)
+                    self.font_style_value.insertItem(self.font_style_value.count() - 1, font_name)
+                    self.font_style_value.setCurrentText(font_name)
                     
                     # Update font mapping
                     self.font_mapping[font_name] = font_path
@@ -4875,14 +4853,14 @@ class MangaTranslationTab:
                             self.main_gui.save_config(show_message=False)
                 else:
                     # Font already exists, just select it
-                    self.font_combo.set(font_name)
+                    self.font_style_value.setCurrentText(font_name)
                     self.selected_font_path = self.font_mapping[font_name]
             else:
                 # User cancelled, revert to previous selection
                 if hasattr(self, 'previous_font_selection'):
-                    self.font_combo.set(self.previous_font_selection)
+                    self.font_style_value.setCurrentText(self.previous_font_selection)
                 else:
-                    self.font_combo.set("Default")
+                    self.font_style_value.setCurrentText("Default")
                 return
         else:
             # Check if it's in the font mapping
@@ -6514,23 +6492,15 @@ class MangaTranslationTab:
         # Reset all global cancellation flags for new translation
         self._reset_global_cancellation()
         
-        # Update UI state (schedule on main thread)
+        # Update UI state (PySide6)
         self.is_running = True
         self.stop_flag.clear()
-        if threading.current_thread() == threading.main_thread():
-            try:
-                self.start_button.config(state=tk.DISABLED)
-                self.stop_button.config(state=tk.NORMAL)
-                self.file_listbox.config(state=tk.DISABLED)
-            except Exception:
-                pass
-        else:
-            try:
-                self.parent_frame.after(0, lambda: self.start_button.config(state=tk.DISABLED))
-                self.parent_frame.after(0, lambda: self.stop_button.config(state=tk.NORMAL))
-                self.parent_frame.after(0, lambda: self.file_listbox.config(state=tk.DISABLED))
-            except Exception:
-                pass
+        try:
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.file_listbox.setEnabled(False)
+        except Exception as e:
+            self._log(f"Failed to update UI state: {e}", "warning")
         
         # Log start message
         self._log(f"Starting translation of {self.total_files} files...", "info")
@@ -7452,7 +7422,7 @@ class MangaTranslationTab:
             self._log("\n⏹️ Translation stopped by user", "warning")
     
     def _reset_ui_state(self):
-        """Reset UI to ready state - with widget existence checks"""
+        """Reset UI to ready state - with widget existence checks (PySide6)"""
         # Restore stdio redirection if active
         self._redirect_stderr(False)
         self._redirect_stdout(False)
@@ -7462,31 +7432,28 @@ class MangaTranslationTab:
         except Exception:
             pass
         try:
-            # Check if the dialog still exists
-            if not hasattr(self, 'dialog') or not self.dialog or not self.dialog.winfo_exists():
+            # Check if the dialog still exists (PySide6)
+            if not hasattr(self, 'dialog') or not self.dialog:
                 return
                 
             # Reset running flag
             self.is_running = False
             
-            # Check and update start_button if it exists - only if not already enabled
-            if hasattr(self, 'start_button') and self.start_button and self.start_button.winfo_exists():
-                if str(self.start_button.cget('state')) == 'disabled':
-                    self.start_button.config(state=tk.NORMAL)
+            # Check and update start_button if it exists (PySide6)
+            if hasattr(self, 'start_button') and self.start_button:
+                if not self.start_button.isEnabled():
+                    self.start_button.setEnabled(True)
             
-            # Check and update stop_button if it exists - only if not already disabled
-            if hasattr(self, 'stop_button') and self.stop_button and self.stop_button.winfo_exists():
-                if str(self.stop_button.cget('state')) == 'normal':
-                    self.stop_button.config(state=tk.DISABLED)
+            # Check and update stop_button if it exists (PySide6)
+            if hasattr(self, 'stop_button') and self.stop_button:
+                if self.stop_button.isEnabled():
+                    self.stop_button.setEnabled(False)
             
-            # Re-enable file modification - check if listbox exists
-            if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.winfo_exists():
-                if str(self.file_listbox.cget('state')) == 'disabled':
-                    self.file_listbox.config(state=tk.NORMAL)
+            # Re-enable file modification - check if listbox exists (PySide6)
+            if hasattr(self, 'file_listbox') and self.file_listbox:
+                if not self.file_listbox.isEnabled():
+                    self.file_listbox.setEnabled(True)
                 
-        except tk.TclError:
-            # Widget has been destroyed, nothing to do
-            pass
         except Exception as e:
             # Log the error but don't crash
             if hasattr(self, '_log'):
