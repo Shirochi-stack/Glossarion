@@ -2116,15 +2116,22 @@ Text to analyze:
         from tkinter import ttk
         from manga_translator import MangaTranslator
         
-        # Preflight check: Are models already preloaded?
+        # Preflight check: Are models already preloaded or disabled?
         manga_settings = self.config.get('manga_settings', {})
         ocr_settings = manga_settings.get('ocr', {})
         inpaint_settings = manga_settings.get('inpainting', {})
         
         models_needed = False
+        bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
         
-        # Check bubble detector
-        if ocr_settings.get('bubble_detection_enabled', False):
+        # Check if inpainting is skipped (from the manga integration toggle)
+        skip_inpainting = self.config.get('manga_skip_inpainting', False)
+        inpainting_method = inpaint_settings.get('method', 'local')
+        # If skip_inpainting is True, we don't need inpainting models
+        inpainting_enabled = not skip_inpainting and inpainting_method == 'local'
+        
+        # Check bubble detector only if enabled
+        if bubble_detection_enabled:
             detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
             model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
             key = (detector_type, model_url)
@@ -2135,8 +2142,8 @@ Text to analyze:
                 if not rec or (not rec.get('spares') and not rec.get('loaded')):
                     models_needed = True
         
-        # Check inpainter
-        if inpaint_settings.get('method', 'local') == 'local':
+        # Check inpainter only if enabled (not skipped and method is local)
+        if inpainting_enabled:
             local_method = inpaint_settings.get('local_method', 'anime')
             model_path = self.config.get(f'manga_{local_method}_model_path', '')
             key = (local_method, model_path or '')
@@ -2146,20 +2153,23 @@ Text to analyze:
                 if not rec or (not rec.get('loaded') and not rec.get('spares')):
                     models_needed = True
         
-        # If models are already loaded, skip the loading screen entirely
+        # If no models are needed (either disabled or already loaded), skip the loading screen
         if not models_needed:
-            print("Models already preloaded, opening manga translator directly")
+            if not bubble_detection_enabled and not inpainting_enabled:
+                print("Both bubble detection and local inpainting are disabled, opening directly")
+            else:
+                print("Models already preloaded, opening manga translator directly")
             self._open_manga_translator_direct()
             return
         
         # Otherwise show loading screen
         loading_dialog = tk.Toplevel(self.master)
         loading_dialog.title("Loading Manga Translator")
-        loading_dialog.geometry("350x200")
         loading_dialog.resizable(False, False)
         loading_dialog.transient(self.master)
         
-        # Don't grab_set yet - let's try without it to avoid freezing
+        # Make it modal but not grabbing to avoid freezing
+        loading_dialog.attributes('-topmost', True)
         
         # Set icon
         try:
@@ -2167,42 +2177,58 @@ Text to analyze:
         except:
             pass
         
-        # Center the window
-        loading_dialog.update_idletasks()
-        x = (loading_dialog.winfo_screenwidth() // 2) - 175
-        y = (loading_dialog.winfo_screenheight() // 2) - 100
-        loading_dialog.geometry(f"350x200+{x}+{y}")
+        # Set larger size
+        dialog_width = 500
+        dialog_height = 300
         
-        # Create main frame
-        main_frame = ttk.Frame(loading_dialog, padding="20")
+        # Get screen dimensions
+        screen_width = loading_dialog.winfo_screenwidth()
+        screen_height = loading_dialog.winfo_screenheight()
+        
+        # Calculate center position
+        x = (screen_width - dialog_width) // 2
+        y = (screen_height - dialog_height) // 2
+        
+        # Set geometry with size and position
+        loading_dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
+        
+        # Ensure it's actually centered by updating first
+        loading_dialog.update_idletasks()
+        
+        # Create main frame with more padding
+        main_frame = ttk.Frame(loading_dialog, padding="30")
         main_frame.pack(fill="both", expand=True)
         
-        # Try to load icon
+        # Try to load icon - larger size
         try:
             ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
             if os.path.isfile(ico_path):
                 from PIL import Image, ImageTk
                 img = Image.open(ico_path)
-                img = img.resize((48, 48), Image.Resampling.LANCZOS)
+                # Much larger icon to fill the space better
+                img = img.resize((96, 96), Image.Resampling.LANCZOS)
                 self.loading_icon = ImageTk.PhotoImage(img)
                 icon_label = ttk.Label(main_frame, image=self.loading_icon)
-                icon_label.pack(pady=(0, 10))
+                icon_label.pack(pady=(0, 20))
         except:
-            pass
+            # If no icon, add some space anyway
+            ttk.Label(main_frame, text="").pack(pady=(30, 0))
         
-        # Loading text
-        loading_text = ttk.Label(main_frame, text="Pre-loading models...",
+        # Loading text - larger font
+        loading_text = ttk.Label(main_frame, text="Pre-loading Manga Models",
+                                font=('TkDefaultFont', 14, 'bold'))
+        loading_text.pack(pady=(0, 10))
+        
+        # Status label - larger font
+        status_label = ttk.Label(main_frame, text="Initializing components...",
                                 font=('TkDefaultFont', 11))
-        loading_text.pack(pady=(0, 5))
+        status_label.pack(pady=(0, 15))
         
-        # Status label
-        status_label = ttk.Label(main_frame, text="Please wait...",
-                                font=('TkDefaultFont', 9))
-        status_label.pack(pady=(0, 10))
-        
-        # Progress bar
-        progress_bar = ttk.Progressbar(main_frame, mode='indeterminate')
-        progress_bar.pack(pady=(10, 0), fill='x')
+        # Progress bar - wider
+        progress_frame = ttk.Frame(main_frame)
+        progress_frame.pack(pady=(15, 0), fill='x', padx=50)
+        progress_bar = ttk.Progressbar(progress_frame, mode='indeterminate', length=300)
+        progress_bar.pack(fill='x')
         progress_bar.start(10)
         
         # Update the dialog to process events
@@ -2221,7 +2247,8 @@ Text to analyze:
         def preload_models():
             """Preload models in background thread"""
             try:
-                status_label.config(text="Initializing...")
+                status_label.config(text="Checking configuration...")
+                time.sleep(0.2)  # Small delay for UI update
                 
                 # Import MangaTranslator to access its class-level pools
                 from manga_translator import MangaTranslator
@@ -2231,12 +2258,36 @@ Text to analyze:
                 ocr_settings = manga_settings.get('ocr', {})
                 inpaint_settings = manga_settings.get('inpainting', {})
                 
-                # Preload bubble detector if enabled
-                if ocr_settings.get('bubble_detection_enabled', False):
-                    status_label.config(text="Loading bubble detector...")
+                models_to_load = []
+                bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+                skip_inpainting = self.config.get('manga_skip_inpainting', False)
+                inpainting_method = inpaint_settings.get('method', 'local')
+                inpainting_enabled = not skip_inpainting and inpainting_method == 'local'
+                
+                if bubble_detection_enabled:
+                    detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                    detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
+                    models_to_load.append(f"Bubble Detector ({detector_name})")
+                
+                if inpainting_enabled:
+                    local_method = inpaint_settings.get('local_method', 'anime')
+                    method_name = local_method.capitalize()
+                    models_to_load.append(f"Inpainting Model ({method_name})")
+                
+                if models_to_load:
+                    loading_text.config(text=f"Pre-loading {len(models_to_load)} Model{'s' if len(models_to_load) > 1 else ''}")
+                else:
+                    # This shouldn't happen as we check before showing dialog, but just in case
+                    loading_text.config(text="Initializing Manga Translator")
+                
+                # Preload bubble detector only if enabled
+                if bubble_detection_enabled:
+                    detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                    detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
+                    status_label.config(text=f"Loading {detector_name} bubble detector...")
+                    
                     try:
                         from bubble_detector import BubbleDetector
-                        detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
                         model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
                         
                         # Create and load the detector
@@ -2246,8 +2297,9 @@ Text to analyze:
                             if not rec or not rec.get('spares'):
                                 bd = BubbleDetector()
                                 
-                                # Actually trigger model loading
+                                # Show more specific status
                                 if detector_type == 'rtdetr_onnx':
+                                    status_label.config(text=f"Initializing {detector_name} (ONNX runtime)...")
                                     model_repo = model_url if model_url else 'ogkalu/comic-text-and-bubble-detector'
                                     if hasattr(bd, '_ensure_rtdetr_onnx_loaded'):
                                         bd._ensure_rtdetr_onnx_loaded(model_repo)
@@ -2262,16 +2314,24 @@ Text to analyze:
                                     rec = {'spares': []}
                                     MangaTranslator._detector_pool[key] = rec
                                 rec['spares'].append(bd)
+                                status_label.config(text=f"✓ {detector_name} ready")
+                            else:
+                                status_label.config(text=f"✓ {detector_name} already cached")
+                        time.sleep(0.3)
                     except Exception as e:
                         print(f"Bubble detector preload failed: {e}")
+                        status_label.config(text=f"⚠ {detector_name} failed to load")
+                        time.sleep(0.5)
                 
-                # Preload local inpainter if in local mode
-                if inpaint_settings.get('method', 'local') == 'local':
-                    status_label.config(text="Loading inpainter...")
+                # Preload local inpainter only if enabled (not skipped and in local mode)
+                if inpainting_enabled:
                     try:
                         from local_inpainter import LocalInpainter
                         local_method = inpaint_settings.get('local_method', 'anime')
+                        method_name = local_method.capitalize()
                         model_path = self.config.get(f'manga_{local_method}_model_path', '')
+                        
+                        status_label.config(text=f"Loading {method_name} inpainting model...")
                         
                         key = (local_method, model_path or '')
                         with MangaTranslator._inpaint_pool_lock:
@@ -2282,13 +2342,14 @@ Text to analyze:
                                 # Download/load model
                                 resolved_path = model_path
                                 if not resolved_path or not os.path.exists(resolved_path):
-                                    status_label.config(text="Downloading inpaint model...")
+                                    status_label.config(text=f"Downloading {method_name} model (~50MB)...")
                                     try:
                                         resolved_path = inp.download_jit_model(local_method)
                                     except:
                                         resolved_path = None
                                 
                                 if resolved_path and os.path.exists(resolved_path):
+                                    status_label.config(text=f"Initializing {method_name} neural network...")
                                     success = inp.load_model_with_retry(local_method, resolved_path)
                                     if success and getattr(inp, 'model_loaded', False):
                                         # Store in pool
@@ -2301,11 +2362,25 @@ Text to analyze:
                                             rec['loaded'] = True
                                             if rec.get('event'):
                                                 rec['event'].set()
+                                        status_label.config(text=f"✓ {method_name} inpainter ready")
+                                    else:
+                                        status_label.config(text=f"⚠ {method_name} model failed to load")
+                                else:
+                                    status_label.config(text=f"⚠ {method_name} model not found")
+                            else:
+                                status_label.config(text=f"✓ {method_name} inpainter already cached")
+                        time.sleep(0.3)
                     except Exception as e:
                         print(f"Inpainter preload failed: {e}")
+                        status_label.config(text=f"⚠ Inpainter failed to load")
+                        time.sleep(0.5)
                 
-                status_label.config(text="Ready!")
-                time.sleep(0.3)
+                # Final status
+                if models_to_load:
+                    status_label.config(text="✓ All models pre-loaded successfully!")
+                else:
+                    status_label.config(text="✓ Ready to translate!")
+                time.sleep(0.5)
                 
             except Exception as e:
                 print(f"Preload error: {e}")
