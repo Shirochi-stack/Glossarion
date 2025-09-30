@@ -166,9 +166,9 @@ class MangaTranslator:
         self.manga_settings = self.config.get('manga_settings', {})
         # Concise logging flag from Advanced settings
         try:
-            self.concise_logs = bool(self.manga_settings.get('advanced', {}).get('concise_logs', False))
+            self.concise_logs = bool(self.manga_settings.get('advanced', {}).get('concise_logs', True))
         except Exception:
-            self.concise_logs = False
+            self.concise_logs = True
 
         # Initialize attributes
         self.current_image = None
@@ -1440,18 +1440,11 @@ class MangaTranslator:
                 self._log(f"🎯 Detecting bubbles with YOLO (confidence >= {confidence:.2f})")
                 bubbles = bd.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
                 
-            else:  # auto mode
-                self._log("🤖 Auto mode: using best available detector", "info")
-                
-                if not bd.rtdetr_loaded:
-                    bd.load_rtdetr_model()
-                
-                confidence = ocr_settings.get('bubble_confidence', 0.5)
-                bubbles = bd.detect_bubbles(
-                    image_path, 
-                    confidence=confidence,
-                    use_rtdetr=None
-                )
+            else:
+                # Unknown detector type
+                self._log(f"❌ Unknown detector type: {detector_type}", "error")
+                self._log("   Valid options: rtdetr_onnx, rtdetr, yolo", "error")
+                return self._merge_nearby_regions(regions)
             
             if not bubbles:
                 self._log("⚠️ No bubbles detected, using traditional merging", "warning")
@@ -2104,7 +2097,8 @@ class MangaTranslator:
                                     total_confidence += word_confidence
                                     word_count += 1
                                 else:
-                                    self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
+                                    if not getattr(self, 'concise_logs', False):
+                                        self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
                         
                         block_text = block_text.strip()
                         
@@ -2120,17 +2114,20 @@ class MangaTranslator:
                         # TEXT FILTERING SECTION
                         # Skip if text is too short (after cleaning)
                         if len(block_text.strip()) < min_text_length:
-                            self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping short text ({len(block_text)} chars): {block_text}")
                             continue
                         
                         # Skip if primarily English and exclude_english is enabled
                         if exclude_english and self._is_primarily_english(block_text):
-                            self._log(f"   Skipping English text: {block_text[:50]}...")
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping English text: {block_text[:50]}...")
                             continue
                         
                         # Skip if no confident words found
                         if word_count == 0 or not block_text:
-                            self._log(f"   Skipping block - no words above threshold {confidence_threshold}")
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping block - no words above threshold {confidence_threshold}")
                             continue
                         
                         # Calculate average confidence for the block
@@ -2153,7 +2150,8 @@ class MangaTranslator:
                             region_type='text_block'
                         )
                         regions.append(region)
-                        self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
                         
             elif self.ocr_provider == 'azure':
                 # === AZURE COMPUTER VISION ===
@@ -2449,12 +2447,14 @@ class MangaTranslator:
                             # TEXT FILTERING FOR AZURE
                             # Skip if text is too short (after cleaning)
                             if len(cleaned_line_text.strip()) < min_text_length:
-                                self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
+                                if not getattr(self, 'concise_logs', False):
+                                    self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
                                 continue
                             
                             # Skip if primarily English and exclude_english is enabled (use cleaned text)
                             if exclude_english and self._is_primarily_english(cleaned_line_text):
-                                self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
+                                if not getattr(self, 'concise_logs', False):
+                                    self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
                                 continue
                             
                             # Azure provides 8-point bounding box
@@ -2484,7 +2484,8 @@ class MangaTranslator:
                                 
                                 if confidences:
                                     confidence = sum(confidences) / len(confidences)
-                                    self._log(f"   Line has {len(line.words)} words, avg confidence: {confidence:.3f}")
+                                    if not getattr(self, 'concise_logs', False):
+                                        self._log(f"   Line has {len(line.words)} words, avg confidence: {confidence:.3f}")
                             
                             # Check for handwriting style (if available)
                             style = 'print'  # Default
@@ -2499,7 +2500,8 @@ class MangaTranslator:
                                             handwritten_lines += 1
                                     if hasattr(style_info, 'confidence'):
                                         style_confidence = style_info.confidence
-                                        self._log(f"   Style: {style} (confidence: {style_confidence:.2f})")
+                                        if not getattr(self, 'concise_logs', False):
+                                            self._log(f"   Style: {style} (confidence: {style_confidence:.2f})")
                             
                             # Apply confidence threshold filtering
                             if confidence >= confidence_threshold:
@@ -2519,15 +2521,17 @@ class MangaTranslator:
                                 total_lines += 1
                                 
                                 # More detailed logging (use cleaned text)
-                                if style == 'handwriting':
-                                    self._log(f"   Found handwritten text ({confidence:.2f}): {cleaned_line_text[:50]}...")
-                                else:
-                                    self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
+                                if not getattr(self, 'concise_logs', False):
+                                    if style == 'handwriting':
+                                        self._log(f"   Found handwritten text ({confidence:.2f}): {cleaned_line_text[:50]}...")
+                                    else:
+                                        self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
                             else:
-                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
+                                if not getattr(self, 'concise_logs', False):
+                                    self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
                     
                     # Log summary statistics
-                    if total_lines > 0:
+                    if total_lines > 0 and not getattr(self, 'concise_logs', False):
                         self._log(f"   Total lines detected: {total_lines}")
                         if handwritten_lines > 0:
                             self._log(f"   Handwritten lines: {handwritten_lines} ({handwritten_lines/total_lines*100:.1f}%)")
@@ -3049,15 +3053,18 @@ class MangaTranslator:
                     
                     # Apply filtering (use cleaned text)
                     if len(cleaned_result_text.strip()) < min_text_length:
-                        self._log(f"   Skipping short text ({len(cleaned_result_text)} chars): {cleaned_result_text}")
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Skipping short text ({len(cleaned_result_text)} chars): {cleaned_result_text}")
                         continue
                     
                     if exclude_english and self._is_primarily_english(cleaned_result_text):
-                        self._log(f"   Skipping English text: {cleaned_result_text[:50]}...")
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Skipping English text: {cleaned_result_text[:50]}...")
                         continue
                     
                     if result.confidence < confidence_threshold:
-                        self._log(f"   Skipping low confidence ({result.confidence:.2f}): {cleaned_result_text[:30]}...")
+                        if not getattr(self, 'concise_logs', False):
+                            self._log(f"   Skipping low confidence ({result.confidence:.2f}): {cleaned_result_text[:30]}...")
                         continue
                     
                     # Create TextRegion (use cleaned text)
@@ -3074,7 +3081,8 @@ class MangaTranslator:
                         region_type='text_block'
                     )
                     regions.append(region)
-                    self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
             
             # MERGING SECTION (applies to all providers)
             # Check if bubble detection is enabled
