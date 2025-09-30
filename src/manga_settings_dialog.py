@@ -105,7 +105,7 @@ class MangaSettingsDialog:
                 'auto_convert_to_onnx_background': True,
                 'quantize_models': False,
                 'onnx_quantize': False,
-                'torch_precision': 'auto',
+                'torch_precision': 'fp16',
                 # HD strategy defaults (mirrors comic-translate)
                 'hd_strategy': 'resize',                # 'original' | 'resize' | 'crop'
                 'hd_strategy_resize_limit': 1536,       # long-edge cap for resize
@@ -3141,11 +3141,11 @@ class MangaSettingsDialog:
         precision_row = tk.Frame(quant_frame)
         precision_row.pack(fill='x', pady=(6, 0))
         tk.Label(precision_row, text="Torch precision:", width=20, anchor='w').pack(side='left')
-        self.torch_precision_var = tk.StringVar(value=self.settings['advanced'].get('torch_precision', 'auto'))
+        self.torch_precision_var = tk.StringVar(value=self.settings['advanced'].get('torch_precision', 'fp16'))
         ttk.Combobox(
             precision_row,
             textvariable=self.torch_precision_var,
-            values=['fp16'],
+            values=['fp16', 'fp32', 'auto'],
             state='readonly',
             width=10
         ).pack(side='left', padx=10)
