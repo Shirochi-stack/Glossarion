@@ -5915,11 +5915,16 @@ class MangaTranslator:
             saved_local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
             saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
             
-            # Update manga_settings with the saved values
+            # Update manga_settings with the saved values ONLY if they are not already set
+            # This allows web UI to override with its own config
             if 'inpainting' not in self.manga_settings:
                 self.manga_settings['inpainting'] = {}
-            self.manga_settings['inpainting']['method'] = saved_inpaint_method
-            self.manga_settings['inpainting']['local_method'] = saved_local_method
+            
+            # Only update if not already set (web UI case)
+            if 'method' not in self.manga_settings['inpainting'] or not self.manga_settings['inpainting']['method']:
+                self.manga_settings['inpainting']['method'] = saved_inpaint_method
+            if 'local_method' not in self.manga_settings['inpainting'] or not self.manga_settings['inpainting']['local_method']:
+                self.manga_settings['inpainting']['local_method'] = saved_local_method
             
             # Now get the values (they'll be correct now)
             inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')

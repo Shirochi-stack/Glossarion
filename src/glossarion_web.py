@@ -14,11 +14,35 @@ from pathlib import Path
 
 # Import API key encryption/decryption
 try:
-    from api_key_encryption import decrypt_config
+    from api_key_encryption import APIKeyEncryption
     API_KEY_ENCRYPTION_AVAILABLE = True
+    # Create web-specific encryption handler with its own key file
+    _web_encryption_handler = None
+    def get_web_encryption_handler():
+        global _web_encryption_handler
+        if _web_encryption_handler is None:
+            _web_encryption_handler = APIKeyEncryption()
+            # Use web-specific key file
+            from pathlib import Path
+            _web_encryption_handler.key_file = Path('.glossarion_web_key')
+            _web_encryption_handler.cipher = _web_encryption_handler._get_or_create_cipher()
+            # Add web-specific fields to encrypt
+            _web_encryption_handler.api_key_fields.extend([
+                'azure_vision_key',
+                'google_vision_credentials'
+            ])
+        return _web_encryption_handler
+    
+    def decrypt_config(config):
+        return get_web_encryption_handler().decrypt_config(config)
+    
+    def encrypt_config(config):
+        return get_web_encryption_handler().encrypt_config(config)
 except ImportError:
     API_KEY_ENCRYPTION_AVAILABLE = False
     def decrypt_config(config):
+        return config  # Fallback: return config as-is
+    def encrypt_config(config):
         return config  # Fallback: return config as-is
 
 # Import your existing translation modules
@@ -44,7 +68,7 @@ class GlossarionWeb:
     """Web interface for Glossarion translator"""
     
     def __init__(self):
-        self.config_file = "config.json"
+        self.config_file = "config_web.json"
         self.config = self.load_config()
         # Decrypt API keys for use
         if API_KEY_ENCRYPTION_AVAILABLE:
@@ -176,11 +200,16 @@ class GlossarionWeb:
         return {}
     
     def save_config(self, config):
-        """Save configuration"""
+        """Save configuration with encryption"""
         try:
+            # Encrypt sensitive fields before saving
+            encrypted_config = config.copy()
+            if API_KEY_ENCRYPTION_AVAILABLE:
+                encrypted_config = encrypt_config(encrypted_config)
+            
             with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-            # Reload config to ensure consistency
+                json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
+            # Reload config to ensure consistency (will be decrypted on load)
             self.config = self.load_config()
         except Exception as e:
             return f"❌ Failed to save config: {e}"
@@ -418,13 +447,19 @@ class GlossarionWeb:
             yield "❌ Please provide an API key", None, None, gr.update(value="❌ Error", visible=True)
             return
         
-        if ocr_provider == "google" and not google_creds_path:
-            yield "❌ Please provide Google Cloud credentials JSON file", None, None, gr.update(value="❌ Error", visible=True)
-            return
+        if ocr_provider == "google":
+            # Check if credentials are provided or saved in config
+            if not google_creds_path and not self.config.get('google_vision_credentials'):
+                yield "❌ Please provide Google Cloud credentials JSON file", None, None, gr.update(value="❌ Error", visible=True)
+                return
         
-        if ocr_provider == "azure" and (not azure_key or not azure_endpoint):
-            yield "❌ Please provide Azure API key and endpoint", None, None, gr.update(value="❌ Error", visible=True)
-            return
+        if ocr_provider == "azure":
+            # Ensure azure credentials are strings
+            azure_key_str = str(azure_key) if azure_key else ''
+            azure_endpoint_str = str(azure_endpoint) if azure_endpoint else ''
+            if not azure_key_str.strip() or not azure_endpoint_str.strip():
+                yield "❌ Please provide Azure API key and endpoint", None, None, gr.update(value="❌ Error", visible=True)
+                return
         
         try:
             
@@ -436,14 +471,36 @@ class GlossarionWeb:
             elif 'gemini' in model.lower():
                 os.environ['GOOGLE_API_KEY'] = api_key
             
-            # Set Google Cloud credentials if provided
-            if ocr_provider == "google" and google_creds_path:
-                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds_path.name
+            # Set Google Cloud credentials if provided and save to config
+            if ocr_provider == "google":
+                if google_creds_path:
+                    # New file provided - save it
+                    creds_path = google_creds_path.name if hasattr(google_creds_path, 'name') else google_creds_path
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
+                    # Auto-save to config
+                    self.config['google_vision_credentials'] = creds_path
+                    self.save_config(self.config)
+                elif self.config.get('google_vision_credentials'):
+                    # Use saved credentials from config
+                    creds_path = self.config.get('google_vision_credentials')
+                    if os.path.exists(creds_path):
+                        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
+                    else:
+                        yield f"❌ Saved Google credentials not found: {creds_path}", None, None, gr.update(value="❌ Error", visible=True)
+                        return
             
-            # Set Azure credentials if provided
+            # Set Azure credentials if provided and save to config
             if ocr_provider == "azure":
-                os.environ['AZURE_VISION_KEY'] = azure_key
-                os.environ['AZURE_VISION_ENDPOINT'] = azure_endpoint
+                # Convert to strings and strip whitespace
+                azure_key_str = str(azure_key).strip() if azure_key else ''
+                azure_endpoint_str = str(azure_endpoint).strip() if azure_endpoint else ''
+                
+                os.environ['AZURE_VISION_KEY'] = azure_key_str
+                os.environ['AZURE_VISION_ENDPOINT'] = azure_endpoint_str
+                # Auto-save to config
+                self.config['azure_vision_key'] = azure_key_str
+                self.config['azure_vision_endpoint'] = azure_endpoint_str
+                self.save_config(self.config)
             
             # Apply text visibility settings to config
             # Convert hex color to RGB tuple
@@ -550,6 +607,12 @@ class GlossarionWeb:
             merged_config['manga_settings']['ocr']['provider'] = ocr_provider
             merged_config['manga_settings']['ocr']['bubble_detection_enabled'] = enable_bubble_detection
             merged_config['manga_settings']['inpainting']['method'] = 'local' if enable_inpainting else 'none'
+            # Make sure local_method is set from config (defaults to anime_onnx)
+            if 'local_method' not in merged_config['manga_settings']['inpainting']:
+                merged_config['manga_settings']['inpainting']['local_method'] = self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx')
+            
+            # CRITICAL: Set skip_inpainting flag to False when inpainting is enabled
+            merged_config['manga_skip_inpainting'] = not enable_inpainting
             
             # Create a simple config object for MangaTranslator
             class SimpleConfig:
@@ -566,7 +629,7 @@ class GlossarionWeb:
                     # Add profile_var mock for MangaTranslator compatibility
                     class ProfileVar:
                         def __init__(self, profile):
-                            self.profile = profile
+                            self.profile = str(profile) if profile else ''
                         def get(self):
                             return self.profile
                     self.profile_var = ProfileVar(profile_name)
@@ -581,24 +644,37 @@ class GlossarionWeb:
                     # Add mock GUI attributes that MangaTranslator expects
                     class MockVar:
                         def __init__(self, val):
+                            # Ensure val is properly typed
                             self.val = val
                         def get(self):
                             return self.val
-                    self.delay_entry = MockVar(config.get('delay', 2.0))
-                    self.trans_temp = MockVar(config.get('translation_temperature', 0.3))
-                    self.contextual_var = MockVar(config.get('contextual', False))
-                    self.trans_history = MockVar(config.get('translation_history_limit', 2))
-                    self.translation_history_rolling_var = MockVar(config.get('translation_history_rolling', False))
-                    self.token_limit_disabled = config.get('token_limit_disabled', False)
-                    self.token_limit_entry = MockVar(config.get('token_limit', 200000))
-                    # Add API key and model for custom-api OCR provider
-                    self.api_key_entry = MockVar(api_key)
-                    self.model_var = MockVar(model)
+                    self.delay_entry = MockVar(float(config.get('delay', 2.0)))
+                    self.trans_temp = MockVar(float(config.get('translation_temperature', 0.3)))
+                    self.contextual_var = MockVar(bool(config.get('contextual', False)))
+                    self.trans_history = MockVar(int(config.get('translation_history_limit', 2)))
+                    self.translation_history_rolling_var = MockVar(bool(config.get('translation_history_rolling', False)))
+                    self.token_limit_disabled = bool(config.get('token_limit_disabled', False))
+                    # IMPORTANT: token_limit_entry must return STRING because manga_translator calls .strip() on it
+                    self.token_limit_entry = MockVar(str(config.get('token_limit', 200000)))
+                    # Add API key and model for custom-api OCR provider - ensure strings
+                    self.api_key_entry = MockVar(str(api_key) if api_key else '')
+                    self.model_var = MockVar(str(model) if model else '')
             
             simple_config = SimpleConfig(merged_config)
             # Get max_output_tokens from config or use from web app config
             web_max_tokens = merged_config.get('max_output_tokens', 16000)
             mock_gui = MockGUI(simple_config.config, profile_name, system_prompt, web_max_tokens, api_key, model)
+            
+            # Ensure model path is in config for local inpainting
+            if enable_inpainting:
+                local_method = merged_config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx')
+                # Set the model path key that MangaTranslator expects
+                model_path_key = f'manga_{local_method}_model_path'
+                if model_path_key not in merged_config:
+                    # Use default model path or empty string
+                    default_model_path = self.config.get(model_path_key, '')
+                    merged_config[model_path_key] = default_model_path
+                    print(f"Set {model_path_key} to: {default_model_path}")
             
             # Setup OCR configuration
             ocr_config = {
@@ -608,8 +684,11 @@ class GlossarionWeb:
             if ocr_provider == 'google':
                 ocr_config['google_credentials_path'] = google_creds_path.name if google_creds_path else None
             elif ocr_provider == 'azure':
-                ocr_config['azure_key'] = azure_key
-                ocr_config['azure_endpoint'] = azure_endpoint
+                # Use string versions
+                azure_key_str = str(azure_key).strip() if azure_key else ''
+                azure_endpoint_str = str(azure_endpoint).strip() if azure_endpoint else ''
+                ocr_config['azure_key'] = azure_key_str
+                ocr_config['azure_endpoint'] = azure_endpoint_str
             
             # Create UnifiedClient for translation API calls
             try:
@@ -653,14 +732,51 @@ class GlossarionWeb:
             
             # Create MangaTranslator instance
             try:
+                # Debug: Log inpainting config
+                inpaint_cfg = merged_config.get('manga_settings', {}).get('inpainting', {})
+                print(f"\n=== INPAINTING CONFIG DEBUG ===")
+                print(f"Inpainting enabled checkbox: {enable_inpainting}")
+                print(f"Inpainting method: {inpaint_cfg.get('method')}")
+                print(f"Local method: {inpaint_cfg.get('local_method')}")
+                print(f"Full inpainting config: {inpaint_cfg}")
+                print("=== END DEBUG ===\n")
+                
                 translator = MangaTranslator(
                     ocr_config=ocr_config,
                     unified_client=unified_client,
                     main_gui=mock_gui,
                     log_callback=capture_log
                 )
+                
+                # CRITICAL: Set skip_inpainting flag directly on translator instance
+                translator.skip_inpainting = not enable_inpainting
+                print(f"Set translator.skip_inpainting = {translator.skip_inpainting}")
+                
+                # Explicitly initialize local inpainting if enabled
+                if enable_inpainting:
+                    print(f"🎨 Initializing local inpainting...")
+                    try:
+                        # Force initialization of the inpainter
+                        init_result = translator._initialize_local_inpainter()
+                        if init_result:
+                            print(f"✅ Local inpainter initialized successfully")
+                        else:
+                            print(f"⚠️ Local inpainter initialization returned False")
+                    except Exception as init_error:
+                        print(f"❌ Failed to initialize inpainter: {init_error}")
+                        import traceback
+                        traceback.print_exc()
+                
             except Exception as e:
-                error_log = f"❌ Failed to initialize manga translator: {str(e)}"
+                import traceback
+                full_error = traceback.format_exc()
+                print(f"\n\n=== MANGA TRANSLATOR INIT ERROR ===")
+                print(full_error)
+                print(f"\nocr_config: {ocr_config}")
+                print(f"\nmock_gui.model_var.get(): {mock_gui.model_var.get()}")
+                print(f"\nmock_gui.api_key_entry.get(): {type(mock_gui.api_key_entry.get())}")
+                print("=== END ERROR ===")
+                error_log = f"❌ Failed to initialize manga translator: {str(e)}\n\nCheck console for full traceback"
                 yield error_log, None, None, gr.update(value=error_log, visible=True)
                 return
             
@@ -925,12 +1041,15 @@ class GlossarionWeb:
                             )
                             
                             with gr.Accordion("⚙️ OCR Settings", open=False):
+                                gr.Markdown("🔒 **Credentials are auto-saved** to your config (encrypted) after first use.")
+                                
                                 ocr_provider = gr.Radio(
                                     choices=["google", "azure", "custom-api"],
                                     value="custom-api",  # Default to custom-api
                                     label="OCR Provider"
                                 )
                                 
+                                # Note: File component doesn't support pre-filling paths, user must re-upload each session
                                 google_creds = gr.File(
                                     label="Google Cloud Credentials JSON (if using Google)",
                                     file_types=[".json"]
@@ -939,12 +1058,14 @@ class GlossarionWeb:
                                 azure_key = gr.Textbox(
                                     label="Azure Vision API Key (if using Azure)",
                                     type="password",
-                                    placeholder="Enter Azure API key"
+                                    placeholder="Enter Azure API key",
+                                    value=self.config.get('azure_vision_key', '')
                                 )
                                 
                                 azure_endpoint = gr.Textbox(
                                     label="Azure Vision Endpoint (if using Azure)",
-                                    placeholder="https://your-resource.cognitiveservices.azure.com/"
+                                    placeholder="https://your-resource.cognitiveservices.azure.com/",
+                                    value=self.config.get('azure_vision_endpoint', '')
                                 )
                                 
                                 bubble_detection = gr.Checkbox(
@@ -1092,9 +1213,37 @@ class GlossarionWeb:
                                 visible=False
                             )
                     
+                    # Auto-save model and API key
+                    def save_manga_credentials(model, api_key):
+                        """Save model and API key to config"""
+                        try:
+                            current_config = self.load_config()
+                            current_config['model'] = model
+                            if api_key:  # Only save if not empty
+                                current_config['api_key'] = api_key
+                            self.save_config(current_config)
+                            return None  # No output needed
+                        except Exception as e:
+                            print(f"Failed to save manga credentials: {e}")
+                            return None
+                    
                     # Update manga system prompt when profile changes
                     def update_manga_system_prompt(profile_name):
                         return self.profiles.get(profile_name, "")
+                    
+                    # Auto-save on model change
+                    manga_model.change(
+                        fn=lambda m, k: save_manga_credentials(m, k),
+                        inputs=[manga_model, manga_api_key],
+                        outputs=None
+                    )
+                    
+                    # Auto-save on API key change
+                    manga_api_key.change(
+                        fn=lambda m, k: save_manga_credentials(m, k),
+                        inputs=[manga_model, manga_api_key],
+                        outputs=None
+                    )
                     
                     manga_profile.change(
                         fn=update_manga_system_prompt,
@@ -1707,7 +1856,7 @@ class GlossarionWeb:
                     gr.Markdown("### Configuration")
                     
                     gr.Markdown("#### Translation Profiles")
-                    gr.Markdown("Profiles are loaded from your `config.json` file. You can manage profiles in the desktop application.")
+                    gr.Markdown("Profiles are loaded from your `config_web.json` file. The web interface has its own separate configuration.")
                     
                     with gr.Accordion("View All Profiles", open=False):
                         profiles_text = "\n\n".join(
@@ -1789,10 +1938,11 @@ class GlossarionWeb:
                             )
                     
                     gr.Markdown("---")
+                    gr.Markdown("🔒 **API keys are encrypted** when saved to config using AES encryption.")
                     
                     save_api_key = gr.Checkbox(
-                        label="Save API Key (⚠️ Warning: Stores key in plain text)",
-                        value=False
+                        label="Save API Key (Encrypted)",
+                        value=True
                     )
                     
                     save_status = gr.Textbox(label="Settings Status", value="Settings auto-save on change", interactive=False)
