@@ -5555,11 +5555,13 @@ class MangaTranslator:
         # Fast path: check without lock
         rec = MangaTranslator._inpaint_pool.get(key)
         if rec and rec.get('loaded') and rec.get('inpainter'):
+            # Already loaded - do NOT force reload!
             return rec['inpainter']
         # Create or wait for loader
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if rec and rec.get('loaded') and rec.get('inpainter'):
+                # Already loaded - do NOT force reload!
                 return rec['inpainter']
             if not rec:
                 # Register loading record
@@ -5585,11 +5587,13 @@ class MangaTranslator:
                     except Exception as e:
                         self._log(f"⚠️ JIT download failed: {e}", "warning")
                         model_path = None
-                # Load model
+                # Load model - NEVER force reload for first-time shared pool loading
                 loaded_ok = False
                 if model_path and os.path.exists(model_path):
                     try:
-                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=force_reload)
+                        # Only force reload if explicitly requested AND this is not the first load
+                        # For shared pool, we should never force reload on initial load
+                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=False)
                     except Exception as e:
                         self._log(f"⚠️ Inpainter load failed: {e}", "warning")
                         loaded_ok = False
@@ -5897,69 +5901,60 @@ class MangaTranslator:
                 
                 self._log(f"Using local method: {local_method} (loaded from config)", "info")
                 
-                # Initialize tracking attributes if they don't exist
+                # Check if we already have a loaded instance in the shared pool
+                # This avoids unnecessary tracking and reloading
+                inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=False)
+                
+                # Only track changes AFTER getting the shared instance
+                # This prevents spurious reloads on first initialization
                 if not hasattr(self, '_last_local_method'):
-                    self._last_local_method = None
-                    self._last_local_model_path = None
-                
-                # Check for changes
-                need_reload = False
-                if self._last_local_method != local_method:
-                    self._log(f"🔄 Local method changed from {self._last_local_method} to {local_method}", "info")
-                    need_reload = True
-                
-                if self._last_local_model_path != model_path:
-                    self._log(f"🔄 Model path changed", "info")
-                    if self._last_local_model_path:
-                        self._log(f"   Old: {os.path.basename(self._last_local_model_path)}", "debug")
-                    if model_path:
-                        self._log(f"   New: {os.path.basename(model_path)}", "debug")
-                    need_reload = True
-                
-                # Store current settings
-                self._last_local_method = local_method
-                self._last_local_model_path = model_path
-                
-                # Obtain shared/local instance with microsecond-scale locking
-                # Use shared pool to avoid long locks during heavy I/O
-                inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=need_reload)
+                    self._last_local_method = local_method
+                    self._last_local_model_path = model_path
+                else:
+                    # Check if settings actually changed and we need to force reload
+                    need_reload = False
+                    if self._last_local_method != local_method:
+                        self._log(f"🔄 Local method changed from {self._last_local_method} to {local_method}", "info")
+                        need_reload = True
+                        # If method changed, we need a different model - get it with force_reload
+                        inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=True)
+                    elif self._last_local_model_path != model_path:
+                        self._log(f"🔄 Model path changed", "info")
+                        if self._last_local_model_path:
+                            self._log(f"   Old: {os.path.basename(self._last_local_model_path)}", "debug")
+                        if model_path:
+                            self._log(f"   New: {os.path.basename(model_path)}", "debug")
+                        need_reload = True
+                        # If path changed, reload the model
+                        inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=True)
+                    
+                    # Update tracking only if changes were made
+                    if need_reload:
+                        self._last_local_method = local_method
+                        self._last_local_model_path = model_path
                 if inp_shared is not None:
                     self.local_inpainter = inp_shared
                     if getattr(self.local_inpainter, 'model_loaded', False):
                         self._log(f"✅ Using shared {local_method.upper()} inpainting model", "info")
                         return True
-                # Fall back to instance-level init (rare)
+                    else:
+                        self._log(f"⚠️ Shared inpainter created but model not loaded", "warning")
+                        return True  # Still return True as inpainter exists even without model
+                
+                # Fall back to instance-level init only if shared init completely failed
+                self._log("⚠️ Shared inpainter init failed, falling back to instance creation", "warning")
                 try:
                     from local_inpainter import LocalInpainter
-                except Exception:
-                    self._log("❌ Local inpainter module not available", "error")
-                    return False
-                    # Reuse shared instance if compatible
-                    if (MangaTranslator._shared_local_inpainter is not None and
-                        MangaTranslator._shared_local_method == local_method and
-                        MangaTranslator._shared_local_model_path == model_path and
-                        getattr(MangaTranslator._shared_local_inpainter, 'model_loaded', False)):
-                        self.local_inpainter = MangaTranslator._shared_local_inpainter
-                        self._log(f"✅ Using shared {local_method.upper()} inpainting model", "info")
-                        return True
                     
-                    # Create local inpainter if needed
-                    if not hasattr(self, 'local_inpainter') or self.local_inpainter is None:
-                        self.local_inpainter = LocalInpainter()
-                        tiling_settings = self.manga_settings.get('tiling', {})
-                        self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
-                        self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
-                        self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
-                        self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
-                        MangaTranslator._shared_local_inpainter = LocalInpainter()
-                        # Set tiling from tiling section once
-                        tiling_settings = self.manga_settings.get('tiling', {})
-                        MangaTranslator._shared_local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
-                        MangaTranslator._shared_local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
-                        MangaTranslator._shared_local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
-                        self._log(f"✅ Set tiling: enabled={MangaTranslator._shared_local_inpainter.tiling_enabled}, size={MangaTranslator._shared_local_inpainter.tile_size}, overlap={MangaTranslator._shared_local_inpainter.tile_overlap}", "info")
+                    # Create local inpainter instance
+                    self.local_inpainter = LocalInpainter()
+                    tiling_settings = self.manga_settings.get('tiling', {})
+                    self.local_inpainter.tiling_enabled = tiling_settings.get('enabled', False)
+                    self.local_inpainter.tile_size = tiling_settings.get('tile_size', 512)
+                    self.local_inpainter.tile_overlap = tiling_settings.get('tile_overlap', 64)
+                    self._log(f"✅ Set tiling: enabled={self.local_inpainter.tiling_enabled}, size={self.local_inpainter.tile_size}, overlap={self.local_inpainter.tile_overlap}", "info")
                     
-                    # If no model path or doesn't exist, try to find or download one (retry once)
+                    # If no model path or doesn't exist, try to find or download one
                     if not model_path or not os.path.exists(model_path):
                         self._log(f"⚠️ Model path not found: {model_path}", "warning")
                         self._log("📥 Attempting to download JIT model...", "info")
@@ -5987,18 +5982,17 @@ class MangaTranslator:
                                 self._log(f"⚠️ Load attempt {attempt+1} failed: {e}", "warning")
                                 time.sleep(0.5)
                         if loaded_ok:
-                            self._log(f"✅ Local inpainter loaded with {local_method.upper()}")
-                            # no-op: instance-level fallback loaded successfully
+                            self._log(f"✅ Local inpainter loaded with {local_method.upper()} (fallback instance)")
                         else:
                             self._log(f"⚠️ Failed to load model, but inpainter is ready", "warning")
                     else:
                         self._log(f"⚠️ No model available, but inpainter is initialized", "warning")
                     
-                    # Done
-                    pass
-                
-                # Always return True so local_inpainter exists
-                return True
+                    return True
+                    
+                except Exception as e:
+                    self._log(f"❌ Local inpainter module not available: {e}", "error")
+                    return False
             
             elif inpaint_method == 'hybrid':
                 # Track hybrid settings changes

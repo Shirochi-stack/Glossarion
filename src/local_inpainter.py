@@ -624,8 +624,16 @@ class LocalInpainter:
             logger.error("ONNX Runtime not available")
             return False
         
+        # Check if this exact ONNX model is already loaded
+        if (self.onnx_session is not None and 
+            hasattr(self, 'current_onnx_path') and 
+            self.current_onnx_path == onnx_path):
+            logger.debug(f"✅ ONNX model already loaded: {onnx_path}")
+            return True
+        
         try:
-            logger.info(f"📥 Loading ONNX model: {onnx_path}")
+            # Don't log here if we already logged in load_model
+            logger.debug(f"📦 ONNX Runtime loading: {onnx_path}")
             
             # Store the path for later checking
             self.current_onnx_path = onnx_path
@@ -1073,11 +1081,8 @@ class LocalInpainter:
                 self.onnx_fixed_size = (512, 512)
                 logger.info(f"  Model expects fixed size: 512x512")
             
-            logger.info(f"✅ ONNX model loaded")
-            time.sleep(0.1)  # Brief pause for stability
-            logger.debug("💤 ONNX model loading pausing briefly for stability")
-            logger.info(f"  Inputs: {self.onnx_input_names}")
-            logger.info(f"  Outputs: {self.onnx_output_names}")
+            # Log success with I/O info in a single line
+            logger.debug(f"✅ ONNX session created - Inputs: {self.onnx_input_names}, Outputs: {self.onnx_output_names}")
             
             self.use_onnx = True
             return True
@@ -1228,9 +1233,9 @@ class LocalInpainter:
                 self.model_loaded = False
                 return False
             
-            # Check if model path changed
+            # Check if model path changed - but only if we had a previous path saved
             current_saved_path = self.config.get(f'{method}_model_path', '')
-            if current_saved_path != model_path and current_saved_path:
+            if current_saved_path and current_saved_path != model_path:
                 logger.info(f"📍 Model path changed for {method}")
                 logger.info(f"   Old: {current_saved_path}")
                 logger.info(f"   New: {model_path}")
@@ -1255,9 +1260,15 @@ class LocalInpainter:
                     logger.info("Inpainting will be unavailable for this session")
                     return False
             
+            # Check if already loaded - both ONNX and regular models
             if self.model_loaded and self.current_method == method and not force_reload:
-                logger.info(f"✅ {method.upper()} already loaded")
-                return True
+                # Additional check for ONNX - make sure the session exists
+                if self.use_onnx and self.onnx_session is not None:
+                    logger.debug(f"✅ {method.upper()} ONNX already loaded (skipping reload)")
+                    return True
+                elif not self.use_onnx and self.model is not None:
+                    logger.debug(f"✅ {method.upper()} already loaded (skipping reload)")
+                    return True
             
             # Clear previous model if force reload
             if force_reload:
@@ -1266,8 +1277,21 @@ class LocalInpainter:
                 self.onnx_session = None
                 self.model_loaded = False
                 self.is_jit_model = False
-            
-            logger.info(f"📥 Loading {method} from {model_path}")
+                # Only log loading message when actually loading
+                logger.info(f"📥 Loading {method} from {model_path}")
+            elif self.model_loaded and self.current_method != method:
+                # If we have a model loaded but it's a different method, clear it
+                logger.info(f"🔄 Switching from {self.current_method} to {method}")
+                self.model = None
+                self.onnx_session = None
+                self.model_loaded = False
+                self.is_jit_model = False
+                # Only log loading message when actually loading
+                logger.info(f"📥 Loading {method} from {model_path}")
+            elif not self.model_loaded:
+                # Only log when we're actually going to load
+                logger.info(f"📥 Loading {method} from {model_path}")
+            # else: model is loaded and current, no logging needed
 
             # Normalize path and enforce expected extension for certain methods
             try:
@@ -1322,34 +1346,28 @@ class LocalInpainter:
             except Exception:
                 pass
 
-            # Check file signature to detect ONNX files with wrong extension
-            with open(model_path, 'rb') as f:
-                file_header = f.read(8)
-            
-            # Check for ONNX signature (starts with \x08)
-            if file_header.startswith(b'\x08'):
-                logger.info("📦 Detected ONNX file signature (regardless of extension)")
-                if self.load_onnx_model(model_path):
-                    self.model_loaded = True
-                    # Ensure aot_onnx is properly set as current method
-                    if 'aot' in method.lower():
-                        self.current_method = 'aot_onnx'
-                    else:
-                        self.current_method = method
-                    self.use_onnx = True
-                    self.is_jit_model = False
-                    self.config[f'{method}_model_path'] = model_path
-                    self._save_config()
-                    logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
-                    return True
-                else:
-                    logger.error("Failed to load ONNX model")
-                    return False
-  
+            # Check file signature to detect ONNX files (even with wrong extension)
+            # or check file extension
             ext = model_path.lower().split('.')[-1]
-            # Handle ONNX files directly
+            is_onnx = False
+            
+            # Check by file signature
+            try:
+                with open(model_path, 'rb') as f:
+                    file_header = f.read(8)
+                if file_header.startswith(b'\x08'):
+                    is_onnx = True
+                    logger.debug("📦 Detected ONNX file signature")
+            except Exception:
+                pass
+            
+            # Check by extension
             if ext == 'onnx':
-                logger.info("📥 Loading ONNX model directly...")
+                is_onnx = True
+            
+            # Handle ONNX files
+            if is_onnx:
+                # Note: load_onnx_model will handle its own logging
                 if self.load_onnx_model(model_path):
                     self.model_loaded = True
                     # Ensure aot_onnx is properly set as current method
