@@ -2402,29 +2402,86 @@ Text to analyze:
     
     def _open_manga_translator_direct(self):
         """Open manga translator directly without loading screen"""
-        # Use WindowManager to create scrollable dialog
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.master,
-            "Manga Panel Translator",
-            width=900,
-            height=700,
-            max_width_ratio=0.9,
-            max_height_ratio=1.45
-        )
+        # Import PySide6 components for the manga translator
+        try:
+            from PySide6.QtWidgets import QApplication, QDialog, QWidget, QVBoxLayout, QScrollArea
+            from PySide6.QtCore import Qt
+        except ImportError:
+            messagebox.showerror("Missing Dependency", 
+                               "PySide6 is required for manga translation. Please install it:\npip install PySide6")
+            return
         
-        # Initialize the manga translator interface on the scrollable frame
-        self.manga_translator = MangaTranslationTab(scrollable_frame, self, dialog, canvas)
+        # Create or get QApplication instance
+        app = QApplication.instance()
+        if not app:
+            # Set DPI awareness before creating QApplication
+            try:
+                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+            except:
+                pass
+            app = QApplication(sys.argv)
         
-        # Auto-resize to fit content
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.6)
+        # Create PySide6 dialog
+        dialog = QDialog()
+        dialog.setWindowTitle("🎌 Manga Panel Translator")
+        
+        # Set icon if available
+        try:
+            icon_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtGui import QIcon
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+        
+        # Size and position the dialog
+        screen = app.primaryScreen().geometry()
+        dialog_width = min(900, int(screen.width() * 0.9))
+        dialog_height = min(700, int(screen.height() * 0.95))
+        dialog.resize(dialog_width, dialog_height)
+        
+        # Center the dialog
+        dialog_x = (screen.width() - dialog_width) // 2
+        dialog_y = max(20, (screen.height() - dialog_height) // 2)
+        dialog.move(dialog_x, dialog_y)
+        
+        # Create scrollable content area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Create main content widget
+        content_widget = QWidget()
+        scroll_area.setWidget(content_widget)
+        
+        # Set dialog layout
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.addWidget(scroll_area)
+        
+        # Initialize the manga translator interface with PySide6 widget
+        self.manga_translator = MangaTranslationTab(content_widget, self, dialog, scroll_area)
         
         # Handle window close
         def on_close():
-            dialog._cleanup_scrolling()
-            dialog.destroy()
-            self.manga_translator = None
+            try:
+                if self.manga_translator:
+                    # Stop any running translations
+                    if hasattr(self.manga_translator, 'stop_translation'):
+                        self.manga_translator.stop_translation()
+                    self.manga_translator = None
+                dialog.close()
+            except Exception as e:
+                print(f"Error closing manga translator: {e}")
         
-        dialog.protocol("WM_DELETE_WINDOW", on_close)
+        dialog.finished.connect(on_close)
+        
+        # Show the dialog
+        dialog.show()
+        
+        # Keep reference to prevent garbage collection
+        self._manga_dialog = dialog
       
         
     def _init_default_prompts(self):

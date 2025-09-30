@@ -12,15 +12,22 @@ import time
 import hashlib
 import traceback
 import concurrent.futures
-from tkinter import filedialog, messagebox
+from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout, QHBoxLayout,
+                               QGroupBox, QListWidget, QComboBox, QLineEdit, QCheckBox,
+                               QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
+                               QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
+                               QDialog, QButtonGroup, QApplication)
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot
+from PySide6.QtGui import QFont, QColor, QTextCharFormat
 import tkinter as tk
-from tkinter import ttk
-import ttkbootstrap as tb
+from tkinter import ttk, filedialog as tk_filedialog, messagebox as tk_messagebox, scrolledtext
+try:
+    import ttkbootstrap as tb
+except ImportError:
+    tb = ttk
 from typing import List, Dict, Optional, Any
 from queue import Queue
 import logging
-import sys
-import threading
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
 
@@ -132,19 +139,19 @@ class MangaTranslationTab:
         with cls._global_cancel_lock:
             return cls._global_cancelled
     
-    def __init__(self, parent_frame: tk.Frame, main_gui, dialog, canvas):
+    def __init__(self, parent_widget, main_gui, dialog, scroll_area=None):
         """Initialize manga translation interface
         
         Args:
-            parent_frame: The scrollable frame from WindowManager
+            parent_widget: The content widget for the interface (PySide6 QWidget)
             main_gui: Reference to TranslatorGUI instance
-            dialog: The dialog window
-            canvas: The canvas for scrolling
+            dialog: The dialog window (PySide6 QDialog)
+            scroll_area: The scroll area widget (PySide6 QScrollArea, optional)
         """
-        self.parent_frame = parent_frame
+        self.parent_widget = parent_widget
         self.main_gui = main_gui
         self.dialog = dialog
-        self.canvas = canvas
+        self.scroll_area = scroll_area
         
         # Translation state
         self.translator = None
@@ -255,7 +262,8 @@ class MangaTranslationTab:
         self._initializing_gui = False
         
         # Do one status check after everything is built
-        self.dialog.after(100, self._check_provider_status)
+        # Use QTimer for PySide6 dialog
+        QTimer.singleShot(100, self._check_provider_status)
         
         # Now that everything is initialized, allow saving
         self._initializing = False
@@ -398,7 +406,7 @@ class MangaTranslationTab:
 
     def _download_hf_model(self):
         """Download HuggingFace models with progress tracking"""
-        provider = self.ocr_provider_var.get()
+        provider = self.ocr_provider_value
         
         # Model sizes (approximate in MB)
         model_sizes = {
@@ -413,9 +421,9 @@ class MangaTranslationTab:
         
         # For Qwen2-VL, show model selection dialog first
         if provider == 'Qwen2-VL':
-            # Use window manager from main_gui
+            # Use window manager from main_gui - pass Tkinter root instead of PySide6 dialog
             selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.dialog,
+                self.main_gui.master,
                 "Select Qwen2-VL Model Size",
                 width=None,
                 height=None,
@@ -582,9 +590,9 @@ class MangaTranslationTab:
             model_id = None
             selected_model_key = None
         
-        # Create download dialog with window manager
+        # Create download dialog with window manager - pass Tkinter root instead of PySide6 dialog
         download_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,
+            self.main_gui.master,
             f"Download {provider} Model",
             width=600,
             height=450,
@@ -916,31 +924,42 @@ class MangaTranslationTab:
         """Check and display OCR provider status"""
         # Skip during initialization to prevent lag
         if hasattr(self, '_initializing_gui') and self._initializing_gui:
-            self.provider_status_label.config(text="", fg="black")
+            if hasattr(self, 'provider_status_label'):
+                self.provider_status_label.setText("")
+                self.provider_status_label.setStyleSheet("color: black;")
             return
-        provider = self.ocr_provider_var.get()
+        
+        # Get provider value
+        if not hasattr(self, 'ocr_provider_value'):
+            # Not initialized yet, skip
+            return
+        provider = self.ocr_provider_value
         
         # Hide ALL buttons first
         if hasattr(self, 'provider_setup_btn'):
-            self.provider_setup_btn.pack_forget()
+            self.provider_setup_btn.setVisible(False)
         if hasattr(self, 'download_model_btn'):
-            self.download_model_btn.pack_forget()
+            self.download_model_btn.setVisible(False)
         
         if provider == 'google':
             # Google - check for credentials file
             google_creds = self.main_gui.config.get('google_vision_credentials', '')
             if google_creds and os.path.exists(google_creds):
-                self.provider_status_label.config(text="✅ Ready", fg="green")
+                self.provider_status_label.setText("✅ Ready")
+                self.provider_status_label.setStyleSheet("color: green;")
             else:
-                self.provider_status_label.config(text="❌ Credentials needed", fg="red")
+                self.provider_status_label.setText("❌ Credentials needed")
+                self.provider_status_label.setStyleSheet("color: red;")
             
         elif provider == 'azure':
             # Azure - check for API key
             azure_key = self.main_gui.config.get('azure_vision_key', '')
             if azure_key:
-                self.provider_status_label.config(text="✅ Ready", fg="green")
+                self.provider_status_label.setText("✅ Ready")
+                self.provider_status_label.setStyleSheet("color: green;")
             else:
-                self.provider_status_label.config(text="❌ Key needed", fg="red")
+                self.provider_status_label.setText("❌ Key needed")
+                self.provider_status_label.setStyleSheet("color: red;")
 
         elif provider == 'custom-api':
             # Custom API - check for main API key
@@ -957,13 +976,24 @@ class MangaTranslationTab:
             
             if api_key:
                 if bubble_detection_enabled:
-                    self.provider_status_label.config(text="✅ Ready", fg="green")
+                    self.provider_status_label.setText("✅ Ready")
+                    self.provider_status_label.setStyleSheet("color: green;")
                 else:
-                    self.provider_status_label.config(text="⚠️ Enable AI bubble detection for best results", fg="orange")
+                    self.provider_status_label.setText("⚠️ Enable AI bubble detection for best results")
+                    self.provider_status_label.setStyleSheet("color: orange;")
             else:
-                self.provider_status_label.config(text="❌ API key needed", fg="red")
+                self.provider_status_label.setText("❌ API key needed")
+                self.provider_status_label.setStyleSheet("color: red;")
      
         elif provider == 'Qwen2-VL':
+            # Initialize OCR manager if needed
+            if not hasattr(self, 'ocr_manager'):
+                from ocr_manager import OCRManager
+                self.ocr_manager = OCRManager(log_callback=self._log)
+            
+            # Check status first
+            status = self.ocr_manager.check_provider_status(provider)
+            
             # Load saved model size if available
             if hasattr(self, 'qwen2vl_model_size'):
                 saved_model_size = self.qwen2vl_model_size
@@ -975,7 +1005,46 @@ class MangaTranslationTab:
                 # Map the saved size to display name
                 size_names = {'1': '2B', '2': '7B', '3': '72B', '4': 'custom'}
                 display_size = size_names.get(saved_model_size, saved_model_size)
-                self.provider_status_label.config(text=f"✅ {display_size} model loaded", fg="green")
+                self.provider_status_label.setText(f"✅ {display_size} model loaded")
+                self.provider_status_label.setStyleSheet("color: green;")
+                
+                # Show reload button
+                self.provider_setup_btn.setText("Reload")
+                self.provider_setup_btn.setVisible(True)
+                
+            elif status['installed']:
+                # Dependencies installed but model not loaded
+                self.provider_status_label.setText("📦 Dependencies ready")
+                self.provider_status_label.setStyleSheet("color: orange;")
+                
+                # Show Load button
+                self.provider_setup_btn.setText("Load Model")
+                self.provider_setup_btn.setVisible(True)
+                
+                # Also show Download button
+                self.download_model_btn.setText("📥 Download Model")
+                self.download_model_btn.setVisible(True)
+                
+            else:
+                # Not installed
+                self.provider_status_label.setText("❌ Not installed")
+                self.provider_status_label.setStyleSheet("color: red;")
+                
+                # Show BOTH buttons
+                self.provider_setup_btn.setText("Load Model")
+                self.provider_setup_btn.setVisible(True)
+                
+                self.download_model_btn.setText("📥 Download Qwen2-VL")
+                self.download_model_btn.setVisible(True)
+            
+            # Additional GPU status check for Qwen2-VL
+            if not status['loaded']:
+                try:
+                    import torch
+                    if not torch.cuda.is_available():
+                        self._log("⚠️ No GPU detected - Qwen2-VL will run slowly on CPU", "warning")
+                except ImportError:
+                    pass
  
         else:
             # Local OCR providers
@@ -995,30 +1064,34 @@ class MangaTranslationTab:
                         status_text = f"✅ {model_size} model loaded"
                     else:
                         status_text = "✅ Model loaded"
-                    self.provider_status_label.config(text=status_text, fg="green")
+                    self.provider_status_label.setText(status_text)
+                    self.provider_status_label.setStyleSheet("color: green;")
                 else:
-                    self.provider_status_label.config(text="✅ Model loaded", fg="green")
+                    self.provider_status_label.setText("✅ Model loaded")
+                    self.provider_status_label.setStyleSheet("color: green;")
                 
                 # Show reload button for all local providers
-                self.provider_setup_btn.config(text="Reload", bootstyle="secondary")
-                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                self.provider_setup_btn.setText("Reload")
+                self.provider_setup_btn.setVisible(True)
                 
             elif status['installed']:
                 # Dependencies installed but model not loaded
-                self.provider_status_label.config(text="📦 Dependencies ready", fg="orange")
+                self.provider_status_label.setText("📦 Dependencies ready")
+                self.provider_status_label.setStyleSheet("color: orange;")
                 
                 # Show Load button for all providers
-                self.provider_setup_btn.config(text="Load Model", bootstyle="primary")
-                self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                self.provider_setup_btn.setText("Load Model")
+                self.provider_setup_btn.setVisible(True)
                 
                 # Also show Download button for models that need downloading
                 if provider in ['Qwen2-VL', 'manga-ocr']:
-                    self.download_model_btn.config(text="📥 Download Model")
-                    self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
+                    self.download_model_btn.setText("📥 Download Model")
+                    self.download_model_btn.setVisible(True)
                 
             else:
                 # Not installed
-                self.provider_status_label.config(text="❌ Not installed", fg="red")
+                self.provider_status_label.setText("❌ Not installed")
+                self.provider_status_label.setStyleSheet("color: red;")
                 
                 # Categorize providers
                 huggingface_providers = ['manga-ocr', 'Qwen2-VL', 'rapidocr']  # Move rapidocr here
@@ -1026,56 +1099,31 @@ class MangaTranslationTab:
 
                 if provider in huggingface_providers:
                     # For HuggingFace models, show BOTH buttons
-                    self.provider_setup_btn.config(text="Load Model", bootstyle="primary")
-                    self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
+                    self.provider_setup_btn.setText("Load Model")
+                    self.provider_setup_btn.setVisible(True)
                     
                     # Download button
                     if provider == 'rapidocr':
-                        self.download_model_btn.config(text="📥 Install RapidOCR")
+                        self.download_model_btn.setText("📥 Install RapidOCR")
                     else:
-                        self.download_model_btn.config(text=f"📥 Download {provider}")
-                    self.download_model_btn.pack(side=tk.LEFT, padx=(5, 0))
+                        self.download_model_btn.setText(f"📥 Download {provider}")
+                    self.download_model_btn.setVisible(True)
 
                 elif provider in pip_providers:
                     # Check if running as .exe
                     if getattr(sys, 'frozen', False):
                         # Running as .exe - can't pip install
-                        self.provider_status_label.config(
-                            text="❌ Not available in .exe", 
-                            fg="red"
-                        )
+                        self.provider_status_label.setText("❌ Not available in .exe")
+                        self.provider_status_label.setStyleSheet("color: red;")
                         self._log(f"⚠️ {provider} cannot be installed in standalone .exe version", "warning")
                     else:
                         # Running from Python - can pip install
-                        self.provider_setup_btn.config(text="Install", bootstyle="success")
-                        self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
-                    
-                elif provider in pip_providers:
-                    # Check if running as .exe
-                    if getattr(sys, 'frozen', False):
-                        # Running as .exe - can't pip install
-                        self.provider_status_label.config(
-                            text="❌ Not available in .exe", 
-                            fg="red"
-                        )
-                        self._log(f"⚠️ {provider} cannot be installed in standalone .exe version", "warning")
-                    else:
-                        # Running from Python - can pip install
-                        self.provider_setup_btn.config(text="Install", bootstyle="success")
-                        self.provider_setup_btn.pack(side=tk.LEFT, padx=(5, 0))
-        
-        # Additional GPU status check for Qwen2-VL
-        if provider == 'Qwen2-VL' and not status['loaded']:
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    self._log("⚠️ No GPU detected - Qwen2-VL will run slowly on CPU", "warning")
-            except ImportError:
-                pass
+                        self.provider_setup_btn.setText("Install")
+                        self.provider_setup_btn.setVisible(True)
 
     def _setup_ocr_provider(self):
         """Setup/install/load OCR provider"""
-        provider = self.ocr_provider_var.get()
+        provider = self.ocr_provider_value
         
         if provider in ['google', 'azure']:
             return  # Cloud providers don't need setup
@@ -1109,9 +1157,9 @@ class MangaTranslationTab:
         # For Qwen2-VL, check if we need to select model size first
         model_size = None
         if provider == 'Qwen2-VL' and status['installed'] and not status['loaded']:
-            # Use window manager for dialog
+            # Use window manager for dialog - pass Tkinter root instead of PySide6 dialog
             selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.dialog,
+                self.main_gui.master,
                 "Select Qwen2-VL Model Size",
                 width=None,
                 height=None,
@@ -1232,9 +1280,9 @@ class MangaTranslationTab:
             model_size = model_confirmed['size']
             self._log(f"DEBUG: Dialog closed, model_size set to: {model_size}")
         
-        # Create progress dialog with window manager
+        # Create progress dialog with window manager - pass Tkinter root instead of PySide6 dialog
         progress_dialog, progress_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,
+            self.main_gui.master,
             f"Setting up {provider}",
             width=400,
             height=200,
@@ -1367,45 +1415,29 @@ class MangaTranslationTab:
 
     def _on_ocr_provider_change(self, event=None):
         """Handle OCR provider change"""
-        provider = self.ocr_provider_var.get()
+        # Get the new provider value from combo box
+        if hasattr(self, 'provider_combo'):
+            provider = self.provider_combo.currentText()
+            self.ocr_provider_value = provider
+        else:
+            provider = self.ocr_provider_value
         
-        # Hide ALL provider-specific frames first
+        # Hide ALL provider-specific frames first (PySide6)
         if hasattr(self, 'google_creds_frame'):
-            self.google_creds_frame.pack_forget()
+            self.google_creds_frame.setVisible(False)
         if hasattr(self, 'azure_frame'):
-            self.azure_frame.pack_forget()
-        
-        # Update the API label based on provider
-        api_label_text = {
-            'custom-api': "OCR: Custom API | Translation: API Key",
-            'google': "OCR: Google Cloud Vision | Translation: API Key",
-            'azure': "OCR: Azure Computer Vision | Translation: API Key",
-            'rapidocr': "OCR: RapidOCR (Local) | Translation: API Key", 
-            'manga-ocr': "OCR: Manga OCR (Japanese) | Translation: API Key",
-            'Qwen2-VL': "OCR: Qwen2-VL (Korean) | Translation: API Key",
-            'easyocr': "OCR: EasyOCR (Multi-lang) | Translation: API Key",
-            'paddleocr': "OCR: PaddleOCR | Translation: API Key",
-            'doctr': "OCR: DocTR | Translation: API Key"
-        }.get(provider, f"OCR: {provider} | Translation: API Key")
-        
-        # Update the label in the UI
-        for widget in self.parent_frame.winfo_children():
-            if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
-                for child in widget.winfo_children():
-                    if isinstance(child, tk.Frame):
-                        for subchild in child.winfo_children():
-                            if isinstance(subchild, tk.Label) and "OCR:" in subchild.cget("text"):
-                                subchild.config(text=api_label_text)
-                                break
+            self.azure_frame.setVisible(False)
         
         # Show only the relevant settings frame for the selected provider
         if provider == 'google':
             # Show Google credentials frame
-            self.google_creds_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
+            if hasattr(self, 'google_creds_frame'):
+                self.google_creds_frame.setVisible(True)
             
         elif provider == 'azure':
             # Show Azure settings frame  
-            self.azure_frame.pack(fill=tk.X, pady=(0, 10), after=self.ocr_provider_frame)
+            if hasattr(self, 'azure_frame'):
+                self.azure_frame.setVisible(True)
             
         # For all other providers (manga-ocr, Qwen2-VL, easyocr, paddleocr, doctr)
         # Don't show any cloud credential frames - they use local models
@@ -1439,40 +1471,50 @@ class MangaTranslationTab:
             self.translator = None  # Force recreation on next translation
     
     def _build_interface(self):
-        """Build the enhanced manga translation interface"""
-        # Title
-        title_frame = tk.Frame(self.parent_frame)
-        title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
+        """Build the enhanced manga translation interface using PySide6"""
+        # Create main layout for PySide6 widget
+        main_layout = QVBoxLayout(self.parent_widget)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)
+        self._build_pyside6_interface(main_layout)
+    
+    def _build_pyside6_interface(self, main_layout):
         
-        title_label = tk.Label(
-            title_frame,
-            text="🎌 Manga Translation",
-            font=('Arial', 16, 'bold')
-        )
-        title_label.pack(side=tk.LEFT)
+        # Title
+        title_frame = QWidget()
+        title_layout = QHBoxLayout(title_frame)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        
+        title_label = QLabel("🎌 Manga Translation")
+        title_font = QFont("Arial", 16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_layout.addWidget(title_label)
         
         # Requirements check
-        has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+        has_api_key = bool(self.main_gui.api_key_entry.text().strip()) if hasattr(self.main_gui.api_key_entry, 'text') else bool(self.main_gui.api_key_entry.get().strip())
         has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
         
         status_text = "✅ Ready" if (has_api_key and has_vision) else "❌ Setup Required"
         status_color = "green" if (has_api_key and has_vision) else "red"
         
-        status_label = tk.Label(
-            title_frame,
-            text=status_text,
-            font=('Arial', 12),
-            fg=status_color
-        )
-        status_label.pack(side=tk.RIGHT)
+        status_label = QLabel(status_text)
+        status_font = QFont("Arial", 12)
+        status_label.setFont(status_font)
+        status_label.setStyleSheet(f"color: {status_color};")
+        title_layout.addStretch()
+        title_layout.addWidget(status_label)
+        
+        main_layout.addWidget(title_frame)
         
         # Store reference for updates
         self.status_label = status_label
         
         # Add instructions and Google Cloud setup
         if not (has_api_key and has_vision):
-            req_frame = tk.Frame(self.parent_frame)
-            req_frame.pack(fill=tk.X, padx=20, pady=5)
+            req_frame = QWidget()
+            req_layout = QVBoxLayout(req_frame)
+            req_layout.setContentsMargins(0, 5, 0, 5)
             
             req_text = []
             if not has_api_key:
@@ -1480,107 +1522,112 @@ class MangaTranslationTab:
             if not has_vision:
                 req_text.append("• Google Cloud Vision credentials not set")
             
-            tk.Label(
-                req_frame,
-                text="\n".join(req_text),
-                font=('Arial', 10),
-                fg='red',
-                justify=tk.LEFT
-            ).pack(anchor=tk.W)
+            req_label = QLabel("\n".join(req_text))
+            req_font = QFont("Arial", 10)
+            req_label.setFont(req_font)
+            req_label.setStyleSheet("color: red;")
+            req_label.setAlignment(Qt.AlignLeft)
+            req_layout.addWidget(req_label)
+            
+            main_layout.addWidget(req_frame)
         
         # File selection frame
-        file_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Select Manga Images",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        file_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        file_frame = QGroupBox("Select Manga Images")
+        file_frame_font = QFont("Arial", 12)
+        file_frame_font.setBold(True)
+        file_frame.setFont(file_frame_font)
+        file_frame_layout = QVBoxLayout(file_frame)
+        file_frame_layout.setContentsMargins(15, 15, 15, 10)
+        file_frame_layout.setSpacing(10)
         
-        # File listbox with scrollbar
-        list_frame = tk.Frame(file_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.file_listbox = tk.Listbox(
-            list_frame,
-            yscrollcommand=scrollbar.set,
-            height=8,
-            selectmode=tk.EXTENDED
-        )
-        self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.file_listbox.yview)
+        # File listbox (QListWidget handles scrolling automatically)
+        self.file_listbox = QListWidget()
+        self.file_listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        self.file_listbox.setMinimumHeight(200)
+        file_frame_layout.addWidget(self.file_listbox)
         
         # File buttons
-        file_btn_frame = tk.Frame(file_frame)
-        file_btn_frame.pack(fill=tk.X, pady=(10, 0))
+        file_btn_frame = QWidget()
+        file_btn_layout = QHBoxLayout(file_btn_frame)
+        file_btn_layout.setContentsMargins(0, 10, 0, 0)
+        file_btn_layout.setSpacing(5)
         
-        tb.Button(
-            file_btn_frame,
-            text="Add Files",
-            command=self._add_files,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 5))
+        add_files_btn = QPushButton("Add Files")
+        add_files_btn.clicked.connect(self._add_files)
+        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+        file_btn_layout.addWidget(add_files_btn)
         
-        tb.Button(
-            file_btn_frame,
-            text="Add Folder",
-            command=self._add_folder,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=5)
+        add_folder_btn = QPushButton("Add Folder")
+        add_folder_btn.clicked.connect(self._add_folder)
+        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+        file_btn_layout.addWidget(add_folder_btn)
         
-        tb.Button(
-            file_btn_frame,
-            text="Remove Selected",
-            command=self._remove_selected,
-            bootstyle="danger"
-        ).pack(side=tk.LEFT, padx=5)
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self._remove_selected)
+        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+        file_btn_layout.addWidget(remove_btn)
         
-        tb.Button(
-            file_btn_frame,
-            text="Clear All",
-            command=self._clear_all,
-            bootstyle="warning"
-        ).pack(side=tk.LEFT, padx=5)
+        clear_btn = QPushButton("Clear All")
+        clear_btn.clicked.connect(self._clear_all)
+        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 5px 15px; }")
+        file_btn_layout.addWidget(clear_btn)
+        
+        file_btn_layout.addStretch()
+        file_frame_layout.addWidget(file_btn_frame)
+        
+        main_layout.addWidget(file_frame)
         
         # Settings frame
-        settings_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Translation Settings",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-      
-        settings_frame.pack(fill=tk.X, padx=20, pady=10)
+        settings_frame = QGroupBox("Translation Settings")
+        settings_frame_font = QFont("Arial", 12)
+        settings_frame_font.setBold(True)
+        settings_frame.setFont(settings_frame_font)
+        settings_frame_layout = QVBoxLayout(settings_frame)
+        settings_frame_layout.setContentsMargins(15, 15, 15, 10)
+        settings_frame_layout.setSpacing(10)
         
         # API Settings - Hybrid approach
-        api_frame = tk.Frame(settings_frame)
-        api_frame.pack(fill=tk.X, pady=(0, 10))
+        api_frame = QWidget()
+        api_layout = QHBoxLayout(api_frame)
+        api_layout.setContentsMargins(0, 0, 0, 10)
+        api_layout.setSpacing(10)
         
-        tk.Label(api_frame, text="OCR: Google Cloud Vision | Translation: API Key", 
-                font=('Arial', 10, 'italic'), fg='gray').pack(side=tk.LEFT)
+        api_label = QLabel("OCR: Google Cloud Vision | Translation: API Key")
+        api_font = QFont("Arial", 10)
+        api_font.setItalic(True)
+        api_label.setFont(api_font)
+        api_label.setStyleSheet("color: gray;")
+        api_layout.addWidget(api_label)
         
         # Show current model
         current_model = 'Unknown'
         if hasattr(self.main_gui, 'model_var'):
-            current_model = self.main_gui.model_var.get()
+            current_model = self.main_gui.model_var  # In PySide6, this might be a direct value
         elif hasattr(self.main_gui, 'model_combo'):
-            current_model = self.main_gui.model_combo.get()
+            current_model = self.main_gui.model_combo.currentText() if hasattr(self.main_gui.model_combo, 'currentText') else str(self.main_gui.model_combo)
         elif hasattr(self.main_gui, 'config'):
             current_model = self.main_gui.config.get('model', 'Unknown')
         
-        tk.Label(api_frame, text=f"Model: {current_model}", 
-                font=('Arial', 10, 'italic'), fg='gray').pack(side=tk.RIGHT)
+        model_label = QLabel(f"Model: {current_model}")
+        model_font = QFont("Arial", 10)
+        model_font.setItalic(True)
+        model_label.setFont(model_font)
+        model_label.setStyleSheet("color: gray;")
+        api_layout.addStretch()
+        api_layout.addWidget(model_label)
+        
+        settings_frame_layout.addWidget(api_frame)
 
         # OCR Provider Selection - ENHANCED VERSION
-        self.ocr_provider_frame = tk.Frame(settings_frame)
-        self.ocr_provider_frame.pack(fill=tk.X, pady=(0, 10))
+        self.ocr_provider_frame = QWidget()
+        ocr_provider_layout = QHBoxLayout(self.ocr_provider_frame)
+        ocr_provider_layout.setContentsMargins(0, 0, 0, 10)
+        ocr_provider_layout.setSpacing(10)
 
-        tk.Label(self.ocr_provider_frame, text="OCR Provider:", width=20, anchor='w').pack(side=tk.LEFT)
+        provider_label = QLabel("OCR Provider:")
+        provider_label.setMinimumWidth(150)
+        provider_label.setAlignment(Qt.AlignLeft)
+        ocr_provider_layout.addWidget(provider_label)
 
         # Expanded provider list with descriptions
         ocr_providers = [
@@ -1599,49 +1646,40 @@ class MangaTranslationTab:
         provider_values = [p[0] for p in ocr_providers]
         provider_display = [f"{p[0]} - {p[1]}" for p in ocr_providers]
 
-        self.ocr_provider_var = tk.StringVar(value=self.main_gui.config.get('manga_ocr_provider', 'custom-api'))
-        provider_combo = ttk.Combobox(
-            self.ocr_provider_frame,
-            textvariable=self.ocr_provider_var,
-            values=provider_values,
-            state='readonly',
-            width=15
-        )
-        provider_combo.pack(side=tk.LEFT, padx=10)
-        provider_combo.bind('<<ComboboxSelected>>', self._on_ocr_provider_change)
-        # Prevent mouse wheel from changing selection while scrolling the page
-        provider_combo.bind("<MouseWheel>", lambda e: "break")
-        provider_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
-        provider_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
+        self.ocr_provider_value = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(provider_values)
+        self.provider_combo.setCurrentText(self.ocr_provider_value)
+        self.provider_combo.setMinimumWidth(150)
+        self.provider_combo.currentTextChanged.connect(self._on_ocr_provider_change)
+        # Qt doesn't need explicit wheel event blocking like tkinter
+        ocr_provider_layout.addWidget(self.provider_combo)
 
         # Provider status indicator with more detail
-        self.provider_status_label = tk.Label(
-            self.ocr_provider_frame,
-            text="",
-            font=('Arial', 9),
-            width=40
-        )
-        self.provider_status_label.pack(side=tk.LEFT, padx=(10, 0))
+        self.provider_status_label = QLabel("")
+        status_font = QFont("Arial", 9)
+        self.provider_status_label.setFont(status_font)
+        self.provider_status_label.setMinimumWidth(300)
+        ocr_provider_layout.addWidget(self.provider_status_label)
 
-        # Setup/Install button for non-cloud providers - ALWAYS VISIBLE for local providers
-        self.provider_setup_btn = tb.Button(
-            self.ocr_provider_frame,
-            text="Setup",
-            command=self._setup_ocr_provider,
-            bootstyle="info",
-            width=12
-        )
-        # Don't pack yet, let _check_provider_status handle it
+        # Setup/Install button for non-cloud providers
+        self.provider_setup_btn = QPushButton("Setup")
+        self.provider_setup_btn.clicked.connect(self._setup_ocr_provider)
+        self.provider_setup_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        self.provider_setup_btn.setMinimumWidth(100)
+        self.provider_setup_btn.setVisible(False)  # Hidden by default, _check_provider_status will show it
+        ocr_provider_layout.addWidget(self.provider_setup_btn)
 
         # Add explicit download button for Hugging Face models
-        self.download_model_btn = tb.Button(
-            self.ocr_provider_frame,
-            text="📥 Download",
-            command=self._download_hf_model,
-            bootstyle="success",
-            width=22
-        )
-        # Don't pack yet
+        self.download_model_btn = QPushButton("📥 Download")
+        self.download_model_btn.clicked.connect(self._download_hf_model)
+        self.download_model_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        self.download_model_btn.setMinimumWidth(150)
+        self.download_model_btn.setVisible(False)  # Hidden by default
+        ocr_provider_layout.addWidget(self.download_model_btn)
+        
+        ocr_provider_layout.addStretch()
+        settings_frame_layout.addWidget(self.ocr_provider_frame)
 
         # Initialize OCR manager
         from ocr_manager import OCRManager
@@ -1651,355 +1689,417 @@ class MangaTranslationTab:
         self._check_provider_status()
 
         # Google Cloud Credentials section (now in a frame that can be hidden)
-        self.google_creds_frame = tk.Frame(settings_frame)
-        self.google_creds_frame.pack(fill=tk.X, pady=(0, 10))
+        self.google_creds_frame = QWidget()
+        google_creds_layout = QHBoxLayout(self.google_creds_frame)
+        google_creds_layout.setContentsMargins(0, 0, 0, 10)
+        google_creds_layout.setSpacing(10)
 
-        tk.Label(self.google_creds_frame, text="Google Cloud Credentials:", width=20, anchor='w').pack(side=tk.LEFT)
+        google_label = QLabel("Google Cloud Credentials:")
+        google_label.setMinimumWidth(150)
+        google_label.setAlignment(Qt.AlignLeft)
+        google_creds_layout.addWidget(google_label)
 
         # Show current credentials file
         google_creds_path = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
         creds_display = os.path.basename(google_creds_path) if google_creds_path else "Not Set"
 
-        self.creds_label = tk.Label(self.google_creds_frame, text=creds_display, 
-                                   font=('Arial', 9), fg='green' if google_creds_path else 'red')
-        self.creds_label.pack(side=tk.LEFT, padx=10)
+        self.creds_label = QLabel(creds_display)
+        creds_font = QFont("Arial", 9)
+        self.creds_label.setFont(creds_font)
+        self.creds_label.setStyleSheet(f"color: {'green' if google_creds_path else 'red'};")
+        google_creds_layout.addWidget(self.creds_label)
 
-        tb.Button(
-            self.google_creds_frame,
-            text="Browse",
-            command=self._browse_google_credentials_permanent,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
+        browse_btn = QPushButton("Browse")
+        browse_btn.clicked.connect(self._browse_google_credentials_permanent)
+        browse_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+        google_creds_layout.addWidget(browse_btn)
+        
+        google_creds_layout.addStretch()
+        settings_frame_layout.addWidget(self.google_creds_frame)
+        self.google_creds_frame.setVisible(False)  # Hidden by default
 
         # Azure settings frame (hidden by default)
-        self.azure_frame = tk.Frame(settings_frame)
+        self.azure_frame = QWidget()
+        azure_frame_layout = QVBoxLayout(self.azure_frame)
+        azure_frame_layout.setContentsMargins(0, 0, 0, 10)
+        azure_frame_layout.setSpacing(5)
 
         # Azure Key
-        azure_key_frame = tk.Frame(self.azure_frame)
-        azure_key_frame.pack(fill=tk.X, pady=(0, 5))
+        azure_key_frame = QWidget()
+        azure_key_layout = QHBoxLayout(azure_key_frame)
+        azure_key_layout.setContentsMargins(0, 0, 0, 0)
+        azure_key_layout.setSpacing(10)
 
-        tk.Label(azure_key_frame, text="Azure Key:", width=20, anchor='w').pack(side=tk.LEFT)
-        self.azure_key_entry = tk.Entry(azure_key_frame, show='*', width=30)
-        self.azure_key_entry.pack(side=tk.LEFT, padx=10)
+        azure_key_label = QLabel("Azure Key:")
+        azure_key_label.setMinimumWidth(150)
+        azure_key_label.setAlignment(Qt.AlignLeft)
+        azure_key_layout.addWidget(azure_key_label)
+        
+        self.azure_key_entry = QLineEdit()
+        self.azure_key_entry.setEchoMode(QLineEdit.Password)
+        self.azure_key_entry.setMinimumWidth(250)
+        azure_key_layout.addWidget(self.azure_key_entry)
 
         # Show/Hide button for Azure key
-        self.show_azure_key_var = tk.BooleanVar(value=False)
-        tb.Checkbutton(
-            azure_key_frame,
-            text="Show",
-            variable=self.show_azure_key_var,
-            command=lambda: self.azure_key_entry.config(show='' if self.show_azure_key_var.get() else '*'),
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=5)
+        self.show_azure_key_checked = False
+        show_azure_check = QCheckBox("Show")
+        show_azure_check.stateChanged.connect(lambda state: self.azure_key_entry.setEchoMode(
+            QLineEdit.Normal if state == Qt.Checked else QLineEdit.Password
+        ))
+        azure_key_layout.addWidget(show_azure_check)
+        azure_key_layout.addStretch()
+        azure_frame_layout.addWidget(azure_key_frame)
 
         # Azure Endpoint
-        azure_endpoint_frame = tk.Frame(self.azure_frame)
-        azure_endpoint_frame.pack(fill=tk.X, pady=(0, 10))
+        azure_endpoint_frame = QWidget()
+        azure_endpoint_layout = QHBoxLayout(azure_endpoint_frame)
+        azure_endpoint_layout.setContentsMargins(0, 0, 0, 0)
+        azure_endpoint_layout.setSpacing(10)
 
-        tk.Label(azure_endpoint_frame, text="Azure Endpoint:", width=20, anchor='w').pack(side=tk.LEFT)
-        self.azure_endpoint_entry = tk.Entry(azure_endpoint_frame, width=40)
-        self.azure_endpoint_entry.pack(side=tk.LEFT, padx=10)
+        azure_endpoint_label = QLabel("Azure Endpoint:")
+        azure_endpoint_label.setMinimumWidth(150)
+        azure_endpoint_label.setAlignment(Qt.AlignLeft)
+        azure_endpoint_layout.addWidget(azure_endpoint_label)
+        
+        self.azure_endpoint_entry = QLineEdit()
+        self.azure_endpoint_entry.setMinimumWidth(350)
+        azure_endpoint_layout.addWidget(self.azure_endpoint_entry)
+        azure_endpoint_layout.addStretch()
+        azure_frame_layout.addWidget(azure_endpoint_frame)
 
         # Load saved Azure settings
         saved_key = self.main_gui.config.get('azure_vision_key', '')
         saved_endpoint = self.main_gui.config.get('azure_vision_endpoint', 'https://YOUR-RESOURCE.cognitiveservices.azure.com/')
-        self.azure_key_entry.insert(0, saved_key)
-        self.azure_endpoint_entry.insert(0, saved_endpoint)
+        self.azure_key_entry.setText(saved_key)
+        self.azure_endpoint_entry.setText(saved_endpoint)
+        
+        settings_frame_layout.addWidget(self.azure_frame)
+        self.azure_frame.setVisible(False)  # Hidden by default
 
         # Initially show/hide based on saved provider
         self._on_ocr_provider_change()
 
         # Separator for context settings
-        ttk.Separator(settings_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        separator1 = QFrame()
+        separator1.setFrameShape(QFrame.HLine)
+        separator1.setFrameShadow(QFrame.Sunken)
+        settings_frame_layout.addWidget(separator1)
         
         # Context and Full Page Mode Settings
-        context_frame = tk.LabelFrame(
-            settings_frame,
-            text="🔄 Context & Translation Mode",
-            font=('Arial', 11, 'bold'),
-            padx=10,
-            pady=10
-        )
-        context_frame.pack(fill=tk.X, pady=(0, 10))
+        context_frame = QGroupBox("🔄 Context & Translation Mode")
+        context_frame_font = QFont("Arial", 11)
+        context_frame_font.setBold(True)
+        context_frame.setFont(context_frame_font)
+        context_frame_layout = QVBoxLayout(context_frame)
+        context_frame_layout.setContentsMargins(10, 10, 10, 10)
+        context_frame_layout.setSpacing(10)
         
         # Show current contextual settings from main GUI
-        context_info = tk.Frame(context_frame)
-        context_info.pack(fill=tk.X, pady=(0, 10))
+        context_info = QWidget()
+        context_info_layout = QVBoxLayout(context_info)
+        context_info_layout.setContentsMargins(0, 0, 0, 10)
+        context_info_layout.setSpacing(5)
         
-        tk.Label(
-            context_info,
-            text="Main GUI Context Settings:",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W)
+        context_title = QLabel("Main GUI Context Settings:")
+        title_font = QFont("Arial", 10)
+        title_font.setBold(True)
+        context_title.setFont(title_font)
+        context_info_layout.addWidget(context_title)
         
         # Display current settings
-        settings_frame_display = tk.Frame(context_info)
-        settings_frame_display.pack(fill=tk.X, padx=(20, 0))
+        settings_frame_display = QWidget()
+        settings_display_layout = QVBoxLayout(settings_frame_display)
+        settings_display_layout.setContentsMargins(20, 0, 0, 0)
+        settings_display_layout.setSpacing(3)
         
         # Contextual enabled status
         contextual_status = "Enabled" if self.main_gui.contextual_var.get() else "Disabled"
-        self.contextual_status_label = tk.Label(
-            settings_frame_display,
-            text=f"• Contextual Translation: {contextual_status}",
-            font=('Arial', 10)
-        )
-        self.contextual_status_label.pack(anchor=tk.W)
+        self.contextual_status_label = QLabel(f"• Contextual Translation: {contextual_status}")
+        status_font = QFont("Arial", 10)
+        self.contextual_status_label.setFont(status_font)
+        settings_display_layout.addWidget(self.contextual_status_label)
         
         # History limit
         history_limit = self.main_gui.trans_history.get() if hasattr(self.main_gui, 'trans_history') else "3"
-        self.history_limit_label = tk.Label(
-            settings_frame_display,
-            text=f"• Translation History Limit: {history_limit} exchanges",
-            font=('Arial', 10)
-        )
-        self.history_limit_label.pack(anchor=tk.W)
+        self.history_limit_label = QLabel(f"• Translation History Limit: {history_limit} exchanges")
+        self.history_limit_label.setFont(status_font)
+        settings_display_layout.addWidget(self.history_limit_label)
         
         # Rolling history status
         rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var.get() else "Disabled (Reset on Limit)"
-        self.rolling_status_label = tk.Label(
-            settings_frame_display,
-            text=f"• Rolling History: {rolling_status}",
-            font=('Arial', 10)
-        )
-        self.rolling_status_label.pack(anchor=tk.W)
+        self.rolling_status_label = QLabel(f"• Rolling History: {rolling_status}")
+        self.rolling_status_label.setFont(status_font)
+        settings_display_layout.addWidget(self.rolling_status_label)
+        
+        context_info_layout.addWidget(settings_frame_display)
+        context_frame_layout.addWidget(context_info)
 
         # Refresh button to update from main GUI
-        tb.Button(
-            context_frame,
-            text="↻ Refresh from Main GUI",
-            command=self._refresh_context_settings,
-            bootstyle="secondary"
-        ).pack(pady=(10, 0))
+        refresh_btn = QPushButton("↻ Refresh from Main GUI")
+        refresh_btn.clicked.connect(self._refresh_context_settings)
+        refresh_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        context_frame_layout.addWidget(refresh_btn)
         
         # Separator
-        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        separator2 = QFrame()
+        separator2.setFrameShape(QFrame.HLine)
+        separator2.setFrameShadow(QFrame.Sunken)
+        context_frame_layout.addWidget(separator2)
         
         # Full Page Context Translation Settings
-        full_page_frame = tk.Frame(context_frame)
-        full_page_frame.pack(fill=tk.X)
+        full_page_frame = QWidget()
+        full_page_layout = QVBoxLayout(full_page_frame)
+        full_page_layout.setContentsMargins(0, 0, 0, 0)
+        full_page_layout.setSpacing(5)
 
-        tk.Label(
-            full_page_frame,
-            text="Full Page Context Mode (Manga-specific):",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W, pady=(0, 5))
+        full_page_title = QLabel("Full Page Context Mode (Manga-specific):")
+        title_font2 = QFont("Arial", 10)
+        title_font2.setBold(True)
+        full_page_title.setFont(title_font2)
+        full_page_layout.addWidget(full_page_title)
 
         # Enable/disable toggle
-        self.full_page_context_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_full_page_context', True)
-        )
+        self.full_page_context_checked = self.main_gui.config.get('manga_full_page_context', True)
 
-        toggle_frame = tk.Frame(full_page_frame)
-        toggle_frame.pack(fill=tk.X, padx=(20, 0))
+        toggle_frame = QWidget()
+        toggle_layout = QHBoxLayout(toggle_frame)
+        toggle_layout.setContentsMargins(20, 0, 0, 0)
+        toggle_layout.setSpacing(10)
 
-        self.context_checkbox = tb.Checkbutton(
-            toggle_frame,
-            text="Enable Full Page Context Translation",
-            variable=self.full_page_context_var,
-            command=self._on_context_toggle,
-            bootstyle="round-toggle"
-        )
-        self.context_checkbox.pack(side=tk.LEFT)
+        self.context_checkbox = QCheckBox("Enable Full Page Context Translation")
+        self.context_checkbox.setChecked(self.full_page_context_checked)
+        self.context_checkbox.stateChanged.connect(self._on_context_toggle)
+        toggle_layout.addWidget(self.context_checkbox)
 
         # Edit prompt button
-        tb.Button(
-            toggle_frame,
-            text="Edit Prompt",
-            command=self._edit_context_prompt,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        edit_prompt_btn = QPushButton("Edit Prompt")
+        edit_prompt_btn.clicked.connect(self._edit_context_prompt)
+        edit_prompt_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        toggle_layout.addWidget(edit_prompt_btn)
 
         # Help button for full page context
-        tb.Button(
-            toggle_frame,
-            text="?",
-            command=lambda: self._show_help_dialog(
-                "Full Page Context Mode",
-                "Full page context sends all text regions from the page together in a single request.\n\n"
-                "This allows the AI to see all text at once for more contextually accurate translations, "
-                "especially useful for maintaining character name consistency and understanding "
-                "conversation flow across multiple speech bubbles.\n\n"
-                "✅ Pros:\n"
-                "• Better context awareness\n"
-                "• Consistent character names\n"
-                "• Understanding of conversation flow\n"
-                "• Maintains tone across bubbles\n\n"
-                "❌ Cons:\n"
-                "• Single API call failure affects all text\n"
-                "• May use more tokens\n"
-                "• Slower for pages with many text regions"
-            ),
-            bootstyle="info",
-            width=2
-        ).pack(side=tk.LEFT, padx=(5, 0))
+        help_btn = QPushButton("?")
+        help_btn.setFixedWidth(30)
+        help_btn.clicked.connect(lambda: self._show_help_dialog(
+            "Full Page Context Mode",
+            "Full page context sends all text regions from the page together in a single request.\n\n"
+            "This allows the AI to see all text at once for more contextually accurate translations, "
+            "especially useful for maintaining character name consistency and understanding "
+            "conversation flow across multiple speech bubbles.\n\n"
+            "✅ Pros:\n"
+            "• Better context awareness\n"
+            "• Consistent character names\n"
+            "• Understanding of conversation flow\n"
+            "• Maintains tone across bubbles\n\n"
+            "❌ Cons:\n"
+            "• Single API call failure affects all text\n"
+            "• May use more tokens\n"
+            "• Slower for pages with many text regions"
+        ))
+        help_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px; }")
+        toggle_layout.addWidget(help_btn)
+        toggle_layout.addStretch()
+        
+        full_page_layout.addWidget(toggle_frame)
+        context_frame_layout.addWidget(full_page_frame)
 
         # Separator
-        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        separator3 = QFrame()
+        separator3.setFrameShape(QFrame.HLine)
+        separator3.setFrameShadow(QFrame.Sunken)
+        context_frame_layout.addWidget(separator3)
 
         # Visual Context Settings (for non-vision model support)
-        visual_frame = tk.Frame(context_frame)
-        visual_frame.pack(fill=tk.X)
+        visual_frame = QWidget()
+        visual_layout = QVBoxLayout(visual_frame)
+        visual_layout.setContentsMargins(0, 0, 0, 0)
+        visual_layout.setSpacing(5)
 
-        tk.Label(
-            visual_frame,
-            text="Visual Context (Image Support):",
-            font=('Arial', 10, 'bold')
-        ).pack(anchor=tk.W, pady=(0, 5))
+        visual_title = QLabel("Visual Context (Image Support):")
+        title_font3 = QFont("Arial", 10)
+        title_font3.setBold(True)
+        visual_title.setFont(title_font3)
+        visual_layout.addWidget(visual_title)
 
         # Visual context toggle
-        self.visual_context_enabled_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_visual_context_enabled', True)
-        )
+        self.visual_context_enabled_checked = self.main_gui.config.get('manga_visual_context_enabled', True)
 
-        visual_toggle_frame = tk.Frame(visual_frame)
-        visual_toggle_frame.pack(fill=tk.X, padx=(20, 0))
+        visual_toggle_frame = QWidget()
+        visual_toggle_layout = QHBoxLayout(visual_toggle_frame)
+        visual_toggle_layout.setContentsMargins(20, 0, 0, 0)
+        visual_toggle_layout.setSpacing(10)
 
-        self.visual_context_checkbox = tb.Checkbutton(
-            visual_toggle_frame,
-            text="Include page image in translation requests",
-            variable=self.visual_context_enabled_var,
-            command=self._on_visual_context_toggle,
-            bootstyle="round-toggle"
-        )
-        self.visual_context_checkbox.pack(side=tk.LEFT)
+        self.visual_context_checkbox = QCheckBox("Include page image in translation requests")
+        self.visual_context_checkbox.setChecked(self.visual_context_enabled_checked)
+        self.visual_context_checkbox.stateChanged.connect(self._on_visual_context_toggle)
+        visual_toggle_layout.addWidget(self.visual_context_checkbox)
 
         # Help button for visual context
-        tb.Button(
-            visual_toggle_frame,
-            text="?",
-            command=lambda: self._show_help_dialog(
-                "Visual Context Settings",
-                "Visual context includes the manga page image with translation requests.\n\n"
-                "⚠️ WHEN TO DISABLE:\n"
-                "• Using text-only models (Claude, GPT-3.5, standard Gemini)\n"
-                "• Model doesn't support images\n"
-                "• Want to reduce token usage\n"
-                "• Testing text-only translation\n\n"
-                "✅ WHEN TO ENABLE:\n"
-                "• Using vision models (Gemini Vision, GPT-4V, Claude 3)\n"
-                "• Want spatial awareness of text position\n"
-                "• Need visual context for better translation\n\n"
-                "Impact:\n"
-                "• Disabled: Only text is sent (compatible with any model)\n"
-                "• Enabled: Text + image sent (requires vision model)\n\n"
-                "Note: Disabling may reduce translation quality as the AI won't see\n"
-                "the artwork context or spatial layout of the text."
-            ),
-            bootstyle="info",
-            width=2
-        ).pack(side=tk.LEFT, padx=(5, 0))
+        visual_help_btn = QPushButton("?")
+        visual_help_btn.setFixedWidth(30)
+        visual_help_btn.clicked.connect(lambda: self._show_help_dialog(
+            "Visual Context Settings",
+            "Visual context includes the manga page image with translation requests.\n\n"
+            "⚠️ WHEN TO DISABLE:\n"
+            "• Using text-only models (Claude, GPT-3.5, standard Gemini)\n"
+            "• Model doesn't support images\n"
+            "• Want to reduce token usage\n"
+            "• Testing text-only translation\n\n"
+            "✅ WHEN TO ENABLE:\n"
+            "• Using vision models (Gemini Vision, GPT-4V, Claude 3)\n"
+            "• Want spatial awareness of text position\n"
+            "• Need visual context for better translation\n\n"
+            "Impact:\n"
+            "• Disabled: Only text is sent (compatible with any model)\n"
+            "• Enabled: Text + image sent (requires vision model)\n\n"
+            "Note: Disabling may reduce translation quality as the AI won't see\n"
+            "the artwork context or spatial layout of the text."
+        ))
+        visual_help_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px; }")
+        visual_toggle_layout.addWidget(visual_help_btn)
+        visual_toggle_layout.addStretch()
+        
+        visual_layout.addWidget(visual_toggle_frame)
+        context_frame_layout.addWidget(visual_frame)
+        
+        # Add the completed context_frame to settings_frame
+        settings_frame_layout.addWidget(context_frame)
+        
+        # Add main settings frame to main layout
+        main_layout.addWidget(settings_frame)
         
         # Text Rendering Settings Frame
-        render_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Text Visibility Settings",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        render_frame.pack(fill=tk.X, padx=20, pady=10)
+        render_frame = QGroupBox("Text Visibility Settings")
+        render_frame_font = QFont("Arial", 12)
+        render_frame_font.setBold(True)
+        render_frame.setFont(render_frame_font)
+        render_frame_layout = QVBoxLayout(render_frame)
+        render_frame_layout.setContentsMargins(15, 15, 15, 10)
+        render_frame_layout.setSpacing(10)
         
         # Advanced Settings button at the top of render_frame
-        advanced_button_frame = tk.Frame(render_frame)
-        advanced_button_frame.pack(fill=tk.X, pady=(0, 10))
+        advanced_button_frame = QWidget()
+        advanced_button_layout = QHBoxLayout(advanced_button_frame)
+        advanced_button_layout.setContentsMargins(0, 0, 0, 10)
+        advanced_button_layout.setSpacing(10)
 
-        tb.Button(
-            advanced_button_frame,
-            text="⚙️ Advanced Settings",
-            command=self._open_advanced_settings,
-            bootstyle="info"
-        ).pack(side=tk.RIGHT)
-
-        tk.Label(
-            advanced_button_frame,
-            text="Configure OCR, preprocessing, and performance options",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side=tk.LEFT)
-
+        advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
+        desc_font = QFont("Arial", 9)
+        advanced_settings_desc.setFont(desc_font)
+        advanced_settings_desc.setStyleSheet("color: gray;")
+        advanced_button_layout.addWidget(advanced_settings_desc)
+        
+        advanced_button_layout.addStretch()
+        
+        advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
+        advanced_settings_btn.clicked.connect(self._open_advanced_settings)
+        advanced_settings_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        advanced_button_layout.addWidget(advanced_settings_btn)
+        
+        render_frame_layout.addWidget(advanced_button_frame)
         
         # Inpainting section
-        inpaint_group = tk.LabelFrame(render_frame, text="Inpainting", padx=15, pady=10)
-        inpaint_group.pack(fill=tk.X, pady=(5, 10))
+        inpaint_group = QGroupBox("Inpainting")
+        inpaint_group_layout = QVBoxLayout(inpaint_group)
+        inpaint_group_layout.setContentsMargins(15, 15, 15, 10)
+        inpaint_group_layout.setSpacing(10)
 
-        # Skip inpainting toggle - store as instance variable
-        self.skip_inpainting_checkbox = tb.Checkbutton(
-            inpaint_group, 
-            text="Skip Inpainter", 
-            variable=self.skip_inpainting_var,
-            bootstyle="round-toggle",
-            command=self._toggle_inpaint_visibility
-        )
-        self.skip_inpainting_checkbox.pack(anchor='w', pady=5)
+        # Skip inpainting toggle - use value loaded from config
+        self.skip_inpainting_checkbox = QCheckBox("Skip Inpainter")
+        self.skip_inpainting_checkbox.setChecked(self.skip_inpainting_value)
+        self.skip_inpainting_checkbox.stateChanged.connect(self._toggle_inpaint_visibility)
+        inpaint_group_layout.addWidget(self.skip_inpainting_checkbox)
 
         # Inpainting method selection (only visible when inpainting is enabled)
-        self.inpaint_method_frame = tk.Frame(inpaint_group)
-        self.inpaint_method_frame.pack(fill=tk.X, pady=5)
+        self.inpaint_method_frame = QWidget()
+        inpaint_method_layout = QHBoxLayout(self.inpaint_method_frame)
+        inpaint_method_layout.setContentsMargins(0, 0, 0, 0)
+        inpaint_method_layout.setSpacing(10)
 
-        tk.Label(self.inpaint_method_frame, text="Inpaint Method:", width=20, anchor='w').pack(side=tk.LEFT)
+        method_label = QLabel("Inpaint Method:")
+        method_label.setMinimumWidth(150)
+        method_label.setAlignment(Qt.AlignLeft)
+        inpaint_method_layout.addWidget(method_label)
 
         # Radio buttons for inpaint method
-        method_selection_frame = tk.Frame(self.inpaint_method_frame)
-        method_selection_frame.pack(side=tk.LEFT, padx=5)
+        method_selection_frame = QWidget()
+        method_selection_layout = QHBoxLayout(method_selection_frame)
+        method_selection_layout.setContentsMargins(0, 0, 0, 0)
+        method_selection_layout.setSpacing(10)
 
-        self.inpaint_method_var = tk.StringVar(value=self.main_gui.config.get('manga_inpaint_method', 'local'))
+        self.inpaint_method_value = self.main_gui.config.get('manga_inpaint_method', 'local')
+        self.inpaint_method_group = QButtonGroup()
 
-        tb.Radiobutton(
-            method_selection_frame,
-            text="Cloud API",
-            variable=self.inpaint_method_var,
-            value="cloud",
-            command=self._on_inpaint_method_change,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        cloud_radio = QRadioButton("Cloud API")
+        cloud_radio.setChecked(self.inpaint_method_value == 'cloud')
+        cloud_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
+        self.inpaint_method_group.addButton(cloud_radio, 0)
+        method_selection_layout.addWidget(cloud_radio)
 
-        tb.Radiobutton(
-            method_selection_frame,
-            text="Local Model",
-            variable=self.inpaint_method_var,
-            value="local",
-            command=self._on_inpaint_method_change,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        local_radio = QRadioButton("Local Model")
+        local_radio.setChecked(self.inpaint_method_value == 'local')
+        local_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
+        self.inpaint_method_group.addButton(local_radio, 1)
+        method_selection_layout.addWidget(local_radio)
 
-        tb.Radiobutton(
-            method_selection_frame,
-            text="Hybrid",
-            variable=self.inpaint_method_var,
-            value="hybrid",
-            command=self._on_inpaint_method_change,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
+        hybrid_radio = QRadioButton("Hybrid")
+        hybrid_radio.setChecked(self.inpaint_method_value == 'hybrid')
+        hybrid_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
+        self.inpaint_method_group.addButton(hybrid_radio, 2)
+        method_selection_layout.addWidget(hybrid_radio)
+        
+        # Store references to radio buttons
+        self.cloud_radio = cloud_radio
+        self.local_radio = local_radio
+        self.hybrid_radio = hybrid_radio
+        
+        inpaint_method_layout.addWidget(method_selection_frame)
+        inpaint_method_layout.addStretch()
+        inpaint_group_layout.addWidget(self.inpaint_method_frame)
 
         # Cloud settings frame
-        self.cloud_inpaint_frame = tk.Frame(inpaint_group)
-        self.cloud_inpaint_frame.pack(fill=tk.X, pady=5)
+        self.cloud_inpaint_frame = QWidget()
+        cloud_inpaint_layout = QVBoxLayout(self.cloud_inpaint_frame)
+        cloud_inpaint_layout.setContentsMargins(0, 0, 0, 0)
+        cloud_inpaint_layout.setSpacing(5)
 
         # Quality selection for cloud
-        quality_frame = tk.Frame(self.cloud_inpaint_frame)
-        quality_frame.pack(fill=tk.X)
+        quality_frame = QWidget()
+        quality_layout = QHBoxLayout(quality_frame)
+        quality_layout.setContentsMargins(0, 0, 0, 0)
+        quality_layout.setSpacing(10)
 
-        tk.Label(quality_frame, text="Cloud Quality:", width=20, anchor='w').pack(side=tk.LEFT)
+        quality_label = QLabel("Cloud Quality:")
+        quality_label.setMinimumWidth(150)
+        quality_label.setAlignment(Qt.AlignLeft)
+        quality_layout.addWidget(quality_label)
 
+        # inpaint_quality_value is already loaded from config in _load_rendering_settings
+        self.quality_button_group = QButtonGroup()
+        
         quality_options = [('high', 'High Quality'), ('fast', 'Fast')]
-        for value, text in quality_options:
-            tb.Radiobutton(
-                quality_frame,
-                text=text,
-                variable=self.inpaint_quality_var,
-                value=value,
-                bootstyle="primary",
-                command=self._save_rendering_settings
-            ).pack(side=tk.LEFT, padx=10)
+        for idx, (value, text) in enumerate(quality_options):
+            quality_radio = QRadioButton(text)
+            quality_radio.setChecked(self.inpaint_quality_value == value)
+            quality_radio.toggled.connect(lambda checked, v=value: self._save_rendering_settings() if checked else None)
+            self.quality_button_group.addButton(quality_radio, idx)
+            quality_layout.addWidget(quality_radio)
+        
+        quality_layout.addStretch()
+        cloud_inpaint_layout.addWidget(quality_frame)
 
         # Conditional separator
-        self.inpaint_separator = ttk.Separator(inpaint_group, orient='horizontal')
-        if not self.skip_inpainting_var.get():
-            self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))
+        self.inpaint_separator = QFrame()
+        self.inpaint_separator.setFrameShape(QFrame.HLine)
+        self.inpaint_separator.setFrameShadow(QFrame.Sunken)
+        if not self.skip_inpainting_value:
+            cloud_inpaint_layout.addWidget(self.inpaint_separator)
 
         # Cloud API status
-        api_status_frame = tk.Frame(self.cloud_inpaint_frame)
-        api_status_frame.pack(fill=tk.X, pady=(10, 0))
+        api_status_frame = QWidget()
+        api_status_layout = QHBoxLayout(api_status_frame)
+        api_status_layout.setContentsMargins(0, 10, 0, 0)
+        api_status_layout.setSpacing(10)
 
         # Check if API key exists
         saved_api_key = self.main_gui.config.get('replicate_api_key', '')
@@ -2010,49 +2110,52 @@ class MangaTranslationTab:
             status_text = "❌ Cloud API not configured"
             status_color = 'red'
 
-        self.inpaint_api_status_label = tk.Label(
-            api_status_frame, 
-            text=status_text,
-            font=('Arial', 9),
-            fg=status_color
-        )
-        self.inpaint_api_status_label.pack(side=tk.LEFT)
+        self.inpaint_api_status_label = QLabel(status_text)
+        api_status_font = QFont('Arial', 9)
+        self.inpaint_api_status_label.setFont(api_status_font)
+        self.inpaint_api_status_label.setStyleSheet(f"color: {status_color};")
+        api_status_layout.addWidget(self.inpaint_api_status_label)
 
-        tb.Button(
-            api_status_frame,
-            text="Configure API Key",
-            command=self._configure_inpaint_api,
-            bootstyle="info"
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        configure_api_btn = QPushButton("Configure API Key")
+        configure_api_btn.clicked.connect(self._configure_inpaint_api)
+        configure_api_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        api_status_layout.addWidget(configure_api_btn)
 
         if saved_api_key:
-            tb.Button(
-                api_status_frame,
-                text="Clear",
-                command=self._clear_inpaint_api,
-                bootstyle="secondary"
-            ).pack(side=tk.LEFT, padx=(5, 0))
+            clear_api_btn = QPushButton("Clear")
+            clear_api_btn.clicked.connect(self._clear_inpaint_api)
+            clear_api_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+            api_status_layout.addWidget(clear_api_btn)
+        
+        api_status_layout.addStretch()
+        cloud_inpaint_layout.addWidget(api_status_frame)
+        inpaint_group_layout.addWidget(self.cloud_inpaint_frame)
 
         # Local inpainting settings frame
-        self.local_inpaint_frame = tk.Frame(inpaint_group)
+        self.local_inpaint_frame = QWidget()
+        local_inpaint_layout = QVBoxLayout(self.local_inpaint_frame)
+        local_inpaint_layout.setContentsMargins(0, 0, 0, 0)
+        local_inpaint_layout.setSpacing(5)
 
         # Local model selection
-        local_model_frame = tk.Frame(self.local_inpaint_frame)
-        local_model_frame.pack(fill=tk.X)
+        local_model_frame = QWidget()
+        local_model_layout = QHBoxLayout(local_model_frame)
+        local_model_layout.setContentsMargins(0, 0, 0, 0)
+        local_model_layout.setSpacing(10)
 
-        tk.Label(local_model_frame, text="Local Model:", width=20, anchor='w').pack(side=tk.LEFT)
+        local_model_label = QLabel("Local Model:")
+        local_model_label.setMinimumWidth(150)
+        local_model_label.setAlignment(Qt.AlignLeft)
+        local_model_layout.addWidget(local_model_label)
 
-        self.local_model_type_var = tk.StringVar(value=self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx'))
-        local_model_combo = ttk.Combobox(
-            local_model_frame,
-            textvariable=self.local_model_type_var,
-            values= ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'],
-            state='readonly',
-            width=15
-        )
-        local_model_combo.pack(side=tk.LEFT, padx=10)
-        local_model_combo.bind('<<ComboboxSelected>>', self._on_local_model_change)
-        self._disable_spinbox_mousewheel(local_model_combo)
+        self.local_model_type_value = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+        local_model_combo = QComboBox()
+        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'])
+        local_model_combo.setCurrentText(self.local_model_type_value)
+        local_model_combo.setMinimumWidth(150)
+        local_model_combo.currentTextChanged.connect(self._on_local_model_change)
+        local_model_layout.addWidget(local_model_combo)
+        self.local_model_combo = local_model_combo
 
         # Model descriptions
         model_desc = {
@@ -2065,692 +2168,820 @@ class MangaTranslationTab:
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
         }
-        self.model_desc_label = tk.Label(
-            local_model_frame,
-            text=model_desc.get(self.local_model_type_var.get(), ''),
-            font=('Arial', 9),
-            fg='gray'
-        )
-        self.model_desc_label.pack(side=tk.LEFT, padx=(10, 0))
+        self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))
+        desc_font = QFont('Arial', 9)
+        self.model_desc_label.setFont(desc_font)
+        self.model_desc_label.setStyleSheet("color: gray;")
+        local_model_layout.addWidget(self.model_desc_label)
+        local_model_layout.addStretch()
+        
+        local_inpaint_layout.addWidget(local_model_frame)
 
         # Model file selection
-        model_path_frame = tk.Frame(self.local_inpaint_frame)
-        model_path_frame.pack(fill=tk.X, pady=(5, 0))
+        model_path_frame = QWidget()
+        model_path_layout = QHBoxLayout(model_path_frame)
+        model_path_layout.setContentsMargins(0, 5, 0, 0)
+        model_path_layout.setSpacing(10)
 
-        tk.Label(model_path_frame, text="Model File:", width=20, anchor='w').pack(side=tk.LEFT)
+        model_file_label = QLabel("Model File:")
+        model_file_label.setMinimumWidth(150)
+        model_file_label.setAlignment(Qt.AlignLeft)
+        model_path_layout.addWidget(model_file_label)
 
-        self.local_model_path_var = tk.StringVar(
-            value=self.main_gui.config.get(f'manga_{self.local_model_type_var.get()}_model_path', '')
+        self.local_model_path_value = self.main_gui.config.get(f'manga_{self.local_model_type_value}_model_path', '')
+        self.local_model_entry = QLineEdit(self.local_model_path_value)
+        self.local_model_entry.setReadOnly(True)
+        self.local_model_entry.setMinimumWidth(300)
+        self.local_model_entry.setStyleSheet(
+            "QLineEdit { background-color: #2b2b2b; color: #ffffff; }"
         )
-        self.local_model_entry = tk.Entry(
-            model_path_frame,
-            textvariable=self.local_model_path_var,
-            width=30,
-            state='readonly',
-            bg='#2b2b2b',  # Dark gray background
-            fg='#ffffff',  # White text
-            readonlybackground='#2b2b2b'  # Gray even when readonly
-        )
-        self.local_model_entry.pack(side=tk.LEFT, padx=(10, 5))
+        model_path_layout.addWidget(self.local_model_entry)
 
-        tb.Button(
-            model_path_frame,
-            text="Browse",
-            command=self._browse_local_model,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
+        browse_model_btn = QPushButton("Browse")
+        browse_model_btn.clicked.connect(self._browse_local_model)
+        browse_model_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+        model_path_layout.addWidget(browse_model_btn)
         
         # Manual load button to avoid auto-loading on dialog open
-        tb.Button(
-            model_path_frame,
-            text="Load",
-            command=self._click_load_local_model,
-            bootstyle="success"
-        ).pack(side=tk.LEFT, padx=(5, 0))
+        load_model_btn = QPushButton("Load")
+        load_model_btn.clicked.connect(self._click_load_local_model)
+        load_model_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        model_path_layout.addWidget(load_model_btn)
+        model_path_layout.addStretch()
+        
+        local_inpaint_layout.addWidget(model_path_frame)
 
         # Model status
-        self.local_model_status_label = tk.Label(
-            self.local_inpaint_frame,
-            text="",
-            font=('Arial', 9)
-        )
-        self.local_model_status_label.pack(anchor='w', pady=(5, 0))
+        self.local_model_status_label = QLabel("")
+        status_font = QFont('Arial', 9)
+        self.local_model_status_label.setFont(status_font)
+        local_inpaint_layout.addWidget(self.local_model_status_label)
 
         # Download model button
-        tb.Button(
-            self.local_inpaint_frame,
-            text="📥 Download Model",
-            command=self._download_model,
-            bootstyle="info"
-        ).pack(anchor='w', pady=(5, 0))
+        download_model_btn = QPushButton("📥 Download Model")
+        download_model_btn.clicked.connect(self._download_model)
+        download_model_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        local_inpaint_layout.addWidget(download_model_btn)
 
         # Model info button
-        tb.Button(
-            self.local_inpaint_frame,
-            text="ℹ️ Model Info",
-            command=self._show_model_info,
-            bootstyle="secondary"
-        ).pack(anchor='w', pady=(5, 0))
+        model_info_btn = QPushButton("ℹ️ Model Info")
+        model_info_btn.clicked.connect(self._show_model_info)
+        model_info_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        local_inpaint_layout.addWidget(model_info_btn)
+        
+        # Add local_inpaint_frame to inpaint_group
+        inpaint_group_layout.addWidget(self.local_inpaint_frame)
 
         # Try to load saved model for current type on dialog open
-        initial_model_type = self.local_model_type_var.get()
+        initial_model_type = self.local_model_type_value
         initial_model_path = self.main_gui.config.get(f'manga_{initial_model_type}_model_path', '')
 
         if initial_model_path and os.path.exists(initial_model_path):
-            self.local_model_path_var.set(initial_model_path)
+            self.local_model_entry.setText(initial_model_path)
             if getattr(self, 'preload_local_models_on_open', False):
-                self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
+                self.local_model_status_label.setText("⏳ Loading saved model...")
+                self.local_model_status_label.setStyleSheet("color: orange;")
                 # Auto-load after dialog is ready
-                self.dialog.after(500, lambda: self._try_load_model(initial_model_type, initial_model_path))
+                QTimer.singleShot(500, lambda: self._try_load_model(initial_model_type, initial_model_path))
             else:
                 # Do not auto-load large models at startup to avoid crashes on some systems
-                self.local_model_status_label.config(
-                    text="💤 Saved model detected (not loaded). Click 'Load' to initialize.",
-                    fg='blue'
-                )
+                self.local_model_status_label.setText("💤 Saved model detected (not loaded). Click 'Load' to initialize.")
+                self.local_model_status_label.setStyleSheet("color: blue;")
         else:
-            self.local_model_status_label.config(text="No model loaded", fg='gray')
+            self.local_model_status_label.setText("No model loaded")
+            self.local_model_status_label.setStyleSheet("color: gray;")
 
         # Initialize visibility based on current settings
         self._toggle_inpaint_visibility()
-
+        
+        # Add inpaint_group to render_frame
+        render_frame_layout.addWidget(inpaint_group)
+        
+        # Add render_frame to main layout
+        main_layout.addWidget(render_frame)
+        
         # Background Settings (moved into inpainting section)
-        self.bg_settings_frame = tk.LabelFrame(inpaint_group, text="Background Settings", padx=10, pady=8)
-        self.bg_settings_frame.pack(fill=tk.X, pady=(10, 5))
+        self.bg_settings_frame = QGroupBox("Background Settings")
+        bg_settings_layout = QVBoxLayout(self.bg_settings_frame)
+        bg_settings_layout.setContentsMargins(10, 10, 10, 10)
+        bg_settings_layout.setSpacing(8)
         
         # Free text only background opacity toggle (applies BG opacity only to free-text regions)
-        ft_only_frame = tk.Frame(self.bg_settings_frame)
-        ft_only_frame.pack(fill=tk.X, pady=(0, 5))
-        tb.Checkbutton(
-            ft_only_frame,
-            text="Free text only background opacity",
-            variable=self.free_text_only_bg_opacity_var,
-            bootstyle="round-toggle",
-            command=self._apply_rendering_settings
-        ).pack(anchor='w')
+        self.ft_only_checkbox = QCheckBox("Free text only background opacity")
+        self.ft_only_checkbox.setChecked(self.free_text_only_bg_opacity_value)
+        self.ft_only_checkbox.stateChanged.connect(self._apply_rendering_settings)
+        bg_settings_layout.addWidget(self.ft_only_checkbox)
 
         # Background opacity slider
-        opacity_frame = tk.Frame(self.bg_settings_frame)
-        opacity_frame.pack(fill=tk.X, pady=5)
+        opacity_frame = QWidget()
+        opacity_layout = QHBoxLayout(opacity_frame)
+        opacity_layout.setContentsMargins(0, 5, 0, 5)
+        opacity_layout.setSpacing(10)
         
-        tk.Label(opacity_frame, text="Background Opacity:", width=20, anchor='w').pack(side=tk.LEFT)
+        opacity_label_text = QLabel("Background Opacity:")
+        opacity_label_text.setMinimumWidth(150)
+        opacity_layout.addWidget(opacity_label_text)
         
-        opacity_scale = tk.Scale(
-            opacity_frame,
-            from_=0,
-            to=255,
-            orient=tk.HORIZONTAL,
-            variable=self.bg_opacity_var,
-            command=self._update_opacity_label,
-            length=200
-        )
-        opacity_scale.pack(side=tk.LEFT, padx=10)
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setMinimum(0)
+        self.opacity_slider.setMaximum(255)
+        self.opacity_slider.setValue(self.bg_opacity_value)
+        self.opacity_slider.setMinimumWidth(200)
+        self.opacity_slider.valueChanged.connect(self._update_opacity_label)
+        opacity_layout.addWidget(self.opacity_slider)
         
-        self.opacity_label = tk.Label(opacity_frame, text="100%", width=5)
-        self.opacity_label.pack(side=tk.LEFT)
+        self.opacity_label = QLabel("100%")
+        self.opacity_label.setMinimumWidth(50)
+        opacity_layout.addWidget(self.opacity_label)
+        opacity_layout.addStretch()
+        
+        bg_settings_layout.addWidget(opacity_frame)
         
         # Initialize the label with the loaded value
-        self._update_opacity_label(self.bg_opacity_var.get())
+        self._update_opacity_label(self.bg_opacity_value)
 
         # Background size reduction
-        reduction_frame = tk.Frame(self.bg_settings_frame)
-        reduction_frame.pack(fill=tk.X, pady=5)
+        reduction_frame = QWidget()
+        reduction_layout = QHBoxLayout(reduction_frame)
+        reduction_layout.setContentsMargins(0, 5, 0, 5)
+        reduction_layout.setSpacing(10)
         
-        tk.Label(reduction_frame, text="Background Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        reduction_label_text = QLabel("Background Size:")
+        reduction_label_text.setMinimumWidth(150)
+        reduction_layout.addWidget(reduction_label_text)
         
-        reduction_scale = tk.Scale(
-            reduction_frame,
-            from_=0.5,
-            to=2.0,
-            resolution=0.05,
-            orient=tk.HORIZONTAL,
-            variable=self.bg_reduction_var,
-            command=self._update_reduction_label,
-            length=200
-        )
-        reduction_scale.pack(side=tk.LEFT, padx=10)
+        self.reduction_slider = QDoubleSpinBox()
+        self.reduction_slider.setMinimum(0.5)
+        self.reduction_slider.setMaximum(2.0)
+        self.reduction_slider.setSingleStep(0.05)
+        self.reduction_slider.setValue(self.bg_reduction_value)
+        self.reduction_slider.setMinimumWidth(100)
+        self.reduction_slider.valueChanged.connect(self._update_reduction_label)
+        reduction_layout.addWidget(self.reduction_slider)
         
-        self.reduction_label = tk.Label(reduction_frame, text="100%", width=5)
-        self.reduction_label.pack(side=tk.LEFT)
+        self.reduction_label = QLabel("100%")
+        self.reduction_label.setMinimumWidth(50)
+        reduction_layout.addWidget(self.reduction_label)
+        reduction_layout.addStretch()
+        
+        bg_settings_layout.addWidget(reduction_frame)
         
         # Initialize the label with the loaded value
-        self._update_reduction_label(self.bg_reduction_var.get())
+        self._update_reduction_label(self.bg_reduction_value)
 
         # Background style selection
-        style_frame = tk.Frame(self.bg_settings_frame)
-        style_frame.pack(fill=tk.X, pady=5)
+        style_frame = QWidget()
+        style_layout = QHBoxLayout(style_frame)
+        style_layout.setContentsMargins(0, 5, 0, 5)
+        style_layout.setSpacing(10)
 
-        tk.Label(style_frame, text="Background Style:", width=20, anchor='w').pack(side=tk.LEFT)
+        style_label = QLabel("Background Style:")
+        style_label.setMinimumWidth(150)
+        style_layout.addWidget(style_label)
 
         # Radio buttons for background style
-        style_selection_frame = tk.Frame(style_frame)
-        style_selection_frame.pack(side=tk.LEFT, padx=10)
+        self.bg_style_group = QButtonGroup()
+        
+        box_radio = QRadioButton("Box")
+        box_radio.setChecked(self.bg_style_value == "box")
+        box_radio.toggled.connect(lambda checked: self._save_rendering_settings() if checked else None)
+        self.bg_style_group.addButton(box_radio, 0)
+        style_layout.addWidget(box_radio)
 
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Box",
-            variable=self.bg_style_var,
-            value="box",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        circle_radio = QRadioButton("Circle")
+        circle_radio.setChecked(self.bg_style_value == "circle")
+        circle_radio.toggled.connect(lambda checked: self._save_rendering_settings() if checked else None)
+        self.bg_style_group.addButton(circle_radio, 1)
+        style_layout.addWidget(circle_radio)
 
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Circle",
-            variable=self.bg_style_var,
-            value="circle",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            style_selection_frame,
-            text="Wrap",
-            variable=self.bg_style_var,
-            value="wrap",
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
+        wrap_radio = QRadioButton("Wrap")
+        wrap_radio.setChecked(self.bg_style_value == "wrap")
+        wrap_radio.toggled.connect(lambda checked: self._save_rendering_settings() if checked else None)
+        self.bg_style_group.addButton(wrap_radio, 2)
+        style_layout.addWidget(wrap_radio)
+        
+        # Store references
+        self.box_radio = box_radio
+        self.circle_radio = circle_radio
+        self.wrap_radio = wrap_radio
 
         # Add tooltips or descriptions
-        style_help = tk.Label(
-            style_frame,
-            text="(Box: rounded rectangle, Circle: ellipse, Wrap: per-line)",
-            font=('Arial', 9),
-            fg='gray'
-        )
-        style_help.pack(side=tk.LEFT, padx=(10, 0))
+        style_help = QLabel("(Box: rounded rectangle, Circle: ellipse, Wrap: per-line)")
+        style_help_font = QFont('Arial', 9)
+        style_help.setFont(style_help_font)
+        style_help.setStyleSheet("color: gray;")
+        style_layout.addWidget(style_help)
+        style_layout.addStretch()
+        
+        bg_settings_layout.addWidget(style_frame)
+        
+        # Add bg_settings_frame to render_frame_layout
+        render_frame_layout.addWidget(self.bg_settings_frame)
 
         # Font Settings group (consolidated)
-        self.sizing_group = tk.LabelFrame(render_frame, text="Font Settings", padx=10, pady=8)
-        self.sizing_group.pack(fill=tk.X, padx=10, pady=(15, 15))
+        self.sizing_group = QGroupBox("Font Settings")
+        sizing_group_layout = QVBoxLayout(self.sizing_group)
+        sizing_group_layout.setContentsMargins(10, 10, 10, 10)
+        sizing_group_layout.setSpacing(8)
  
-        # Font size selection with mode toggle
-        # Sizing Algorithm (moved above font size mode)
-        algo_group_top = tk.LabelFrame(self.sizing_group, text="Sizing Algorithm", padx=10, pady=8)
-        algo_group_top.pack(fill=tk.X, pady=(6, 0))
-        for value, text in [
+        # Font sizing algorithm selection
+        algo_frame = QWidget()
+        algo_layout = QHBoxLayout(algo_frame)
+        algo_layout.setContentsMargins(0, 6, 0, 0)
+        algo_layout.setSpacing(10)
+        
+        algo_label = QLabel("Font Size Algorithm:")
+        algo_label.setMinimumWidth(150)
+        algo_layout.addWidget(algo_label)
+        
+        # Radio buttons for algorithm selection
+        self.font_algorithm_group = QButtonGroup()
+        
+        for idx, (value, text) in enumerate([
             ('conservative', 'Conservative'),
             ('smart', 'Smart'),
             ('aggressive', 'Aggressive')
-        ]:
-            rb = ttk.Radiobutton(
-                algo_group_top,
-                text=text,
-                variable=self.font_algorithm_var,
-                value=value,
-                command=self._save_rendering_settings
-            )
-            rb.pack(side=tk.LEFT, padx=10)
+        ]):
+            rb = QRadioButton(text)
+            rb.setChecked(self.font_algorithm_value == value)
+            rb.toggled.connect(lambda checked, v=value: self._save_rendering_settings() if checked else None)
+            self.font_algorithm_group.addButton(rb, idx)
+            algo_layout.addWidget(rb)
+        
+        algo_layout.addStretch()
+        sizing_group_layout.addWidget(algo_frame)
 
         # Font size selection with mode toggle
-        font_frame = tk.Frame(self.sizing_group)
-        font_frame.pack(fill=tk.X, pady=5)
+        font_frame_container = QWidget()
+        font_frame_layout = QVBoxLayout(font_frame_container)
+        font_frame_layout.setContentsMargins(0, 5, 0, 5)
+        font_frame_layout.setSpacing(5)
         
         # Mode selection frame
-        mode_frame = tk.Frame(font_frame)
-        mode_frame.pack(fill=tk.X)
+        mode_frame = QWidget()
+        mode_layout = QHBoxLayout(mode_frame)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(10)
 
-        tk.Label(mode_frame, text="Font Size Mode:", width=20, anchor='w').pack(side=tk.LEFT)
+        mode_label = QLabel("Font Size Mode:")
+        mode_label.setMinimumWidth(150)
+        mode_layout.addWidget(mode_label)
 
         # Radio buttons for mode selection
-        mode_selection_frame = tk.Frame(mode_frame)
-        mode_selection_frame.pack(side=tk.LEFT, padx=10)
-
-        tb.Radiobutton(
-            mode_selection_frame,
-            text="Auto",
-            variable=self.font_size_mode_var,
-            value="auto",
-            command=self._toggle_font_size_mode,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            mode_selection_frame,
-            text="Fixed Size",
-            variable=self.font_size_mode_var,
-            value="fixed",
-            command=self._toggle_font_size_mode,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        tb.Radiobutton(
-            mode_selection_frame,
-            text="Dynamic Multiplier",
-            variable=self.font_size_mode_var,
-            value="multiplier",
-            command=self._toggle_font_size_mode,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT)
+        self.font_size_mode_group = QButtonGroup()
+        
+        auto_radio = QRadioButton("Auto")
+        auto_radio.setChecked(self.font_size_mode_value == "auto")
+        auto_radio.toggled.connect(lambda checked: self._toggle_font_size_mode() if checked else None)
+        self.font_size_mode_group.addButton(auto_radio, 0)
+        mode_layout.addWidget(auto_radio)
+        
+        fixed_radio = QRadioButton("Fixed Size")
+        fixed_radio.setChecked(self.font_size_mode_value == "fixed")
+        fixed_radio.toggled.connect(lambda checked: self._toggle_font_size_mode() if checked else None)
+        self.font_size_mode_group.addButton(fixed_radio, 1)
+        mode_layout.addWidget(fixed_radio)
+        
+        multiplier_radio = QRadioButton("Dynamic Multiplier")
+        multiplier_radio.setChecked(self.font_size_mode_value == "multiplier")
+        multiplier_radio.toggled.connect(lambda checked: self._toggle_font_size_mode() if checked else None)
+        self.font_size_mode_group.addButton(multiplier_radio, 2)
+        mode_layout.addWidget(multiplier_radio)
+        
+        # Store references
+        self.auto_mode_radio = auto_radio
+        self.fixed_mode_radio = fixed_radio
+        self.multiplier_mode_radio = multiplier_radio
+        
+        mode_layout.addStretch()
+        font_frame_layout.addWidget(mode_frame)
 
         # Fixed font size frame
-        self.fixed_size_frame = tk.Frame(font_frame)
-        # Don't pack yet - let _toggle_font_size_mode handle it
+        self.fixed_size_frame = QWidget()
+        fixed_size_layout = QHBoxLayout(self.fixed_size_frame)
+        fixed_size_layout.setContentsMargins(0, 0, 0, 0)
+        fixed_size_layout.setSpacing(10)
 
-        tk.Label(self.fixed_size_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        fixed_size_label = QLabel("Font Size:")
+        fixed_size_label.setMinimumWidth(150)
+        fixed_size_layout.addWidget(fixed_size_label)
 
-        font_size_spinbox = tb.Spinbox(
-            self.fixed_size_frame,
-            from_=0,
-            to=72,
-            textvariable=self.font_size_var,
-            width=10,
-            command=self._save_rendering_settings
-        )
-        font_size_spinbox.pack(side=tk.LEFT, padx=10)
-        # Also bind to save on manual entry
-        font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        font_size_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        self._disable_spinbox_mousewheel(font_size_spinbox)
+        self.font_size_spinbox = QSpinBox()
+        self.font_size_spinbox.setMinimum(0)
+        self.font_size_spinbox.setMaximum(72)
+        self.font_size_spinbox.setValue(self.font_size_value)
+        self.font_size_spinbox.setMinimumWidth(100)
+        self.font_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        fixed_size_layout.addWidget(self.font_size_spinbox)
 
-        tk.Label(self.fixed_size_frame, text="(0 = Auto)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
+        fixed_help_label = QLabel("(0 = Auto)")
+        fixed_help_font = QFont('Arial', 9)
+        fixed_help_label.setFont(fixed_help_font)
+        fixed_help_label.setStyleSheet("color: gray;")
+        fixed_size_layout.addWidget(fixed_help_label)
+        fixed_size_layout.addStretch()
+        
+        font_frame_layout.addWidget(self.fixed_size_frame)
 
         # Dynamic multiplier frame
-        self.multiplier_frame = tk.Frame(font_frame)
-        # Don't pack yet - let _toggle_font_size_mode handle it
+        self.multiplier_frame = QWidget()
+        multiplier_layout = QHBoxLayout(self.multiplier_frame)
+        multiplier_layout.setContentsMargins(0, 0, 0, 0)
+        multiplier_layout.setSpacing(10)
 
-        tk.Label(self.multiplier_frame, text="Size Multiplier:", width=20, anchor='w').pack(side=tk.LEFT)
+        multiplier_label_text = QLabel("Size Multiplier:")
+        multiplier_label_text.setMinimumWidth(150)
+        multiplier_layout.addWidget(multiplier_label_text)
 
-        multiplier_scale = tk.Scale(
-            self.multiplier_frame,
-            from_=0.5,
-            to=2.0,
-            resolution=0.1,
-            orient=tk.HORIZONTAL,
-            variable=self.font_size_multiplier_var,
-            command=self._update_multiplier_label,
-            length=200
-        )
-        multiplier_scale.pack(side=tk.LEFT, padx=10)
+        self.multiplier_slider = QDoubleSpinBox()
+        self.multiplier_slider.setMinimum(0.5)
+        self.multiplier_slider.setMaximum(2.0)
+        self.multiplier_slider.setSingleStep(0.1)
+        self.multiplier_slider.setValue(self.font_size_multiplier_value)
+        self.multiplier_slider.setMinimumWidth(100)
+        self.multiplier_slider.valueChanged.connect(self._update_multiplier_label)
+        multiplier_layout.addWidget(self.multiplier_slider)
 
-        self.multiplier_label = tk.Label(self.multiplier_frame, text="1.0x", width=5)
-        self.multiplier_label.pack(side=tk.LEFT)
+        self.multiplier_label = QLabel("1.0x")
+        self.multiplier_label.setMinimumWidth(50)
+        multiplier_layout.addWidget(self.multiplier_label)
 
-        tk.Label(self.multiplier_frame, text="(Scales with panel size)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT, padx=5)
+        multiplier_help_label = QLabel("(Scales with panel size)")
+        multiplier_help_font = QFont('Arial', 9)
+        multiplier_help_label.setFont(multiplier_help_font)
+        multiplier_help_label.setStyleSheet("color: gray;")
+        multiplier_layout.addWidget(multiplier_help_label)
+        multiplier_layout.addStretch()
+        
+        font_frame_layout.addWidget(self.multiplier_frame)
 
         # Constraint checkbox frame (only visible in multiplier mode)
-        self.constraint_frame = tk.Frame(font_frame)
-        # Don't pack yet - let _toggle_font_size_mode handle it
+        self.constraint_frame = QWidget()
+        constraint_layout = QHBoxLayout(self.constraint_frame)
+        constraint_layout.setContentsMargins(20, 0, 0, 0)
+        constraint_layout.setSpacing(10)
         
-        self.constrain_checkbox = tb.Checkbutton(
-            self.constraint_frame,
-            text="Constrain text to bubble boundaries",
-            variable=self.constrain_to_bubble_var,
-            command=self._save_rendering_settings,
-            bootstyle="primary"
-        )
-        self.constrain_checkbox.pack(side=tk.LEFT, padx=(20, 0))
+        self.constrain_checkbox = QCheckBox("Constrain text to bubble boundaries")
+        self.constrain_checkbox.setChecked(self.constrain_to_bubble_value)
+        self.constrain_checkbox.stateChanged.connect(self._save_rendering_settings)
+        constraint_layout.addWidget(self.constrain_checkbox)
 
-        tk.Label(
-            self.constraint_frame, 
-            text="(Unchecked allows text to exceed bubbles)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
+        constraint_help_label = QLabel("(Unchecked allows text to exceed bubbles)")
+        constraint_help_font = QFont('Arial', 9)
+        constraint_help_label.setFont(constraint_help_font)
+        constraint_help_label.setStyleSheet("color: gray;")
+        constraint_layout.addWidget(constraint_help_label)
+        constraint_layout.addStretch()
+        
+        font_frame_layout.addWidget(self.constraint_frame)
+        
+        # Add font_frame_container to sizing_group_layout
+        sizing_group_layout.addWidget(font_frame_container)
 
         # Minimum Font Size (Auto mode lower bound)
-        self.min_size_frame = tk.Frame(self.sizing_group)
-        self.min_size_frame.pack(fill=tk.X, pady=5)  # ALWAYS VISIBLE
+        self.min_size_frame = QWidget()
+        min_size_layout = QHBoxLayout(self.min_size_frame)
+        min_size_layout.setContentsMargins(0, 5, 0, 5)
+        min_size_layout.setSpacing(10)
 
-        tk.Label(self.min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        min_size_label = QLabel("Minimum Font Size:")
+        min_size_label.setMinimumWidth(150)
+        min_size_layout.addWidget(min_size_label)
 
-        min_size_spinbox = ttk.Spinbox(
-            self.min_size_frame,
-            from_=8,
-            to=20,
-            textvariable=self.auto_min_size_var,
-            width=10,
-            command=self._save_rendering_settings
-        )
-        min_size_spinbox.pack(side=tk.LEFT, padx=10)
-        self._disable_spinbox_mousewheel(min_size_spinbox)
+        self.min_size_spinbox = QSpinBox()
+        self.min_size_spinbox.setMinimum(8)
+        self.min_size_spinbox.setMaximum(20)
+        self.min_size_spinbox.setValue(self.auto_min_size_value)
+        self.min_size_spinbox.setMinimumWidth(100)
+        self.min_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        min_size_layout.addWidget(self.min_size_spinbox)
 
-        tk.Label(
-            self.min_size_frame, 
-            text="(Auto mode won't go below this)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
+        min_help_label = QLabel("(Auto mode won't go below this)")
+        min_help_font = QFont('Arial', 9)
+        min_help_label.setFont(min_help_font)
+        min_help_label.setStyleSheet("color: gray;")
+        min_size_layout.addWidget(min_help_label)
+        min_size_layout.addStretch()
+        
+        sizing_group_layout.addWidget(self.min_size_frame)
     
         # Maximum Font Size (Auto mode upper bound)
-        self.max_size_frame = tk.Frame(self.sizing_group)
-        self.max_size_frame.pack(fill=tk.X, pady=5)  # ALWAYS VISIBLE
+        self.max_size_frame = QWidget()
+        max_size_layout = QHBoxLayout(self.max_size_frame)
+        max_size_layout.setContentsMargins(0, 5, 0, 5)
+        max_size_layout.setSpacing(10)
 
-        tk.Label(self.max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        max_size_label = QLabel("Maximum Font Size:")
+        max_size_label.setMinimumWidth(150)
+        max_size_layout.addWidget(max_size_label)
 
-        max_size_spinbox = ttk.Spinbox(
-            self.max_size_frame,
-            from_=20,
-            to=100,
-            textvariable=self.max_font_size_var,
-            width=10,
-            command=self._save_rendering_settings
-        )
-        max_size_spinbox.pack(side=tk.LEFT, padx=10)
-        self._disable_spinbox_mousewheel(max_size_spinbox)
+        self.max_size_spinbox = QSpinBox()
+        self.max_size_spinbox.setMinimum(20)
+        self.max_size_spinbox.setMaximum(100)
+        self.max_size_spinbox.setValue(self.max_font_size_value)
+        self.max_size_spinbox.setMinimumWidth(100)
+        self.max_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        max_size_layout.addWidget(self.max_size_spinbox)
 
-        tk.Label(
-            self.max_size_frame, 
-            text="(Limits maximum text size)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=5)
+        max_help_label = QLabel("(Limits maximum text size)")
+        max_help_font = QFont('Arial', 9)
+        max_help_label.setFont(max_help_font)
+        max_help_label.setStyleSheet("color: gray;")
+        max_size_layout.addWidget(max_help_label)
+        max_size_layout.addStretch()
+        
+        sizing_group_layout.addWidget(self.max_size_frame)
 
         # Initialize visibility AFTER all frames are created
         self._toggle_font_size_mode()
 
-
         # Auto Fit Style (applies to Auto mode)
-        fit_row = tk.Frame(self.sizing_group)
-        fit_row.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(fit_row, text="Auto Fit Style:", width=14, anchor='w').pack(side=tk.LEFT)
+        fit_row = QWidget()
+        fit_layout = QHBoxLayout(fit_row)
+        fit_layout.setContentsMargins(0, 0, 0, 6)
+        fit_layout.setSpacing(10)
         
-        # Create a container with proper padding for the radio buttons
-        fit_buttons = tk.Frame(fit_row)
-        fit_buttons.pack(side=tk.LEFT, padx=(15, 0))
+        fit_label = QLabel("Auto Fit Style:")
+        fit_label.setMinimumWidth(110)
+        fit_layout.addWidget(fit_label)
         
-        for value, text in [('compact','Compact'), ('balanced','Balanced'), ('readable','Readable')]:
-            ttk.Radiobutton(
-                fit_buttons,
-                text=text,
-                variable=self.auto_fit_style_var,
-                value=value,
-                command=self._save_rendering_settings
-            ).pack(side=tk.LEFT, padx=(0,15))
+        # Radio buttons for auto fit style
+        self.auto_fit_style_group = QButtonGroup()
+        
+        for idx, (value, text) in enumerate([('compact','Compact'), ('balanced','Balanced'), ('readable','Readable')]):
+            rb = QRadioButton(text)
+            rb.setChecked(self.auto_fit_style_value == value)
+            rb.toggled.connect(lambda checked, v=value: self._save_rendering_settings() if checked else None)
+            self.auto_fit_style_group.addButton(rb, idx)
+            fit_layout.addWidget(rb)
+        
+        fit_layout.addStretch()
+        sizing_group_layout.addWidget(fit_row)
 
         # Behavior toggles
-        tb.Checkbutton(
-            self.sizing_group,
-            text="Prefer larger text",
-            variable=self.prefer_larger_var,
-            command=self._save_rendering_settings,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=2)
-        tb.Checkbutton(
-            self.sizing_group,
-            text="Scale with bubble size",
-            variable=self.bubble_size_factor_var,
-            command=self._save_rendering_settings,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=2)
+        self.prefer_larger_checkbox = QCheckBox("Prefer larger text")
+        self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
+        self.prefer_larger_checkbox.stateChanged.connect(self._save_rendering_settings)
+        sizing_group_layout.addWidget(self.prefer_larger_checkbox)
+        
+        self.bubble_size_factor_checkbox = QCheckBox("Scale with bubble size")
+        self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
+        self.bubble_size_factor_checkbox.stateChanged.connect(self._save_rendering_settings)
+        sizing_group_layout.addWidget(self.bubble_size_factor_checkbox)
 
         # Line Spacing row with live value label
-        row_ls = tk.Frame(self.sizing_group)
-        row_ls.pack(fill=tk.X, pady=(6, 2))
-        tk.Label(row_ls, text="Line Spacing:", width=14, anchor='w').pack(side=tk.LEFT)
-        ls_scale = tk.Scale(
-            row_ls,
-            from_=1.0, to=2.0,
-            resolution=0.01,
-            orient=tk.HORIZONTAL,
-            variable=self.line_spacing_var,
-            command=lambda v: self._on_line_spacing_changed(v),
-            length=200
-        )
-        ls_scale.pack(side=tk.LEFT, padx=6)
-        self.line_spacing_value_label = tk.Label(row_ls, text=f"{float(self.line_spacing_var.get()):.2f}", width=5)
-        self.line_spacing_value_label.pack(side=tk.LEFT, padx=6)
+        row_ls = QWidget()
+        ls_layout = QHBoxLayout(row_ls)
+        ls_layout.setContentsMargins(0, 6, 0, 2)
+        ls_layout.setSpacing(10)
+        
+        ls_label = QLabel("Line Spacing:")
+        ls_label.setMinimumWidth(110)
+        ls_layout.addWidget(ls_label)
+        
+        self.line_spacing_spinbox = QDoubleSpinBox()
+        self.line_spacing_spinbox.setMinimum(1.0)
+        self.line_spacing_spinbox.setMaximum(2.0)
+        self.line_spacing_spinbox.setSingleStep(0.01)
+        self.line_spacing_spinbox.setValue(self.line_spacing_value)
+        self.line_spacing_spinbox.setMinimumWidth(100)
+        self.line_spacing_spinbox.valueChanged.connect(self._on_line_spacing_changed)
+        ls_layout.addWidget(self.line_spacing_spinbox)
+        
+        self.line_spacing_value_label = QLabel(f"{self.line_spacing_value:.2f}")
+        self.line_spacing_value_label.setMinimumWidth(50)
+        ls_layout.addWidget(self.line_spacing_value_label)
+        ls_layout.addStretch()
+        
+        sizing_group_layout.addWidget(row_ls)
 
         # Max Lines
-        row_ml = tk.Frame(self.sizing_group)
-        row_ml.pack(fill=tk.X, pady=(2, 4))
-        tk.Label(row_ml, text="Max Lines:", width=14, anchor='w').pack(side=tk.LEFT)
-        tb.Spinbox(
-            row_ml,
-            from_=5,
-            to=20,
-            textvariable=self.max_lines_var,
-            width=10,
-            command=self._save_rendering_settings
-        ).pack(side=tk.LEFT, padx=6)
+        row_ml = QWidget()
+        ml_layout = QHBoxLayout(row_ml)
+        ml_layout.setContentsMargins(0, 2, 0, 4)
+        ml_layout.setSpacing(10)
+        
+        ml_label = QLabel("Max Lines:")
+        ml_label.setMinimumWidth(110)
+        ml_layout.addWidget(ml_label)
+        
+        self.max_lines_spinbox = QSpinBox()
+        self.max_lines_spinbox.setMinimum(5)
+        self.max_lines_spinbox.setMaximum(20)
+        self.max_lines_spinbox.setValue(self.max_lines_value)
+        self.max_lines_spinbox.setMinimumWidth(100)
+        self.max_lines_spinbox.valueChanged.connect(self._save_rendering_settings)
+        ml_layout.addWidget(self.max_lines_spinbox)
+        ml_layout.addStretch()
+        
+        sizing_group_layout.addWidget(row_ml)
 
         # Quick Presets (horizontal) merged into sizing group
-        row_presets = tk.Frame(self.sizing_group)
-        row_presets.pack(fill=tk.X, pady=(6, 2))
-        tk.Label(row_presets, text="Quick Presets:", width=14, anchor='w').pack(side=tk.LEFT)
-        btns = tk.Frame(row_presets)
-        btns.pack(side=tk.LEFT, padx=(10, 0))  # Add left padding to the button container
-        ttk.Button(btns, text="Small Bubbles", width=14, command=lambda: self._set_font_preset('small')).pack(side=tk.LEFT, padx=(0, 8), pady=2)
-        ttk.Button(btns, text="Balanced", width=14, command=lambda: self._set_font_preset('balanced')).pack(side=tk.LEFT, padx=(0, 8), pady=2)
-        ttk.Button(btns, text="Large Text", width=14, command=lambda: self._set_font_preset('large')).pack(side=tk.LEFT, padx=(0, 0), pady=2)
+        row_presets = QWidget()
+        presets_layout = QHBoxLayout(row_presets)
+        presets_layout.setContentsMargins(0, 6, 0, 2)
+        presets_layout.setSpacing(10)
+        
+        presets_label = QLabel("Quick Presets:")
+        presets_label.setMinimumWidth(110)
+        presets_layout.addWidget(presets_label)
+        
+        small_preset_btn = QPushButton("Small Bubbles")
+        small_preset_btn.setMinimumWidth(120)
+        small_preset_btn.clicked.connect(lambda: self._set_font_preset('small'))
+        presets_layout.addWidget(small_preset_btn)
+        
+        balanced_preset_btn = QPushButton("Balanced")
+        balanced_preset_btn.setMinimumWidth(120)
+        balanced_preset_btn.clicked.connect(lambda: self._set_font_preset('balanced'))
+        presets_layout.addWidget(balanced_preset_btn)
+        
+        large_preset_btn = QPushButton("Large Text")
+        large_preset_btn.setMinimumWidth(120)
+        large_preset_btn.clicked.connect(lambda: self._set_font_preset('large'))
+        presets_layout.addWidget(large_preset_btn)
+        
+        presets_layout.addStretch()
+        sizing_group_layout.addWidget(row_presets)
 
         # Text wrapping mode (moved into Font Settings)
-        wrap_frame = tk.Frame(self.sizing_group)
-        wrap_frame.pack(fill=tk.X, pady=(12, 4))
+        wrap_frame = QWidget()
+        wrap_layout = QVBoxLayout(wrap_frame)
+        wrap_layout.setContentsMargins(0, 12, 0, 4)
+        wrap_layout.setSpacing(5)
 
-        self.strict_wrap_checkbox = tb.Checkbutton(
-            wrap_frame,
-            text="Strict text wrapping (force text to fit within bubbles)",
-            variable=self.strict_text_wrapping_var,
-            command=self._save_rendering_settings,
-            bootstyle="round-toggle"
-        )
-        self.strict_wrap_checkbox.pack(anchor='w')
+        self.strict_wrap_checkbox = QCheckBox("Strict text wrapping (force text to fit within bubbles)")
+        self.strict_wrap_checkbox.setChecked(self.strict_text_wrapping_value)
+        self.strict_wrap_checkbox.stateChanged.connect(self._save_rendering_settings)
+        wrap_layout.addWidget(self.strict_wrap_checkbox)
 
-        tk.Label(
-            wrap_frame, 
-            text="(Break words with hyphens if needed)", 
-            font=('Arial', 9), 
-            fg='gray'
-        ).pack(anchor='w', padx=(20, 0))
+        wrap_help_label = QLabel("(Break words with hyphens if needed)")
+        wrap_help_font = QFont('Arial', 9)
+        wrap_help_label.setFont(wrap_help_font)
+        wrap_help_label.setStyleSheet("color: gray; margin-left: 20px;")
+        wrap_layout.addWidget(wrap_help_label)
 
         # Force CAPS LOCK directly below strict wrapping
-        force_caps_check = ttk.Checkbutton(
-            wrap_frame,
-            text="Force CAPS LOCK",
-            variable=self.force_caps_lock_var,
-            command=self._apply_rendering_settings,
-            bootstyle="round-toggle"
-        )
-        force_caps_check.pack(anchor='w', pady=(4, 0))
+        self.force_caps_checkbox = QCheckBox("Force CAPS LOCK")
+        self.force_caps_checkbox.setChecked(self.force_caps_lock_value)
+        self.force_caps_checkbox.stateChanged.connect(self._apply_rendering_settings)
+        wrap_layout.addWidget(self.force_caps_checkbox)
+        
+        sizing_group_layout.addWidget(wrap_frame)
     
         # Update multiplier label with loaded value
-        self._update_multiplier_label(self.font_size_multiplier_var.get())
+        self._update_multiplier_label(self.font_size_multiplier_value)
         
         # Font style selection (moved into Font Settings)
-        font_style_frame = tk.Frame(self.sizing_group)
-        font_style_frame.pack(fill=tk.X, pady=(6, 4))
+        font_style_frame = QWidget()
+        font_style_layout = QHBoxLayout(font_style_frame)
+        font_style_layout.setContentsMargins(0, 6, 0, 4)
+        font_style_layout.setSpacing(10)
         
-        tk.Label(font_style_frame, text="Font Style:", width=14, anchor='w').pack(side=tk.LEFT)
+        font_style_label = QLabel("Font Style:")
+        font_style_label.setMinimumWidth(110)
+        font_style_layout.addWidget(font_style_label)
         
         # Font style will be set from loaded config in _load_rendering_settings
-        self.font_combo = ttk.Combobox(
-            font_style_frame,
-            textvariable=self.font_style_var,
-            values=self._get_available_fonts(),
-            width=30,
-            state='readonly'
-        )
-        self.font_combo.pack(side=tk.LEFT, padx=10)
-        self.font_combo.bind('<<ComboboxSelected>>', self._on_font_selected)
-
-        # Disable mousewheel scrolling completely
-        self.font_combo.bind("<MouseWheel>", lambda e: "break")
-        self.font_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
-        self.font_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
+        self.font_combo = QComboBox()
+        self.font_combo.addItems(self._get_available_fonts())
+        self.font_combo.setCurrentText(self.font_style_value)
+        self.font_combo.setMinimumWidth(300)
+        self.font_combo.currentTextChanged.connect(self._on_font_selected)
+        font_style_layout.addWidget(self.font_combo)
+        font_style_layout.addStretch()
+        
+        sizing_group_layout.addWidget(font_style_frame)
+        
+        # Add sizing_group to render_frame_layout
+        render_frame_layout.addWidget(self.sizing_group)
         
         # Font color selection (moved into Font Settings)
-        color_frame = tk.Frame(self.sizing_group)
-        color_frame.pack(fill=tk.X, pady=(6, 12))
+        color_frame = QWidget()
+        color_layout = QHBoxLayout(color_frame)
+        color_layout.setContentsMargins(0, 6, 0, 12)
+        color_layout.setSpacing(10)
         
-        tk.Label(color_frame, text="Font Color:", width=14, anchor='w').pack(side=tk.LEFT)
+        color_label = QLabel("Font Color:")
+        color_label.setMinimumWidth(110)
+        color_layout.addWidget(color_label)
         
-        # Color button and preview
-        color_button_frame = tk.Frame(color_frame)
-        color_button_frame.pack(side=tk.LEFT, padx=10)
-        
-        # Color preview
-        self.color_preview = tk.Canvas(color_button_frame, width=40, height=30, 
-                                     highlightthickness=1, highlightbackground="gray")
-        self.color_preview.pack(side=tk.LEFT, padx=(0, 10))
+        # Color preview frame
+        self.color_preview_frame = QFrame()
+        self.color_preview_frame.setFixedSize(40, 30)
+        self.color_preview_frame.setFrameShape(QFrame.Box)
+        self.color_preview_frame.setLineWidth(1)
+        color_layout.addWidget(self.color_preview_frame)
         
         # RGB display label
-        r, g, b = self.text_color_r.get(), self.text_color_g.get(), self.text_color_b.get()
-        self.rgb_label = tk.Label(color_button_frame, text=f"RGB({r},{g},{b})", width=12)
-        self.rgb_label.pack(side=tk.LEFT, padx=(0, 10))
+        r, g, b = self.text_color_r_value, self.text_color_g_value, self.text_color_b_value
+        self.rgb_label = QLabel(f"RGB({r},{g},{b})")
+        self.rgb_label.setMinimumWidth(100)
+        color_layout.addWidget(self.rgb_label)
         
         # Color picker button
         def pick_font_color():
-            from tkinter import colorchooser
             # Get current color
-            current_color = (self.text_color_r.get(), self.text_color_g.get(), self.text_color_b.get())
-            color_hex = f'#{current_color[0]:02x}{current_color[1]:02x}{current_color[2]:02x}'
+            current_color = QColor(self.text_color_r_value, self.text_color_g_value, self.text_color_b_value)
             
             # Open color dialog
-            color = colorchooser.askcolor(initialcolor=color_hex, parent=self.dialog, 
-                                         title="Choose Font Color")
-            if color[0]:  # If a color was chosen (not cancelled)
+            color = QColorDialog.getColor(current_color, self.dialog, "Choose Font Color")
+            if color.isValid():
                 # Update RGB values
-                self.text_color_r.set(int(color[0][0]))
-                self.text_color_g.set(int(color[0][1]))
-                self.text_color_b.set(int(color[0][2]))
+                self.text_color_r_value = color.red()
+                self.text_color_g_value = color.green()
+                self.text_color_b_value = color.blue()
                 # Update display
-                self.rgb_label.config(text=f"RGB({int(color[0][0])},{int(color[0][1])},{int(color[0][2])})")
+                self.rgb_label.setText(f"RGB({color.red()},{color.green()},{color.blue()})")
                 self._update_color_preview(None)
         
-        tb.Button(
-            color_button_frame,
-            text="Choose Color",
-            command=pick_font_color,
-            bootstyle="info"
-        ).pack(side=tk.LEFT)
+        choose_color_btn = QPushButton("Choose Color")
+        choose_color_btn.clicked.connect(pick_font_color)
+        choose_color_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        color_layout.addWidget(choose_color_btn)
+        color_layout.addStretch()
+        
+        sizing_group_layout.addWidget(color_frame)
         
         self._update_color_preview(None)  # Initialize with loaded colors
         
         # Text Shadow settings (moved into Font Settings)
-        shadow_header = tk.Frame(self.sizing_group)
-        shadow_header.pack(fill=tk.X, pady=(4, 4))
+        shadow_header = QWidget()
+        shadow_header_layout = QHBoxLayout(shadow_header)
+        shadow_header_layout.setContentsMargins(0, 4, 0, 4)
         
         # Shadow enabled checkbox
-        tb.Checkbutton(
-            shadow_header,
-            text="Enable Shadow",
-            variable=self.shadow_enabled_var,
-            bootstyle="round-toggle",
-            command=self._toggle_shadow_controls
-        ).pack(anchor='w')
+        self.shadow_enabled_checkbox = QCheckBox("Enable Shadow")
+        self.shadow_enabled_checkbox.setChecked(self.shadow_enabled_value)
+        self.shadow_enabled_checkbox.stateChanged.connect(self._toggle_shadow_controls)
+        shadow_header_layout.addWidget(self.shadow_enabled_checkbox)
+        shadow_header_layout.addStretch()
+        
+        sizing_group_layout.addWidget(shadow_header)
         
         # Shadow controls container
-        self.shadow_controls = tk.Frame(self.sizing_group)
-        self.shadow_controls.pack(fill=tk.X, pady=(2, 6))
+        self.shadow_controls = QWidget()
+        shadow_controls_layout = QVBoxLayout(self.shadow_controls)
+        shadow_controls_layout.setContentsMargins(0, 2, 0, 6)
+        shadow_controls_layout.setSpacing(5)
         
         # Shadow color
-        shadow_color_frame = tk.Frame(self.shadow_controls)
-        shadow_color_frame.pack(fill=tk.X, pady=(2, 8))
+        shadow_color_frame = QWidget()
+        shadow_color_layout = QHBoxLayout(shadow_color_frame)
+        shadow_color_layout.setContentsMargins(0, 2, 0, 8)
+        shadow_color_layout.setSpacing(10)
         
-        tk.Label(shadow_color_frame, text="Shadow Color:", width=15, anchor='w').pack(side=tk.LEFT)
-        
-        # Shadow color button and preview
-        shadow_button_frame = tk.Frame(shadow_color_frame)
-        shadow_button_frame.pack(side=tk.LEFT, padx=10)
+        shadow_color_label = QLabel("Shadow Color:")
+        shadow_color_label.setMinimumWidth(110)
+        shadow_color_layout.addWidget(shadow_color_label)
         
         # Shadow color preview
-        self.shadow_preview = tk.Canvas(shadow_button_frame, width=30, height=25, 
-                                      highlightthickness=1, highlightbackground="gray")
-        self.shadow_preview.pack(side=tk.LEFT, padx=(0, 10))
+        self.shadow_preview_frame = QFrame()
+        self.shadow_preview_frame.setFixedSize(30, 25)
+        self.shadow_preview_frame.setFrameShape(QFrame.Box)
+        self.shadow_preview_frame.setLineWidth(1)
+        shadow_color_layout.addWidget(self.shadow_preview_frame)
         
         # Shadow RGB display label
-        sr, sg, sb = self.shadow_color_r.get(), self.shadow_color_g.get(), self.shadow_color_b.get()
-        self.shadow_rgb_label = tk.Label(shadow_button_frame, text=f"RGB({sr},{sg},{sb})", width=15)
-        self.shadow_rgb_label.pack(side=tk.LEFT, padx=(0, 10))
+        sr, sg, sb = self.shadow_color_r_value, self.shadow_color_g_value, self.shadow_color_b_value
+        self.shadow_rgb_label = QLabel(f"RGB({sr},{sg},{sb})")
+        self.shadow_rgb_label.setMinimumWidth(120)
+        shadow_color_layout.addWidget(self.shadow_rgb_label)
         
         # Shadow color picker button
         def pick_shadow_color():
-            from tkinter import colorchooser
             # Get current color
-            current_color = (self.shadow_color_r.get(), self.shadow_color_g.get(), self.shadow_color_b.get())
-            color_hex = f'#{current_color[0]:02x}{current_color[1]:02x}{current_color[2]:02x}'
+            current_color = QColor(self.shadow_color_r_value, self.shadow_color_g_value, self.shadow_color_b_value)
             
             # Open color dialog
-            color = colorchooser.askcolor(initialcolor=color_hex, parent=self.dialog, 
-                                         title="Choose Shadow Color")
-            if color[0]:  # If a color was chosen (not cancelled)
+            color = QColorDialog.getColor(current_color, self.dialog, "Choose Shadow Color")
+            if color.isValid():
                 # Update RGB values
-                self.shadow_color_r.set(int(color[0][0]))
-                self.shadow_color_g.set(int(color[0][1]))
-                self.shadow_color_b.set(int(color[0][2]))
+                self.shadow_color_r_value = color.red()
+                self.shadow_color_g_value = color.green()
+                self.shadow_color_b_value = color.blue()
                 # Update display
-                self.shadow_rgb_label.config(text=f"RGB({int(color[0][0])},{int(color[0][1])},{int(color[0][2])})")
+                self.shadow_rgb_label.setText(f"RGB({color.red()},{color.green()},{color.blue()})")
                 self._update_shadow_preview(None)
         
-        tb.Button(
-            shadow_button_frame,
-            text="Choose Color",
-            command=pick_shadow_color,
-            bootstyle="info",
-            width=12
-        ).pack(side=tk.LEFT)
+        choose_shadow_btn = QPushButton("Choose Color")
+        choose_shadow_btn.setMinimumWidth(120)
+        choose_shadow_btn.clicked.connect(pick_shadow_color)
+        choose_shadow_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        shadow_color_layout.addWidget(choose_shadow_btn)
+        shadow_color_layout.addStretch()
+        
+        shadow_controls_layout.addWidget(shadow_color_frame)
         
         self._update_shadow_preview(None)  # Initialize with loaded colors
         
         # Shadow offset
-        offset_frame = tk.Frame(self.shadow_controls)
-        offset_frame.pack(fill=tk.X, pady=2)
+        offset_frame = QWidget()
+        offset_layout = QHBoxLayout(offset_frame)
+        offset_layout.setContentsMargins(0, 2, 0, 0)
+        offset_layout.setSpacing(10)
         
-        tk.Label(offset_frame, text="Shadow Offset:", width=15, anchor='w').pack(side=tk.LEFT)
+        offset_label = QLabel("Shadow Offset:")
+        offset_label.setMinimumWidth(110)
+        offset_layout.addWidget(offset_label)
         
         # X offset
-        x_frame = tk.Frame(offset_frame)
-        x_frame.pack(side=tk.LEFT, padx=10)
-        tk.Label(x_frame, text="X:", width=2).pack(side=tk.LEFT)
-        x_spinbox = tb.Spinbox(x_frame, from_=-10, to=10, textvariable=self.shadow_offset_x_var,
-                  width=5, command=self._save_rendering_settings)
-        x_spinbox.pack(side=tk.LEFT)
-        x_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        x_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        self._disable_spinbox_mousewheel(x_spinbox)
+        x_label = QLabel("X:")
+        offset_layout.addWidget(x_label)
+        
+        self.shadow_offset_x_spinbox = QSpinBox()
+        self.shadow_offset_x_spinbox.setMinimum(-10)
+        self.shadow_offset_x_spinbox.setMaximum(10)
+        self.shadow_offset_x_spinbox.setValue(self.shadow_offset_x_value)
+        self.shadow_offset_x_spinbox.setMinimumWidth(60)
+        self.shadow_offset_x_spinbox.valueChanged.connect(self._save_rendering_settings)
+        offset_layout.addWidget(self.shadow_offset_x_spinbox)
         
         # Y offset
-        y_frame = tk.Frame(offset_frame)
-        y_frame.pack(side=tk.LEFT, padx=10)
-        tk.Label(y_frame, text="Y:", width=2).pack(side=tk.LEFT)
-        y_spinbox = tb.Spinbox(y_frame, from_=-10, to=10, textvariable=self.shadow_offset_y_var,
-                  width=5, command=self._save_rendering_settings)
-        y_spinbox.pack(side=tk.LEFT)
-        y_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
-        y_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
-        self._disable_spinbox_mousewheel(y_spinbox)
+        y_label = QLabel("Y:")
+        offset_layout.addWidget(y_label)
+        
+        self.shadow_offset_y_spinbox = QSpinBox()
+        self.shadow_offset_y_spinbox.setMinimum(-10)
+        self.shadow_offset_y_spinbox.setMaximum(10)
+        self.shadow_offset_y_spinbox.setValue(self.shadow_offset_y_value)
+        self.shadow_offset_y_spinbox.setMinimumWidth(60)
+        self.shadow_offset_y_spinbox.valueChanged.connect(self._save_rendering_settings)
+        offset_layout.addWidget(self.shadow_offset_y_spinbox)
+        offset_layout.addStretch()
+        
+        shadow_controls_layout.addWidget(offset_frame)
         
         # Shadow blur
-        blur_frame = tk.Frame(self.shadow_controls)
-        blur_frame.pack(fill=tk.X, pady=2)
+        blur_frame = QWidget()
+        blur_layout = QHBoxLayout(blur_frame)
+        blur_layout.setContentsMargins(0, 2, 0, 0)
+        blur_layout.setSpacing(10)
         
-        tk.Label(blur_frame, text="Shadow Blur:", width=15, anchor='w').pack(side=tk.LEFT)
-        shadow_blur_scale = tk.Scale(blur_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.shadow_blur_var,
-                length=150, command=lambda v: self._on_shadow_blur_changed(v))
-        shadow_blur_scale.pack(side=tk.LEFT, padx=10)
+        blur_label = QLabel("Shadow Blur:")
+        blur_label.setMinimumWidth(110)
+        blur_layout.addWidget(blur_label)
+        
+        self.shadow_blur_spinbox = QSpinBox()
+        self.shadow_blur_spinbox.setMinimum(0)
+        self.shadow_blur_spinbox.setMaximum(10)
+        self.shadow_blur_spinbox.setValue(self.shadow_blur_value)
+        self.shadow_blur_spinbox.setMinimumWidth(100)
+        self.shadow_blur_spinbox.valueChanged.connect(self._on_shadow_blur_changed)
+        blur_layout.addWidget(self.shadow_blur_spinbox)
         
         # Shadow blur value label
-        self.shadow_blur_value_label = tk.Label(blur_frame, text=f"{int(self.shadow_blur_var.get())}", width=3)
-        self.shadow_blur_value_label.pack(side=tk.LEFT, padx=(5, 10))
+        self.shadow_blur_value_label = QLabel(f"{self.shadow_blur_value}")
+        self.shadow_blur_value_label.setMinimumWidth(30)
+        blur_layout.addWidget(self.shadow_blur_value_label)
         
-        tk.Label(blur_frame, text="(0=sharp, 10=blurry)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
+        blur_help_label = QLabel("(0=sharp, 10=blurry)")
+        blur_help_font = QFont('Arial', 9)
+        blur_help_label.setFont(blur_help_font)
+        blur_help_label.setStyleSheet("color: gray;")
+        blur_layout.addWidget(blur_help_label)
+        blur_layout.addStretch()
+        
+        shadow_controls_layout.addWidget(blur_frame)
+        
+        # Add shadow_controls to sizing_group_layout
+        sizing_group_layout.addWidget(self.shadow_controls)
         
         # Initially disable shadow controls
         self._toggle_shadow_controls()
         
         # Output settings
-        output_frame = tk.Frame(settings_frame)
-        output_frame.pack(fill=tk.X, pady=(5, 0))
+        output_frame = QWidget()
+        output_layout = QHBoxLayout(output_frame)
+        output_layout.setContentsMargins(0, 5, 0, 0)
         
-        self.create_subfolder_var = tk.BooleanVar(value=self.main_gui.config.get('manga_create_subfolder', True))
-        tb.Checkbutton(
-            output_frame,
-            text="Create 'translated' subfolder for output",
-            variable=self.create_subfolder_var,
-            bootstyle="round-toggle",
-            command=self._save_rendering_settings
-        ).pack(side=tk.LEFT)
+        self.create_subfolder_checkbox = QCheckBox("Create 'translated' subfolder for output")
+        self.create_subfolder_checkbox.setChecked(self.main_gui.config.get('manga_create_subfolder', True))
+        self.create_subfolder_checkbox.stateChanged.connect(self._save_rendering_settings)
+        output_layout.addWidget(self.create_subfolder_checkbox)
+        output_layout.addStretch()
+        
+        settings_frame_layout.addWidget(output_frame)
         
         # Control buttons
-        control_frame = tk.Frame(self.parent_frame)
-        control_frame.pack(fill=tk.X, padx=20, pady=10)
+        control_frame = QWidget()
+        control_layout = QHBoxLayout(control_frame)
+        control_layout.setContentsMargins(20, 10, 20, 10)
+        control_layout.setSpacing(10)
         
         # Check if ready based on selected provider
-        has_api_key = bool(self.main_gui.api_key_entry.get().strip()) if hasattr(self.main_gui, 'api_key_entry') else False
-        provider = self.ocr_provider_var.get()
+        # Get API key from main GUI - handle both Tkinter and PySide6
+        try:
+            if hasattr(self.main_gui.api_key_entry, 'text'):  # PySide6 QLineEdit
+                has_api_key = bool(self.main_gui.api_key_entry.text().strip())
+            elif hasattr(self.main_gui.api_key_entry, 'get'):  # Tkinter Entry
+                has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+            else:
+                has_api_key = False
+        except:
+            has_api_key = False
+            
+        provider = self.ocr_provider_value
 
         # Determine readiness based on provider
         if provider == 'google':
@@ -2765,14 +2996,12 @@ class MangaTranslationTab:
             # Local providers (manga-ocr, easyocr, etc.) only need API key for translation
             is_ready = has_api_key
 
-        self.start_button = tb.Button(
-            control_frame,
-            text="Start Translation",
-            command=self._start_translation,
-            bootstyle="success",
-            state=tk.NORMAL if is_ready else tk.DISABLED
-        )
-        self.start_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.start_button = QPushButton("Start Translation")
+        self.start_button.clicked.connect(self._start_translation)
+        self.start_button.setEnabled(is_ready)
+        self.start_button.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px 20px; font-size: 12px; }" +
+                                       ("" if is_ready else " QPushButton:disabled { background-color: #6c757d; }"))
+        control_layout.addWidget(self.start_button)
 
         # Add tooltip to show why button is disabled
         if not is_ready:
@@ -2784,115 +3013,89 @@ class MangaTranslationTab:
             elif provider == 'azure' and not self.main_gui.config.get('azure_vision_key', ''):
                 reasons.append("Azure credentials not configured")
             tooltip_text = "Cannot start: " + ", ".join(reasons)
-            # You can add a tooltip here if you have a tooltip library
+            self.start_button.setToolTip(tooltip_text)
         
-        self.stop_button = tb.Button(
-            control_frame,
-            text="Stop",
-            command=self._stop_translation,
-            bootstyle="danger",
-            state=tk.DISABLED
-        )
-        self.stop_button.pack(side=tk.LEFT)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self._stop_translation)
+        self.stop_button.setEnabled(False)
+        self.stop_button.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 8px 20px; font-size: 12px; } " +
+                                      "QPushButton:disabled { background-color: #6c757d; }")
+        control_layout.addWidget(self.stop_button)
+        control_layout.addStretch()
+        
+        main_layout.addWidget(control_frame)
         
         # Progress frame
-        progress_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Progress",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        progress_frame.pack(fill=tk.X, padx=20, pady=10)
+        progress_frame = QGroupBox("Progress")
+        progress_frame_font = QFont('Arial', 12)
+        progress_frame_font.setBold(True)
+        progress_frame.setFont(progress_frame_font)
+        progress_frame_layout = QVBoxLayout(progress_frame)
+        progress_frame_layout.setContentsMargins(15, 15, 15, 10)
+        progress_frame_layout.setSpacing(10)
         
         # Overall progress
-        self.progress_label = tk.Label(
-            progress_frame,
-            text="Ready to start",
-            font=('Arial', 11),
-            fg='white'  # White text for dark mode
-        )
-        self.progress_label.pack(anchor=tk.W)
+        self.progress_label = QLabel("Ready to start")
+        progress_label_font = QFont('Arial', 11)
+        self.progress_label.setFont(progress_label_font)
+        self.progress_label.setStyleSheet("color: white;")
+        progress_frame_layout.addWidget(self.progress_label)
         
-        # Create and configure progress bar with custom styling
-        try:
-            # Create a custom style for the progress bar
-            style = ttk.Style()
-            
-            # Configure the progress bar for dark mode with white fill
-            style.configure("MangaProgress.Horizontal.TProgressbar",
-                          troughcolor='#2d3748',      # Dark gray background
-                          background='white',          # White progress fill color
-                          lightcolor='#f7fafc',       # Light white highlight
-                          darkcolor='#e2e8f0',        # Light gray shadow
-                          bordercolor='#4a5568',      # Border color
-                          relief='flat')
-            
-            # Apply the style to our progress bar
-            self.progress_bar = ttk.Progressbar(
-                progress_frame,
-                mode='determinate',
-                length=400,
-                style="MangaProgress.Horizontal.TProgressbar"
-            )
-        except Exception:
-            # Fallback to default progress bar if styling fails
-            self.progress_bar = ttk.Progressbar(
-                progress_frame,
-                mode='determinate',
-                length=400
-            )
-        
-        self.progress_bar.pack(fill=tk.X, pady=(5, 10))
+        # Create and configure progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMinimumHeight(20)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                background-color: #2d3748;
+                text-align: center;
+                color: white;
+            }
+            QProgressBar::chunk {
+                background-color: white;
+            }
+        """)
+        progress_frame_layout.addWidget(self.progress_bar)
         
         # Current file status
-        self.current_file_label = tk.Label(
-            progress_frame,
-            text="",
-            font=('Arial', 10),
-            fg='lightgray'  # Light gray for dark mode visibility
-        )
-        self.current_file_label.pack(anchor=tk.W)
+        self.current_file_label = QLabel("")
+        current_file_font = QFont('Arial', 10)
+        self.current_file_label.setFont(current_file_font)
+        self.current_file_label.setStyleSheet("color: lightgray;")
+        progress_frame_layout.addWidget(self.current_file_label)
+        
+        main_layout.addWidget(progress_frame)
         
         # Log frame
-        log_frame = tk.LabelFrame(
-            self.parent_frame,
-            text="Translation Log",
-            font=('Arial', 12, 'bold'),
-            padx=15,
-            pady=10
-        )
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(10, 20))
+        log_frame = QGroupBox("Translation Log")
+        log_frame_font = QFont('Arial', 12)
+        log_frame_font.setBold(True)
+        log_frame.setFont(log_frame_font)
+        log_frame_layout = QVBoxLayout(log_frame)
+        log_frame_layout.setContentsMargins(15, 15, 15, 10)
+        log_frame_layout.setSpacing(10)
         
-        # Log text with scrollbar
-        log_scroll_frame = tk.Frame(log_frame)
-        log_scroll_frame.pack(fill=tk.BOTH, expand=True)
+        # Log text widget (QTextEdit handles scrolling automatically)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMinimumHeight(400)
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: white;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+                border: 1px solid #4a5568;
+            }
+        """)
+        log_frame_layout.addWidget(self.log_text)
         
-        log_scrollbar = tk.Scrollbar(log_scroll_frame)
-        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.log_text = tk.Text(
-            log_scroll_frame,
-            height=28,
-            wrap=tk.WORD,
-            yscrollcommand=log_scrollbar.set
-        )
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        log_scrollbar.config(command=self.log_text.yview)
-
-        # Make log read-only (programmatic inserts will toggle state)
-        self.log_text.config(state='disabled', cursor='arrow')
-        try:
-            # Prevent focus via Tab key
-            self.log_text.configure(takefocus=0)
-        except Exception:
-            pass
-        
-        # Configure text tags for colored output
-        self.log_text.tag_config('info', foreground='white')
-        self.log_text.tag_config('success', foreground='green')
-        self.log_text.tag_config('warning', foreground='orange')
-        self.log_text.tag_config('error', foreground='red')
+        main_layout.addWidget(log_frame)
         
         # Restore persistent log from previous sessions
         self._restore_persistent_log()
@@ -2902,87 +3105,73 @@ class MangaTranslationTab:
         try:
             with MangaTranslationTab._persistent_log_lock:
                 if MangaTranslationTab._persistent_log:
-                    self.log_text.config(state='normal')
+                    # PySide6 QTextEdit
+                    color_map = {
+                        'info': 'white',
+                        'success': 'green',
+                        'warning': 'orange',
+                        'error': 'red',
+                        'debug': 'lightblue'
+                    }
                     for message, level in MangaTranslationTab._persistent_log:
-                        self.log_text.insert(tk.END, message + '\n', level)
-                    self.log_text.see(tk.END)
-                    self.log_text.config(state='disabled')
+                        color = color_map.get(level, 'white')
+                        self.log_text.setTextColor(QColor(color))
+                        self.log_text.append(message)
         except Exception as e:
             print(f"Failed to restore persistent log: {e}")
     
     def _show_help_dialog(self, title: str, message: str):
         """Show a help dialog with the given title and message"""
-        # Create a simple dialog
-        help_dialog = tk.Toplevel(self.dialog)
-        help_dialog.title(title)
-        help_dialog.geometry("500x400")
-        help_dialog.transient(self.dialog)
-        help_dialog.grab_set()
+        # Create a PySide6 dialog
+        help_dialog = QDialog(self.dialog)
+        help_dialog.setWindowTitle(title)
+        help_dialog.resize(500, 400)
+        help_dialog.setModal(True)
         
-        # Center the dialog
-        help_dialog.update_idletasks()
-        x = (help_dialog.winfo_screenwidth() // 2) - (help_dialog.winfo_width() // 2)
-        y = (help_dialog.winfo_screenheight() // 2) - (help_dialog.winfo_height() // 2)
-        help_dialog.geometry(f"+{x}+{y}")
-        
-        # Main frame with padding
-        main_frame = tk.Frame(help_dialog, padx=20, pady=20)
-        main_frame.pack(fill='both', expand=True)
+        # Main layout
+        main_layout = QVBoxLayout(help_dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)
         
         # Icon and title
-        title_frame = tk.Frame(main_frame)
-        title_frame.pack(fill='x', pady=(0, 10))
+        title_frame = QWidget()
+        title_layout = QHBoxLayout(title_frame)
+        title_layout.setContentsMargins(0, 0, 0, 10)
         
-        tk.Label(
-            title_frame,
-            text="ℹ️",
-            font=('Arial', 20)
-        ).pack(side='left', padx=(0, 10))
+        icon_label = QLabel("ℹ️")
+        icon_font = QFont('Arial', 20)
+        icon_label.setFont(icon_font)
+        title_layout.addWidget(icon_label)
         
-        tk.Label(
-            title_frame,
-            text=title,
-            font=('Arial', 12, 'bold')
-        ).pack(side='left')
+        title_label = QLabel(title)
+        title_font = QFont('Arial', 12)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
         
-        # Help text in a scrollable frame
-        text_frame = tk.Frame(main_frame)
-        text_frame.pack(fill='both', expand=True)
+        main_layout.addWidget(title_frame)
         
-        # Scrollbar
-        scrollbar = tk.Scrollbar(text_frame)
-        scrollbar.pack(side='right', fill='y')
-        
-        # Text widget
-        text_widget = tk.Text(
-            text_frame,
-            wrap='word',
-            yscrollcommand=scrollbar.set,
-            font=('Arial', 10),
-            padx=10,
-            pady=10
-        )
-        text_widget.pack(side='left', fill='both', expand=True)
-        scrollbar.config(command=text_widget.yview)
-        
-        # Insert the help text
-        text_widget.insert('1.0', message)
-        text_widget.config(state='disabled')  # Make read-only
+        # Help text in a scrollable text widget
+        text_widget = QTextEdit()
+        text_widget.setReadOnly(True)
+        text_widget.setPlainText(message)
+        text_font = QFont('Arial', 10)
+        text_widget.setFont(text_font)
+        main_layout.addWidget(text_widget)
         
         # Close button
-        tb.Button(
-            main_frame,
-            text="Close",
-            command=help_dialog.destroy,
-            bootstyle="secondary"
-        ).pack(pady=(10, 0))
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(help_dialog.accept)
+        close_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 20px; }")
+        main_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
         
-        # Bind Escape key to close
-        help_dialog.bind('<Escape>', lambda e: help_dialog.destroy())
+        # Show the dialog
+        help_dialog.exec()
 
     def _on_visual_context_toggle(self):
         """Handle visual context toggle"""
-        enabled = self.visual_context_enabled_var.get()
+        enabled = self.visual_context_enabled_value
         self.main_gui.config['manga_visual_context_enabled'] = enabled
         
         # Update translator if it exists
@@ -3021,12 +3210,12 @@ class MangaTranslationTab:
                         font = ms.setdefault('font_sizing', {})
                         rend['auto_min_size'] = int(min_from_dialog)
                         font['min_size'] = int(min_from_dialog)
-                        if hasattr(self, 'auto_min_size_var'):
-                            self.auto_min_size_var.set(int(min_from_dialog))
+                        if hasattr(self, 'auto_min_size_value'):
+                            self.auto_min_size_value = int(min_from_dialog)
                     if max_from_dialog is not None:
                         self.main_gui.config['manga_max_font_size'] = int(max_from_dialog)
-                        if hasattr(self, 'max_font_size_var'):
-                            self.max_font_size_var.set(int(max_from_dialog))
+                        if hasattr(self, 'max_font_size_value'):
+                            self.max_font_size_value = int(max_from_dialog)
                 except Exception:
                     pass
 
@@ -3045,38 +3234,40 @@ class MangaTranslationTab:
                 self._log("✅ Advanced settings saved and applied", "success")
             
             # Open the settings dialog
+            # Note: MangaSettingsDialog is still Tkinter-based, so pass Tkinter root
             MangaSettingsDialog(
-                parent=self.dialog,
+                parent=self.main_gui.master,  # Use Tkinter root instead of PySide6 dialog
                 main_gui=self.main_gui,
                 config=self.main_gui.config,
                 callback=on_settings_saved
             )
             
         except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
             self._log(f"❌ Error opening settings dialog: {str(e)}", "error")
-            messagebox.showerror("Error", f"Failed to open settings dialog:\n{str(e)}")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to open settings dialog:\n{str(e)}")
         
     def _toggle_font_size_mode(self):
         """Toggle between auto, fixed size and multiplier modes"""
-        mode = self.font_size_mode_var.get()
+        mode = self.font_size_mode_value
         
         # Handle main frames (fixed size and multiplier)
         if hasattr(self, 'fixed_size_frame') and hasattr(self, 'multiplier_frame'):
             if mode == "fixed":
-                self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
-                self.multiplier_frame.pack_forget()
+                self.fixed_size_frame.show()
+                self.multiplier_frame.hide()
                 if hasattr(self, 'constraint_frame'):
-                    self.constraint_frame.pack_forget()
+                    self.constraint_frame.hide()
             elif mode == "multiplier":
-                self.fixed_size_frame.pack_forget()
-                self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
+                self.fixed_size_frame.hide()
+                self.multiplier_frame.show()
                 if hasattr(self, 'constraint_frame'):
-                    self.constraint_frame.pack(fill=tk.X, pady=(5, 0))
+                    self.constraint_frame.show()
             else:  # auto
-                self.fixed_size_frame.pack_forget()
-                self.multiplier_frame.pack_forget()
+                self.fixed_size_frame.hide()
+                self.multiplier_frame.hide()
                 if hasattr(self, 'constraint_frame'):
-                    self.constraint_frame.pack_forget()
+                    self.constraint_frame.hide()
         
         # MIN/MAX FIELDS ARE ALWAYS VISIBLE - NEVER HIDE THEM
         # They are packed at creation time and stay visible in all modes
@@ -3087,7 +3278,7 @@ class MangaTranslationTab:
 
     def _update_multiplier_label(self, value):
         """Update multiplier label"""
-        self.multiplier_label.config(text=f"{float(value):.1f}x")
+        self.multiplier_label.setText(f"{float(value):.1f}x")
         # Auto-save on change
         self._save_rendering_settings()
 
@@ -3095,7 +3286,7 @@ class MangaTranslationTab:
         """Update line spacing value label and save"""
         try:
             if hasattr(self, 'line_spacing_value_label'):
-                self.line_spacing_value_label.config(text=f"{float(value):.2f}")
+                self.line_spacing_value_label.setText(f"{float(value):.2f}")
         except Exception:
             pass
         self._save_rendering_settings()
@@ -3104,41 +3295,43 @@ class MangaTranslationTab:
         """Update shadow blur value label and save"""
         try:
             if hasattr(self, 'shadow_blur_value_label'):
-                self.shadow_blur_value_label.config(text=f"{int(float(value))}")
+                self.shadow_blur_value_label.setText(f"{int(float(value))}")
         except Exception:
             pass
         self._save_rendering_settings()
     
-    def _update_color_preview(self, event):
+    def _update_color_preview(self, event=None):
         """Update the font color preview"""
-        r = self.text_color_r.get()
-        g = self.text_color_g.get()
-        b = self.text_color_b.get()
+        r = self.text_color_r_value
+        g = self.text_color_g_value
+        b = self.text_color_b_value
         color = f'#{r:02x}{g:02x}{b:02x}'
-        self.color_preview.configure(bg=color)
+        if hasattr(self, 'color_preview'):
+            self.color_preview.setStyleSheet(f"background-color: {color};")
         # Auto-save on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
     
-    def _update_shadow_preview(self, event):
+    def _update_shadow_preview(self, event=None):
         """Update the shadow color preview"""
-        r = self.shadow_color_r.get()
-        g = self.shadow_color_g.get()
-        b = self.shadow_color_b.get()
+        r = self.shadow_color_r_value
+        g = self.shadow_color_g_value
+        b = self.shadow_color_b_value
         color = f'#{r:02x}{g:02x}{b:02x}'
-        self.shadow_preview.configure(bg=color)
+        if hasattr(self, 'shadow_preview'):
+            self.shadow_preview.setStyleSheet(f"background-color: {color};")
         # Auto-save on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
     
     def _toggle_shadow_controls(self):
         """Enable/disable shadow controls based on checkbox"""
-        if self.shadow_enabled_var.get():
-            for widget in self.shadow_controls.winfo_children():
-                self._enable_widget_tree(widget)
+        if self.shadow_enabled_value:
+            if hasattr(self, 'shadow_controls'):
+                self.shadow_controls.setEnabled(True)
         else:
-            for widget in self.shadow_controls.winfo_children():
-                self._disable_widget_tree(widget)
+            if hasattr(self, 'shadow_controls'):
+                self.shadow_controls.setEnabled(False)
         # Auto-save on change (but not during initialization)
         if not getattr(self, '_initializing', False):
             self._save_rendering_settings()
@@ -3147,55 +3340,65 @@ class MangaTranslationTab:
         """Apply font sizing preset (moved from dialog)"""
         try:
             if preset == 'small':
-                self.font_algorithm_var.set('conservative')
-                self.auto_min_size_var.set(10)
-                self.max_font_size_var.set(32)
-                self.prefer_larger_var.set(False)
-                self.bubble_size_factor_var.set(True)
-                self.line_spacing_var.set(1.2)
-                self.max_lines_var.set(8)
+                self.font_algorithm_value = 'conservative'
+                self.auto_min_size_value = 10
+                self.max_font_size_value = 32
+                self.prefer_larger_value = False
+                self.bubble_size_factor_value = True
+                self.line_spacing_value = 1.2
+                self.max_lines_value = 8
             elif preset == 'balanced':
-                self.font_algorithm_var.set('smart')
-                self.auto_min_size_var.set(12)
-                self.max_font_size_var.set(48)
-                self.prefer_larger_var.set(True)
-                self.bubble_size_factor_var.set(True)
-                self.line_spacing_var.set(1.3)
-                self.max_lines_var.set(10)
+                self.font_algorithm_value = 'smart'
+                self.auto_min_size_value = 12
+                self.max_font_size_value = 48
+                self.prefer_larger_value = True
+                self.bubble_size_factor_value = True
+                self.line_spacing_value = 1.3
+                self.max_lines_value = 10
             elif preset == 'large':
-                self.font_algorithm_var.set('aggressive')
-                self.auto_min_size_var.set(14)
-                self.max_font_size_var.set(64)
-                self.prefer_larger_var.set(True)
-                self.bubble_size_factor_var.set(False)
-                self.line_spacing_var.set(1.4)
-                self.max_lines_var.set(12)
+                self.font_algorithm_value = 'aggressive'
+                self.auto_min_size_value = 14
+                self.max_font_size_value = 64
+                self.prefer_larger_value = True
+                self.bubble_size_factor_value = False
+                self.line_spacing_value = 1.4
+                self.max_lines_value = 12
             
-            # Manually update the line spacing label since .set() doesn't trigger the callback
+            # Manually update the line spacing label
             if hasattr(self, 'line_spacing_value_label'):
-                self.line_spacing_value_label.config(text=f"{float(self.line_spacing_var.get()):.2f}")
+                self.line_spacing_value_label.setText(f"{float(self.line_spacing_value):.2f}")
             
             self._save_rendering_settings()
         except Exception:
             pass
     
     def _enable_widget_tree(self, widget):
-        """Recursively enable a widget and its children"""
+        """Recursively enable a widget and its children (PySide6 version)"""
         try:
-            widget.configure(state=tk.NORMAL)
+            widget.setEnabled(True)
         except:
             pass
-        for child in widget.winfo_children():
-            self._enable_widget_tree(child)
+        # PySide6 way to iterate children
+        try:
+            for child in widget.children():
+                if hasattr(child, 'setEnabled'):
+                    self._enable_widget_tree(child)
+        except:
+            pass
     
     def _disable_widget_tree(self, widget):
-        """Recursively disable a widget and its children"""
+        """Recursively disable a widget and its children (PySide6 version)"""
         try:
-            widget.configure(state=tk.DISABLED)
+            widget.setEnabled(False)
         except:
             pass
-        for child in widget.winfo_children():
-            self._disable_widget_tree(child)
+        # PySide6 way to iterate children
+        try:
+            for child in widget.children():
+                if hasattr(child, 'setEnabled'):
+                    self._disable_widget_tree(child)
+        except:
+            pass
         
     def _load_rendering_settings(self):
         """Load text rendering settings from config"""
@@ -3227,52 +3430,39 @@ class MangaTranslationTab:
         manga_settings = config.get('manga_settings', {})
         inpaint_settings = manga_settings.get('inpainting', {})
         
-        # Load inpaint method from the correct location
-        self.inpaint_method_var = tk.StringVar(value=inpaint_settings.get('method', 'local'))
-        self.local_model_type_var = tk.StringVar(value=inpaint_settings.get('local_method', 'anime_onnx'))
+        # Load inpaint method from the correct location (no Tkinter variables in PySide6)
+        self.inpaint_method_value = inpaint_settings.get('method', 'local')
+        self.local_model_type_value = inpaint_settings.get('local_method', 'anime_onnx')
         
         # Load model paths
+        self.local_model_path_value = ''
         for model_type in  ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
-            if model_type == self.local_model_type_var.get():
-                self.local_model_path_var = tk.StringVar(value=path)
+            if model_type == self.local_model_type_value:
+                self.local_model_path_value = path
         
-        # Initialize with defaults
-        self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
-        # Free-text-only background opacity (default on)
-        self.free_text_only_bg_opacity_var = tk.BooleanVar(value=config.get('manga_free_text_only_bg_opacity', True))
-        # Persist on change like other controls
-        self.free_text_only_bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())
-        self.bg_opacity_var.trace('w', lambda *args: self._save_rendering_settings())  # Add trace right after creation
-        
-        self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'circle'))
-        self.bg_style_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.bg_reduction_var = tk.DoubleVar(value=config.get('manga_bg_reduction', 1.0))
-        self.bg_reduction_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.font_size_var = tk.IntVar(value=config.get('manga_font_size', 0))
-        self.font_size_var.trace('w', lambda *args: self._save_rendering_settings())
+        # Initialize with defaults (plain Python values, no Tkinter variables)
+        self.bg_opacity_value = config.get('manga_bg_opacity', 130)
+        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', True)
+        self.bg_style_value = config.get('manga_bg_style', 'circle')
+        self.bg_reduction_value = config.get('manga_bg_reduction', 1.0)
+        self.font_size_value = config.get('manga_font_size', 0)
         
         self.selected_font_path = config.get('manga_font_path', None)
-        self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', False))
-        self.inpaint_quality_var = tk.StringVar(value=config.get('manga_inpaint_quality', 'high'))
-        self.inpaint_dilation_var = tk.IntVar(value=config.get('manga_inpaint_dilation', 15))
-        self.inpaint_passes_var = tk.IntVar(value=config.get('manga_inpaint_passes', 2))
+        self.skip_inpainting_value = config.get('manga_skip_inpainting', False)
+        self.inpaint_quality_value = config.get('manga_inpaint_quality', 'high')
+        self.inpaint_dilation_value = config.get('manga_inpaint_dilation', 15)
+        self.inpaint_passes_value = config.get('manga_inpaint_passes', 2)
         
-        self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
-        self.font_size_mode_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
-        self.font_size_multiplier_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.font_size_mode_value = config.get('manga_font_size_mode', 'fixed')
+        self.font_size_multiplier_value = config.get('manga_font_size_multiplier', 1.0)
         
         # Auto fit style for auto mode
         try:
             rend_cfg = (config.get('manga_settings', {}) or {}).get('rendering', {})
         except Exception:
             rend_cfg = {}
-        self.auto_fit_style_var = tk.StringVar(value=rend_cfg.get('auto_fit_style', 'balanced'))
-        self.auto_fit_style_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.auto_fit_style_value = rend_cfg.get('auto_fit_style', 'balanced')
         
         # Auto minimum font size (from rendering or font_sizing)
         try:
@@ -3280,27 +3470,18 @@ class MangaTranslationTab:
         except Exception:
             font_cfg = {}
         auto_min_default = rend_cfg.get('auto_min_size', font_cfg.get('min_size', 10))
-        self.auto_min_size_var = tk.IntVar(value=int(auto_min_default))
-        self.auto_min_size_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.auto_min_size_value = int(auto_min_default)
         
-        self.force_caps_lock_var = tk.BooleanVar(value=config.get('manga_force_caps_lock', True))
-        self.force_caps_lock_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
-        self.constrain_to_bubble_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.force_caps_lock_value = config.get('manga_force_caps_lock', True)
+        self.constrain_to_bubble_value = config.get('manga_constrain_to_bubble', True)
         
         # Advanced font sizing (from manga_settings.font_sizing)
         font_settings = (config.get('manga_settings', {}) or {}).get('font_sizing', {})
-        self.font_algorithm_var = tk.StringVar(value=str(font_settings.get('algorithm', 'smart')))
-        self.font_algorithm_var.trace('w', lambda *args: self._save_rendering_settings())
-        self.prefer_larger_var = tk.BooleanVar(value=bool(font_settings.get('prefer_larger', True)))
-        self.prefer_larger_var.trace('w', lambda *args: self._save_rendering_settings())
-        self.bubble_size_factor_var = tk.BooleanVar(value=bool(font_settings.get('bubble_size_factor', True)))
-        self.bubble_size_factor_var.trace('w', lambda *args: self._save_rendering_settings())
-        self.line_spacing_var = tk.DoubleVar(value=float(font_settings.get('line_spacing', 1.3)))
-        self.line_spacing_var.trace('w', lambda *args: self._save_rendering_settings())
-        self.max_lines_var = tk.IntVar(value=int(font_settings.get('max_lines', 10)))
-        self.max_lines_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.font_algorithm_value = str(font_settings.get('algorithm', 'smart'))
+        self.prefer_larger_value = bool(font_settings.get('prefer_larger', True))
+        self.bubble_size_factor_value = bool(font_settings.get('bubble_size_factor', True))
+        self.line_spacing_value = float(font_settings.get('line_spacing', 1.3))
+        self.max_lines_value = int(font_settings.get('max_lines', 10))
         
         # Determine effective max font size with fallback
         font_max_top = config.get('manga_max_font_size', None)
@@ -3310,58 +3491,37 @@ class MangaTranslationTab:
         effective_max = font_max_top if font_max_top is not None else (
             nested_render.get('auto_max_size', nested_font.get('max_size', 48))
         )
-        self.max_font_size_var = tk.IntVar(value=int(effective_max))
-        self.max_font_size_var.trace('w', lambda *args: self._save_rendering_settings())  
+        self.max_font_size_value = int(effective_max)
         
         # If top-level keys were missing, mirror max now (won't save during initialization)
         if font_max_top is None:
             self.main_gui.config['manga_max_font_size'] = int(effective_max)
         
-        self.strict_text_wrapping_var = tk.BooleanVar(value=config.get('manga_strict_text_wrapping', False))
-        self.strict_text_wrapping_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.strict_text_wrapping_value = config.get('manga_strict_text_wrapping', False)
         
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
-        self.text_color_r = tk.IntVar(value=manga_text_color[0])
-        self.text_color_r.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.text_color_g = tk.IntVar(value=manga_text_color[1])
-        self.text_color_g.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.text_color_b = tk.IntVar(value=manga_text_color[2])
-        self.text_color_b.trace('w', lambda *args: self._save_rendering_settings())
+        self.text_color_r_value = manga_text_color[0]
+        self.text_color_g_value = manga_text_color[1]
+        self.text_color_b_value = manga_text_color[2]
         
         # Shadow settings
-        self.shadow_enabled_var = tk.BooleanVar(value=config.get('manga_shadow_enabled', True))
-        self.shadow_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.shadow_enabled_value = config.get('manga_shadow_enabled', True)
         
         manga_shadow_color = config.get('manga_shadow_color', [204, 128, 128])
-        self.shadow_color_r = tk.IntVar(value=manga_shadow_color[0])
-        self.shadow_color_r.trace('w', lambda *args: self._save_rendering_settings())
+        self.shadow_color_r_value = manga_shadow_color[0]
+        self.shadow_color_g_value = manga_shadow_color[1]
+        self.shadow_color_b_value = manga_shadow_color[2]
         
-        self.shadow_color_g = tk.IntVar(value=manga_shadow_color[1])
-        self.shadow_color_g.trace('w', lambda *args: self._save_rendering_settings())
+        self.shadow_offset_x_value = config.get('manga_shadow_offset_x', 2)
+        self.shadow_offset_y_value = config.get('manga_shadow_offset_y', 2)
+        self.shadow_blur_value = config.get('manga_shadow_blur', 0)
         
-        self.shadow_color_b = tk.IntVar(value=manga_shadow_color[2])
-        self.shadow_color_b.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_offset_x_var = tk.IntVar(value=config.get('manga_shadow_offset_x', 2))
-        self.shadow_offset_x_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_offset_y_var = tk.IntVar(value=config.get('manga_shadow_offset_y', 2))
-        self.shadow_offset_y_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        self.shadow_blur_var = tk.IntVar(value=config.get('manga_shadow_blur', 0))
-        self.shadow_blur_var.trace('w', lambda *args: self._save_rendering_settings())
-        
-        # Initialize font_style_var with saved value or default
-        saved_font_style = config.get('manga_font_style', 'Default')
-        self.font_style_var = tk.StringVar(value=saved_font_style)
-        self.font_style_var.trace('w', lambda *args: self._save_rendering_settings())
+        # Initialize font_style with saved value or default
+        self.font_style_value = config.get('manga_font_style', 'Default')
         
         # Full page context settings
-        self.full_page_context_var = tk.BooleanVar(value=config.get('manga_full_page_context', False))
-        self.full_page_context_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.full_page_context_value = config.get('manga_full_page_context', False)
         
         self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
             "You will receive multiple text segments from a manga page. "
@@ -3403,26 +3563,16 @@ class MangaTranslationTab:
             "Output ONLY the raw text, nothing else."
         ) 
         # Visual context setting
-        self.visual_context_enabled_var = tk.BooleanVar(
-            value=self.main_gui.config.get('manga_visual_context_enabled', True)
-        )
-        self.visual_context_enabled_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.visual_context_enabled_value = self.main_gui.config.get('manga_visual_context_enabled', True)
         self.qwen2vl_model_size = config.get('qwen2vl_model_size', '1')  # Default to '1' (2B)
         
         # Initialize RapidOCR settings
-        self.rapidocr_use_recognition_var = tk.BooleanVar(
-            value=self.main_gui.config.get('rapidocr_use_recognition', True)
-        )
-        self.rapidocr_language_var = tk.StringVar(
-            value=self.main_gui.config.get('rapidocr_language', 'auto')
-        )
-        self.rapidocr_detection_mode_var = tk.StringVar(
-            value=self.main_gui.config.get('rapidocr_detection_mode', 'document')
-        )
+        self.rapidocr_use_recognition_value = self.main_gui.config.get('rapidocr_use_recognition', True)
+        self.rapidocr_language_value = self.main_gui.config.get('rapidocr_language', 'auto')
+        self.rapidocr_detection_mode_value = self.main_gui.config.get('rapidocr_detection_mode', 'document')
 
         # Output settings
-        self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
-        self.create_subfolder_var.trace('w', lambda *args: self._save_rendering_settings())
+        self.create_subfolder_value = config.get('manga_create_subfolder', True)
     
     def _save_rendering_settings(self):
         """Save rendering settings with validation"""
@@ -3440,60 +3590,51 @@ class MangaTranslationTab:
             
             # Save to nested location
             inpaint = self.main_gui.config['manga_settings']['inpainting']
-            if hasattr(self, 'inpaint_method_var'):
-                inpaint['method'] = self.inpaint_method_var.get()
-            if hasattr(self, 'local_model_type_var'):
-                inpaint['local_method'] = self.local_model_type_var.get()
-                model_type = self.local_model_type_var.get()
-                if hasattr(self, 'local_model_path_var'):
-                    inpaint[f'{model_type}_model_path'] = self.local_model_path_var.get()
+            if hasattr(self, 'inpaint_method_value'):
+                inpaint['method'] = self.inpaint_method_value
+            if hasattr(self, 'local_model_type_value'):
+                inpaint['local_method'] = self.local_model_type_value
+                model_type = self.local_model_type_value
+                if hasattr(self, 'local_model_path_value'):
+                    inpaint[f'{model_type}_model_path'] = self.local_model_path_value
             
             # Add new inpainting settings
-            if hasattr(self, 'inpaint_method_var'):
-                self.main_gui.config['manga_inpaint_method'] = self.inpaint_method_var.get()
-            if hasattr(self, 'local_model_type_var'):
-                self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_var.get()
+            if hasattr(self, 'inpaint_method_value'):
+                self.main_gui.config['manga_inpaint_method'] = self.inpaint_method_value
+            if hasattr(self, 'local_model_type_value'):
+                self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_value
             
             # Save model paths for each type
             for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local']:
-                if hasattr(self, 'local_model_type_var'):
-                    if model_type == self.local_model_type_var.get():
-                        if hasattr(self, 'local_model_path_var'):
-                            path = self.local_model_path_var.get()
+                if hasattr(self, 'local_model_type_value'):
+                    if model_type == self.local_model_type_value:
+                        if hasattr(self, 'local_model_path_value'):
+                            path = self.local_model_path_value
                             if path:
                                 self.main_gui.config[f'manga_{model_type}_model_path'] = path
             
             # Save all other settings with validation
-            if hasattr(self, 'bg_opacity_var'):
-                self.main_gui.config['manga_bg_opacity'] = self.bg_opacity_var.get()
-            if hasattr(self, 'bg_style_var'):
-                self.main_gui.config['manga_bg_style'] = self.bg_style_var.get()
-            if hasattr(self, 'bg_reduction_var'):
-                self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_var.get()
+            if hasattr(self, 'bg_opacity_value'):
+                self.main_gui.config['manga_bg_opacity'] = self.bg_opacity_value
+            if hasattr(self, 'bg_style_value'):
+                self.main_gui.config['manga_bg_style'] = self.bg_style_value
+            if hasattr(self, 'bg_reduction_value'):
+                self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_value
             
             # Save free-text-only background opacity toggle
-            if hasattr(self, 'free_text_only_bg_opacity_var'):
-                try:
-                    self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_var.get())
-                except tk.TclError:
-                    pass
+            if hasattr(self, 'free_text_only_bg_opacity_value'):
+                self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_value)
             
             # CRITICAL: Font size settings - validate before saving
-            if hasattr(self, 'font_size_var'):
-                try:
-                    value = self.font_size_var.get()
-                    self.main_gui.config['manga_font_size'] = value
-                except tk.TclError:
-                    pass  # Skip if variable is in invalid state
+            if hasattr(self, 'font_size_value'):
+                value = self.font_size_value
+                self.main_gui.config['manga_font_size'] = value
             
-            if hasattr(self, 'max_font_size_var'):
-                try:
-                    value = self.max_font_size_var.get()
-                    # Validate the value is reasonable
-                    if 0 <= value <= 200:
-                        self.main_gui.config['manga_max_font_size'] = value
-                except (tk.TclError, ValueError):
-                    pass  # Skip if variable is in invalid state
+            if hasattr(self, 'max_font_size_value'):
+                value = self.max_font_size_value
+                # Validate the value is reasonable
+                if 0 <= value <= 200:
+                    self.main_gui.config['manga_max_font_size'] = value
             
             # Mirror these into nested manga_settings so the dialog and integration stay in sync
             try:
@@ -3501,93 +3642,83 @@ class MangaTranslationTab:
                 rend = ms.setdefault('rendering', {})
                 font = ms.setdefault('font_sizing', {})
                 # Mirror bounds
-                try:
-                    rend['auto_min_size'] = int(self.auto_min_size_var.get())
-                    font['min_size'] = int(self.auto_min_size_var.get())
-                except Exception:
-                    pass
-                try:
-                    rend['auto_max_size'] = int(self.max_font_size_var.get())
-                    font['max_size'] = int(self.max_font_size_var.get())
-                except Exception:
-                    pass
+                if hasattr(self, 'auto_min_size_value'):
+                    rend['auto_min_size'] = int(self.auto_min_size_value)
+                    font['min_size'] = int(self.auto_min_size_value)
+                if hasattr(self, 'max_font_size_value'):
+                    rend['auto_max_size'] = int(self.max_font_size_value)
+                    font['max_size'] = int(self.max_font_size_value)
                 # Persist advanced font sizing controls
-                if hasattr(self, 'font_algorithm_var'):
-                    font['algorithm'] = str(self.font_algorithm_var.get())
-                if hasattr(self, 'prefer_larger_var'):
-                    font['prefer_larger'] = bool(self.prefer_larger_var.get())
-                if hasattr(self, 'bubble_size_factor_var'):
-                    font['bubble_size_factor'] = bool(self.bubble_size_factor_var.get())
-                if hasattr(self, 'line_spacing_var'):
-                    try:
-                        font['line_spacing'] = float(self.line_spacing_var.get())
-                    except Exception:
-                        pass
-                if hasattr(self, 'max_lines_var'):
-                    try:
-                        font['max_lines'] = int(self.max_lines_var.get())
-                    except Exception:
-                        pass
-                if hasattr(self, 'auto_fit_style_var'):
-                    rend['auto_fit_style'] = str(self.auto_fit_style_var.get())
+                if hasattr(self, 'font_algorithm_value'):
+                    font['algorithm'] = str(self.font_algorithm_value)
+                if hasattr(self, 'prefer_larger_value'):
+                    font['prefer_larger'] = bool(self.prefer_larger_value)
+                if hasattr(self, 'bubble_size_factor_value'):
+                    font['bubble_size_factor'] = bool(self.bubble_size_factor_value)
+                if hasattr(self, 'line_spacing_value'):
+                    font['line_spacing'] = float(self.line_spacing_value)
+                if hasattr(self, 'max_lines_value'):
+                    font['max_lines'] = int(self.max_lines_value)
+                if hasattr(self, 'auto_fit_style_value'):
+                    rend['auto_fit_style'] = str(self.auto_fit_style_value)
             except Exception:
                 pass
             
             # Continue with other settings
             self.main_gui.config['manga_font_path'] = self.selected_font_path
             
-            if hasattr(self, 'skip_inpainting_var'):
-                self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
-            if hasattr(self, 'inpaint_quality_var'):
-                self.main_gui.config['manga_inpaint_quality'] = self.inpaint_quality_var.get()
-            if hasattr(self, 'inpaint_dilation_var'):
-                self.main_gui.config['manga_inpaint_dilation'] = self.inpaint_dilation_var.get()
-            if hasattr(self, 'inpaint_passes_var'):
-                self.main_gui.config['manga_inpaint_passes'] = self.inpaint_passes_var.get()
-            if hasattr(self, 'font_size_mode_var'):
-                self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
-            if hasattr(self, 'font_size_multiplier_var'):
-                self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
-            if hasattr(self, 'font_style_var'):
-                self.main_gui.config['manga_font_style'] = self.font_style_var.get()
-            if hasattr(self, 'constrain_to_bubble_var'):
-                self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
-            if hasattr(self, 'strict_text_wrapping_var'):
-                self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_var.get()
-            if hasattr(self, 'force_caps_lock_var'):
-                self.main_gui.config['manga_force_caps_lock'] = self.force_caps_lock_var.get()
+            if hasattr(self, 'skip_inpainting_value'):
+                self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_value
+            if hasattr(self, 'inpaint_quality_value'):
+                self.main_gui.config['manga_inpaint_quality'] = self.inpaint_quality_value
+            if hasattr(self, 'inpaint_dilation_value'):
+                self.main_gui.config['manga_inpaint_dilation'] = self.inpaint_dilation_value
+            if hasattr(self, 'inpaint_passes_value'):
+                self.main_gui.config['manga_inpaint_passes'] = self.inpaint_passes_value
+            if hasattr(self, 'font_size_mode_value'):
+                self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_value
+            if hasattr(self, 'font_size_multiplier_value'):
+                self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_value
+            if hasattr(self, 'font_style_value'):
+                self.main_gui.config['manga_font_style'] = self.font_style_value
+            if hasattr(self, 'constrain_to_bubble_value'):
+                self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_value
+            if hasattr(self, 'strict_text_wrapping_value'):
+                self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_value
+            if hasattr(self, 'force_caps_lock_value'):
+                self.main_gui.config['manga_force_caps_lock'] = self.force_caps_lock_value
             
             # Save font color as list
-            if hasattr(self, 'text_color_r') and hasattr(self, 'text_color_g') and hasattr(self, 'text_color_b'):
+            if hasattr(self, 'text_color_r_value') and hasattr(self, 'text_color_g_value') and hasattr(self, 'text_color_b_value'):
                 self.main_gui.config['manga_text_color'] = [
-                    self.text_color_r.get(),
-                    self.text_color_g.get(),
-                    self.text_color_b.get()
+                    self.text_color_r_value,
+                    self.text_color_g_value,
+                    self.text_color_b_value
                 ]
             
             # Save shadow settings
-            if hasattr(self, 'shadow_enabled_var'):
-                self.main_gui.config['manga_shadow_enabled'] = self.shadow_enabled_var.get()
-            if hasattr(self, 'shadow_color_r') and hasattr(self, 'shadow_color_g') and hasattr(self, 'shadow_color_b'):
+            if hasattr(self, 'shadow_enabled_value'):
+                self.main_gui.config['manga_shadow_enabled'] = self.shadow_enabled_value
+            if hasattr(self, 'shadow_color_r_value') and hasattr(self, 'shadow_color_g_value') and hasattr(self, 'shadow_color_b_value'):
                 self.main_gui.config['manga_shadow_color'] = [
-                    self.shadow_color_r.get(),
-                    self.shadow_color_g.get(),
-                    self.shadow_color_b.get()
+                    self.shadow_color_r_value,
+                    self.shadow_color_g_value,
+                    self.shadow_color_b_value
                 ]
-            if hasattr(self, 'shadow_offset_x_var'):
-                self.main_gui.config['manga_shadow_offset_x'] = self.shadow_offset_x_var.get()
-            if hasattr(self, 'shadow_offset_y_var'):
-                self.main_gui.config['manga_shadow_offset_y'] = self.shadow_offset_y_var.get()
-            if hasattr(self, 'shadow_blur_var'):
-                self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_var.get()
+            if hasattr(self, 'shadow_offset_x_value'):
+                self.main_gui.config['manga_shadow_offset_x'] = self.shadow_offset_x_value
+            if hasattr(self, 'shadow_offset_y_value'):
+                self.main_gui.config['manga_shadow_offset_y'] = self.shadow_offset_y_value
+            if hasattr(self, 'shadow_blur_value'):
+                self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_value
             
             # Save output settings
-            if hasattr(self, 'create_subfolder_var'):
-                self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_var.get()
+            if hasattr(self, 'create_subfolder_value'):
+                self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_value
             
             # Save full page context settings
-            if hasattr(self, 'full_page_context_var'):
-                self.main_gui.config['manga_full_page_context'] = self.full_page_context_var.get()
+            if hasattr(self, 'full_page_context_value'):
+                self.main_gui.config['manga_full_page_context'] = self.full_page_context_value
             if hasattr(self, 'full_page_context_prompt'):
                 self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
             
@@ -3600,12 +3731,12 @@ class MangaTranslationTab:
                 self.main_gui.config['qwen2vl_model_size'] = self.qwen2vl_model_size
 
             # RapidOCR specific settings
-            if hasattr(self, 'rapidocr_use_recognition_var'):
-                self.main_gui.config['rapidocr_use_recognition'] = self.rapidocr_use_recognition_var.get()
-            if hasattr(self, 'rapidocr_detection_mode_var'):
-                self.main_gui.config['rapidocr_detection_mode'] = self.rapidocr_detection_mode_var.get()
-            if hasattr(self, 'rapidocr_language_var'):
-                self.main_gui.config['rapidocr_language'] = self.rapidocr_language_var.get()
+            if hasattr(self, 'rapidocr_use_recognition_value'):
+                self.main_gui.config['rapidocr_use_recognition'] = self.rapidocr_use_recognition_value
+            if hasattr(self, 'rapidocr_detection_mode_value'):
+                self.main_gui.config['rapidocr_detection_mode'] = self.rapidocr_detection_mode_value
+            if hasattr(self, 'rapidocr_language_value'):
+                self.main_gui.config['rapidocr_language'] = self.rapidocr_language_value
 
             # Call main GUI's save_config to persist to file
             if hasattr(self.main_gui, 'save_config'):
@@ -3617,94 +3748,63 @@ class MangaTranslationTab:
     
     def _on_context_toggle(self):
         """Handle full page context toggle"""
-        enabled = self.full_page_context_var.get()
+        enabled = self.full_page_context_value
         self._save_rendering_settings()
     
     def _edit_context_prompt(self):
         """Open dialog to edit full page context prompt and OCR prompt"""
-        # Store parent canvas for scroll restoration
-        parent_canvas = self.canvas
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTextEdit, 
+                                        QPushButton, QHBoxLayout)
+        from PySide6.QtCore import Qt
         
-        # Use WindowManager to create scrollable dialog
-        dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,  # parent window
-            "Edit Prompts",
-            width=700,
-            height=600,
-            max_width_ratio=0.7,
-            max_height_ratio=0.85
-        )
+        # Create PySide6 dialog
+        dialog = QDialog(self.dialog)
+        dialog.setWindowTitle("Edit Prompts")
+        dialog.setMinimumSize(700, 600)
+        
+        layout = QVBoxLayout(dialog)
         
         # Instructions
-        instructions = tk.Label(
-            scrollable_frame,
-            text="Edit the prompt used for full page context translation.\n"
-                 "This will be appended to the main translation system prompt.",
-            font=('Arial', 10),
-            justify=tk.LEFT
+        instructions = QLabel(
+            "Edit the prompt used for full page context translation.\n"
+            "This will be appended to the main translation system prompt."
         )
-        instructions.pack(padx=20, pady=(20, 10))
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
         
         # Full Page Context label
-        context_label = tk.Label(
-            scrollable_frame,
-            text="Full Page Context Prompt:",
-            font=('Arial', 10, 'bold')
-        )
-        context_label.pack(padx=20, pady=(10, 5), anchor='w')
+        context_label = QLabel("Full Page Context Prompt:")
+        font = context_label.font()
+        font.setBold(True)
+        context_label.setFont(font)
+        layout.addWidget(context_label)
         
         # Text editor for context
-        text_editor = self.main_gui.ui.setup_scrollable_text(
-            scrollable_frame,
-            wrap=tk.WORD,
-            height=10
-        )
-        text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-        
-        # Insert current prompt
-        text_editor.insert(1.0, self.full_page_context_prompt)
+        text_editor = QTextEdit()
+        text_editor.setMinimumHeight(200)
+        text_editor.setPlainText(self.full_page_context_prompt)
+        layout.addWidget(text_editor)
         
         # OCR Prompt label
-        ocr_label = tk.Label(
-            scrollable_frame,
-            text="OCR System Prompt:",
-            font=('Arial', 10, 'bold')
-        )
-        ocr_label.pack(padx=20, pady=(10, 5), anchor='w')
+        ocr_label = QLabel("OCR System Prompt:")
+        ocr_label.setFont(font)
+        layout.addWidget(ocr_label)
         
         # Text editor for OCR
-        ocr_editor = self.main_gui.ui.setup_scrollable_text(
-            scrollable_frame,
-            wrap=tk.WORD,
-            height=10
-        )
-        ocr_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+        ocr_editor = QTextEdit()
+        ocr_editor.setMinimumHeight(200)
         
         # Get current OCR prompt
         if hasattr(self, 'ocr_prompt'):
-            ocr_editor.insert(1.0, self.ocr_prompt)
+            ocr_editor.setPlainText(self.ocr_prompt)
         else:
-            ocr_editor.insert(1.0, "")
+            ocr_editor.setPlainText("")
         
-        # Button frame
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
-        
-        def close_dialog():
-            """Properly close dialog and restore parent scrolling"""
-            try:
-                # Clean up this dialog's scrolling
-                if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
-                    dialog._cleanup_scrolling()
-            except:
-                pass
-            
-            # Destroy the dialog
-            dialog.destroy()
+        layout.addWidget(ocr_editor)
         
         def save_prompt():
-            self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
-            self.ocr_prompt = ocr_editor.get(1.0, tk.END).strip()  # Save to self.ocr_prompt
+            self.full_page_context_prompt = text_editor.toPlainText().strip()
+            self.ocr_prompt = ocr_editor.toPlainText().strip()
             
             # Save to config
             self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
@@ -3712,7 +3812,7 @@ class MangaTranslationTab:
             
             self._save_rendering_settings()
             self._log("✅ Updated prompts", "success")
-            close_dialog()
+            dialog.accept()
         
         def reset_prompt():
             default_prompt = (
@@ -3727,8 +3827,7 @@ class MangaTranslationTab:
                 '}\n\n'
                 'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
             )
-            text_editor.delete(1.0, tk.END)
-            text_editor.insert(1.0, default_prompt)
+            text_editor.setPlainText(default_prompt)
             
             default_ocr = (
                 "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
@@ -3750,52 +3849,47 @@ class MangaTranslationTab:
                 "NEVER translate. ONLY extract exactly what is written.\n"
                 "Output ONLY the raw text, nothing else."
             )
-            ocr_editor.delete(1.0, tk.END)
-            ocr_editor.insert(1.0, default_ocr)
+            ocr_editor.setPlainText(default_ocr)
         
-        # Buttons
-        tb.Button(
-            button_frame,
-            text="Save",
-            command=save_prompt,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        # Button layout
+        button_layout = QHBoxLayout()
         
-        tb.Button(
-            button_frame,
-            text="Reset to Default",
-            command=reset_prompt,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(save_prompt)
+        button_layout.addWidget(save_btn)
         
-        tb.Button(
-            button_frame,
-            text="Cancel",
-            command=close_dialog,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT)
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(reset_prompt)
+        button_layout.addWidget(reset_btn)
         
-        # Auto-resize dialog to fit content
-        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
         
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        # Show dialog
+        dialog.exec()
     
     def _refresh_context_settings(self):
         """Refresh context settings from main GUI"""
         # Actually fetch the current values from main GUI
         if hasattr(self.main_gui, 'contextual_var'):
             contextual_enabled = self.main_gui.contextual_var.get()
-            self.contextual_status_label.config(text=f"• Contextual Translation: {'Enabled' if contextual_enabled else 'Disabled'}")
+            if hasattr(self, 'contextual_status_label'):
+                self.contextual_status_label.setText(f"• Contextual Translation: {'Enabled' if contextual_enabled else 'Disabled'}")
         
         if hasattr(self.main_gui, 'trans_history'):
             history_limit = self.main_gui.trans_history.get()
-            self.history_limit_label.config(text=f"• Translation History Limit: {history_limit} exchanges")
+            if hasattr(self, 'history_limit_label'):
+                self.history_limit_label.setText(f"• Translation History Limit: {history_limit} exchanges")
         
         if hasattr(self.main_gui, 'translation_history_rolling_var'):
             rolling_enabled = self.main_gui.translation_history_rolling_var.get()
             rolling_status = "Enabled (Rolling Window)" if rolling_enabled else "Disabled (Reset on Limit)"
-            self.rolling_status_label.config(text=f"• Rolling History: {rolling_status}")
+            if hasattr(self, 'rolling_status_label'):
+                self.rolling_status_label.setText(f"• Rolling History: {rolling_status}")
         
         # Get and update model from main GUI
         current_model = None
@@ -3808,19 +3902,23 @@ class MangaTranslationTab:
         elif hasattr(self.main_gui, 'config'):
             current_model = self.main_gui.config.get('model', 'Unknown')
         
-        # Update model display in the API Settings frame
-        for widget in self.parent_frame.winfo_children():
-            if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
-                for child in widget.winfo_children():
-                    if isinstance(child, tk.Frame):
-                        for subchild in child.winfo_children():
-                            if isinstance(subchild, tk.Label) and "Model:" in subchild.cget("text"):
-                                old_model_text = subchild.cget("text")
-                                old_model = old_model_text.split("Model: ")[-1] if "Model: " in old_model_text else None
-                                if old_model != current_model:
-                                    model_changed = True
-                                subchild.config(text=f"Model: {current_model}")
-                                break
+        # Update model display in the API Settings frame (skip if parent_frame doesn't exist)
+        if hasattr(self, 'parent_frame') and hasattr(self.parent_frame, 'winfo_children'):
+            try:
+                for widget in self.parent_frame.winfo_children():
+                    if isinstance(widget, tk.LabelFrame) and "Translation Settings" in widget.cget("text"):
+                        for child in widget.winfo_children():
+                            if isinstance(child, tk.Frame):
+                                for subchild in child.winfo_children():
+                                    if isinstance(subchild, tk.Label) and "Model:" in subchild.cget("text"):
+                                        old_model_text = subchild.cget("text")
+                                        old_model = old_model_text.split("Model: ")[-1] if "Model: " in old_model_text else None
+                                        if old_model != current_model:
+                                            model_changed = True
+                                        subchild.config(text=f"Model: {current_model}")
+                                        break
+            except Exception:
+                pass  # Silently skip if there's an issue with Tkinter widgets
         
         # If model changed, reset translator and client to force recreation
         if model_changed and current_model:
@@ -3860,9 +3958,13 @@ class MangaTranslationTab:
     
     def _browse_google_credentials_permanent(self):
         """Browse and set Google Cloud Vision credentials from the permanent button"""
-        file_path = filedialog.askopenfilename(
-            title="Select Google Cloud Service Account JSON",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        from PySide6.QtWidgets import QFileDialog
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.dialog,
+            "Select Google Cloud Service Account JSON",
+            "",
+            "JSON files (*.json);;All files (*.*)"
         )
         
         if file_path:
@@ -3875,17 +3977,23 @@ class MangaTranslationTab:
                 self.main_gui.save_config(show_message=False)
 
             
+            from PySide6.QtWidgets import QMessageBox
+            
             # Update button state immediately
-            self.start_button.config(state=tk.NORMAL)
+            if hasattr(self, 'start_button'):
+                self.start_button.setEnabled(True)
             
             # Update credentials display
-            self.creds_label.config(text=os.path.basename(file_path), fg='green')
+            if hasattr(self, 'creds_label'):
+                self.creds_label.setText(os.path.basename(file_path))
+                self.creds_label.setStyleSheet("color: green;")
             
             # Update status if we have a reference
             if hasattr(self, 'status_label'):
-                self.status_label.config(text="✅ Ready", fg="green")
+                self.status_label.setText("✅ Ready")
+                self.status_label.setStyleSheet("color: green;")
             
-            messagebox.showinfo("Success", "Google Cloud credentials set successfully!")
+            QMessageBox.information(self.dialog, "Success", "Google Cloud credentials set successfully!")
     
     def _update_status_display(self):
         """Update the status display after credentials change"""
@@ -3894,8 +4002,8 @@ class MangaTranslationTab:
         google_creds_path = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
         has_vision = os.path.exists(google_creds_path) if google_creds_path else False
         
-        if has_vision:
-            self.start_button.config(state=tk.NORMAL)
+        if has_vision and hasattr(self, 'start_button'):
+            self.start_button.setEnabled(True)
     
     def _get_available_fonts(self):
         """Get list of available fonts from system and custom directories"""
@@ -4449,21 +4557,21 @@ class MangaTranslationTab:
     def _update_opacity_label(self, value):
         """Update opacity percentage label"""
         percentage = int((float(value) / 255) * 100)
-        self.opacity_label.config(text=f"{percentage}%")
+        self.opacity_label.setText(f"{percentage}%")
         # Auto-save on change
         self._save_rendering_settings()
     
     def _update_reduction_label(self, value):
         """Update size reduction percentage label"""
         percentage = int(float(value) * 100)
-        self.reduction_label.config(text=f"{percentage}%")
+        self.reduction_label.setText(f"{percentage}%")
         # Auto-save on change
         self._save_rendering_settings()
         
     def _toggle_inpaint_quality_visibility(self):
         """Show/hide inpaint quality options based on skip_inpainting setting"""
         if hasattr(self, 'inpaint_quality_frame'):
-            if self.skip_inpainting_var.get():
+            if self.skip_inpainting_value:
                 # Hide quality options when inpainting is skipped
                 self.inpaint_quality_frame.pack_forget()
             else:
@@ -4472,40 +4580,61 @@ class MangaTranslationTab:
 
     def _toggle_inpaint_visibility(self):
         """Show/hide inpainting options based on skip toggle"""
-        if self.skip_inpainting_var.get():
+        # Update the value from the checkbox
+        self.skip_inpainting_value = self.skip_inpainting_checkbox.isChecked()
+        
+        if self.skip_inpainting_value:
             # Hide all inpainting options
-            self.inpaint_method_frame.pack_forget()
-            self.cloud_inpaint_frame.pack_forget()
-            self.local_inpaint_frame.pack_forget()
-            self.inpaint_separator.pack_forget()  # Hide separator
+            self.inpaint_method_frame.hide()
+            self.cloud_inpaint_frame.hide()
+            self.local_inpaint_frame.hide()
+            self.inpaint_separator.hide()  # Hide separator
         else:
             # Show method selection
-            self.inpaint_method_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
-            self.inpaint_separator.pack(fill=tk.X, pady=(10, 10))  # Show separator
+            self.inpaint_method_frame.show()
+            self.inpaint_separator.show()  # Show separator
             self._on_inpaint_method_change()
         
         self._save_rendering_settings()
 
     def _on_inpaint_method_change(self):
         """Show appropriate inpainting settings based on method"""
-        method = self.inpaint_method_var.get()
+        # Determine current method from radio buttons
+        if self.cloud_radio.isChecked():
+            method = 'cloud'
+        elif self.local_radio.isChecked():
+            method = 'local'
+        elif self.hybrid_radio.isChecked():
+            method = 'hybrid'
+        else:
+            method = 'local'  # Default fallback
+        
+        # Update the stored value
+        self.inpaint_method_value = method
         
         if method == 'cloud':
-            self.cloud_inpaint_frame.pack(fill=tk.X, pady=5, after=self.inpaint_method_frame)
-            self.local_inpaint_frame.pack_forget()
+            self.cloud_inpaint_frame.show()
+            self.local_inpaint_frame.hide()
         elif method == 'local':
-            self.local_inpaint_frame.pack(fill=tk.X, pady=10, after=self.inpaint_method_frame)
-            self.cloud_inpaint_frame.pack_forget()
+            self.local_inpaint_frame.show()
+            self.cloud_inpaint_frame.hide()
         elif method == 'hybrid':
             # Show both frames for hybrid
-            self.local_inpaint_frame.pack(fill=tk.X, pady=5, after=self.inpaint_method_frame)
-            self.cloud_inpaint_frame.pack(fill=tk.X, pady=5, after=self.local_inpaint_frame)
+            self.local_inpaint_frame.show()
+            self.cloud_inpaint_frame.show()
         
         self._save_rendering_settings()
 
-    def _on_local_model_change(self, event=None):
+    def _on_local_model_change(self, new_model_type=None):
         """Handle model type change and auto-load if model exists"""
-        model_type = self.local_model_type_var.get()
+        # Get model type from combo box (PySide6)
+        if new_model_type is None:
+            model_type = self.local_model_combo.currentText()
+        else:
+            model_type = new_model_type
+        
+        # Update stored value
+        self.local_model_type_value = model_type
         
         # Update description
         model_desc = {
@@ -4516,55 +4645,54 @@ class MangaTranslationTab:
             'sd_local': 'Stable Diffusion (Anime)',
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
+            'lama_onnx': 'LaMa ONNX (Optimized)',
         }
-        self.model_desc_label.config(text=model_desc.get(model_type, ''))
+        self.model_desc_label.setText(model_desc.get(model_type, ''))
         
         # Check for saved path for this model type
         saved_path = self.main_gui.config.get(f'manga_{model_type}_model_path', '')
         
         if saved_path and os.path.exists(saved_path):
             # Update the path display
-            self.local_model_path_var.set(saved_path)
-            self.local_model_status_label.config(text="⏳ Loading saved model...", fg='orange')
+            self.local_model_entry.setText(saved_path)
+            self.local_model_path_value = saved_path
+            self.local_model_status_label.setText("⏳ Loading saved model...")
+            self.local_model_status_label.setStyleSheet("color: orange;")
             
-            # Auto-load the model after a short delay
-            self.dialog.after(100, lambda: self._try_load_model(model_type, saved_path))
+            # Auto-load the model after a short delay using QTimer
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, lambda: self._try_load_model(model_type, saved_path))
         else:
             # Clear the path display
-            self.local_model_path_var.set("")
-            self.local_model_status_label.config(text="No model loaded", fg='gray')
+            self.local_model_entry.setText("")
+            self.local_model_path_value = ""
+            self.local_model_status_label.setText("No model loaded")
+            self.local_model_status_label.setStyleSheet("color: gray;")
         
         self._save_rendering_settings()
 
     def _browse_local_model(self):
         """Browse for local inpainting model and auto-load"""
-        model_type = self.local_model_type_var.get()
+        from PySide6.QtWidgets import QFileDialog
+        from PySide6.QtCore import QTimer
+        
+        model_type = self.local_model_type_value
         
         if model_type == 'sd_local':
-            filetypes = [
-                ("Model files", "*.safetensors *.pt *.pth *.ckpt *.onnx"),
-                ("SafeTensors", "*.safetensors"),
-                ("Checkpoint files", "*.ckpt"),
-                ("PyTorch models", "*.pt *.pth"),
-                ("ONNX models", "*.onnx"),
-                ("All files", "*.*")
-            ]
+            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
         else:
-            filetypes = [
-                ("Model files", "*.pt *.pth *.ckpt *.onnx"),
-                ("Checkpoint files", "*.ckpt"),
-                ("PyTorch models", "*.pt *.pth"),
-                ("ONNX models", "*.onnx"),
-                ("All files", "*.*")
-            ]
+            filter_str = "Model files (*.pt *.pth *.ckpt *.onnx);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
         
-        path = filedialog.askopenfilename(
-            title=f"Select {model_type.upper()} Model",
-            filetypes=filetypes
+        path, _ = QFileDialog.getOpenFileName(
+            self.dialog,
+            f"Select {model_type.upper()} Model",
+            "",
+            filter_str
         )
         
         if path:
-            self.local_model_path_var.set(path)
+            self.local_model_entry.setText(path)
+            self.local_model_path_value = path
             # Save to config
             self.main_gui.config[f'manga_{model_type}_model_path'] = path
             self._save_rendering_settings()
@@ -4572,28 +4700,34 @@ class MangaTranslationTab:
             # Update status first
             self._update_local_model_status()
             
-            # Auto-load the selected model
-            self.dialog.after(100, lambda: self._try_load_model(model_type, path))
+            # Auto-load the selected model using QTimer
+            QTimer.singleShot(100, lambda: self._try_load_model(model_type, path))
 
     def _click_load_local_model(self):
         """Manually trigger loading of the selected local inpainting model"""
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import QTimer
+        
         try:
-            model_type = self.local_model_type_var.get() if hasattr(self, 'local_model_type_var') else None
-            path = self.local_model_path_var.get() if hasattr(self, 'local_model_path_var') else ''
+            model_type = self.local_model_type_value if hasattr(self, 'local_model_type_value') else None
+            path = self.local_model_path_value if hasattr(self, 'local_model_path_value') else ''
             if not model_type or not path:
-                messagebox.showinfo("Load Model", "Please select a model file first using the Browse button.")
+                QMessageBox.information(self.dialog, "Load Model", "Please select a model file first using the Browse button.")
                 return
-            # Defer to keep UI responsive
-            self.dialog.after(50, lambda: self._try_load_model(model_type, path))
+            # Defer to keep UI responsive using QTimer
+            QTimer.singleShot(50, lambda: self._try_load_model(model_type, path))
         except Exception:
             pass
 
     def _try_load_model(self, method: str, model_path: str):
         """Try to load a model and update status (runs loading on a background thread)."""
+        from PySide6.QtCore import QTimer, QMetaObject, Qt, Q_ARG
+        
         try:
             # Show loading status immediately
-            self.local_model_status_label.config(text="⏳ Loading model...", fg='orange')
-            self.dialog.update_idletasks()
+            self.local_model_status_label.setText("⏳ Loading model...")
+            self.local_model_status_label.setStyleSheet("color: orange;")
+            self.dialog.repaint()  # Force immediate update
             self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
 
             def do_load():
@@ -4605,14 +4739,13 @@ class MangaTranslationTab:
                 except Exception as e:
                     self.main_gui.append_log(f"❌ Error loading model: {e}")
                     ok = False
-                # Update UI on main thread
+                
+                # Update UI on main thread using QMetaObject.invokeMethod
                 def _after():
                     if ok:
                         self._update_local_model_status()
-                        self.local_model_status_label.config(
-                            text=f"✅ {method.upper()} model loaded successfully!",
-                            fg='green'
-                        )
+                        self.local_model_status_label.setText(f"✅ {method.upper()} model loaded successfully!")
+                        self.local_model_status_label.setStyleSheet("color: green;")
                         self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
                         if hasattr(self, 'translator') and self.translator:
                             for attr in ('local_inpainter', '_last_local_method', '_last_local_model_path'):
@@ -4621,44 +4754,41 @@ class MangaTranslationTab:
                                         delattr(self.translator, attr)
                                     except Exception:
                                         pass
-                        self.dialog.after(3000, self._update_local_model_status)
+                        QTimer.singleShot(3000, self._update_local_model_status)
                     else:
-                        self.local_model_status_label.config(
-                            text="⚠️ Model file found but failed to load",
-                            fg='orange'
-                        )
+                        self.local_model_status_label.setText("⚠️ Model file found but failed to load")
+                        self.local_model_status_label.setStyleSheet("color: orange;")
                         self.main_gui.append_log("⚠️ Model file found but failed to load")
+                
                 try:
-                    self.dialog.after(0, _after)
+                    QTimer.singleShot(0, _after)
                 except Exception:
                     pass
+            
             # Fire background loader
             threading.Thread(target=do_load, daemon=True).start()
             return True
         except Exception as e:
             try:
-                self.local_model_status_label.config(text=f"❌ Error: {str(e)[:50]}", fg='red')
+                self.local_model_status_label.setText(f"❌ Error: {str(e)[:50]}")
+                self.local_model_status_label.setStyleSheet("color: red;")
             except Exception:
                 pass
             self.main_gui.append_log(f"❌ Error loading model: {e}")
             return False
-            self.local_model_status_label.config(
-                text=f"❌ Error: {str(e)[:50]}",
-                fg='red'
-            )
-            self.main_gui.append_log(f"❌ Error loading model: {str(e)}")
-            return False
         
     def _update_local_model_status(self):
         """Update local model status display"""
-        path = self.local_model_path_var.get()
+        path = self.local_model_path_value if hasattr(self, 'local_model_path_value') else ''
         
         if not path:
-            self.local_model_status_label.config(text="⚠️ No model selected", fg='orange')
+            self.local_model_status_label.setText("⚠️ No model selected")
+            self.local_model_status_label.setStyleSheet("color: orange;")
             return
         
         if not os.path.exists(path):
-            self.local_model_status_label.config(text="❌ Model file not found", fg='red')
+            self.local_model_status_label.setText("❌ Model file not found")
+            self.local_model_status_label.setStyleSheet("color: red;")
             return
         
         # Check for ONNX cache
@@ -4669,29 +4799,23 @@ class MangaTranslationTab:
                 model_hash = hashlib.md5(path.encode()).hexdigest()[:8]
                 onnx_files = [f for f in os.listdir(onnx_dir) if model_hash in f]
                 if onnx_files:
-                    self.local_model_status_label.config(
-                        text="✅ Model ready (ONNX cached)",
-                        fg='green'
-                    )
+                    self.local_model_status_label.setText("✅ Model ready (ONNX cached)")
+                    self.local_model_status_label.setStyleSheet("color: green;")
                 else:
-                    self.local_model_status_label.config(
-                        text="ℹ️ Will convert to ONNX on first use",
-                        fg='blue'
-                    )
+                    self.local_model_status_label.setText("ℹ️ Will convert to ONNX on first use")
+                    self.local_model_status_label.setStyleSheet("color: blue;")
             else:
-                self.local_model_status_label.config(
-                    text="ℹ️ Will convert to ONNX on first use",
-                    fg='blue'
-                )
+                self.local_model_status_label.setText("ℹ️ Will convert to ONNX on first use")
+                self.local_model_status_label.setStyleSheet("color: blue;")
         else:
-            self.local_model_status_label.config(
-                text="✅ ONNX model ready",
-                fg='green'
-            )
+            self.local_model_status_label.setText("✅ ONNX model ready")
+            self.local_model_status_label.setStyleSheet("color: green;")
 
     def _download_model(self):
         """Actually download the model for the selected type"""
-        model_type = self.local_model_type_var.get()
+        from PySide6.QtWidgets import QMessageBox
+        
+        model_type = self.local_model_type_value
         
         # Define URLs for each model type
         model_urls = {
@@ -4709,7 +4833,7 @@ class MangaTranslationTab:
         url = model_urls.get(model_type, '')
         
         if not url:
-            messagebox.showinfo("Manual Download", 
+            QMessageBox.information(self.dialog, "Manual Download",
                 f"Please manually download and browse for {model_type} model")
             return
         
@@ -4733,9 +4857,11 @@ class MangaTranslationTab:
         
         # Check if already exists
         if os.path.exists(save_path):
-            self.local_model_path_var.set(save_path)
-            self.local_model_status_label.config(text="✅ Model already downloaded")
-            messagebox.showinfo("Model Ready", f"Model already exists at:\n{save_path}")
+            self.local_model_entry.setText(save_path)
+            self.local_model_path_value = save_path
+            self.local_model_status_label.setText("✅ Model already downloaded")
+            self.local_model_status_label.setStyleSheet("color: green;")
+            QMessageBox.information(self.dialog, "Model Ready", f"Model already exists at:\n{save_path}")
             return
         
         # Download the model
@@ -4745,57 +4871,42 @@ class MangaTranslationTab:
         """Perform the actual download with progress indication"""
         import threading
         import requests
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton
+        from PySide6.QtCore import Qt, QTimer
         
         # Create a progress dialog
-        progress_dialog = tk.Toplevel(self.dialog)
-        progress_dialog.title(f"Downloading {model_name.upper()} Model")
-        progress_dialog.geometry("400x150")
-        progress_dialog.transient(self.dialog)
-        progress_dialog.grab_set()
+        progress_dialog = QDialog(self.dialog)
+        progress_dialog.setWindowTitle(f"Downloading {model_name.upper()} Model")
+        progress_dialog.setFixedSize(400, 150)
+        progress_dialog.setModal(True)
         
-        # Center the dialog
-        progress_dialog.update_idletasks()
-        x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
-        y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
-        progress_dialog.geometry(f"+{x}+{y}")
+        layout = QVBoxLayout(progress_dialog)
         
         # Progress label
-        progress_label = tk.Label(progress_dialog, text="⏳ Downloading...", font=('Arial', 10))
-        progress_label.pack(pady=20)
+        progress_label = QLabel("⏳ Downloading...")
+        progress_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(progress_label)
         
         # Progress bar
-        progress_var = tk.DoubleVar()
-        try:
-            # Try to use our custom progress bar style
-            progress_bar = ttk.Progressbar(
-                progress_dialog,
-                length=350,
-                mode='determinate',
-                variable=progress_var,
-                style="MangaProgress.Horizontal.TProgressbar"
-            )
-        except Exception:
-            # Fallback to default if style not available yet
-            progress_bar = ttk.Progressbar(
-                progress_dialog,
-                length=350,
-                mode='determinate',
-                variable=progress_var
-            )
-        progress_bar.pack(pady=10)
+        progress_bar = QProgressBar()
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(100)
+        progress_bar.setValue(0)
+        layout.addWidget(progress_bar)
         
         # Status label
-        status_label = tk.Label(progress_dialog, text="0%", font=('Arial', 9))
-        status_label.pack()
+        status_label = QLabel("0%")
+        status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(status_label)
         
         # Cancel flag
         cancel_download = {'value': False}
         
         def on_cancel():
             cancel_download['value'] = True
-            progress_dialog.destroy()
+            progress_dialog.close()
         
-        progress_dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        progress_dialog.closeEvent = lambda event: on_cancel()
         
         def download_thread():
             try:
@@ -4822,15 +4933,15 @@ class MangaTranslationTab:
                             # Update progress
                             if total_size > 0:
                                 progress = (downloaded / total_size) * 100
-                                progress_dialog.after(0, lambda p=progress: [
-                                    progress_var.set(p),
-                                    status_label.config(text=f"{p:.1f}%"),
-                                    progress_label.config(text=f"⏳ Downloading... {downloaded//1024//1024}MB / {total_size//1024//1024}MB")
+                                QTimer.singleShot(0, lambda p=progress, d=downloaded, t=total_size: [
+                                    progress_bar.setValue(int(p)),
+                                    status_label.setText(f"{p:.1f}%"),
+                                    progress_label.setText(f"⏳ Downloading... {d//1024//1024}MB / {t//1024//1024}MB")
                                 ])
                 
                 # Success - update UI in main thread
-                progress_dialog.after(0, lambda: [
-                    progress_dialog.destroy(),
+                QTimer.singleShot(0, lambda: [
+                    progress_dialog.close(),
                     self._download_complete(save_path, model_name)
                 ])
                 
@@ -4838,53 +4949,63 @@ class MangaTranslationTab:
                 # Error - update UI in main thread
                 if not cancel_download['value']:
                     error_msg = str(e)  # Capture error before lambda
-                    progress_dialog.after(0, lambda: [
-                        progress_dialog.destroy(),
+                    QTimer.singleShot(0, lambda: [
+                        progress_dialog.close(),
                         self._download_failed(error_msg)
                     ])
             except Exception as e:
                 if not cancel_download['value']:
                     error_msg = str(e)  # Capture error before lambda
-                    progress_dialog.after(0, lambda: [
-                        progress_dialog.destroy(),
+                    QTimer.singleShot(0, lambda: [
+                        progress_dialog.close(),
                         self._download_failed(error_msg)
                     ])
         
         # Start download in background thread
         thread = threading.Thread(target=download_thread, daemon=True)
         thread.start()
+        
+        # Show dialog
+        progress_dialog.exec()
 
     def _download_complete(self, save_path: str, model_name: str):
         """Handle successful download"""
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import QTimer
+        
         # Update the model path entry
-        self.local_model_path_var.set(save_path)
+        self.local_model_entry.setText(save_path)
+        self.local_model_path_value = save_path
         
         # Save to config
         self.main_gui.config[f'manga_{model_name}_model_path'] = save_path
         self._save_rendering_settings()
         
         # Auto-load the downloaded model
-        self.local_model_status_label.config(text="⏳ Loading downloaded model...", fg='orange')
+        self.local_model_status_label.setText("⏳ Loading downloaded model...")
+        self.local_model_status_label.setStyleSheet("color: orange;")
         
         def load_after_download():
             if self._try_load_model(model_name, save_path):
-                messagebox.showinfo("Success", f"{model_name.upper()} model downloaded and loaded!")
+                QMessageBox.information(self.dialog, "Success", f"{model_name.upper()} model downloaded and loaded!")
             else:
-                messagebox.showinfo("Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
+                QMessageBox.information(self.dialog, "Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
         
-        self.dialog.after(100, load_after_download)
+        QTimer.singleShot(100, load_after_download)
         
         # Log to main GUI
         self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
 
     def _download_failed(self, error: str):
         """Handle download failure"""
-        messagebox.showerror("Download Failed", f"Failed to download model:\n{error}")
+        from PySide6.QtWidgets import QMessageBox
+        
+        QMessageBox.critical(self.dialog, "Download Failed", f"Failed to download model:\n{error}")
         self.main_gui.append_log(f"❌ Model download failed: {error}")
 
     def _show_model_info(self):
         """Show information about models"""
-        model_type = self.local_model_type_var.get()
+        model_type = self.local_model_type_value
         
         info = {
             'aot': "AOT GAN Model:\n\n"
@@ -4947,31 +5068,30 @@ class MangaTranslationTab:
                         "• Can use custom prompts"
         }
         
-        # Create info dialog
-        info_dialog = tk.Toplevel(self.dialog)
-        info_dialog.title(f"{model_type.upper()} Model Information")
-        info_dialog.geometry("450x350")
-        info_dialog.transient(self.dialog)
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        from PySide6.QtCore import Qt
         
-        # Center the dialog
-        info_dialog.update_idletasks()
-        x = (info_dialog.winfo_screenwidth() // 2) - (info_dialog.winfo_width() // 2)
-        y = (info_dialog.winfo_screenheight() // 2) - (info_dialog.winfo_height() // 2)
-        info_dialog.geometry(f"+{x}+{y}")
+        # Create info dialog
+        info_dialog = QDialog(self.dialog)
+        info_dialog.setWindowTitle(f"{model_type.upper()} Model Information")
+        info_dialog.setFixedSize(450, 350)
+        info_dialog.setModal(True)
+        
+        layout = QVBoxLayout(info_dialog)
         
         # Info text
-        text_widget = tk.Text(info_dialog, wrap=tk.WORD, padx=20, pady=20)
-        text_widget.pack(fill='both', expand=True)
-        text_widget.insert(1.0, info.get(model_type, "Please select a model type first"))
-        text_widget.config(state='disabled')
+        text_widget = QTextEdit()
+        text_widget.setReadOnly(True)
+        text_widget.setPlainText(info.get(model_type, "Please select a model type first"))
+        layout.addWidget(text_widget)
         
         # Close button
-        tb.Button(
-            info_dialog,
-            text="Close",
-            command=info_dialog.destroy,
-            bootstyle="secondary"
-        ).pack(pady=10)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(info_dialog.close)
+        close_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        layout.addWidget(close_btn)
+        
+        info_dialog.exec()
 
     def _toggle_inpaint_controls_visibility(self):
             """Toggle visibility of inpaint controls (mask expansion and passes) based on skip inpainting setting"""
@@ -4979,16 +5099,21 @@ class MangaTranslationTab:
             if not hasattr(self, 'inpaint_controls_frame'):
                 return
                 
-            if self.skip_inpainting_var.get():
-                self.inpaint_controls_frame.pack_forget()
+            if self.skip_inpainting_value:
+                self.inpaint_controls_frame.hide()
             else:
-                # Pack it back in the right position
-                self.inpaint_controls_frame.pack(fill=tk.X, pady=5, after=self.inpaint_quality_frame)
+                # Show it back
+                self.inpaint_controls_frame.show()
 
     def _configure_inpaint_api(self):
         """Configure cloud inpainting API"""
+        from PySide6.QtWidgets import QMessageBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
+        from PySide6.QtCore import Qt
+        import webbrowser
+        
         # Show instructions
-        result = messagebox.askyesno(
+        result = QMessageBox.question(
+            self.dialog,
             "Configure Cloud Inpainting",
             "Cloud inpainting uses Replicate API for questionable results.\n\n"
             "1. Go to replicate.com and sign up (free tier available?)\n"
@@ -4996,146 +5121,99 @@ class MangaTranslationTab:
             "3. Enter it here\n\n"
             "Pricing: ~$0.0023 per image?\n"
             "Free tier: ~100 images per month?\n\n"
-            "Would you like to proceed?"
+            "Would you like to proceed?",
+            QMessageBox.Yes | QMessageBox.No
         )
         
-        if not result:
+        if result != QMessageBox.Yes:
             return
         
         # Open Replicate page
-        import webbrowser
         webbrowser.open("https://replicate.com/account/api-tokens")
         
-        # Get API key from user using WindowManager
-        dialog = self.main_gui.wm.create_simple_dialog(
-            self.main_gui.master,
-            "Replicate API Key",
-            width=None,
-            height=None,
-            hide_initially=True  # Hide initially so we can position it
-        )
+        # Create API key input dialog
+        api_dialog = QDialog(self.dialog)
+        api_dialog.setWindowTitle("Replicate API Key")
+        api_dialog.setFixedSize(400, 150)
+        api_dialog.setModal(True)
         
-        # Force the height by overriding after creation
-        dialog.update_idletasks()  # Process pending geometry
-        dialog.minsize(None, None)   # Set minimum size
-        dialog.maxsize(None, None)   # Set maximum size to lock it
+        layout = QVBoxLayout(api_dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
         
-        # Get cursor position
-        cursor_x = self.main_gui.master.winfo_pointerx()
-        cursor_y = self.main_gui.master.winfo_pointery()
-        
-        # Offset the dialog slightly so it doesn't appear directly under cursor
-        # This prevents the cursor from immediately being over a button
-        offset_x = 10
-        offset_y = 10
-        
-        # Ensure dialog doesn't go off-screen
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        
-        # Adjust position if it would go off-screen
-        if cursor_x + 400 + offset_x > screen_width:
-            cursor_x = screen_width - 400 - offset_x
-        if cursor_y + 150 + offset_y > screen_height:
-            cursor_y = screen_height - 150 - offset_y
-        
-        # Set position and show
-        dialog.geometry(f"400x150+{cursor_x + offset_x}+{cursor_y + offset_y}")
-        dialog.deiconify()  # Show the dialog
-        
-        # Variables
-        api_key_var = tk.StringVar()
-        result = {'key': None}
-        
-        # Content
-        frame = tk.Frame(dialog, padx=20, pady=20)
-        frame.pack(fill='both', expand=True)
-        
-        tk.Label(frame, text="Enter your Replicate API key:").pack(anchor='w', pady=(0, 10))
+        # Label
+        label = QLabel("Enter your Replicate API key:")
+        layout.addWidget(label)
         
         # Entry with show/hide
-        entry_frame = tk.Frame(frame)
-        entry_frame.pack(fill='x')
-        
-        entry = tk.Entry(entry_frame, textvariable=api_key_var, show='*', width=20)
-        entry.pack(side='left', fill='x', expand=True)
+        entry_layout = QHBoxLayout()
+        entry = QLineEdit()
+        entry.setEchoMode(QLineEdit.Password)
+        entry_layout.addWidget(entry)
         
         # Toggle show/hide
+        show_btn = QPushButton("Show")
+        show_btn.setFixedWidth(60)
         def toggle_show():
-            current = entry.cget('show')
-            entry.config(show='' if current else '*')
-            show_btn.config(text='Hide' if current else 'Show')
+            if entry.echoMode() == QLineEdit.Password:
+                entry.setEchoMode(QLineEdit.Normal)
+                show_btn.setText("Hide")
+            else:
+                entry.setEchoMode(QLineEdit.Password)
+                show_btn.setText("Show")
+        show_btn.clicked.connect(toggle_show)
+        entry_layout.addWidget(show_btn)
         
-        show_btn = tb.Button(entry_frame, text="Show", command=toggle_show, width=8)
-        show_btn.pack(side='left', padx=(10, 0))
+        layout.addLayout(entry_layout)
         
         # Buttons
-        btn_frame = tk.Frame(frame)
-        btn_frame.pack(fill='x', pady=(20, 0))
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
         
-        def on_ok():
-            result['key'] = api_key_var.get().strip()
-            dialog.destroy()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(api_dialog.reject)
+        btn_layout.addWidget(cancel_btn)
         
-        tb.Button(btn_frame, text="OK", command=on_ok, bootstyle="success").pack(side='right', padx=(5, 0))
-        tb.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side='right')
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        ok_btn.clicked.connect(api_dialog.accept)
+        btn_layout.addWidget(ok_btn)
         
-        # Focus and bindings
-        entry.focus_set()
-        dialog.bind('<Return>', lambda e: on_ok())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        layout.addLayout(btn_layout)
         
-        # Wait for dialog
-        dialog.wait_window()
+        # Focus and key bindings
+        entry.setFocus()
         
-        api_key = result['key']
-        
-        if api_key:
-            try:
-                # Save the API key
-                self.main_gui.config['replicate_api_key'] = api_key
-                self.main_gui.save_config(show_message=False)
-                
-                # Update UI
-                self.inpaint_api_status_label.config(
-                    text="✅ Cloud inpainting configured",
-                    fg='green'
-                )
-                
-                # Add clear button if it doesn't exist
-                clear_button_exists = False
-                for widget in self.inpaint_api_status_label.master.winfo_children():
-                    if isinstance(widget, tb.Button) and widget.cget('text') == 'Clear':
-                        clear_button_exists = True
-                        break
-                
-                if not clear_button_exists:
-                    tb.Button(
-                        self.inpaint_api_status_label.master,
-                        text="Clear",
-                        command=self._clear_inpaint_api,
-                        bootstyle="secondary"
-                    ).pack(side=tk.LEFT, padx=(5, 0))
-                
-                # Set flag on translator
-                if self.translator:
-                    self.translator.use_cloud_inpainting = True
-                    self.translator.replicate_api_key = api_key
+        # Execute dialog
+        if api_dialog.exec() == QDialog.Accepted:
+            api_key = entry.text().strip()
+            
+            if api_key:
+                try:
+                    # Save the API key
+                    self.main_gui.config['replicate_api_key'] = api_key
+                    self.main_gui.save_config(show_message=False)
                     
-                self._log("✅ Cloud inpainting API configured", "success")
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save API key:\n{str(e)}")
+                    # Update UI
+                    self.inpaint_api_status_label.setText("✅ Cloud inpainting configured")
+                    self.inpaint_api_status_label.setStyleSheet("color: green;")
+                    
+                    # Set flag on translator
+                    if self.translator:
+                        self.translator.use_cloud_inpainting = True
+                        self.translator.replicate_api_key = api_key
+                        
+                    self._log("✅ Cloud inpainting API configured", "success")
+                    
+                except Exception as e:
+                    QMessageBox.critical(self.dialog, "Error", f"Failed to save API key:\n{str(e)}")
 
     def _clear_inpaint_api(self):
         """Clear the inpainting API configuration"""
         self.main_gui.config['replicate_api_key'] = ''
         self.main_gui.save_config(show_message=False)
         
-        self.inpaint_api_status_label.config(
-            text="❌ Inpainting API not configured", 
-            fg='red'
-        )
+        self.inpaint_api_status_label.setText("❌ Inpainting API not configured")
+        self.inpaint_api_status_label.setStyleSheet("color: red;")
         
         if hasattr(self, 'translator') and self.translator:
             self.translator.use_cloud_inpainting = False
@@ -5143,22 +5221,18 @@ class MangaTranslationTab:
             
         self._log("🗑️ Cleared inpainting API configuration", "info")
         
-        # Find and destroy the clear button
-        for widget in self.inpaint_api_status_label.master.winfo_children():
-            if isinstance(widget, tb.Button) and widget.cget('text') == 'Clear':
-                widget.destroy()
-                break 
+        # Note: Clear button management would need to be handled differently in PySide6
+        # For now, we'll skip automatic button removal
             
     def _add_files(self):
         """Add image files (and CBZ archives) to the list"""
-        files = filedialog.askopenfilenames(
-            title="Select Manga Images or CBZ",
-            filetypes=[
-                ("Images / CBZ", "*.png *.jpg *.jpeg *.gif *.bmp *.webp *.cbz"),
-                ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-                ("Comic Book Zip", "*.cbz"),
-                ("All files", "*.*")
-            ]
+        from PySide6.QtWidgets import QFileDialog
+        
+        files, _ = QFileDialog.getOpenFileNames(
+            self.dialog,
+            "Select Manga Images or CBZ",
+            "",
+            "Images / CBZ (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.cbz);;Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;Comic Book Zip (*.cbz);;All files (*.*)"
         )
         
         if not files:
@@ -5205,7 +5279,7 @@ class MangaTranslationTab:
                                 target_path = os.path.join(root, fn)
                                 if target_path not in self.selected_files:
                                     self.selected_files.append(target_path)
-                                    self.file_listbox.insert(tk.END, os.path.basename(target_path))
+                                    self.file_listbox.addItem(os.path.basename(target_path))
                                     added += 1
                                 # Map extracted image to its CBZ job
                                 self.cbz_image_to_job[target_path] = path
@@ -5215,11 +5289,16 @@ class MangaTranslationTab:
             else:
                 if path not in self.selected_files:
                     self.selected_files.append(path)
-                    self.file_listbox.insert(tk.END, os.path.basename(path))
+                    self.file_listbox.addItem(os.path.basename(path))
     
     def _add_folder(self):
         """Add all images (and CBZ archives) from a folder"""
-        folder = filedialog.askdirectory(title="Select Folder with Manga Images or CBZ")
+        from PySide6.QtWidgets import QFileDialog
+        
+        folder = QFileDialog.getExistingDirectory(
+            self.dialog,
+            "Select Folder with Manga Images or CBZ"
+        )
         if not folder:
             return
         
@@ -5245,7 +5324,7 @@ class MangaTranslationTab:
             if any(lower.endswith(ext) for ext in image_extensions):
                 if filepath not in self.selected_files:
                     self.selected_files.append(filepath)
-                    self.file_listbox.insert(tk.END, filename)
+                    self.file_listbox.addItem(filename)
             elif lower.endswith(cbz_ext):
                 # Extract images from CBZ archive
                 try:
@@ -5274,7 +5353,7 @@ class MangaTranslationTab:
                                 target_path = os.path.join(root, fn)
                                 if target_path not in self.selected_files:
                                     self.selected_files.append(target_path)
-                                    self.file_listbox.insert(tk.END, os.path.basename(target_path))
+                                    self.file_listbox.addItem(os.path.basename(target_path))
                                     added += 1
                                 # Map extracted image to its CBZ job
                                 self.cbz_image_to_job[target_path] = filepath
@@ -5284,16 +5363,21 @@ class MangaTranslationTab:
     
     def _remove_selected(self):
         """Remove selected files from the list"""
-        selected_indices = list(self.file_listbox.curselection())
+        selected_items = self.file_listbox.selectedItems()
+        
+        if not selected_items:
+            return
         
         # Remove in reverse order to maintain indices
-        for index in reversed(selected_indices):
-            self.file_listbox.delete(index)
-            del self.selected_files[index]
+        for item in selected_items:
+            row = self.file_listbox.row(item)
+            self.file_listbox.takeItem(row)
+            if 0 <= row < len(self.selected_files):
+                del self.selected_files[row]
     
     def _clear_all(self):
         """Clear all files from the list"""
-        self.file_listbox.delete(0, tk.END)
+        self.file_listbox.clear()
         self.selected_files.clear()
     
     def _finalize_cbz_jobs(self):
@@ -5483,11 +5567,19 @@ class MangaTranslationTab:
             if threading.current_thread() == threading.main_thread():
                 # We're in the main thread, update directly
                 try:
-                    self.log_text.config(state='normal')
-                    self.log_text.insert(tk.END, message + '\n', level)
-                    self.log_text.see(tk.END)
-                finally:
-                    self.log_text.config(state='disabled')
+                    # PySide6 QTextEdit - append with color
+                    color_map = {
+                        'info': 'white',
+                        'success': 'green',
+                        'warning': 'orange',
+                        'error': 'red',
+                        'debug': 'lightblue'
+                    }
+                    color = color_map.get(level, 'white')
+                    self.log_text.setTextColor(QColor(color))
+                    self.log_text.append(message)
+                except Exception:
+                    pass
             else:
                 # We're in a background thread, use queue
                 self.update_queue.put(('log', message, level))
@@ -5522,16 +5614,15 @@ class MangaTranslationTab:
                 try:
                     c = chars[self._heartbeat_idx % len(chars)]
                     if hasattr(self, 'progress_label'):
-                        self.progress_label.config(text=f"Starting… {c}", fg='white')
+                        self.progress_label.setText(f"Starting… {c}")
+                        self.progress_label.setStyleSheet("color: white;")
                 except Exception:
                     pass
                 self._heartbeat_idx += 1
-                try:
-                    self.parent_frame.after(250, tick)
-                except Exception:
-                    pass
-            # Kick off on main thread
-            self.parent_frame.after(0, tick)
+                # Schedule next tick with QTimer
+                QTimer.singleShot(250, tick)
+            # Kick off
+            QTimer.singleShot(0, tick)
         except Exception:
             pass
 
@@ -5550,49 +5641,65 @@ class MangaTranslationTab:
                 if update[0] == 'log':
                     _, message, level = update
                     try:
-                        self.log_text.config(state='normal')
-                        self.log_text.insert(tk.END, message + '\n', level)
-                        self.log_text.see(tk.END)
-                    finally:
-                        self.log_text.config(state='disabled')
+                        # PySide6 QTextEdit
+                        color_map = {
+                            'info': 'white',
+                            'success': 'green',
+                            'warning': 'orange',
+                            'error': 'red',
+                            'debug': 'lightblue'
+                        }
+                        color = color_map.get(level, 'white')
+                        self.log_text.setTextColor(QColor(color))
+                        self.log_text.append(message)
+                    except Exception:
+                        pass
                     
                 elif update[0] == 'progress':
                     _, current, total, status = update
                     if total > 0:
                         percentage = (current / total) * 100
-                        self.progress_bar['value'] = percentage
+                        self.progress_bar.setValue(int(percentage))
                     
                     # Check if this is a stopped status and style accordingly
                     if "stopped" in status.lower() or "cancelled" in status.lower():
                         # Make the status more prominent for stopped translations
-                        self.progress_label.config(text=f"⏹️ {status}", fg='orange')
+                        self.progress_label.setText(f"⏹️ {status}")
+                        self.progress_label.setStyleSheet("color: orange;")
                     elif "complete" in status.lower() or "finished" in status.lower():
                         # Success status
-                        self.progress_label.config(text=f"✅ {status}", fg='green')
+                        self.progress_label.setText(f"✅ {status}")
+                        self.progress_label.setStyleSheet("color: green;")
                     elif "error" in status.lower() or "failed" in status.lower():
                         # Error status
-                        self.progress_label.config(text=f"❌ {status}", fg='red')
+                        self.progress_label.setText(f"❌ {status}")
+                        self.progress_label.setStyleSheet("color: red;")
                     else:
                         # Normal status - white for dark mode
-                        self.progress_label.config(text=status, fg='white')
+                        self.progress_label.setText(status)
+                        self.progress_label.setStyleSheet("color: white;")
                     
                 elif update[0] == 'current_file':
                     _, filename = update
                     # Style the current file display based on the status
                     if "stopped" in filename.lower() or "cancelled" in filename.lower():
-                        self.current_file_label.config(text=f"⏹️ {filename}", fg='orange')
+                        self.current_file_label.setText(f"⏹️ {filename}")
+                        self.current_file_label.setStyleSheet("color: orange;")
                     elif "complete" in filename.lower() or "finished" in filename.lower():
-                        self.current_file_label.config(text=f"✅ {filename}", fg='green')
+                        self.current_file_label.setText(f"✅ {filename}")
+                        self.current_file_label.setStyleSheet("color: green;")
                     elif "error" in filename.lower() or "failed" in filename.lower():
-                        self.current_file_label.config(text=f"❌ {filename}", fg='red')
+                        self.current_file_label.setText(f"❌ {filename}")
+                        self.current_file_label.setStyleSheet("color: red;")
                     else:
-                        self.current_file_label.config(text=f"Current: {filename}", fg='lightgray')
+                        self.current_file_label.setText(f"Current: {filename}")
+                        self.current_file_label.setStyleSheet("color: lightgray;")
                     
         except:
             pass
         
-        # Schedule next update
-        self.parent_frame.after(100, self._process_updates)
+        # Schedule next update with QTimer
+        QTimer.singleShot(100, self._process_updates)
 
     def load_local_inpainting_model(self, model_path):
         """Load a local inpainting model
@@ -5674,7 +5781,7 @@ class MangaTranslationTab:
         # Early feedback
         self._log("⏳ Preparing configuration...", "info")
         # Build OCR configuration
-        ocr_config = {'provider': self.ocr_provider_var.get()}
+        ocr_config = {'provider': self.ocr_provider_value}
 
         if ocr_config['provider'] == 'Qwen2-VL':
             qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
@@ -6112,7 +6219,7 @@ class MangaTranslationTab:
             self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
             self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
             self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
-            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
         
         # Stop heartbeat before launching worker; now regular progress takes over
         try:
@@ -6156,23 +6263,23 @@ class MangaTranslationTab:
         
         # Get text color and shadow color
         text_color = (
-            self.text_color_r.get(),
-            self.text_color_g.get(),
-            self.text_color_b.get()
+            self.text_color_r_value,
+            self.text_color_g_value,
+            self.text_color_b_value
         )
         shadow_color = (
-            self.shadow_color_r.get(),
-            self.shadow_color_g.get(),
-            self.shadow_color_b.get()
+            self.shadow_color_r_value,
+            self.shadow_color_g_value,
+            self.shadow_color_b_value
         )
         
         # Determine font size value based on mode
-        if self.font_size_mode_var.get() == 'multiplier':
+        if self.font_size_mode_value == 'multiplier':
             # Pass negative value to indicate multiplier mode
-            font_size = -self.font_size_multiplier_var.get()
+            font_size = -self.font_size_multiplier_value
         else:
             # Fixed mode - use the font size value directly
-            font_size = self.font_size_var.get() if self.font_size_var.get() > 0 else None
+            font_size = self.font_size_value if self.font_size_value > 0 else None
         
         # Apply concise logging toggle from Advanced settings
         try:
@@ -6183,38 +6290,38 @@ class MangaTranslationTab:
         
         # Push rendering settings to translator
         self.translator.update_text_rendering_settings(
-            bg_opacity=self.bg_opacity_var.get(),
-            bg_style=self.bg_style_var.get(),
-            bg_reduction=self.bg_reduction_var.get(),
+            bg_opacity=self.bg_opacity_value,
+            bg_style=self.bg_style_value,
+            bg_reduction=self.bg_reduction_value,
             font_style=self.selected_font_path,
             font_size=font_size,
             text_color=text_color,
-            shadow_enabled=self.shadow_enabled_var.get(),
+            shadow_enabled=self.shadow_enabled_value,
             shadow_color=shadow_color,
-            shadow_offset_x=self.shadow_offset_x_var.get(),
-            shadow_offset_y=self.shadow_offset_y_var.get(),
-            shadow_blur=self.shadow_blur_var.get(),
-            force_caps_lock=self.force_caps_lock_var.get()
+            shadow_offset_x=self.shadow_offset_x_value,
+            shadow_offset_y=self.shadow_offset_y_value,
+            shadow_blur=self.shadow_blur_value,
+            force_caps_lock=self.force_caps_lock_value
         )
         
         # Free-text-only background opacity toggle -> pass through to translator
         try:
-            if hasattr(self, 'free_text_only_bg_opacity_var'):
-                self.translator.free_text_only_bg_opacity = bool(self.free_text_only_bg_opacity_var.get())
+            if hasattr(self, 'free_text_only_bg_opacity_value'):
+                self.translator.free_text_only_bg_opacity = bool(self.free_text_only_bg_opacity_value)
         except Exception:
             pass
         
         # Update font mode and multiplier explicitly
-        self.translator.font_size_mode = self.font_size_mode_var.get()
-        self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
-        self.translator.min_readable_size = self.auto_min_size_var.get()
-        self.translator.max_font_size_limit = self.max_font_size_var.get()
-        self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
-        self.translator.force_caps_lock = self.force_caps_lock_var.get()
+        self.translator.font_size_mode = self.font_size_mode_value
+        self.translator.font_size_multiplier = self.font_size_multiplier_value
+        self.translator.min_readable_size = self.auto_min_size_value
+        self.translator.max_font_size_limit = self.max_font_size_value
+        self.translator.strict_text_wrapping = self.strict_text_wrapping_value
+        self.translator.force_caps_lock = self.force_caps_lock_value
         
         # Update constrain to bubble setting
-        if hasattr(self, 'constrain_to_bubble_var'):
-            self.translator.constrain_to_bubble = self.constrain_to_bubble_var.get()
+        if hasattr(self, 'constrain_to_bubble_value'):
+            self.translator.constrain_to_bubble = self.constrain_to_bubble_value
         
         # Handle inpainting mode (radio: skip/local/cloud/hybrid)
         mode = None
@@ -6259,27 +6366,27 @@ class MangaTranslationTab:
         
         # Log the applied rendering and inpainting settings
         self._log(f"Applied rendering settings:", "info")
-        self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
+        self._log(f"  Background: {self.bg_style_value} @ {int(self.bg_opacity_value/255*100)}% opacity", "info")
         import os
         self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
-        self._log(f"  Minimum Font Size: {self.auto_min_size_var.get()}pt", "info")
-        self._log(f"  Maximum Font Size: {self.max_font_size_var.get()}pt", "info")
-        self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_var.get() else 'Disabled (allow overflow)'}", "info")
-        if self.font_size_mode_var.get() == 'multiplier':
-            self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_var.get():.1f}x)", "info")
-            if hasattr(self, 'constrain_to_bubble_var'):
-                constraint_status = "constrained" if self.constrain_to_bubble_var.get() else "unconstrained"
+        self._log(f"  Minimum Font Size: {self.auto_min_size_value}pt", "info")
+        self._log(f"  Maximum Font Size: {self.max_font_size_value}pt", "info")
+        self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_value else 'Disabled (allow overflow)'}", "info")
+        if self.font_size_mode_value == 'multiplier':
+            self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_value:.1f}x)", "info")
+            if hasattr(self, 'constrain_to_bubble_value'):
+                constraint_status = "constrained" if self.constrain_to_bubble_value else "unconstrained"
                 self._log(f"  Text Constraint: {constraint_status}", "info")
         else:
-            size_text = f"{self.font_size_var.get()}pt" if self.font_size_var.get() > 0 else "Auto"
+            size_text = f"{self.font_size_value}pt" if self.font_size_value > 0 else "Auto"
             self._log(f"  Font Size: Fixed ({size_text})", "info")
         self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
-        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
+        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_value else 'Disabled'}", "info")
         try:
-            self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_var').get() else 'Disabled'}", "info")
+            self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_value', False) else 'Disabled'}", "info")
         except Exception:
             pass
-        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
     
     def _translation_worker(self):
         """Worker thread for translation"""
@@ -6394,7 +6501,7 @@ class MangaTranslationTab:
                         from manga_translator import MangaTranslator
                         import os
                         # Build full OCR config for this thread (mirror _start_translation)
-                        ocr_config = {'provider': self.ocr_provider_var.get()}
+                        ocr_config = {'provider': self.ocr_provider_value}
                         if ocr_config['provider'] == 'google':
                             google_creds = self.main_gui.config.get('google_vision_credentials', '') or \
                                            self.main_gui.config.get('google_cloud_credentials', '')
@@ -6456,7 +6563,7 @@ class MangaTranslationTab:
                         except Exception:
                             output_path = None
                         if not output_path:
-                            if self.create_subfolder_var.get():
+                            if self.create_subfolder_value:
                                 output_dir = os.path.join(os.path.dirname(filepath), 'translated')
                                 os.makedirs(output_dir, exist_ok=True)
                                 output_path = os.path.join(output_dir, filename)
@@ -6611,7 +6718,7 @@ class MangaTranslationTab:
                         if job_output_path:
                             output_path = job_output_path
                         else:
-                            if self.create_subfolder_var.get():
+                            if self.create_subfolder_value:
                                 output_dir = os.path.join(os.path.dirname(filepath), 'translated')
                                 os.makedirs(output_dir, exist_ok=True)
                                 output_path = os.path.join(output_dir, filename)
