@@ -2297,17 +2297,17 @@ Text to analyze:
                             if not rec or not rec.get('spares'):
                                 bd = BubbleDetector()
                                 
-                                # Show more specific status
+                                # Load the appropriate model based on detector type
+                                status_label.config(text=f"Downloading {detector_name} model...")
                                 if detector_type == 'rtdetr_onnx':
-                                    status_label.config(text=f"Initializing {detector_name} (ONNX runtime)...")
                                     model_repo = model_url if model_url else 'ogkalu/comic-text-and-bubble-detector'
-                                    if hasattr(bd, '_ensure_rtdetr_onnx_loaded'):
-                                        bd._ensure_rtdetr_onnx_loaded(model_repo)
-                                    else:
-                                        # Trigger loading with dummy detection
-                                        import numpy as np
-                                        dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
-                                        bd.detect_bubbles(dummy_img)
+                                    bd.load_rtdetr_onnx_model(model_repo)
+                                elif detector_type == 'rtdetr':
+                                    bd.load_rtdetr_model()
+                                elif detector_type == 'yolo':
+                                    if model_url:
+                                        bd.load_model(model_url)
+                                status_label.config(text=f"Initializing {detector_name}...")
                                 
                                 # Store in pool
                                 if not rec:
