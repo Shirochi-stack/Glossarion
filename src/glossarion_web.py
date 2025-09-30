@@ -1475,21 +1475,167 @@ class GlossarionWeb:
                         )
                     
                     # Button handlers for model management
-                    def download_models_handler():
-                        return "Model download functionality will be available soon. Models are automatically downloaded on first use."
+                    def download_models_handler(detector_type_val, inpaint_method_val):
+                        """Download selected models"""
+                        messages = []
+                        
+                        try:
+                            # Download bubble detection model
+                            if detector_type_val:
+                                messages.append(f"📥 Downloading {detector_type_val} bubble detector...")
+                                try:
+                                    from bubble_detector import BubbleDetector
+                                    bd = BubbleDetector()
+                                    
+                                    if detector_type_val == "rtdetr_onnx":
+                                        if bd.load_rtdetr_onnx_model():
+                                            messages.append("✅ RT-DETR ONNX model downloaded successfully")
+                                        else:
+                                            messages.append("❌ Failed to download RT-DETR ONNX model")
+                                    elif detector_type_val == "rtdetr":
+                                        if bd.load_rtdetr_model():
+                                            messages.append("✅ RT-DETR model downloaded successfully")
+                                        else:
+                                            messages.append("❌ Failed to download RT-DETR model")
+                                    elif detector_type_val == "yolo":
+                                        messages.append("ℹ️ YOLO models are downloaded automatically on first use")
+                                except Exception as e:
+                                    messages.append(f"❌ Error downloading detector: {str(e)}")
+                            
+                            # Download inpainting model
+                            if inpaint_method_val:
+                                messages.append(f"\n📥 Downloading {inpaint_method_val} inpainting model...")
+                                try:
+                                    from local_inpainter import LocalInpainter, LAMA_JIT_MODELS
+                                    
+                                    inpainter = LocalInpainter({})
+                                    
+                                    # Map method names to download keys
+                                    method_map = {
+                                        'anime_onnx': 'anime_onnx',
+                                        'anime': 'anime',
+                                        'lama': 'lama',
+                                        'lama_onnx': 'lama_onnx',
+                                        'aot': 'aot',
+                                        'aot_onnx': 'aot_onnx'
+                                    }
+                                    
+                                    method_key = method_map.get(inpaint_method_val)
+                                    if method_key and method_key in LAMA_JIT_MODELS:
+                                        model_info = LAMA_JIT_MODELS[method_key]
+                                        messages.append(f"Downloading {model_info['name']}...")
+                                        
+                                        model_path = inpainter.download_jit_model(method_key)
+                                        if model_path:
+                                            messages.append(f"✅ {model_info['name']} downloaded to: {model_path}")
+                                        else:
+                                            messages.append(f"❌ Failed to download {model_info['name']}")
+                                    else:
+                                        messages.append(f"ℹ️ {inpaint_method_val} is downloaded automatically on first use")
+                                        
+                                except Exception as e:
+                                    messages.append(f"❌ Error downloading inpainting model: {str(e)}")
+                            
+                            if not messages:
+                                messages.append("ℹ️ No models selected for download")
+                                
+                        except Exception as e:
+                            messages.append(f"❌ Error during download: {str(e)}")
+                        
+                        return gr.Info("\n".join(messages))
                     
-                    def load_models_handler():
-                        return "Models are loaded automatically when needed. Manual loading is not required."
+                    def load_models_handler(detector_type_val, inpaint_method_val):
+                        """Load selected models into memory"""
+                        messages = []
+                        
+                        try:
+                            # Load bubble detection model
+                            if detector_type_val:
+                                messages.append(f"📦 Loading {detector_type_val} bubble detector...")
+                                try:
+                                    from bubble_detector import BubbleDetector
+                                    bd = BubbleDetector()
+                                    
+                                    if detector_type_val == "rtdetr_onnx":
+                                        if bd.load_rtdetr_onnx_model():
+                                            messages.append("✅ RT-DETR ONNX model loaded successfully")
+                                        else:
+                                            messages.append("❌ Failed to load RT-DETR ONNX model")
+                                    elif detector_type_val == "rtdetr":
+                                        if bd.load_rtdetr_model():
+                                            messages.append("✅ RT-DETR model loaded successfully")
+                                        else:
+                                            messages.append("❌ Failed to load RT-DETR model")
+                                    elif detector_type_val == "yolo":
+                                        messages.append("ℹ️ YOLO models are loaded automatically when needed")
+                                except Exception as e:
+                                    messages.append(f"❌ Error loading detector: {str(e)}")
+                            
+                            # Load inpainting model
+                            if inpaint_method_val:
+                                messages.append(f"\n📦 Loading {inpaint_method_val} inpainting model...")
+                                try:
+                                    from local_inpainter import LocalInpainter, LAMA_JIT_MODELS
+                                    import os
+                                    
+                                    inpainter = LocalInpainter({})
+                                    
+                                    # Map method names to model keys
+                                    method_map = {
+                                        'anime_onnx': 'anime_onnx',
+                                        'anime': 'anime',
+                                        'lama': 'lama',
+                                        'lama_onnx': 'lama_onnx',
+                                        'aot': 'aot',
+                                        'aot_onnx': 'aot_onnx'
+                                    }
+                                    
+                                    method_key = method_map.get(inpaint_method_val)
+                                    if method_key:
+                                        # First check if model exists, download if not
+                                        if method_key in LAMA_JIT_MODELS:
+                                            model_info = LAMA_JIT_MODELS[method_key]
+                                            cache_dir = os.path.expanduser('~/.cache/inpainting')
+                                            model_filename = os.path.basename(model_info['url'])
+                                            model_path = os.path.join(cache_dir, model_filename)
+                                            
+                                            if not os.path.exists(model_path):
+                                                messages.append(f"Model not found, downloading first...")
+                                                model_path = inpainter.download_jit_model(method_key)
+                                                if not model_path:
+                                                    messages.append(f"❌ Failed to download model")
+                                                    return gr.Info("\n".join(messages))
+                                            
+                                            # Now load the model
+                                            if inpainter.load_model(method_key, model_path):
+                                                messages.append(f"✅ {model_info['name']} loaded successfully")
+                                            else:
+                                                messages.append(f"❌ Failed to load {model_info['name']}")
+                                        else:
+                                            messages.append(f"ℹ️ {inpaint_method_val} will be loaded automatically when needed")
+                                    else:
+                                        messages.append(f"ℹ️ Unknown method: {inpaint_method_val}")
+                                        
+                                except Exception as e:
+                                    messages.append(f"❌ Error loading inpainting model: {str(e)}")
+                            
+                            if not messages:
+                                messages.append("ℹ️ No models selected for loading")
+                                
+                        except Exception as e:
+                            messages.append(f"❌ Error during loading: {str(e)}")
+                        
+                        return gr.Info("\n".join(messages))
                     
                     download_models_btn.click(
-                        fn=lambda: gr.Info("Models are automatically downloaded on first use."),
-                        inputs=None,
+                        fn=download_models_handler,
+                        inputs=[detector_type, local_inpaint_method],
                         outputs=None
                     )
                     
                     load_models_btn.click(
-                        fn=lambda: gr.Info("Models are loaded automatically when translation starts."),
-                        inputs=None,
+                        fn=load_models_handler,
+                        inputs=[detector_type, local_inpaint_method],
                         outputs=None
                     )
                     
