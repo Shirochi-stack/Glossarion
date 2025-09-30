@@ -46,16 +46,20 @@ def _preload_models_worker(models_list, progress_queue):
         
         for idx, (model_type, model_key, model_name, model_path) in enumerate(models_list):
             try:
-                # Send progress update
-                progress_percent = int((idx / total_steps) * 100)
-                progress_queue.put(('progress', progress_percent, model_name))
+                # Send start progress
+                base_progress = int((idx / total_steps) * 100)
+                progress_queue.put(('progress', base_progress, model_name))
                 
                 if model_type == 'detector':
                     from bubble_detector import BubbleDetector
                     from manga_translator import MangaTranslator
                     
+                    # Progress: 0-25% of this model's portion
+                    progress_queue.put(('progress', base_progress + int(25 / total_steps), f"{model_name} - Initializing"))
                     bd = BubbleDetector()
                     
+                    # Progress: 25-75% - loading model
+                    progress_queue.put(('progress', base_progress + int(50 / total_steps), f"{model_name} - Downloading/Loading"))
                     if model_key == 'rtdetr_onnx':
                         model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
                         bd.load_rtdetr_onnx_model(model_repo)
@@ -65,22 +69,33 @@ def _preload_models_worker(models_list, progress_queue):
                         if model_path:
                             bd.load_model(model_path)
                     
+                    # Progress: 75-100% - finalizing
+                    progress_queue.put(('progress', base_progress + int(75 / total_steps), f"{model_name} - Finalizing"))
                     progress_queue.put(('loaded', model_type, model_name))
                     
                 elif model_type == 'inpainter':
                     from local_inpainter import LocalInpainter
                     
+                    # Progress: 0-25%
+                    progress_queue.put(('progress', base_progress + int(25 / total_steps), f"{model_name} - Initializing"))
                     inp = LocalInpainter()
                     resolved_path = model_path
                     
                     if not resolved_path or not os.path.exists(resolved_path):
+                        # Progress: 25-50% - downloading
+                        progress_queue.put(('progress', base_progress + int(40 / total_steps), f"{model_name} - Downloading"))
                         try:
                             resolved_path = inp.download_jit_model(model_key)
                         except:
                             resolved_path = None
                     
                     if resolved_path and os.path.exists(resolved_path):
+                        # Progress: 50-90% - loading
+                        progress_queue.put(('progress', base_progress + int(60 / total_steps), f"{model_name} - Loading model"))
                         success = inp.load_model_with_retry(model_key, resolved_path)
+                        
+                        # Progress: 90-100% - finalizing
+                        progress_queue.put(('progress', base_progress + int(85 / total_steps), f"{model_name} - Finalizing"))
                         if success:
                             progress_queue.put(('loaded', model_type, model_name))
             
@@ -564,6 +579,10 @@ class MangaTranslationTab:
                             print(f"✗ Failed to load {model_name}: {error}")
                         
                         elif msg_type == 'complete':
+                            # Child process downloaded/cached models, now load into main process pool
+                            self.preload_status_label.setText("✓ Loading into main process...")
+                            self._load_models_into_pool(models_to_load)
+                            
                             self.preload_progress_bar.setValue(100)
                             self.preload_status_label.setText("✓ Models ready")
                             
@@ -588,6 +607,93 @@ class MangaTranslationTab:
                     MangaTranslationTab._preload_in_progress = False
         
         QTimer.singleShot(100, check_progress)
+    
+    def _load_models_into_pool(self, models_to_load):
+        """Load models into the main process pool (called after child process downloads)"""
+        try:
+            from manga_translator import MangaTranslator
+            import threading
+            
+            for model_type, model_key, model_name, model_path in models_to_load:
+                try:
+                    if model_type == 'detector':
+                        from bubble_detector import BubbleDetector
+                        key = (model_key, model_path)
+                        print(f"[DEBUG] Loading detector into pool with key: {key}")
+                        
+                        # Check if already loaded
+                        with MangaTranslator._detector_pool_lock:
+                            rec = MangaTranslator._detector_pool.get(key)
+                            if rec and (rec.get('spares') or rec.get('loaded')):
+                                print(f"⏭️  {model_name} already in pool, skipping")
+                        
+                        # Only load if not already in pool
+                        if not (rec and (rec.get('spares') or rec.get('loaded'))):
+                            with MangaTranslator._detector_pool_lock:
+                                bd = BubbleDetector()
+                                
+                                if model_key == 'rtdetr_onnx':
+                                    model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                                    bd.load_rtdetr_onnx_model(model_repo)
+                                elif model_key == 'rtdetr':
+                                    bd.load_rtdetr_model()
+                                elif model_key == 'yolo':
+                                    if model_path:
+                                        bd.load_model(model_path)
+                                
+                                rec = MangaTranslator._detector_pool.get(key)
+                                if not rec:
+                                    rec = {'spares': []}
+                                    MangaTranslator._detector_pool[key] = rec
+                                rec['spares'].append(bd)
+                                
+                                # Verify model is actually loaded
+                                loaded_flag = getattr(bd, 'rtdetr_onnx_loaded', False) if model_key == 'rtdetr_onnx' else \
+                                              getattr(bd, 'rtdetr_loaded', False) if model_key == 'rtdetr' else \
+                                              getattr(bd, 'model_loaded', False)
+                                print(f"✓ Loaded {model_name} into main process pool (loaded={loaded_flag})")
+                    
+                    elif model_type == 'inpainter':
+                        from local_inpainter import LocalInpainter
+                        key = (model_key, model_path or '')
+                        
+                        # Check if already loaded
+                        with MangaTranslator._inpaint_pool_lock:
+                            rec = MangaTranslator._inpaint_pool.get(key)
+                            if rec and (rec.get('loaded') or rec.get('spares')):
+                                print(f"⏭️  {model_name} already in pool, skipping")
+                        
+                        # Only load if not already in pool
+                        if not (rec and (rec.get('loaded') or rec.get('spares'))):
+                            with MangaTranslator._inpaint_pool_lock:
+                                inp = LocalInpainter()
+                                
+                                resolved_path = model_path
+                                if not resolved_path or not os.path.exists(resolved_path):
+                                    try:
+                                        resolved_path = inp.download_jit_model(model_key)
+                                    except:
+                                        resolved_path = None
+                                
+                                if resolved_path and os.path.exists(resolved_path):
+                                    success = inp.load_model_with_retry(model_key, resolved_path)
+                                    if success and getattr(inp, 'model_loaded', False):
+                                        if not rec:
+                                            rec = {'inpainter': inp, 'loaded': True, 'event': threading.Event(), 'spares': []}
+                                            MangaTranslator._inpaint_pool[key] = rec
+                                            rec['event'].set()
+                                        else:
+                                            rec['inpainter'] = inp
+                                            rec['loaded'] = True
+                                            if rec.get('event'):
+                                                rec['event'].set()
+                                        print(f"✓ Loaded {model_name} into main process pool")
+                
+                except Exception as e:
+                    print(f"✗ Failed to load {model_name} into main pool: {e}")
+        
+        except Exception as e:
+            print(f"✗ Error loading models into pool: {e}")
     
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox"""
@@ -1665,8 +1771,8 @@ class MangaTranslationTab:
         """Build the enhanced manga translation interface using PySide6"""
         # Create main layout for PySide6 widget
         main_layout = QVBoxLayout(self.parent_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(6)
         self._build_pyside6_interface(main_layout)
     
     def _build_pyside6_interface(self, main_layout):
@@ -1674,9 +1780,10 @@ class MangaTranslationTab:
         title_frame = QWidget()
         title_layout = QHBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(8)
         
         title_label = QLabel("🎌 Manga Translation")
-        title_font = QFont("Arial", 16)
+        title_font = QFont("Arial", 13)
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
@@ -1689,7 +1796,7 @@ class MangaTranslationTab:
         status_color = "green" if (has_api_key and has_vision) else "red"
         
         status_label = QLabel(status_text)
-        status_font = QFont("Arial", 12)
+        status_font = QFont("Arial", 10)
         status_label.setFont(status_font)
         status_label.setStyleSheet(f"color: {status_color};")
         title_layout.addStretch()
@@ -1704,16 +1811,16 @@ class MangaTranslationTab:
         self.preload_progress_frame = QWidget()
         self.preload_progress_frame.setStyleSheet(
             "background-color: #2d2d2d; "
-            "border: 2px solid #4a5568; "
-            "border-radius: 8px; "
-            "padding: 12px;"
+            "border: 1px solid #4a5568; "
+            "border-radius: 4px; "
+            "padding: 6px;"
         )
         preload_layout = QVBoxLayout(self.preload_progress_frame)
-        preload_layout.setContentsMargins(12, 12, 12, 12)
-        preload_layout.setSpacing(8)
+        preload_layout.setContentsMargins(8, 6, 8, 6)
+        preload_layout.setSpacing(4)
         
         self.preload_status_label = QLabel("Loading models...")
-        preload_status_font = QFont("Segoe UI", 10)
+        preload_status_font = QFont("Segoe UI", 9)
         preload_status_font.setBold(True)
         self.preload_status_label.setFont(preload_status_font)
         self.preload_status_label.setStyleSheet("color: #ffffff; background: transparent; border: none;")
@@ -1724,22 +1831,22 @@ class MangaTranslationTab:
         self.preload_progress_bar.setRange(0, 100)
         self.preload_progress_bar.setValue(0)
         self.preload_progress_bar.setTextVisible(True)
-        self.preload_progress_bar.setMinimumHeight(30)
+        self.preload_progress_bar.setMinimumHeight(22)
         self.preload_progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 2px solid #4a5568;
-                border-radius: 8px;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
                 text-align: center;
                 background-color: #1e1e1e;
                 color: #ffffff;
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 9px;
             }
             QProgressBar::chunk {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #2d6a4f, stop:0.5 #1b4332, stop:1 #081c15);
-                border-radius: 6px;
-                margin: 1px;
+                border-radius: 2px;
+                margin: 0px;
             }
         """)
         preload_layout.addWidget(self.preload_progress_bar)
@@ -1770,12 +1877,12 @@ class MangaTranslationTab:
         
         # File selection frame
         file_frame = QGroupBox("Select Manga Images")
-        file_frame_font = QFont("Arial", 12)
+        file_frame_font = QFont("Arial", 10)
         file_frame_font.setBold(True)
         file_frame.setFont(file_frame_font)
         file_frame_layout = QVBoxLayout(file_frame)
-        file_frame_layout.setContentsMargins(15, 15, 15, 10)
-        file_frame_layout.setSpacing(10)
+        file_frame_layout.setContentsMargins(10, 10, 10, 8)
+        file_frame_layout.setSpacing(6)
         
         # File listbox (QListWidget handles scrolling automatically)
         self.file_listbox = QListWidget()
@@ -1786,27 +1893,27 @@ class MangaTranslationTab:
         # File buttons
         file_btn_frame = QWidget()
         file_btn_layout = QHBoxLayout(file_btn_frame)
-        file_btn_layout.setContentsMargins(0, 10, 0, 0)
-        file_btn_layout.setSpacing(5)
+        file_btn_layout.setContentsMargins(0, 6, 0, 0)
+        file_btn_layout.setSpacing(4)
         
         add_files_btn = QPushButton("Add Files")
         add_files_btn.clicked.connect(self._add_files)
-        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 3px 10px; font-size: 9pt; }")
         file_btn_layout.addWidget(add_files_btn)
         
         add_folder_btn = QPushButton("Add Folder")
         add_folder_btn.clicked.connect(self._add_folder)
-        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 3px 10px; font-size: 9pt; }")
         file_btn_layout.addWidget(add_folder_btn)
         
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected)
-        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 3px 10px; font-size: 9pt; }")
         file_btn_layout.addWidget(remove_btn)
         
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self._clear_all)
-        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 5px 15px; }")
+        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 3px 10px; font-size: 9pt; }")
         file_btn_layout.addWidget(clear_btn)
         
         file_btn_layout.addStretch()
@@ -1816,12 +1923,12 @@ class MangaTranslationTab:
         
         # Settings frame
         settings_frame = QGroupBox("Translation Settings")
-        settings_frame_font = QFont("Arial", 12)
+        settings_frame_font = QFont("Arial", 10)
         settings_frame_font.setBold(True)
         settings_frame.setFont(settings_frame_font)
         settings_frame_layout = QVBoxLayout(settings_frame)
-        settings_frame_layout.setContentsMargins(15, 15, 15, 10)
-        settings_frame_layout.setSpacing(10)
+        settings_frame_layout.setContentsMargins(10, 10, 10, 8)
+        settings_frame_layout.setSpacing(6)
         
         # API Settings - Hybrid approach
         api_frame = QWidget()
@@ -3203,8 +3310,8 @@ class MangaTranslationTab:
         # Control buttons
         control_frame = QWidget()
         control_layout = QHBoxLayout(control_frame)
-        control_layout.setContentsMargins(20, 10, 20, 10)
-        control_layout.setSpacing(10)
+        control_layout.setContentsMargins(10, 6, 10, 6)
+        control_layout.setSpacing(6)
         
         # Check if ready based on selected provider
         # Get API key from main GUI - handle both Tkinter and PySide6
@@ -3236,7 +3343,7 @@ class MangaTranslationTab:
         self.start_button = QPushButton("Start Translation")
         self.start_button.clicked.connect(self._start_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px 20px; font-size: 12px; }" +
+        self.start_button.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 12px; font-size: 10px; }" +
                                        ("" if is_ready else " QPushButton:disabled { background-color: #6c757d; }"))
         control_layout.addWidget(self.start_button)
 
@@ -3255,7 +3362,7 @@ class MangaTranslationTab:
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self._stop_translation)
         self.stop_button.setEnabled(False)
-        self.stop_button.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 8px 20px; font-size: 12px; } " +
+        self.stop_button.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 12px; font-size: 10px; } " +
                                       "QPushButton:disabled { background-color: #6c757d; }")
         control_layout.addWidget(self.stop_button)
         control_layout.addStretch()
@@ -3264,16 +3371,16 @@ class MangaTranslationTab:
         
         # Progress frame
         progress_frame = QGroupBox("Progress")
-        progress_frame_font = QFont('Arial', 12)
+        progress_frame_font = QFont('Arial', 10)
         progress_frame_font.setBold(True)
         progress_frame.setFont(progress_frame_font)
         progress_frame_layout = QVBoxLayout(progress_frame)
-        progress_frame_layout.setContentsMargins(15, 15, 15, 10)
-        progress_frame_layout.setSpacing(10)
+        progress_frame_layout.setContentsMargins(10, 10, 10, 8)
+        progress_frame_layout.setSpacing(6)
         
         # Overall progress
         self.progress_label = QLabel("Ready to start")
-        progress_label_font = QFont('Arial', 11)
+        progress_label_font = QFont('Arial', 9)
         self.progress_label.setFont(progress_label_font)
         self.progress_label.setStyleSheet("color: white;")
         progress_frame_layout.addWidget(self.progress_label)
@@ -3283,7 +3390,7 @@ class MangaTranslationTab:
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setMinimumHeight(20)
+        self.progress_bar.setMinimumHeight(18)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setStyleSheet("""
             QProgressBar {
@@ -3310,12 +3417,12 @@ class MangaTranslationTab:
         
         # Log frame
         log_frame = QGroupBox("Translation Log")
-        log_frame_font = QFont('Arial', 12)
+        log_frame_font = QFont('Arial', 10)
         log_frame_font.setBold(True)
         log_frame.setFont(log_frame_font)
         log_frame_layout = QVBoxLayout(log_frame)
-        log_frame_layout.setContentsMargins(15, 15, 15, 10)
-        log_frame_layout.setSpacing(10)
+        log_frame_layout.setContentsMargins(10, 10, 10, 8)
+        log_frame_layout.setSpacing(6)
         
         # Log text widget (QTextEdit handles scrolling automatically)
         self.log_text = QTextEdit()

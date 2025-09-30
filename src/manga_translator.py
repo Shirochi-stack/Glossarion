@@ -7783,7 +7783,34 @@ class MangaTranslator:
             # We are the loader
             try:
                 from bubble_detector import BubbleDetector
-                bd = BubbleDetector()
+                bd = None
+                
+                # First, try to get a preloaded detector from the pool
+                try:
+                    ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
+                    det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                    key = (det_type, model_id)
+                    self._log(f"[DEBUG] Looking for detector in pool with key: {key}", "debug")
+                    with MangaTranslator._detector_pool_lock:
+                        self._log(f"[DEBUG] Pool keys available: {list(MangaTranslator._detector_pool.keys())}", "debug")
+                        rec = MangaTranslator._detector_pool.get(key)
+                        if rec and isinstance(rec, dict):
+                            spares = rec.get('spares') or []
+                            self._log(f"[DEBUG] Found pool record with {len(spares)} spares", "debug")
+                            if spares:
+                                bd = spares.pop(0)
+                                self._log("🤖 Using preloaded bubble detector from pool", "info")
+                        else:
+                            self._log(f"[DEBUG] No pool record found for key: {key}", "debug")
+                except Exception as e:
+                    self._log(f"Could not fetch preloaded detector: {e}", "debug")
+                
+                # If no preloaded detector, create a new one
+                if bd is None:
+                    bd = BubbleDetector()
+                    self._log("🤖 Created new bubble detector instance", "info")
+                
                 # Optionally: defer model load until first actual call inside BD; keeping instance resident
                 with MangaTranslator._singleton_lock:
                     MangaTranslator._singleton_bubble_detector = bd
@@ -7794,7 +7821,7 @@ class MangaTranslator:
                     except Exception:
                         pass
                 elapsed = time.time() - start_time
-                self._log(f"🤖 Created singleton bubble detector instance (took {elapsed:.2f}s)", "info")
+                self._log(f"🤖 Singleton bubble detector ready (took {elapsed:.2f}s)", "info")
                 return bd
             except Exception as e:
                 with MangaTranslator._singleton_lock:
