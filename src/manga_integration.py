@@ -104,6 +104,10 @@ class MangaTranslationTab:
     _global_cancelled = False
     _global_cancel_lock = threading.RLock()
     
+    # Class-level log storage to persist across window closures
+    _persistent_log = []
+    _persistent_log_lock = threading.RLock()
+    
     @classmethod
     def set_global_cancellation(cls, cancelled: bool):
         """Set global cancellation flag for all translation instances"""
@@ -2877,7 +2881,23 @@ class MangaTranslationTab:
         self.log_text.tag_config('success', foreground='green')
         self.log_text.tag_config('warning', foreground='orange')
         self.log_text.tag_config('error', foreground='red')
+        
+        # Restore persistent log from previous sessions
+        self._restore_persistent_log()
 
+    def _restore_persistent_log(self):
+        """Restore log messages from persistent storage"""
+        try:
+            with MangaTranslationTab._persistent_log_lock:
+                if MangaTranslationTab._persistent_log:
+                    self.log_text.config(state='normal')
+                    for message, level in MangaTranslationTab._persistent_log:
+                        self.log_text.insert(tk.END, message + '\n', level)
+                    self.log_text.see(tk.END)
+                    self.log_text.config(state='disabled')
+        except Exception as e:
+            print(f"Failed to restore persistent log: {e}")
+    
     def _show_help_dialog(self, title: str, message: str):
         """Show a help dialog with the given title and message"""
         # Create a simple dialog
@@ -5434,6 +5454,16 @@ class MangaTranslationTab:
                 return
         except Exception:
             pass
+        
+        # Store in persistent log (thread-safe)
+        try:
+            with MangaTranslationTab._persistent_log_lock:
+                # Keep only last 1000 messages to avoid unbounded growth
+                if len(MangaTranslationTab._persistent_log) >= 1000:
+                    MangaTranslationTab._persistent_log.pop(0)
+                MangaTranslationTab._persistent_log.append((message, level))
+        except Exception:
+            pass
             
         # Check if log_text widget exists yet
         if hasattr(self, 'log_text') and self.log_text:
@@ -5595,14 +5625,15 @@ class MangaTranslationTab:
         except Exception:
             pass
         
-        # Clear existing log immediately (main thread) so the next lines are visible
-        try:
-            if hasattr(self, 'log_text') and self.log_text:
-                self.log_text.config(state='normal')
-                self.log_text.delete('1.0', tk.END)
-                self.log_text.config(state='disabled')
-        except Exception:
-            pass
+        # Don't automatically clear log - let users see previous session logs
+        # Users can manually clear via Clear Log button if desired
+        # try:
+        #     if hasattr(self, 'log_text') and self.log_text:
+        #         self.log_text.config(state='normal')
+        #         self.log_text.delete('1.0', tk.END)
+        #         self.log_text.config(state='disabled')
+        # except Exception:
+        #     pass
         
         # Immediate minimal feedback
         self._log("starting translation", "info")
