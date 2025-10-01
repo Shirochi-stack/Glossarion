@@ -121,8 +121,10 @@ class _MangaGuiLogHandler(logging.Handler):
         try:
             if getattr(self.gui_ref, '_stdio_redirect_active', False):
                 return
-            if record and isinstance(record.name, str) and record.name.startswith(('manga_integration',)):
-                return
+            # Filter out manga_translator, bubble_detector, local_inpainter logs as they're already shown
+            if record and isinstance(record.name, str):
+                if record.name.startswith(('manga_integration', 'manga_translator', 'bubble_detector', 'local_inpainter', 'unified_api_client', 'google_genai', 'httpx')):
+                    return
         except Exception:
             pass
         try:
@@ -6151,19 +6153,28 @@ class MangaTranslationTab:
                     if hasattr(self, 'progress_label'):
                         self.progress_label.setText(f"Starting… {c}")
                         self.progress_label.setStyleSheet("color: white;")
+                        # Force update to ensure it's visible
+                        from PySide6.QtWidgets import QApplication
+                        QApplication.processEvents()
                 except Exception:
                     pass
                 self._heartbeat_idx += 1
-                # Schedule next tick with QTimer
-                QTimer.singleShot(250, tick)
+                # Schedule next tick with QTimer - only if still running
+                if getattr(self, '_startup_heartbeat_running', False):
+                    QTimer.singleShot(250, tick)
             # Kick off
             QTimer.singleShot(0, tick)
         except Exception:
             pass
 
     def _stop_startup_heartbeat(self):
+        """Stop the startup heartbeat spinner"""
         try:
             self._startup_heartbeat_running = False
+            # Clear the spinner text immediately
+            if hasattr(self, 'progress_label') and self.progress_label:
+                self.progress_label.setText("Initializing...")
+                self.progress_label.setStyleSheet("color: white;")
         except Exception:
             pass
     
@@ -6229,8 +6240,22 @@ class MangaTranslationTab:
                     else:
                         self.current_file_label.setText(f"Current: {filename}")
                         self.current_file_label.setStyleSheet("color: lightgray;")
+                
+                elif update[0] == 'ui_state':
+                    _, state = update
+                    if state == 'translation_started':
+                        try:
+                            if hasattr(self, 'start_button') and self.start_button:
+                                self.start_button.setEnabled(False)
+                            if hasattr(self, 'stop_button') and self.stop_button:
+                                self.stop_button.setEnabled(True)
+                            if hasattr(self, 'file_listbox') and self.file_listbox:
+                                self.file_listbox.setEnabled(False)
+                        except Exception:
+                            pass
                     
-        except:
+        except Exception:
+            # Queue is empty or some other exception
             pass
         
         # Schedule next update with QTimer
@@ -6265,279 +6290,297 @@ class MangaTranslationTab:
             
     def _start_translation(self):
         """Start the translation process"""
-        print("DEBUG: _start_translation called")
-        # Mirror console output to GUI during startup for immediate feedback
-        self._redirect_stdout(True)
-        self._redirect_stderr(True)
+        # Check files BEFORE redirecting stdout to avoid deadlock
         if not self.selected_files:
-            print("DEBUG: No files selected")
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self.dialog, "No Files", "Please select manga images to translate.")
             return
-        
-        print(f"DEBUG: Selected {len(self.selected_files)} files")
         
         # Immediately disable Start to prevent double-clicks
         try:
             if hasattr(self, 'start_button') and self.start_button:
                 self.start_button.setEnabled(False)
-                print("DEBUG: Start button disabled")
-        except Exception as e:
-            print(f"DEBUG: Error disabling start button: {e}")
+        except Exception:
+            pass
         
-        # Don't automatically clear log - let users see previous session logs
-        # Users can manually clear via Clear Log button if desired
-        # try:
-        #     if hasattr(self, 'log_text') and self.log_text:
-        #         self.log_text.config(state='normal')
-        #         self.log_text.delete('1.0', tk.END)
-        #         self.log_text.config(state='disabled')
-        # except Exception:
-        #     pass
-        
-        # Immediate minimal feedback
-        self._log("starting translation", "info")
-        print("DEBUG: Logged 'starting translation'")
+        # Immediate minimal feedback using direct log append
         try:
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-            print("DEBUG: Processed events after starting translation log")
-        except Exception as e:
-            print(f"DEBUG: Error processing events: {e}")
+            if hasattr(self, 'log_text') and self.log_text:
+                from PySide6.QtGui import QColor
+                self.log_text.setTextColor(QColor('white'))
+                self.log_text.append("Starting translation...")
+        except Exception:
+            pass
+        
         # Start heartbeat spinner so there's visible activity until logs stream
         self._start_startup_heartbeat()
         
         # Reset all stop flags at the start of new translation
-        self.reset_stop_flags()
-        print("DEBUG: Reset stop flags")
-        self._log("🚀 Starting new manga translation batch", "info")
-        print("DEBUG: Logged starting batch message")
+        self.is_running = False
+        if hasattr(self, 'stop_flag'):
+            self.stop_flag.clear()
+        self._reset_global_cancellation()
+        
+        # Log start directly to GUI
         try:
-            # Let the GUI render the above log immediately
+            if hasattr(self, 'log_text') and self.log_text:
+                from PySide6.QtGui import QColor
+                self.log_text.setTextColor(QColor('white'))
+                self.log_text.append("🚀 Starting new manga translation batch")
+        except Exception:
+            pass
+        
+        # Force GUI update
+        try:
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
-            print("DEBUG: Processed events after batch start log")
-        except Exception as e:
-            print(f"DEBUG: Error processing events: {e}")
+        except Exception:
+            pass
         
         # Run the heavy preparation and kickoff in a background thread to avoid GUI freeze
-        print("DEBUG: Starting background thread for _start_translation_heavy")
         threading.Thread(target=self._start_translation_heavy, name="MangaStartHeavy", daemon=True).start()
-        print("DEBUG: Background thread started")
         return
     
     def _start_translation_heavy(self):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
-        print("DEBUG: _start_translation_heavy entered")
-        # Early feedback
-        self._log("⏳ Preparing configuration...", "info")
-        print("DEBUG: Logged 'Preparing configuration'")
-        # Build OCR configuration
-        ocr_config = {'provider': self.ocr_provider_value}
+        try:
+            # Early feedback
+            self._log("⏳ Preparing configuration...", "info")
+            # Build OCR configuration
+            ocr_config = {'provider': self.ocr_provider_value}
 
-        if ocr_config['provider'] == 'Qwen2-VL':
-            qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-            if qwen_provider:
-                # Set model size configuration
-                if hasattr(qwen_provider, 'loaded_model_size'):
-                    if qwen_provider.loaded_model_size == "Custom":
-                        ocr_config['model_size'] = f"custom:{qwen_provider.model_id}"
-                    else:
-                        size_map = {'2B': '1', '7B': '2', '72B': '3'}
-                        ocr_config['model_size'] = size_map.get(qwen_provider.loaded_model_size, '2')
-                    self._log(f"Setting ocr_config['model_size'] = {ocr_config['model_size']}", "info")
+            if ocr_config['provider'] == 'Qwen2-VL':
+                qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
+                if qwen_provider:
+                    # Set model size configuration
+                    if hasattr(qwen_provider, 'loaded_model_size'):
+                        if qwen_provider.loaded_model_size == "Custom":
+                            ocr_config['model_size'] = f"custom:{qwen_provider.model_id}"
+                        else:
+                            size_map = {'2B': '1', '7B': '2', '72B': '3'}
+                            ocr_config['model_size'] = size_map.get(qwen_provider.loaded_model_size, '2')
+                        self._log(f"Setting ocr_config['model_size'] = {ocr_config['model_size']}", "info")
+                    
+                    # Set OCR prompt if available
+                    if hasattr(self, 'ocr_prompt'):
+                        # Set it via environment variable (Qwen2VL will read this)
+                        os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
+                        
+                        # Also set it directly on the provider if it has the method
+                        if hasattr(qwen_provider, 'set_ocr_prompt'):
+                            qwen_provider.set_ocr_prompt(self.ocr_prompt)
+                        else:
+                            # If no setter method, set it directly
+                            qwen_provider.ocr_prompt = self.ocr_prompt
+                        
+                        self._log("✅ Set custom OCR prompt for Qwen2-VL", "info")
+           
+            elif ocr_config['provider'] == 'google':
+                import os
+                google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
+                if not google_creds or not os.path.exists(google_creds):
+                    self._log("❌ Google Cloud Vision credentials not found. Please set up credentials in the main settings.", "error")
+                    self._stop_startup_heartbeat()
+                    self._reset_ui_state()
+                    return
+                ocr_config['google_credentials_path'] = google_creds
                 
-                # Set OCR prompt if available
-                if hasattr(self, 'ocr_prompt'):
-                    # Set it via environment variable (Qwen2VL will read this)
-                    os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
-                    
-                    # Also set it directly on the provider if it has the method
-                    if hasattr(qwen_provider, 'set_ocr_prompt'):
-                        qwen_provider.set_ocr_prompt(self.ocr_prompt)
+            elif ocr_config['provider'] == 'azure':
+                # Support both PySide6 QLineEdit (.text()) and Tkinter Entry (.get())
+                if hasattr(self.azure_key_entry, 'text'):
+                    azure_key = self.azure_key_entry.text().strip()
+                elif hasattr(self.azure_key_entry, 'get'):
+                    azure_key = self.azure_key_entry.get().strip()
+                else:
+                    azure_key = ''
+                if hasattr(self.azure_endpoint_entry, 'text'):
+                    azure_endpoint = self.azure_endpoint_entry.text().strip()
+                elif hasattr(self.azure_endpoint_entry, 'get'):
+                    azure_endpoint = self.azure_endpoint_entry.get().strip()
+                else:
+                    azure_endpoint = ''
+                
+                if not azure_key or not azure_endpoint:
+                    self._log("❌ Azure credentials not configured.", "error")
+                    self._stop_startup_heartbeat()
+                    self._reset_ui_state()
+                    return
+                
+                # Save Azure settings
+                self.main_gui.config['azure_vision_key'] = azure_key
+                self.main_gui.config['azure_vision_endpoint'] = azure_endpoint
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+                
+                ocr_config['azure_key'] = azure_key
+                ocr_config['azure_endpoint'] = azure_endpoint
+            
+            # Get current API key and model for translation
+            api_key = None
+            model = 'gemini-2.5-flash'  # default
+            
+            # Try to get API key from various sources (support PySide6 and Tkinter widgets)
+            if hasattr(self.main_gui, 'api_key_entry'):
+                try:
+                    if hasattr(self.main_gui.api_key_entry, 'text'):
+                        api_key_candidate = self.main_gui.api_key_entry.text()
+                    elif hasattr(self.main_gui.api_key_entry, 'get'):
+                        api_key_candidate = self.main_gui.api_key_entry.get()
                     else:
-                        # If no setter method, set it directly
-                        qwen_provider.ocr_prompt = self.ocr_prompt
+                        api_key_candidate = ''
+                    if api_key_candidate and api_key_candidate.strip():
+                        api_key = api_key_candidate.strip()
+                except Exception:
+                    pass
+            if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+                api_key = self.main_gui.config.get('api_key')
+            
+            # Try to get model - ALWAYS get the current selection from GUI
+            if hasattr(self.main_gui, 'model_var'):
+                model = self.main_gui.model_var.get()
+            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
+                model = self.main_gui.config.get('model')
+            
+            if not api_key:
+                self._log("❌ API key not found. Please configure your API key in the main settings.", "error")
+                self._stop_startup_heartbeat()
+                self._reset_ui_state()
+                return
+            
+            # Check if we need to create or update the client
+            needs_new_client = False
+            self._log("🔎 Checking API client...", "debug")
+            
+            if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
+                needs_new_client = True
+                self._log(f"🛠 Creating new API client with model: {model}", "info")
+            elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
+                needs_new_client = True
+                self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
+            else:
+                self._log("♻️ Reusing existing API client", "debug")
+            
+            if needs_new_client:
+                # Apply multi-key settings from config so UnifiedClient picks them up
+                try:
+                    import os  # Import os here
+                    use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                    mk_list = self.main_gui.config.get('multi_api_keys', [])
+                    if use_mk and mk_list:
+                        os.environ['USE_MULTI_API_KEYS'] = '1'
+                        os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
+                        os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
+                        os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
+                        os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
+                        self._log("🔑 Multi-key mode ENABLED for manga translator", "info")
+                    else:
+                        # Explicitly disable if not configured
+                        os.environ['USE_MULTI_API_KEYS'] = '0'
+                        os.environ['USE_MULTI_KEYS'] = '0'
+                    # Fallback keys (optional)
+                    if self.main_gui.config.get('use_fallback_keys', False):
+                        os.environ['USE_FALLBACK_KEYS'] = '1'
+                        os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
+                    else:
+                        os.environ['USE_FALLBACK_KEYS'] = '0'
+                        os.environ['FALLBACK_KEYS'] = '[]'
+                except Exception as env_err:
+                    self._log(f"⚠️ Failed to apply multi-key settings: {env_err}", "warning")
+                
+                # Create the unified client with the current model
+                try:
+                    from unified_api_client import UnifiedClient
+                    self._log("⏳ Creating API client (network/model handshake)...", "debug")
+                    self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
+                    self._log(f"✅ API client ready (model: {model})", "info")
+                    try:
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self._log(f"❌ Failed to create API client: {str(e)}", "error")
+                    import traceback
+                    self._log(traceback.format_exc(), "debug")
+                    self._stop_startup_heartbeat()
+                    self._reset_ui_state()
+                    return
+            
+            # Reset the translator's history manager for new batch
+            if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
+                self.translator.reset_history_manager()
+
+            # Set environment variables for custom-api provider
+                if ocr_config['provider'] == 'custom-api':
+                    import os  # Import os for environment variables
+                    env_vars = self.main_gui._get_environment_variables(
+                        epub_path='',  # Not needed for manga
+                        api_key=api_key
+                    )
                     
-                    self._log("✅ Set custom OCR prompt for Qwen2-VL", "info")
-       
-        elif ocr_config['provider'] == 'google':
-            import os
-            google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
-            if not google_creds or not os.path.exists(google_creds):
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self.dialog, "Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
-                self._stop_startup_heartbeat()
-                self._reset_ui_state()
-                return
-            ocr_config['google_credentials_path'] = google_creds
-            
-        elif ocr_config['provider'] == 'azure':
-            azure_key = self.azure_key_entry.get().strip()
-            azure_endpoint = self.azure_endpoint_entry.get().strip()
-            
-            if not azure_key or not azure_endpoint:
-                from PySide6.QtWidgets import QMessageBox
-                from PySide6.QtCore import QTimer
-                QMessageBox.critical(self.dialog, "Error", "Azure credentials not configured.")
-                self._stop_startup_heartbeat()
-                self._reset_ui_state()
-                return
-            
-            # Save Azure settings
-            self.main_gui.config['azure_vision_key'] = azure_key
-            self.main_gui.config['azure_vision_endpoint'] = azure_endpoint
-            if hasattr(self.main_gui, 'save_config'):
-                self.main_gui.save_config(show_message=False)
-            
-            ocr_config['azure_key'] = azure_key
-            ocr_config['azure_endpoint'] = azure_endpoint
-        
-        # Get current API key and model for translation
-        api_key = None
-        model = 'gemini-2.5-flash'  # default
-        
-        # Try to get API key from various sources
-        if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
-            api_key = self.main_gui.api_key_entry.get().strip()
-        elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
-            api_key = self.main_gui.config.get('api_key')
-        
-        # Try to get model - ALWAYS get the current selection from GUI
-        if hasattr(self.main_gui, 'model_var'):
-            model = self.main_gui.model_var.get()
-        elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
-            model = self.main_gui.config.get('model')
-        
-        if not api_key:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self.dialog, "Error", "API key not found.\nPlease configure your API key in the main settings.")
+                    # Apply all environment variables EXCEPT SYSTEM_PROMPT
+                    for key, value in env_vars.items():
+                        if key == 'SYSTEM_PROMPT':
+                            # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
+                            continue
+                        os.environ[key] = str(value)
+                    
+                    # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
+                    os.environ['OCR_SYSTEM_PROMPT'] = (
+                    "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
+                    "CRITICAL RULES:\n"
+                    "1. DO NOT TRANSLATE ANYTHING\n"
+                    "2. DO NOT MODIFY THE TEXT\n"
+                    "3. DO NOT EXPLAIN OR COMMENT\n"
+                    "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
+                    "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
+                    "If you see Korean text, output it in Korean.\n"
+                    "If you see Japanese text, output it in Japanese.\n"
+                    "If you see Chinese text, output it in Chinese.\n"
+                    "If you see English text, output it in English.\n\n"
+                    "IMPORTANT: Only use line breaks where they naturally occur in the original text "
+                    "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
+                    "between every word/character.\n\n"
+                    "For vertical text common in manga/comics, transcribe it as a continuous line unless "
+                    "there are clear visual breaks.\n\n"
+                    "NEVER translate. ONLY extract exactly what is written.\n"
+                    "Output ONLY the raw text, nothing else."
+                    )
+                    
+                    self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
+
+                    # Respect user settings: only set default detector values when bubble detection is OFF.
+                    try:
+                        ms = self.main_gui.config.setdefault('manga_settings', {})
+                        ocr_set = ms.setdefault('ocr', {})
+                        changed = False
+                        bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
+
+                        if not bubble_enabled:
+                            # User has bubble detection OFF -> set non-intrusive defaults only
+                            if 'detector_type' not in ocr_set:
+                                ocr_set['detector_type'] = 'rtdetr_onnx'
+                                changed = True
+                            if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                                # Default HF repo (detector.onnx lives here)
+                                ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                                changed = True
+                            if changed and hasattr(self.main_gui, 'save_config'):
+                                self.main_gui.save_config(show_message=False)
+                        # Do not preload bubble detector for custom-api here; it will load on use or via panel preloading
+                        self._preloaded_bd = None
+                    except Exception:
+                        self._preloaded_bd = None
+        except Exception as e:
+            # Surface any startup error and reset UI so the app doesn't look stuck
+            try:
+                import traceback
+                self._log(f"❌ Startup error: {e}", "error")
+                self._log(traceback.format_exc(), "debug")
+            except Exception:
+                pass
             self._stop_startup_heartbeat()
             self._reset_ui_state()
             return
-        
-        # Check if we need to create or update the client
-        needs_new_client = False
-        self._log("🔎 Checking API client...", "debug")
-        
-        if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
-            needs_new_client = True
-            self._log(f"🛠 Creating new API client with model: {model}", "info")
-        elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
-            needs_new_client = True
-            self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
-        else:
-            self._log("♻️ Reusing existing API client", "debug")
-        
-        if needs_new_client:
-            # Apply multi-key settings from config so UnifiedClient picks them up
-            try:
-                import os  # Import os here
-                use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
-                mk_list = self.main_gui.config.get('multi_api_keys', [])
-                if use_mk and mk_list:
-                    os.environ['USE_MULTI_API_KEYS'] = '1'
-                    os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
-                    os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
-                    os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
-                    os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
-                    self._log("🔑 Multi-key mode ENABLED for manga translator", "info")
-                else:
-                    # Explicitly disable if not configured
-                    os.environ['USE_MULTI_API_KEYS'] = '0'
-                    os.environ['USE_MULTI_KEYS'] = '0'
-                # Fallback keys (optional)
-                if self.main_gui.config.get('use_fallback_keys', False):
-                    os.environ['USE_FALLBACK_KEYS'] = '1'
-                    os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
-                else:
-                    os.environ['USE_FALLBACK_KEYS'] = '0'
-                    os.environ['FALLBACK_KEYS'] = '[]'
-            except Exception as env_err:
-                self._log(f"⚠️ Failed to apply multi-key settings: {env_err}", "warning")
-            
-            # Create the unified client with the current model
-            try:
-                from unified_api_client import UnifiedClient
-                self._log("⏳ Creating API client (network/model handshake)...", "debug")
-                self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
-                self._log(f"✅ API client ready (model: {model})", "info")
-                try:
-                    time.sleep(0.05)
-                except Exception:
-                    pass
-            except Exception as e:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self.dialog, "Error", f"Failed to create API client:\n{str(e)}")
-                self._stop_startup_heartbeat()
-                self._reset_ui_state()
-                return
-        
-        # Reset the translator's history manager for new batch
-        if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
-            self.translator.reset_history_manager()
-
-        # Set environment variables for custom-api provider
-            if ocr_config['provider'] == 'custom-api':
-                import os  # Import os for environment variables
-                env_vars = self.main_gui._get_environment_variables(
-                    epub_path='',  # Not needed for manga
-                    api_key=api_key
-                )
-                
-                # Apply all environment variables EXCEPT SYSTEM_PROMPT
-                for key, value in env_vars.items():
-                    if key == 'SYSTEM_PROMPT':
-                        # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
-                        continue
-                    os.environ[key] = str(value)
-                
-                # Set a VERY EXPLICIT OCR prompt that OpenAI can't ignore
-                os.environ['OCR_SYSTEM_PROMPT'] = (
-                "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-                "CRITICAL RULES:\n"
-                "1. DO NOT TRANSLATE ANYTHING\n"
-                "2. DO NOT MODIFY THE TEXT\n"
-                "3. DO NOT EXPLAIN OR COMMENT\n"
-                "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-                "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-                "If you see Korean text, output it in Korean.\n"
-                "If you see Japanese text, output it in Japanese.\n"
-                "If you see Chinese text, output it in Chinese.\n"
-                "If you see English text, output it in English.\n\n"
-                "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-                "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-                "between every word/character.\n\n"
-                "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-                "there are clear visual breaks.\n\n"
-                "NEVER translate. ONLY extract exactly what is written.\n"
-                "Output ONLY the raw text, nothing else."
-                )
-                
-                self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
-
-                # Respect user settings: only set default detector values when bubble detection is OFF.
-                try:
-                    ms = self.main_gui.config.setdefault('manga_settings', {})
-                    ocr_set = ms.setdefault('ocr', {})
-                    changed = False
-                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
-
-                    if not bubble_enabled:
-                        # User has bubble detection OFF -> set non-intrusive defaults only
-                        if 'detector_type' not in ocr_set:
-                            ocr_set['detector_type'] = 'rtdetr_onnx'
-                            changed = True
-                        if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
-                            # Default HF repo (detector.onnx lives here)
-                            ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
-                            changed = True
-                        if changed and hasattr(self.main_gui, 'save_config'):
-                            self.main_gui.save_config(show_message=False)
-                    # Do not preload bubble detector for custom-api here; it will load on use or via panel preloading
-                    self._preloaded_bd = None
-                except Exception:
-                    self._preloaded_bd = None
         
         # Initialize translator if needed (or if it was reset or client was cleared during shutdown)
         needs_new_translator = (not hasattr(self, 'translator')) or (self.translator is None)
@@ -6556,25 +6599,7 @@ class MangaTranslationTab:
                     self.main_gui.client,
                     self.main_gui,
                     log_callback=self._log
-                )
-                
-                # IMPORTANT: Ensure parallel processing settings are properly mapped for the main translator
-                # The web UI uses parallel_panel_translation but MangaTranslator expects parallel_processing
-                try:
-                    advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
-                    if advanced.get('parallel_panel_translation', False):
-                        # Override the manga_settings to enable parallel processing within each panel's bubbles
-                        self.translator.manga_settings.setdefault('advanced', {})['parallel_processing'] = True
-                        panel_workers = int(advanced.get('panel_max_workers', 2))
-                        self.translator.manga_settings.setdefault('advanced', {})['max_workers'] = panel_workers
-                        # Also set the instance attributes directly to ensure they're available
-                        self.translator.parallel_processing = True
-                        self.translator.max_workers = panel_workers
-                        self._log(f"🔧 Main translator configured: parallel_processing={self.translator.parallel_processing}, max_workers={self.translator.max_workers}", "debug")
-                    else:
-                        self._log(f"🔧 Main translator: parallel_panel_translation=False, using sequential bubble processing", "debug")
-                except Exception as e:
-                    self._log(f"⚠️ Warning: Failed to configure parallel processing settings: {e}", "warning")
+                )               
                 
                 # Fix 4: Safely set OCR manager
                 if hasattr(self, 'ocr_manager'):
@@ -6611,9 +6636,7 @@ class MangaTranslationTab:
                 self._log("✅ Translator ready", "info")
                 
             except Exception as e:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self.dialog, "Error", f"Failed to initialize translator:\n{str(e)}")
-                self._log(f"Initialization error: {str(e)}", "error")
+                self._log(f"❌ Failed to initialize translator: {str(e)}", "error")
                 import traceback
                 self._log(traceback.format_exc(), "error")
                 self._stop_startup_heartbeat()
@@ -6716,15 +6739,11 @@ class MangaTranslationTab:
         # Reset all global cancellation flags for new translation
         self._reset_global_cancellation()
         
-        # Update UI state (PySide6)
+        # Update UI state (PySide6) - queue UI updates for main thread
         self.is_running = True
         self.stop_flag.clear()
-        try:
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(True)
-            self.file_listbox.setEnabled(False)
-        except Exception as e:
-            self._log(f"Failed to update UI state: {e}", "warning")
+        # Queue UI updates to be processed by main thread
+        self.update_queue.put(('ui_state', 'translation_started'))
         
         # Log start message
         self._log(f"Starting translation of {self.total_files} files...", "info")
@@ -6761,6 +6780,10 @@ class MangaTranslationTab:
         
         # Stop heartbeat before launching worker; now regular progress takes over
         self._stop_startup_heartbeat()
+        
+        # Update progress to show we're starting the translation worker
+        self._log("🚀 Launching translation worker...", "info")
+        self._update_progress(0, self.total_files, "Starting translation...")
         
         # Start translation via executor
         try:

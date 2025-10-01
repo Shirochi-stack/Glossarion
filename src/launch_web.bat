@@ -28,7 +28,7 @@ REM Start PowerShell script in background to wait for server and open browser
 start "" /B powershell -ExecutionPolicy Bypass -File "%~dp0wait_and_open.ps1" -url "http://127.0.0.1:7860"
 
 REM Start the web interface
-python glossarion_web.py
+python app.py
 
 echo.
 echo ========================================
