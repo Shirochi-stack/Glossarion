@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
                                QDialog, QButtonGroup, QApplication)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot
-from PySide6.QtGui import QFont, QColor, QTextCharFormat
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon
 import tkinter as tk
 from tkinter import ttk, filedialog as tk_filedialog, messagebox as tk_messagebox, scrolledtext
 try:
@@ -644,6 +644,73 @@ class MangaTranslationTab:
         """Disable mousewheel scrolling on a spinbox (PySide6)"""
         # Override wheelEvent to prevent scrolling
         spinbox.wheelEvent = lambda event: None
+    
+    def _disable_combobox_mousewheel(self, combobox):
+        """Disable mousewheel scrolling on a combobox (PySide6)"""
+        # Override wheelEvent to prevent scrolling
+        combobox.wheelEvent = lambda event: None
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
+        
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 12px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.setGeometry(1, 0, 16, 16)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark():
+            if checkbox.isChecked():
+                checkmark.show()
+            else:
+                checkmark.hide()
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        update_checkmark()  # Initial state
+        
+        return checkbox
 
     def _download_hf_model(self):
         """Download HuggingFace models with progress tracking"""
@@ -784,7 +851,8 @@ class MangaTranslationTab:
                 selected = selected_model.get()
                 if selected == "custom":
                     if not custom_model_id.get().strip():
-                        messagebox.showerror("Error", "Please enter a model ID")
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.critical(selection_dialog, "Error", "Please enter a model ID")
                         return
                     model_confirmed['model_key'] = selected
                     model_confirmed['model_id'] = custom_model_id.get().strip()
@@ -1383,14 +1451,17 @@ class MangaTranslationTab:
                 self.dialog.after(100, self._check_provider_status)
             except ImportError:
                 # If dialog not available, show message
-                messagebox.showinfo(
+                from PySide6.QtWidgets import QMessageBox
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: QMessageBox.information(
+                    self.dialog,
                     "Custom API Configuration",
                     "This mode uses your own API key in the main GUI:\n\n"
                     "- Make sure your API supports vision\n"
                     "- api_key: Your API key\n"
                     "- model: Model name\n"
                     "- custom url: You can override API endpoint under Other settings"
-                )
+                ))
             return
         
         status = self.ocr_manager.check_provider_status(provider)
@@ -1489,7 +1560,8 @@ class MangaTranslationTab:
                 self._log(f"DEBUG: Radio button selection = {selected}")
                 if selected == "4":
                     if not custom_model_id.get().strip():
-                        messagebox.showerror("Error", "Please enter a model ID")
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.critical(selection_dialog, "Error", "Please enter a model ID")
                         return
                     model_confirmed['size'] = f"custom:{custom_model_id.get().strip()}"
                 else:
@@ -1720,6 +1792,70 @@ class MangaTranslationTab:
         self._build_pyside6_interface(main_layout)
     
     def _build_pyside6_interface(self, main_layout):
+        # Apply global stylesheet for checkboxes and radio buttons
+        checkbox_radio_style = """
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QRadioButton {
+                color: white;
+                spacing: 6px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #5a9fd4;
+                border-radius: 8px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 2px solid #5a9fd4;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QRadioButton:disabled {
+                color: #666666;
+            }
+            QRadioButton::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            /* Disabled fields styling */
+            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            QLabel:disabled {
+                color: #666666;
+            }
+        """
+        self.parent_widget.setStyleSheet(checkbox_radio_style)
+        
         # Title (at the very top)
         title_frame = QWidget()
         title_layout = QHBoxLayout(title_frame)
@@ -1947,7 +2083,7 @@ class MangaTranslationTab:
         self.provider_combo.setCurrentText(self.ocr_provider_value)
         self.provider_combo.setMinimumWidth(150)
         self.provider_combo.currentTextChanged.connect(self._on_ocr_provider_change)
-        # Qt doesn't need explicit wheel event blocking like tkinter
+        self._disable_combobox_mousewheel(self.provider_combo)  # Disable mousewheel scrolling
         ocr_provider_layout.addWidget(self.provider_combo)
 
         # Provider status indicator with more detail
@@ -2037,9 +2173,9 @@ class MangaTranslationTab:
 
         # Show/Hide button for Azure key
         self.show_azure_key_checked = False
-        show_azure_check = QCheckBox("Show")
+        show_azure_check = self._create_styled_checkbox("Show")
         show_azure_check.stateChanged.connect(lambda state: self.azure_key_entry.setEchoMode(
-            QLineEdit.Normal if state == Qt.Checked else QLineEdit.Password
+            QLineEdit.Normal if state == Qt.CheckState.Checked else QLineEdit.Password
         ))
         azure_key_layout.addWidget(show_azure_check)
         azure_key_layout.addStretch()
@@ -2161,7 +2297,7 @@ class MangaTranslationTab:
         toggle_layout.setContentsMargins(20, 0, 0, 0)
         toggle_layout.setSpacing(10)
 
-        self.context_checkbox = QCheckBox("Enable Full Page Context Translation")
+        self.context_checkbox = self._create_styled_checkbox("Enable Full Page Context Translation")
         self.context_checkbox.setChecked(self.full_page_context_checked)
         self.context_checkbox.stateChanged.connect(self._on_context_toggle)
         toggle_layout.addWidget(self.context_checkbox)
@@ -2224,7 +2360,7 @@ class MangaTranslationTab:
         visual_toggle_layout.setContentsMargins(20, 0, 0, 0)
         visual_toggle_layout.setSpacing(10)
 
-        self.visual_context_checkbox = QCheckBox("Include page image in translation requests")
+        self.visual_context_checkbox = self._create_styled_checkbox("Include page image in translation requests")
         self.visual_context_checkbox.setChecked(self.visual_context_enabled_checked)
         self.visual_context_checkbox.stateChanged.connect(self._on_visual_context_toggle)
         visual_toggle_layout.addWidget(self.visual_context_checkbox)
@@ -2300,7 +2436,7 @@ class MangaTranslationTab:
         inpaint_group_layout.setSpacing(10)
 
         # Skip inpainting toggle - use value loaded from config
-        self.skip_inpainting_checkbox = QCheckBox("Skip Inpainter")
+        self.skip_inpainting_checkbox = self._create_styled_checkbox("Skip Inpainter")
         self.skip_inpainting_checkbox.setChecked(self.skip_inpainting_value)
         self.skip_inpainting_checkbox.stateChanged.connect(self._toggle_inpaint_visibility)
         inpaint_group_layout.addWidget(self.skip_inpainting_checkbox)
@@ -2312,7 +2448,9 @@ class MangaTranslationTab:
         inpaint_method_layout.setSpacing(10)
 
         method_label = QLabel("Inpaint Method:")
-        method_label.setMinimumWidth(150)
+        method_label_font = QFont('Arial', 9)
+        method_label.setFont(method_label_font)
+        method_label.setMinimumWidth(95)
         method_label.setAlignment(Qt.AlignLeft)
         inpaint_method_layout.addWidget(method_label)
 
@@ -2325,19 +2463,25 @@ class MangaTranslationTab:
         self.inpaint_method_value = self.main_gui.config.get('manga_inpaint_method', 'local')
         self.inpaint_method_group = QButtonGroup()
 
+        # Set smaller font for radio buttons
+        radio_font = QFont('Arial', 9)
+        
         cloud_radio = QRadioButton("Cloud API")
+        cloud_radio.setFont(radio_font)
         cloud_radio.setChecked(self.inpaint_method_value == 'cloud')
         cloud_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(cloud_radio, 0)
         method_selection_layout.addWidget(cloud_radio)
 
         local_radio = QRadioButton("Local Model")
+        local_radio.setFont(radio_font)
         local_radio.setChecked(self.inpaint_method_value == 'local')
         local_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(local_radio, 1)
         method_selection_layout.addWidget(local_radio)
 
         hybrid_radio = QRadioButton("Hybrid")
+        hybrid_radio.setFont(radio_font)
         hybrid_radio.setChecked(self.inpaint_method_value == 'hybrid')
         hybrid_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(hybrid_radio, 2)
@@ -2365,7 +2509,9 @@ class MangaTranslationTab:
         quality_layout.setSpacing(10)
 
         quality_label = QLabel("Cloud Quality:")
-        quality_label.setMinimumWidth(150)
+        quality_label_font = QFont('Arial', 9)
+        quality_label.setFont(quality_label_font)
+        quality_label.setMinimumWidth(95)
         quality_label.setAlignment(Qt.AlignLeft)
         quality_layout.addWidget(quality_label)
 
@@ -2439,16 +2585,23 @@ class MangaTranslationTab:
         local_model_layout.setSpacing(10)
 
         local_model_label = QLabel("Local Model:")
-        local_model_label.setMinimumWidth(150)
+        local_model_label_font = QFont('Arial', 9)
+        local_model_label.setFont(local_model_label_font)
+        local_model_label.setMinimumWidth(95)
         local_model_label.setAlignment(Qt.AlignLeft)
         local_model_layout.addWidget(local_model_label)
+        self.local_model_label = local_model_label
 
         self.local_model_type_value = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
         local_model_combo = QComboBox()
         local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'])
         local_model_combo.setCurrentText(self.local_model_type_value)
-        local_model_combo.setMinimumWidth(150)
+        local_model_combo.setMinimumWidth(120)
+        local_model_combo.setMaximumWidth(120)
+        local_combo_font = QFont('Arial', 9)
+        local_model_combo.setFont(local_combo_font)
         local_model_combo.currentTextChanged.connect(self._on_local_model_change)
+        self._disable_combobox_mousewheel(local_model_combo)  # Disable mousewheel scrolling
         local_model_layout.addWidget(local_model_combo)
         self.local_model_combo = local_model_combo
 
@@ -2464,9 +2617,10 @@ class MangaTranslationTab:
             'lama_onnx': 'LaMa ONNX (Optimized)',
         }
         self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))
-        desc_font = QFont('Arial', 9)
+        desc_font = QFont('Arial', 8)
         self.model_desc_label.setFont(desc_font)
         self.model_desc_label.setStyleSheet("color: gray;")
+        self.model_desc_label.setMaximumWidth(200)
         local_model_layout.addWidget(self.model_desc_label)
         local_model_layout.addStretch()
         
@@ -2479,9 +2633,12 @@ class MangaTranslationTab:
         model_path_layout.setSpacing(10)
 
         model_file_label = QLabel("Model File:")
-        model_file_label.setMinimumWidth(150)
+        model_file_label_font = QFont('Arial', 9)
+        model_file_label.setFont(model_file_label_font)
+        model_file_label.setMinimumWidth(95)
         model_file_label.setAlignment(Qt.AlignLeft)
         model_path_layout.addWidget(model_file_label)
+        self.model_file_label = model_file_label
 
         self.local_model_path_value = self.main_gui.config.get(f'manga_{self.local_model_type_value}_model_path', '')
         self.local_model_entry = QLineEdit(self.local_model_path_value)
@@ -2496,12 +2653,14 @@ class MangaTranslationTab:
         browse_model_btn.clicked.connect(self._browse_local_model)
         browse_model_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
         model_path_layout.addWidget(browse_model_btn)
+        self.browse_model_btn = browse_model_btn
         
         # Manual load button to avoid auto-loading on dialog open
         load_model_btn = QPushButton("Load")
         load_model_btn.clicked.connect(self._click_load_local_model)
         load_model_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
         model_path_layout.addWidget(load_model_btn)
+        self.load_model_btn = load_model_btn
         model_path_layout.addStretch()
         
         local_inpaint_layout.addWidget(model_path_frame)
@@ -2562,7 +2721,7 @@ class MangaTranslationTab:
         bg_settings_layout.setSpacing(8)
         
         # Free text only background opacity toggle (applies BG opacity only to free-text regions)
-        self.ft_only_checkbox = QCheckBox("Free text only background opacity")
+        self.ft_only_checkbox = self._create_styled_checkbox("Free text only background opacity")
         self.ft_only_checkbox.setChecked(self.free_text_only_bg_opacity_value)
         self.ft_only_checkbox.stateChanged.connect(self._apply_rendering_settings)
         bg_settings_layout.addWidget(self.ft_only_checkbox)
@@ -2819,7 +2978,7 @@ class MangaTranslationTab:
         constraint_layout.setContentsMargins(20, 0, 0, 0)
         constraint_layout.setSpacing(10)
         
-        self.constrain_checkbox = QCheckBox("Constrain text to bubble boundaries")
+        self.constrain_checkbox = self._create_styled_checkbox("Constrain text to bubble boundaries")
         self.constrain_checkbox.setChecked(self.constrain_to_bubble_value)
         self.constrain_checkbox.stateChanged.connect(self._save_rendering_settings)
         constraint_layout.addWidget(self.constrain_checkbox)
@@ -2919,12 +3078,12 @@ class MangaTranslationTab:
         sizing_group_layout.addWidget(fit_row)
 
         # Behavior toggles
-        self.prefer_larger_checkbox = QCheckBox("Prefer larger text")
+        self.prefer_larger_checkbox = self._create_styled_checkbox("Prefer larger text")
         self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
         self.prefer_larger_checkbox.stateChanged.connect(self._save_rendering_settings)
         sizing_group_layout.addWidget(self.prefer_larger_checkbox)
         
-        self.bubble_size_factor_checkbox = QCheckBox("Scale with bubble size")
+        self.bubble_size_factor_checkbox = self._create_styled_checkbox("Scale with bubble size")
         self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
         self.bubble_size_factor_checkbox.stateChanged.connect(self._save_rendering_settings)
         sizing_group_layout.addWidget(self.bubble_size_factor_checkbox)
@@ -3012,7 +3171,7 @@ class MangaTranslationTab:
         wrap_layout.setContentsMargins(0, 12, 0, 4)
         wrap_layout.setSpacing(5)
 
-        self.strict_wrap_checkbox = QCheckBox("Strict text wrapping (force text to fit within bubbles)")
+        self.strict_wrap_checkbox = self._create_styled_checkbox("Strict text wrapping (force text to fit within bubbles)")
         self.strict_wrap_checkbox.setChecked(self.strict_text_wrapping_value)
         self.strict_wrap_checkbox.stateChanged.connect(self._save_rendering_settings)
         wrap_layout.addWidget(self.strict_wrap_checkbox)
@@ -3024,7 +3183,7 @@ class MangaTranslationTab:
         wrap_layout.addWidget(wrap_help_label)
 
         # Force CAPS LOCK directly below strict wrapping
-        self.force_caps_checkbox = QCheckBox("Force CAPS LOCK")
+        self.force_caps_checkbox = self._create_styled_checkbox("Force CAPS LOCK")
         self.force_caps_checkbox.setChecked(self.force_caps_lock_value)
         self.force_caps_checkbox.stateChanged.connect(self._apply_rendering_settings)
         wrap_layout.addWidget(self.force_caps_checkbox)
@@ -3050,6 +3209,7 @@ class MangaTranslationTab:
         self.font_combo.setCurrentText(self.font_style_value)
         self.font_combo.setMinimumWidth(300)
         self.font_combo.currentTextChanged.connect(self._on_font_selected)
+        self._disable_combobox_mousewheel(self.font_combo)  # Disable mousewheel scrolling
         font_style_layout.addWidget(self.font_combo)
         font_style_layout.addStretch()
         
@@ -3073,6 +3233,9 @@ class MangaTranslationTab:
         self.color_preview_frame.setFixedSize(40, 30)
         self.color_preview_frame.setFrameShape(QFrame.Box)
         self.color_preview_frame.setLineWidth(1)
+        # Initialize with current color
+        r, g, b = self.text_color_r_value, self.text_color_g_value, self.text_color_b_value
+        self.color_preview_frame.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #5a9fd4;")
         color_layout.addWidget(self.color_preview_frame)
         
         # RGB display label
@@ -3113,7 +3276,7 @@ class MangaTranslationTab:
         shadow_header_layout.setContentsMargins(0, 4, 0, 4)
         
         # Shadow enabled checkbox
-        self.shadow_enabled_checkbox = QCheckBox("Enable Shadow")
+        self.shadow_enabled_checkbox = self._create_styled_checkbox("Enable Shadow")
         self.shadow_enabled_checkbox.setChecked(self.shadow_enabled_value)
         self.shadow_enabled_checkbox.stateChanged.connect(self._toggle_shadow_controls)
         shadow_header_layout.addWidget(self.shadow_enabled_checkbox)
@@ -3142,6 +3305,9 @@ class MangaTranslationTab:
         self.shadow_preview_frame.setFixedSize(30, 25)
         self.shadow_preview_frame.setFrameShape(QFrame.Box)
         self.shadow_preview_frame.setLineWidth(1)
+        # Initialize with current color
+        sr, sg, sb = self.shadow_color_r_value, self.shadow_color_g_value, self.shadow_color_b_value
+        self.shadow_preview_frame.setStyleSheet(f"background-color: rgb({sr},{sg},{sb}); border: 1px solid #5a9fd4;")
         shadow_color_layout.addWidget(self.shadow_preview_frame)
         
         # Shadow RGB display label
@@ -3260,7 +3426,7 @@ class MangaTranslationTab:
         output_layout = QHBoxLayout(output_frame)
         output_layout.setContentsMargins(0, 5, 0, 0)
         
-        self.create_subfolder_checkbox = QCheckBox("Create 'translated' subfolder for output")
+        self.create_subfolder_checkbox = self._create_styled_checkbox("Create 'translated' subfolder for output")
         self.create_subfolder_checkbox.setChecked(self.main_gui.config.get('manga_create_subfolder', True))
         self.create_subfolder_checkbox.stateChanged.connect(self._save_rendering_settings)
         output_layout.addWidget(self.create_subfolder_checkbox)
@@ -3301,11 +3467,26 @@ class MangaTranslationTab:
             # Local providers (manga-ocr, easyocr, etc.) only need API key for translation
             is_ready = has_api_key
 
-        self.start_button = QPushButton("Start Translation")
+        self.start_button = QPushButton("▶ Start Translation")
         self.start_button.clicked.connect(self._start_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 12px; font-size: 10px; }" +
-                                       ("" if is_ready else " QPushButton:disabled { background-color: #6c757d; }"))
+        self.start_button.setMinimumHeight(40)
+        self.start_button.setMinimumWidth(160)
+        self.start_button.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #28a745; "
+            "  color: white; "
+            "  padding: 10px 20px; "
+            "  font-size: 12pt; "
+            "  font-weight: bold; "
+            "  border-radius: 5px; "
+            "} "
+            "QPushButton:hover { background-color: #218838; } "
+            "QPushButton:disabled { "
+            "  background-color: #2d2d2d; "
+            "  color: #666666; "
+            "}"
+        )
         control_layout.addWidget(self.start_button)
 
         # Add tooltip to show why button is disabled
@@ -3320,11 +3501,26 @@ class MangaTranslationTab:
             tooltip_text = "Cannot start: " + ", ".join(reasons)
             self.start_button.setToolTip(tooltip_text)
         
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton("⏹ Stop")
         self.stop_button.clicked.connect(self._stop_translation)
         self.stop_button.setEnabled(False)
-        self.stop_button.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 12px; font-size: 10px; } " +
-                                      "QPushButton:disabled { background-color: #6c757d; }")
+        self.stop_button.setMinimumHeight(40)
+        self.stop_button.setMinimumWidth(160)
+        self.stop_button.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #dc3545; "
+            "  color: white; "
+            "  padding: 10px 20px; "
+            "  font-size: 12pt; "
+            "  font-weight: bold; "
+            "  border-radius: 5px; "
+            "} "
+            "QPushButton:hover { background-color: #c82333; } "
+            "QPushButton:disabled { "
+            "  background-color: #2d2d2d; "
+            "  color: #999999; "
+            "}"
+        )
         control_layout.addWidget(self.stop_button)
         control_layout.addStretch()
         
@@ -3610,9 +3806,8 @@ class MangaTranslationTab:
         r = self.text_color_r_value
         g = self.text_color_g_value
         b = self.text_color_b_value
-        color = f'#{r:02x}{g:02x}{b:02x}'
-        if hasattr(self, 'color_preview'):
-            self.color_preview.setStyleSheet(f"background-color: {color};")
+        if hasattr(self, 'color_preview_frame'):
+            self.color_preview_frame.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #5a9fd4;")
         # Auto-save on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
@@ -3622,9 +3817,8 @@ class MangaTranslationTab:
         r = self.shadow_color_r_value
         g = self.shadow_color_g_value
         b = self.shadow_color_b_value
-        color = f'#{r:02x}{g:02x}{b:02x}'
-        if hasattr(self, 'shadow_preview'):
-            self.shadow_preview.setStyleSheet(f"background-color: {color};")
+        if hasattr(self, 'shadow_preview_frame'):
+            self.shadow_preview_frame.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #5a9fd4;")
         # Auto-save on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
@@ -4801,9 +4995,9 @@ class MangaTranslationTab:
     
     def _on_font_selected(self, event=None):
         """Handle font selection"""
-        if not hasattr(self, 'font_style_value'):
+        if not hasattr(self, 'font_combo'):
             return
-        selected = self.font_style_value.currentText()
+        selected = self.font_combo.currentText()
         
         if selected == "Default":
             self.selected_font_path = None
@@ -4827,8 +5021,8 @@ class MangaTranslationTab:
                 # Insert before "Browse Custom Font..." option
                 if font_name not in [n for n in self.font_mapping.keys()]:
                     # Add to combo box (PySide6)
-                    self.font_style_value.insertItem(self.font_style_value.count() - 1, font_name)
-                    self.font_style_value.setCurrentText(font_name)
+                    self.font_combo.insertItem(self.font_combo.count() - 1, font_name)
+                    self.font_combo.setCurrentText(font_name)
                     
                     # Update font mapping
                     self.font_mapping[font_name] = font_path
@@ -4853,14 +5047,14 @@ class MangaTranslationTab:
                             self.main_gui.save_config(show_message=False)
                 else:
                     # Font already exists, just select it
-                    self.font_style_value.setCurrentText(font_name)
+                    self.font_combo.setCurrentText(font_name)
                     self.selected_font_path = self.font_mapping[font_name]
             else:
                 # User cancelled, revert to previous selection
                 if hasattr(self, 'previous_font_selection'):
-                    self.font_style_value.setCurrentText(self.previous_font_selection)
+                    self.font_combo.setCurrentText(self.previous_font_selection)
                 else:
-                    self.font_style_value.setCurrentText("Default")
+                    self.font_combo.setCurrentText("Default")
                 return
         else:
             # Check if it's in the font mapping
@@ -5043,30 +5237,33 @@ class MangaTranslationTab:
 
     def _try_load_model(self, method: str, model_path: str):
         """Try to load a model and update status (runs loading on a background thread)."""
-        from PySide6.QtCore import QTimer, QMetaObject, Qt, Q_ARG
+        from PySide6.QtCore import QTimer, QMetaObject, Qt, Q_ARG, QThread
+        from PySide6.QtWidgets import QApplication
         
         try:
             # Show loading status immediately
             self.local_model_status_label.setText("⏳ Loading model...")
             self.local_model_status_label.setStyleSheet("color: orange;")
-            self.dialog.repaint()  # Force immediate update
+            QApplication.processEvents()  # Process pending events to update UI
             self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
 
             def do_load():
                 from local_inpainter import LocalInpainter
-                ok = False
+                success = False
                 try:
                     test_inpainter = LocalInpainter()
-                    ok = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
+                    success = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
+                    print(f"DEBUG: Model loading completed, success={success}")
                 except Exception as e:
+                    print(f"DEBUG: Model loading exception: {e}")
                     self.main_gui.append_log(f"❌ Error loading model: {e}")
-                    ok = False
+                    success = False
                 
-                # Update UI on main thread using QMetaObject.invokeMethod
-                def _after():
-                    if ok:
-                        self._update_local_model_status()
-                        self.local_model_status_label.setText(f"✅ {method.upper()} model loaded successfully!")
+                # Update UI directly from thread (works in PySide6/Qt6)
+                print(f"DEBUG: Updating UI, success={success}")
+                try:
+                    if success:
+                        self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
                         self.local_model_status_label.setStyleSheet("color: green;")
                         self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
                         if hasattr(self, 'translator') and self.translator:
@@ -5076,16 +5273,15 @@ class MangaTranslationTab:
                                         delattr(self.translator, attr)
                                     except Exception:
                                         pass
-                        QTimer.singleShot(3000, self._update_local_model_status)
                     else:
                         self.local_model_status_label.setText("⚠️ Model file found but failed to load")
                         self.local_model_status_label.setStyleSheet("color: orange;")
                         self.main_gui.append_log("⚠️ Model file found but failed to load")
-                
-                try:
-                    QTimer.singleShot(0, _after)
-                except Exception:
-                    pass
+                    print(f"DEBUG: UI update completed")
+                except Exception as e:
+                    print(f"ERROR updating UI after load: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Fire background loader
             threading.Thread(target=do_load, daemon=True).start()
@@ -5195,12 +5391,18 @@ class MangaTranslationTab:
         import requests
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton
         from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QIcon
         
         # Create a progress dialog
         progress_dialog = QDialog(self.dialog)
         progress_dialog.setWindowTitle(f"Downloading {model_name.upper()} Model")
         progress_dialog.setFixedSize(400, 150)
         progress_dialog.setModal(True)
+        
+        # Set window icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'halgakos.ico')
+        if os.path.exists(icon_path):
+            progress_dialog.setWindowIcon(QIcon(icon_path))
         
         layout = QVBoxLayout(progress_dialog)
         
@@ -5231,13 +5433,16 @@ class MangaTranslationTab:
         progress_dialog.closeEvent = lambda event: on_cancel()
         
         def download_thread():
+            import time
             try:
-                # Download with progress
+                # Download with progress and speed tracking
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
+                start_time = time.time()
+                last_update = start_time
                 
                 with open(save_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -5252,36 +5457,47 @@ class MangaTranslationTab:
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            # Update progress
-                            if total_size > 0:
+                            # Update progress (throttle updates to every 0.1 seconds)
+                            current_time = time.time()
+                            if total_size > 0 and (current_time - last_update > 0.1):
+                                last_update = current_time
+                                elapsed = current_time - start_time
+                                speed = downloaded / elapsed if elapsed > 0 else 0
+                                speed_mb = speed / (1024 * 1024)
                                 progress = (downloaded / total_size) * 100
-                                QTimer.singleShot(0, lambda p=progress, d=downloaded, t=total_size: [
-                                    progress_bar.setValue(int(p)),
-                                    status_label.setText(f"{p:.1f}%"),
-                                    progress_label.setText(f"⏳ Downloading... {d//1024//1024}MB / {t//1024//1024}MB")
-                                ])
+                                
+                                # Direct widget updates work in PySide6 from threads
+                                try:
+                                    progress_bar.setValue(int(progress))
+                                    status_label.setText(f"{progress:.1f}% - {speed_mb:.2f} MB/s")
+                                    progress_label.setText(f"⏳ Downloading... {downloaded//1024//1024}MB / {total_size//1024//1024}MB")
+                                except RuntimeError:
+                                    # Widget was destroyed, exit
+                                    cancel_download['value'] = True
+                                    return
                 
-                # Success - update UI in main thread
-                QTimer.singleShot(0, lambda: [
-                    progress_dialog.close(),
+                # Success - direct call (works in PySide6/Qt6)
+                try:
+                    progress_dialog.close()
                     self._download_complete(save_path, model_name)
-                ])
+                except Exception as e:
+                    print(f"Error in download completion: {e}")
                 
             except requests.exceptions.RequestException as e:
-                # Error - update UI in main thread
+                # Error - direct call
                 if not cancel_download['value']:
-                    error_msg = str(e)  # Capture error before lambda
-                    QTimer.singleShot(0, lambda: [
-                        progress_dialog.close(),
-                        self._download_failed(error_msg)
-                    ])
+                    try:
+                        progress_dialog.close()
+                        self._download_failed(str(e))
+                    except Exception as ex:
+                        print(f"Error handling download failure: {ex}")
             except Exception as e:
                 if not cancel_download['value']:
-                    error_msg = str(e)  # Capture error before lambda
-                    QTimer.singleShot(0, lambda: [
-                        progress_dialog.close(),
-                        self._download_failed(error_msg)
-                    ])
+                    try:
+                        progress_dialog.close()
+                        self._download_failed(str(e))
+                    except Exception as ex:
+                        print(f"Error handling download failure: {ex}")
         
         # Start download in background thread
         thread = threading.Thread(target=download_thread, daemon=True)
@@ -5293,7 +5509,6 @@ class MangaTranslationTab:
     def _download_complete(self, save_path: str, model_name: str):
         """Handle successful download"""
         from PySide6.QtWidgets import QMessageBox
-        from PySide6.QtCore import QTimer
         
         # Update the model path entry
         self.local_model_entry.setText(save_path)
@@ -5303,20 +5518,18 @@ class MangaTranslationTab:
         self.main_gui.config[f'manga_{model_name}_model_path'] = save_path
         self._save_rendering_settings()
         
-        # Auto-load the downloaded model
+        # Log to main GUI
+        self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
+        
+        # Auto-load the downloaded model (direct call)
         self.local_model_status_label.setText("⏳ Loading downloaded model...")
         self.local_model_status_label.setStyleSheet("color: orange;")
         
-        def load_after_download():
-            if self._try_load_model(model_name, save_path):
-                QMessageBox.information(self.dialog, "Success", f"{model_name.upper()} model downloaded and loaded!")
-            else:
-                QMessageBox.information(self.dialog, "Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
-        
-        QTimer.singleShot(100, load_after_download)
-        
-        # Log to main GUI
-        self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
+        # Try to load immediately
+        if self._try_load_model(model_name, save_path):
+            QMessageBox.information(self.dialog, "Success", f"{model_name.upper()} model downloaded and loaded!")
+        else:
+            QMessageBox.information(self.dialog, "Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
 
     def _download_failed(self, error: str):
         """Handle download failure"""
@@ -6052,19 +6265,25 @@ class MangaTranslationTab:
             
     def _start_translation(self):
         """Start the translation process"""
+        print("DEBUG: _start_translation called")
         # Mirror console output to GUI during startup for immediate feedback
         self._redirect_stdout(True)
         self._redirect_stderr(True)
         if not self.selected_files:
-            messagebox.showwarning("No Files", "Please select manga images to translate.")
+            print("DEBUG: No files selected")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self.dialog, "No Files", "Please select manga images to translate.")
             return
+        
+        print(f"DEBUG: Selected {len(self.selected_files)} files")
         
         # Immediately disable Start to prevent double-clicks
         try:
-            if hasattr(self, 'start_button') and self.start_button and self.start_button.winfo_exists():
-                self.start_button.config(state=tk.DISABLED)
-        except Exception:
-            pass
+            if hasattr(self, 'start_button') and self.start_button:
+                self.start_button.setEnabled(False)
+                print("DEBUG: Start button disabled")
+        except Exception as e:
+            print(f"DEBUG: Error disabling start button: {e}")
         
         # Don't automatically clear log - let users see previous session logs
         # Users can manually clear via Clear Log button if desired
@@ -6078,30 +6297,41 @@ class MangaTranslationTab:
         
         # Immediate minimal feedback
         self._log("starting translation", "info")
+        print("DEBUG: Logged 'starting translation'")
         try:
-            self.dialog.update_idletasks()
-        except Exception:
-            pass
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            print("DEBUG: Processed events after starting translation log")
+        except Exception as e:
+            print(f"DEBUG: Error processing events: {e}")
         # Start heartbeat spinner so there's visible activity until logs stream
         self._start_startup_heartbeat()
         
         # Reset all stop flags at the start of new translation
         self.reset_stop_flags()
+        print("DEBUG: Reset stop flags")
         self._log("🚀 Starting new manga translation batch", "info")
+        print("DEBUG: Logged starting batch message")
         try:
             # Let the GUI render the above log immediately
-            self.dialog.update_idletasks()
-        except Exception:
-            pass
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            print("DEBUG: Processed events after batch start log")
+        except Exception as e:
+            print(f"DEBUG: Error processing events: {e}")
         
         # Run the heavy preparation and kickoff in a background thread to avoid GUI freeze
+        print("DEBUG: Starting background thread for _start_translation_heavy")
         threading.Thread(target=self._start_translation_heavy, name="MangaStartHeavy", daemon=True).start()
+        print("DEBUG: Background thread started")
         return
     
     def _start_translation_heavy(self):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
+        print("DEBUG: _start_translation_heavy entered")
         # Early feedback
         self._log("⏳ Preparing configuration...", "info")
+        print("DEBUG: Logged 'Preparing configuration'")
         # Build OCR configuration
         ocr_config = {'provider': self.ocr_provider_value}
 
@@ -6135,15 +6365,10 @@ class MangaTranslationTab:
             import os
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
             if not google_creds or not os.path.exists(google_creds):
-                try:
-                    self.dialog.after(0, lambda: messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings."))
-                except Exception:
-                    pass
-                try:
-                    self.parent_frame.after(0, self._stop_startup_heartbeat)
-                    self.parent_frame.after(0, self._reset_ui_state)
-                except Exception:
-                    pass
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self.dialog, "Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
+                self._stop_startup_heartbeat()
+                self._reset_ui_state()
                 return
             ocr_config['google_credentials_path'] = google_creds
             
@@ -6152,15 +6377,11 @@ class MangaTranslationTab:
             azure_endpoint = self.azure_endpoint_entry.get().strip()
             
             if not azure_key or not azure_endpoint:
-                try:
-                    self.dialog.after(0, lambda: messagebox.showerror("Error", "Azure credentials not configured."))
-                except Exception:
-                    pass
-                try:
-                    self.parent_frame.after(0, self._stop_startup_heartbeat)
-                    self.parent_frame.after(0, self._reset_ui_state)
-                except Exception:
-                    pass
+                from PySide6.QtWidgets import QMessageBox
+                from PySide6.QtCore import QTimer
+                QMessageBox.critical(self.dialog, "Error", "Azure credentials not configured.")
+                self._stop_startup_heartbeat()
+                self._reset_ui_state()
                 return
             
             # Save Azure settings
@@ -6189,15 +6410,10 @@ class MangaTranslationTab:
             model = self.main_gui.config.get('model')
         
         if not api_key:
-            try:
-                self.dialog.after(0, lambda: messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings."))
-            except Exception:
-                pass
-            try:
-                self.parent_frame.after(0, self._stop_startup_heartbeat)
-                self.parent_frame.after(0, self._reset_ui_state)
-            except Exception:
-                pass
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self.dialog, "Error", "API key not found.\nPlease configure your API key in the main settings.")
+            self._stop_startup_heartbeat()
+            self._reset_ui_state()
             return
         
         # Check if we need to create or update the client
@@ -6251,15 +6467,10 @@ class MangaTranslationTab:
                 except Exception:
                     pass
             except Exception as e:
-                try:
-                    self.dialog.after(0, lambda e=e: messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}"))
-                except Exception:
-                    pass
-                try:
-                    self.parent_frame.after(0, self._stop_startup_heartbeat)
-                    self.parent_frame.after(0, self._reset_ui_state)
-                except Exception:
-                    pass
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self.dialog, "Error", f"Failed to create API client:\n{str(e)}")
+                self._stop_startup_heartbeat()
+                self._reset_ui_state()
                 return
         
         # Reset the translator's history manager for new batch
@@ -6382,18 +6593,13 @@ class MangaTranslationTab:
                 self._log("✅ Translator ready", "info")
                 
             except Exception as e:
-                try:
-                    self.dialog.after(0, lambda e=e: messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}"))
-                except Exception:
-                    pass
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self.dialog, "Error", f"Failed to initialize translator:\n{str(e)}")
                 self._log(f"Initialization error: {str(e)}", "error")
                 import traceback
                 self._log(traceback.format_exc(), "error")
-                try:
-                    self.parent_frame.after(0, self._stop_startup_heartbeat)
-                    self.parent_frame.after(0, self._reset_ui_state)
-                except Exception:
-                    pass
+                self._stop_startup_heartbeat()
+                self._reset_ui_state()
                 return
         else:
             # Update the translator with the new client if model changed
@@ -6536,10 +6742,7 @@ class MangaTranslationTab:
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
         
         # Stop heartbeat before launching worker; now regular progress takes over
-        try:
-            self.parent_frame.after(0, self._stop_startup_heartbeat)
-        except Exception:
-            pass
+        self._stop_startup_heartbeat()
         
         # Start translation via executor
         try:
@@ -7203,7 +7406,9 @@ class MangaTranslationTab:
                 except Exception:
                     pass
             else:
-                self._log("🔑 Auto cleanup disabled - models will remain in RAM for faster subsequent translations", "info")
+                # Only log if not stopped
+                if not self.stop_flag.is_set():
+                    self._log("🔑 Auto cleanup disabled - models will remain in RAM for faster subsequent translations", "info")
             
             # IMPORTANT: Reset the entire translator instance to free ALL memory
             # Controlled by a separate "Unload models after translation" toggle
@@ -7353,14 +7558,18 @@ class MangaTranslationTab:
                     except Exception:
                         pass
                 else:
-                    self._log("🔑 Translator instance preserved for faster subsequent translations", "debug")
+                    # Only log if not stopped
+                    if not self.stop_flag.is_set():
+                        self._log("🔑 Translator instance preserved for faster subsequent translations", "debug")
                     
             except Exception as e:
                 self._log(f"⚠️ Warning: Failed to reset translator instance: {e}", "warning")
             
-            # Check if parent frame still exists before scheduling callback
-            if hasattr(self, 'parent_frame') and self.parent_frame.winfo_exists():
-                self.parent_frame.after(0, self._reset_ui_state)
+            # Reset UI state (PySide6 - call directly)
+            try:
+                self._reset_ui_state()
+            except Exception as e:
+                self._log(f"Error resetting UI: {e}", "warning")
     
     def _stop_translation(self):
         """Stop the translation process"""
