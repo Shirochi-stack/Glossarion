@@ -545,6 +545,9 @@ class GlossarionWeb:
             cbz_mode = False
             cbz_output_path = None
             
+            # Initialize translation logs early (needed for CBZ processing)
+            translation_logs = []
+            
             # Check if any file is a CBZ/ZIP archive
             import zipfile
             files_to_process = image_files if isinstance(image_files, list) else [image_files]
@@ -705,7 +708,6 @@ class GlossarionWeb:
                 return
             
             # Log storage - will be yielded as live updates
-            translation_logs = []
             last_yield_log_count = [0]  # Track when we last yielded
             last_yield_time = [0]  # Track last yield time
             
