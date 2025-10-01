@@ -6558,6 +6558,24 @@ class MangaTranslationTab:
                     log_callback=self._log
                 )
                 
+                # IMPORTANT: Ensure parallel processing settings are properly mapped for the main translator
+                # The web UI uses parallel_panel_translation but MangaTranslator expects parallel_processing
+                try:
+                    advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                    if advanced.get('parallel_panel_translation', False):
+                        # Override the manga_settings to enable parallel processing within each panel's bubbles
+                        self.translator.manga_settings.setdefault('advanced', {})['parallel_processing'] = True
+                        panel_workers = int(advanced.get('panel_max_workers', 2))
+                        self.translator.manga_settings.setdefault('advanced', {})['max_workers'] = panel_workers
+                        # Also set the instance attributes directly to ensure they're available
+                        self.translator.parallel_processing = True
+                        self.translator.max_workers = panel_workers
+                        self._log(f"🔧 Main translator configured: parallel_processing={self.translator.parallel_processing}, max_workers={self.translator.max_workers}", "debug")
+                    else:
+                        self._log(f"🔧 Main translator: parallel_panel_translation=False, using sequential bubble processing", "debug")
+                except Exception as e:
+                    self._log(f"⚠️ Warning: Failed to configure parallel processing settings: {e}", "warning")
+                
                 # Fix 4: Safely set OCR manager
                 if hasattr(self, 'ocr_manager'):
                     self.translator.ocr_manager = self.ocr_manager
@@ -7037,6 +7055,25 @@ class MangaTranslationTab:
 
                         translator = MangaTranslator(ocr_config, self.main_gui.client, self.main_gui, log_callback=self._log)
                         translator.set_stop_flag(self.stop_flag)
+                        
+                        # Ensure parallel processing settings are properly applied to each panel translator
+                        # The web UI maps parallel_panel_translation to parallel_processing for MangaTranslator compatibility
+                        try:
+                            advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                            if advanced.get('parallel_panel_translation', False):
+                                # Override the manga_settings in this translator instance to enable parallel processing
+                                # for bubble regions within each panel
+                                translator.manga_settings.setdefault('advanced', {})['parallel_processing'] = True
+                                panel_workers = int(advanced.get('panel_max_workers', 2))
+                                translator.manga_settings.setdefault('advanced', {})['max_workers'] = panel_workers
+                                # Also set the instance attributes directly
+                                translator.parallel_processing = True
+                                translator.max_workers = panel_workers
+                                self._log(f"   📋 Panel translator configured: parallel_processing={translator.parallel_processing}, max_workers={translator.max_workers}", "debug")
+                            else:
+                                self._log(f"   📋 Panel translator: parallel_panel_translation=False, using sequential bubble processing", "debug")
+                        except Exception as e:
+                            self._log(f"   ⚠️ Warning: Failed to configure parallel processing for panel translator: {e}", "warning")
                         
                         # Also propagate global cancellation to isolated translator
                         from manga_translator import MangaTranslator as MTClass

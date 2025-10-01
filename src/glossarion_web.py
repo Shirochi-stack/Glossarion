@@ -74,6 +74,7 @@ class GlossarionWeb:
         if API_KEY_ENCRYPTION_AVAILABLE:
             self.config = decrypt_config(self.config)
         self.models = get_model_options() if TRANSLATION_AVAILABLE else ["gpt-4", "claude-3-5-sonnet"]
+        print(f"🤖 Loaded {len(self.models)} models: {self.models[:5]}{'...' if len(self.models) > 5 else ''}")
         
         # Default prompts from the GUI (same as translator_gui.py)
         self.default_prompts = {
@@ -438,21 +439,21 @@ class GlossarionWeb:
         """Translate manga images - GENERATOR that yields (logs, image, cbz_file, status) updates"""
         
         if not MANGA_TRANSLATION_AVAILABLE:
-            yield "❌ Manga translation modules not loaded", None, None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Manga translation modules not loaded", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
         
         if not image_files:
-            yield "❌ Please upload at least one image", None, None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Please upload at least one image", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
         
         if not api_key:
-            yield "❌ Please provide an API key", None, None, gr.update(value="❌ Error", visible=True)
+            yield "❌ Please provide an API key", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
         
         if ocr_provider == "google":
             # Check if credentials are provided or saved in config
             if not google_creds_path and not self.config.get('google_vision_credentials'):
-                yield "❌ Please provide Google Cloud credentials JSON file", None, None, gr.update(value="❌ Error", visible=True)
+                yield "❌ Please provide Google Cloud credentials JSON file", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
                 return
         
         if ocr_provider == "azure":
@@ -460,7 +461,7 @@ class GlossarionWeb:
             azure_key_str = str(azure_key) if azure_key else ''
             azure_endpoint_str = str(azure_endpoint) if azure_endpoint else ''
             if not azure_key_str.strip() or not azure_endpoint_str.strip():
-                yield "❌ Please provide Azure API key and endpoint", None, None, gr.update(value="❌ Error", visible=True)
+                yield "❌ Please provide Azure API key and endpoint", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
                 return
         
         try:
@@ -488,7 +489,7 @@ class GlossarionWeb:
                     if os.path.exists(creds_path):
                         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
                     else:
-                        yield f"❌ Saved Google credentials not found: {creds_path}", None, None, gr.update(value="❌ Error", visible=True)
+                        yield f"❌ Saved Google credentials not found: {creds_path}", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
                         return
             
             # Set Azure credentials if provided and save to config
@@ -608,6 +609,8 @@ class GlossarionWeb:
                 merged_config['manga_settings']['ocr'] = {}
             if 'inpainting' not in merged_config['manga_settings']:
                 merged_config['manga_settings']['inpainting'] = {}
+            if 'advanced' not in merged_config['manga_settings']:
+                merged_config['manga_settings']['advanced'] = {}
             
             merged_config['manga_settings']['ocr']['provider'] = ocr_provider
             merged_config['manga_settings']['ocr']['bubble_detection_enabled'] = enable_bubble_detection
@@ -615,6 +618,26 @@ class GlossarionWeb:
             # Make sure local_method is set from config (defaults to anime_onnx)
             if 'local_method' not in merged_config['manga_settings']['inpainting']:
                 merged_config['manga_settings']['inpainting']['local_method'] = self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx')
+            
+            # Set parallel panel translation settings from config (Manga Settings tab)
+            # These are controlled in the Manga Settings tab, so reload config to get latest values
+            current_config = self.load_config()
+            if API_KEY_ENCRYPTION_AVAILABLE:
+                current_config = decrypt_config(current_config)
+            
+            config_parallel = current_config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+            config_max_workers = current_config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 10)
+            
+            # Map web UI settings to MangaTranslator expected names
+            merged_config['manga_settings']['advanced']['parallel_panel_translation'] = config_parallel
+            merged_config['manga_settings']['advanced']['panel_max_workers'] = int(config_max_workers)
+            # CRITICAL: Also set the setting names that MangaTranslator actually checks
+            merged_config['manga_settings']['advanced']['parallel_processing'] = config_parallel
+            merged_config['manga_settings']['advanced']['max_workers'] = int(config_max_workers)
+            
+            # Log the parallel settings being used
+            print(f"🔧 Reloaded config - Using parallel panel translation: {config_parallel}")
+            print(f"🔧 Reloaded config - Using panel max workers: {config_max_workers}")
             
             # CRITICAL: Set skip_inpainting flag to False when inpainting is enabled
             merged_config['manga_skip_inpainting'] = not enable_inpainting
@@ -704,7 +727,7 @@ class GlossarionWeb:
                 )
             except Exception as e:
                 error_log = f"❌ Failed to initialize API client: {str(e)}"
-                yield error_log, None, None, gr.update(value=error_log, visible=True)
+                yield error_log, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_log, visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
                 return
             
             # Log storage - will be yielded as live updates
@@ -781,7 +804,7 @@ class GlossarionWeb:
                 print(f"\nmock_gui.api_key_entry.get(): {type(mock_gui.api_key_entry.get())}")
                 print("=== END ERROR ===")
                 error_log = f"❌ Failed to initialize manga translator: {str(e)}\n\nCheck console for full traceback"
-                yield error_log, None, None, gr.update(value=error_log, visible=True)
+                yield error_log, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_log, visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
                 return
             
             # Process each image with real progress tracking
@@ -805,10 +828,12 @@ class GlossarionWeb:
                     translation_logs.append(f"Processing with OCR: {ocr_provider}, Model: {model}")
                     translation_logs.append("-" * 60)
                     
-                    # Yield initial log update
+                    # Yield initial log update with progress
+                    progress_percent = int(((idx - 1) / total_images) * 100)
+                    status_text = f"Processing {idx}/{total_images}: {filename}"
                     last_yield_log_count[0] = len(translation_logs)
                     last_yield_time[0] = time.time()
-                    yield "\n".join(translation_logs), None, None, gr.update(visible=False)
+                    yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                     
                     # Start processing in a thread so we can yield logs periodically
                     import threading
@@ -832,9 +857,11 @@ class GlossarionWeb:
                     while not processing_complete[0]:
                         time.sleep(0.5)  # Check every 0.5 seconds
                         if should_yield_logs():
+                            progress_percent = int(((idx - 0.5) / total_images) * 100)  # Mid-processing
+                            status_text = f"Processing {idx}/{total_images}: {filename} (in progress...)"
                             last_yield_log_count[0] = len(translation_logs)
                             last_yield_time[0] = time.time()
-                            yield "\n".join(translation_logs), None, None, gr.update(visible=False)
+                            yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                     
                     # Wait for thread to complete
                     process_thread.join(timeout=1)
@@ -848,13 +875,17 @@ class GlossarionWeb:
                             translation_logs.append(f"✅ Image {idx}/{total_images} COMPLETE: {filename} | Total: {len(translated_files)}/{total_images} done")
                             translation_logs.append("")
                             # Yield progress update with completed image
-                            yield "\n".join(translation_logs), gr.update(value=final_output, visible=True), None, gr.update(visible=False)
+                            progress_percent = int((idx / total_images) * 100)
+                            status_text = f"Completed {idx}/{total_images}: {filename}"
+                            yield "\n".join(translation_logs), gr.update(value=final_output, visible=True), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                         else:
                             translation_logs.append(f"⚠️ Image {idx}/{total_images}: Output file missing for {filename}")
                             translation_logs.append(f"⚠️ Warning: Output file not found for image {idx}")
                             translation_logs.append("")
                             # Yield progress update
-                            yield "\n".join(translation_logs), None, None, gr.update(visible=False)
+                            progress_percent = int((idx / total_images) * 100)
+                            status_text = f"Warning: {idx}/{total_images} - Output missing for {filename}"
+                            yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                     else:
                         errors = result.get('errors', [])
                         error_msg = errors[0] if errors else 'Unknown error'
@@ -862,7 +893,9 @@ class GlossarionWeb:
                         translation_logs.append(f"⚠️ Error on image {idx}: {error_msg}")
                         translation_logs.append("")
                         # Yield progress update
-                        yield "\n".join(translation_logs), None, None, gr.update(visible=False)
+                        progress_percent = int((idx / total_images) * 100)
+                        status_text = f"Failed: {idx}/{total_images} - {filename}"
+                        yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                         
                         # If translation failed, save original with error overlay
                         from PIL import Image as PILImage, ImageDraw, ImageFont
@@ -926,20 +959,45 @@ class GlossarionWeb:
             final_status_text = "\n".join(final_status_lines)
             
             # Final yield with complete logs, image, CBZ, and final status
-            # Format: (logs_textbox, output_image, cbz_file, status_textbox)
+            # Format: (logs_textbox, output_image, cbz_file, status_textbox, progress_group, progress_text, progress_bar)
+            final_progress_text = f"Complete! Processed {len(translated_files)}/{total_images} images"
             if translated_files:
                 # If CBZ mode, show CBZ file for download; otherwise show first image
                 if cbz_mode and cbz_output_path and os.path.exists(cbz_output_path):
-                    yield "\n".join(translation_logs), gr.update(value=translated_files[0], visible=True), gr.update(value=cbz_output_path, visible=True), gr.update(value=final_status_text, visible=True)
+                    yield (
+                        "\n".join(translation_logs), 
+                        gr.update(value=translated_files[0], visible=True), 
+                        gr.update(value=cbz_output_path, visible=True),  # CBZ file for download with visibility
+                        gr.update(value=final_status_text, visible=True),
+                        gr.update(visible=True),
+                        gr.update(value=final_progress_text),
+                        gr.update(value=100)
+                    )
                 else:
-                    yield "\n".join(translation_logs), gr.update(value=translated_files[0], visible=True), gr.update(visible=False), gr.update(value=final_status_text, visible=True)
+                    yield (
+                        "\n".join(translation_logs), 
+                        gr.update(value=translated_files[0], visible=True), 
+                        gr.update(visible=False),  # Hide CBZ component
+                        gr.update(value=final_status_text, visible=True),
+                        gr.update(visible=True),
+                        gr.update(value=final_progress_text),
+                        gr.update(value=100)
+                    )
             else:
-                yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value=final_status_text, visible=True)
+                yield (
+                    "\n".join(translation_logs), 
+                    gr.update(visible=False), 
+                    gr.update(visible=False),  # Hide CBZ component
+                    gr.update(value=final_status_text, visible=True),
+                    gr.update(visible=True),
+                    gr.update(value=final_progress_text),
+                    gr.update(value=0)  # 0% if nothing was processed
+                )
                 
         except Exception as e:
             import traceback
             error_msg = f"❌ Error during manga translation:\n{str(e)}\n\n{traceback.format_exc()}"
-            yield error_msg, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_msg, visible=True)
+            yield error_msg, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_msg, visible=True), gr.update(visible=False), gr.update(value="Error occurred"), gr.update(value=0)
     
     def create_interface(self):
         """Create Gradio interface"""
@@ -1011,7 +1069,10 @@ class GlossarionWeb:
                             manga_model = gr.Dropdown(
                                 choices=self.models,
                                 value=self.config.get('model', 'gpt-4-turbo'),
-                                label="🤖 AI Model"
+                                label="🤖 AI Model",
+                                interactive=True,
+                                allow_custom_value=True,
+                                filterable=True
                             )
                             
                             manga_api_key = gr.Textbox(
@@ -1184,11 +1245,11 @@ class GlossarionWeb:
                                     label="Background Opacity"
                                 )
                                 
-                                bg_style = gr.Radio(
-                                    choices=["box", "circle", "wrap"],
-                                    value=self.config.get('manga_bg_style', 'circle'),
-                                    label="Background Style"
-                                )
+                            bg_style = gr.Radio(
+                                choices=["box", "circle", "wrap"],
+                                value=self.config.get('manga_bg_style', 'circle'),
+                                label="Background Style"
+                            )
                         
                         with gr.Column():
                             # Add logo and loading message at top
@@ -1206,7 +1267,27 @@ class GlossarionWeb:
                                 status_message = gr.Markdown(
                                     value="### Ready to translate\nUpload an image and click 'Translate Manga' to begin.",
                                     visible=True
+                            )
+                            
+                            # Progress section for manga translation (similar to manga integration script)
+                            with gr.Group(visible=False) as manga_progress_group:
+                                gr.Markdown("### Progress")
+                                manga_progress_text = gr.Textbox(
+                                    label="📈 Current Status",
+                                    value="Ready to start",
+                                    interactive=False,
+                                    lines=1
                                 )
+                                manga_progress_bar = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=0,
+                                    step=1,
+                                    label="📋 Translation Progress",
+                                    interactive=False,
+                                    show_label=True
+                                )
+                            
                             manga_logs = gr.Textbox(
                                 label="📋 Translation Logs",
                                 lines=20,
@@ -1407,7 +1488,7 @@ class GlossarionWeb:
                             bg_opacity,
                             bg_style
                         ],
-                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status]
+                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar]
                     )
                 
                 # Manga Settings Tab - NEW
@@ -1690,6 +1771,23 @@ class GlossarionWeb:
                             interactive=True
                         )
                         
+                        gr.Markdown("#### Inpainting Performance")
+                        
+                        inpaint_batch_size = gr.Slider(
+                            minimum=1,
+                            maximum=32,
+                            value=self.config.get('manga_settings', {}).get('inpainting', {}).get('batch_size', 10),
+                            step=1,
+                            label="Batch Size",
+                            interactive=True,
+                            info="Process multiple regions at once"
+                        )
+                        
+                        inpaint_cache_enabled = gr.Checkbox(
+                            label="Enable inpainting cache (speeds up repeated processing)",
+                            value=self.config.get('manga_settings', {}).get('inpainting', {}).get('enable_cache', True)
+                        )
+                        
                         gr.Markdown("#### Performance")
                         
                         parallel_processing = gr.Checkbox(
@@ -1706,18 +1804,39 @@ class GlossarionWeb:
                             interactive=True
                         )
                         
+                        gr.Markdown("**⚡ Parallel Panel Translation**")
+                        gr.Markdown("*Processes multiple text bubbles simultaneously for faster translation*")
+                        
+                        preload_local_inpainting = gr.Checkbox(
+                            label="Preload local inpainting instances for panel-parallel runs",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('preload_local_inpainting_for_panels', True),
+                            info="Preloads inpainting models to speed up parallel processing"
+                        )
+                        
                         parallel_panel_translation = gr.Checkbox(
-                            label="Parallel Panel Translation",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+                            label="Enable Parallel Panel Translation",
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
+                            info="Translates multiple panels at once instead of sequentially"
                         )
                         
                         panel_max_workers = gr.Slider(
                             minimum=1,
                             maximum=20,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 10),
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),
                             step=1,
-                            label="Panel Max Workers",
-                            interactive=True
+                            label="Max concurrent panels",
+                            interactive=True,
+                            info="Number of panels to process simultaneously (higher = faster but more memory)"
+                        )
+                        
+                        panel_start_stagger = gr.Slider(
+                            minimum=0,
+                            maximum=1000,
+                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_start_stagger_ms', 30),
+                            step=10,
+                            label="Panel start stagger",
+                            interactive=True,
+                            info="Milliseconds delay between panel starts"
                         )
                         
                         gr.Markdown("#### Model Optimization")
@@ -1913,6 +2032,92 @@ class GlossarionWeb:
                     load_models_btn.click(
                         fn=load_models_handler,
                         inputs=[detector_type, local_inpaint_method],
+                        outputs=None
+                    )
+                    
+                    # Auto-save parallel panel translation settings
+                    def save_parallel_settings(preload_enabled, parallel_enabled, max_workers, stagger_ms):
+                        """Save parallel panel translation settings to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            
+                            # Initialize nested structure if not exists
+                            if 'manga_settings' not in current_config:
+                                current_config['manga_settings'] = {}
+                            if 'advanced' not in current_config['manga_settings']:
+                                current_config['manga_settings']['advanced'] = {}
+                            
+                            current_config['manga_settings']['advanced']['preload_local_inpainting_for_panels'] = bool(preload_enabled)
+                            current_config['manga_settings']['advanced']['parallel_panel_translation'] = bool(parallel_enabled)
+                            current_config['manga_settings']['advanced']['panel_max_workers'] = int(max_workers)
+                            current_config['manga_settings']['advanced']['panel_start_stagger_ms'] = int(stagger_ms)
+                            
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save parallel panel settings: {e}")
+                            return None
+                    
+                    # Auto-save inpainting performance settings
+                    def save_inpainting_settings(batch_size, cache_enabled):
+                        """Save inpainting performance settings to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            
+                            # Initialize nested structure if not exists
+                            if 'manga_settings' not in current_config:
+                                current_config['manga_settings'] = {}
+                            if 'inpainting' not in current_config['manga_settings']:
+                                current_config['manga_settings']['inpainting'] = {}
+                            
+                            current_config['manga_settings']['inpainting']['batch_size'] = int(batch_size)
+                            current_config['manga_settings']['inpainting']['enable_cache'] = bool(cache_enabled)
+                            
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save inpainting settings: {e}")
+                            return None
+                    
+                    # Auto-save handlers for inpainting performance settings
+                    inpaint_batch_size.change(
+                        fn=lambda bs, ce: save_inpainting_settings(bs, ce),
+                        inputs=[inpaint_batch_size, inpaint_cache_enabled],
+                        outputs=None
+                    )
+                    
+                    inpaint_cache_enabled.change(
+                        fn=lambda bs, ce: save_inpainting_settings(bs, ce),
+                        inputs=[inpaint_batch_size, inpaint_cache_enabled],
+                        outputs=None
+                    )
+                    
+                    # Auto-save handlers for parallel panel translation settings
+                    preload_local_inpainting.change(
+                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
+                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
+                        outputs=None
+                    )
+                    
+                    parallel_panel_translation.change(
+                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
+                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
+                        outputs=None
+                    )
+                    
+                    panel_max_workers.change(
+                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
+                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
+                        outputs=None
+                    )
+                    
+                    panel_start_stagger.change(
+                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
+                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
                         outputs=None
                     )
                     
@@ -2177,25 +2382,35 @@ def main():
     """Launch Gradio web app"""
     print("🚀 Starting Glossarion Web Interface...")
     
+    # Check if running on Hugging Face Spaces
+    is_spaces = os.getenv('HF_SPACES') == 'true' or os.getenv('Shirochi/Glossarion') is not None
+    if is_spaces:
+        print("🤗 Running on Hugging Face Spaces")
+    
     web_app = GlossarionWeb()
     app = web_app.create_interface()
     
-    # Set favicon with absolute path if available
+    # Set favicon with absolute path if available (skip for Spaces)
     favicon_path = None
-    if os.path.exists("Halgakos.ico"):
+    if not is_spaces and os.path.exists("Halgakos.ico"):
         favicon_path = os.path.abspath("Halgakos.ico")
         print(f"✅ Using favicon: {favicon_path}")
-    else:
+    elif not is_spaces:
         print("⚠️ Halgakos.ico not found")
     
-    # Launch with options
-    app.launch(
-        server_name="0.0.0.0",  # Allow external access
-        server_port=7860,
-        share=False,  # Set to True to create public link
-        show_error=True,
-        favicon_path=favicon_path
-    )
+    # Launch with options appropriate for environment
+    launch_args = {
+        "server_name": "0.0.0.0",  # Allow external access
+        "server_port": 7860,
+        "share": False,
+        "show_error": True,
+    }
+    
+    # Only add favicon for non-Spaces environments
+    if not is_spaces and favicon_path:
+        launch_args["favicon_path"] = favicon_path
+    
+    app.launch(**launch_args)
 
 
 if __name__ == "__main__":
