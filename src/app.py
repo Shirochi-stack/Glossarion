@@ -87,6 +87,12 @@ class GlossarionWeb:
         self.models = get_model_options() if TRANSLATION_AVAILABLE else ["gpt-4", "claude-3-5-sonnet"]
         print(f"🤖 Loaded {len(self.models)} models: {self.models[:5]}{'...' if len(self.models) > 5 else ''}")
         
+        # Translation state management
+        import threading
+        self.is_translating = False
+        self.stop_flag = threading.Event()
+        self.translation_thread = None
+        
         # Default prompts from the GUI (same as translator_gui.py)
         self.default_prompts = {
             "korean": (
@@ -420,6 +426,48 @@ class GlossarionWeb:
         except Exception as e:
             return None, f"❌ Error: {str(e)}"
     
+    def stop_translation(self):
+        """Stop the ongoing translation process"""
+        if self.is_translating:
+            self.stop_flag.set()
+            self.is_translating = False
+            
+            # Also propagate to MangaTranslator class if available
+            try:
+                if MANGA_TRANSLATION_AVAILABLE:
+                    from manga_translator import MangaTranslator
+                    MangaTranslator.set_global_cancellation(True)
+            except ImportError:
+                pass
+            
+            # Also propagate to UnifiedClient if available
+            try:
+                if MANGA_TRANSLATION_AVAILABLE:
+                    from unified_api_client import UnifiedClient
+                    UnifiedClient.set_global_cancellation(True)
+            except ImportError:
+                pass
+    
+    def _reset_translation_flags(self):
+        """Reset all translation flags for new translation"""
+        self.is_translating = False
+        self.stop_flag.clear()
+        
+        # Reset global cancellation flags
+        try:
+            if MANGA_TRANSLATION_AVAILABLE:
+                from manga_translator import MangaTranslator
+                MangaTranslator.set_global_cancellation(False)
+        except ImportError:
+            pass
+            
+        try:
+            if MANGA_TRANSLATION_AVAILABLE:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.set_global_cancellation(False)
+        except ImportError:
+            pass
+    
     def translate_manga(
         self,
         image_files,
@@ -445,28 +493,35 @@ class GlossarionWeb:
         shadow_offset_y,
         shadow_blur,
         bg_opacity,
-        bg_style
+        bg_style,
+        parallel_panel_translation=False,
+        panel_max_workers=10
     ):
-        """Translate manga images - GENERATOR that yields (logs, image, cbz_file, status) updates"""
+        """Translate manga images - GENERATOR that yields (logs, image, cbz_file, status, progress_group, progress_text, progress_bar) updates"""
+        
+        # Reset translation flags and set running state
+        self._reset_translation_flags()
+        self.is_translating = True
         
         if not MANGA_TRANSLATION_AVAILABLE:
-            error_msg = (
-                "❌ Manga translation modules not available\n\n"
-                "This could be due to:\n"
-                "1. Missing required dependencies\n"
-                "2. Files not uploaded to Hugging Face Spaces\n"
-                "3. Import path issues\n\n"
-                "Please check the app logs for more details."
-            )
-            yield error_msg, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_msg, visible=True), gr.update(visible=False), gr.update(value="Modules not available"), gr.update(value=0)
+            self.is_translating = False
+            yield "❌ Manga translation modules not loaded", None, None, gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
         
         if not image_files:
+            self.is_translating = False
             yield "❌ Please upload at least one image", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
             return
         
         if not api_key:
+            self.is_translating = False
             yield "❌ Please provide an API key", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
+            return
+        
+        # Check for stop request
+        if self.stop_flag.is_set():
+            self.is_translating = False
+            yield "⏹️ Translation stopped by user", gr.update(visible=False), gr.update(visible=False), gr.update(value="⏹️ Stopped", visible=True), gr.update(visible=False), gr.update(value="Stopped"), gr.update(value=0)
             return
         
         if ocr_provider == "google":
@@ -942,6 +997,13 @@ class GlossarionWeb:
                         pass
                     continue
             
+            # Check for stop request before final processing
+            if self.stop_flag.is_set():
+                translation_logs.append("\n⏹️ Translation stopped by user")
+                self.is_translating = False
+                yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value="⏹️ Translation stopped", visible=True), gr.update(visible=True), gr.update(value="Stopped"), gr.update(value=0)
+                return
+                
             # Add completion message
             translation_logs.append("\n" + "="*60)
             translation_logs.append(f"✅ ALL COMPLETE! Successfully translated {len(translated_files)}/{total_images} images")
@@ -1016,7 +1078,59 @@ class GlossarionWeb:
         except Exception as e:
             import traceback
             error_msg = f"❌ Error during manga translation:\n{str(e)}\n\n{traceback.format_exc()}"
+            self.is_translating = False
             yield error_msg, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_msg, visible=True), gr.update(visible=False), gr.update(value="Error occurred"), gr.update(value=0)
+        finally:
+            # Always reset translation state when done
+            self.is_translating = False
+    
+    def translate_or_stop_manga(self, *args):
+        """Handle both translate and stop actions based on current state"""
+        if self.is_translating:
+            # Stop the translation
+            self.stop_translation()
+            # Return updates to indicate stopped state
+            return (
+                "⏹️ Translation stopped by user",
+                gr.update(visible=False),  # manga_output_image
+                gr.update(visible=False),  # manga_cbz_output
+                gr.update(value="⏹️ Translation stopped", visible=True),  # manga_status
+                gr.update(visible=False),  # manga_progress_group
+                gr.update(value="Stopped"),  # manga_progress_text
+                gr.update(value=0),  # manga_progress_bar
+                gr.update(value="🚀 Translate Manga", variant="primary")  # button state
+            )
+        else:
+            # Start the translation - this is a generator function
+            # First set button to stop state
+            def generator():
+                # Yield initial button state change
+                yield (
+                    "🚀 Starting translation...",
+                    gr.update(visible=False),
+                    gr.update(visible=False), 
+                    gr.update(value="Starting...", visible=True),
+                    gr.update(visible=False),
+                    gr.update(value="Initializing..."),
+                    gr.update(value=0),
+                    gr.update(value="⏹️ Stop Translation", variant="stop")
+                )
+                
+                # Call the translate function and yield all its results plus button state
+                for result in self.translate_manga(*args):
+                    if len(result) >= 7:
+                        yield result + (gr.update(value="⏹️ Stop Translation", variant="stop"),)
+                    else:
+                        yield result + (gr.update(value="⏹️ Stop Translation", variant="stop"),)
+                
+                # Final yield to reset button to translate state
+                last_result = result if 'result' in locals() else ("", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(value="Complete"), gr.update(value=100))
+                if len(last_result) >= 7:
+                    yield last_result[:7] + (gr.update(value="🚀 Translate Manga", variant="primary"),)
+                else:
+                    yield last_result + (gr.update(value="🚀 Translate Manga", variant="primary"),)
+            
+            return generator()
     
     def create_interface(self):
         """Create Gradio interface"""
@@ -1032,6 +1146,18 @@ class GlossarionWeb:
         custom_css = """
         footer {display: none !important;}
         .gradio-container {min-height: 100vh;}
+        
+        /* Stop button styling */
+        .gr-button[data-variant="stop"] {
+            background-color: #dc3545 !important;
+            border-color: #dc3545 !important;
+            color: white !important;
+        }
+        .gr-button[data-variant="stop"]:hover {
+            background-color: #c82333 !important;
+            border-color: #bd2130 !important;
+            color: white !important;
+        }
         """
         
         with gr.Blocks(
@@ -1480,7 +1606,7 @@ class GlossarionWeb:
                     )
                     
                     translate_manga_btn.click(
-                        fn=self.translate_manga,
+                        fn=self.translate_or_stop_manga,
                         inputs=[
                             manga_images,
                             manga_model,
@@ -1505,9 +1631,11 @@ class GlossarionWeb:
                             shadow_offset_y,
                             shadow_blur,
                             bg_opacity,
-                            bg_style
+                            bg_style,
+                            parallel_panel_translation,
+                            panel_max_workers
                         ],
-                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar]
+                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar, translate_manga_btn]
                     )
                 
                 # Manga Settings Tab - NEW

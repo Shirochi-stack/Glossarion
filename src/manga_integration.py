@@ -655,7 +655,7 @@ class MangaTranslationTab:
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay"""
         from PySide6.QtWidgets import QCheckBox, QLabel
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import Qt, QTimer
         from PySide6.QtGui import QFont
         
         checkbox = QCheckBox(text)
@@ -694,23 +694,29 @@ class MangaTranslationTab:
                 color: white;
                 background: transparent;
                 font-weight: bold;
-                font-size: 12px;
+                font-size: 11px;
             }
         """)
         checkmark.setAlignment(Qt.AlignCenter)
-        checkmark.setGeometry(1, 0, 16, 16)
         checkmark.hide()
         checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly after widget is shown
+        def position_checkmark():
+            # Position over the checkbox indicator
+            checkmark.setGeometry(2, 1, 14, 14)
         
         # Show/hide checkmark based on checked state
         def update_checkmark():
             if checkbox.isChecked():
+                position_checkmark()
                 checkmark.show()
             else:
                 checkmark.hide()
         
         checkbox.stateChanged.connect(update_checkmark)
-        update_checkmark()  # Initial state
+        # Delay initial positioning to ensure widget is properly rendered
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
         
         return checkbox
 
@@ -2174,12 +2180,9 @@ class MangaTranslationTab:
         azure_key_layout.addWidget(self.azure_key_entry)
 
         # Show/Hide button for Azure key
-        self.show_azure_key_checked = False
-        show_azure_check = self._create_styled_checkbox("Show")
-        show_azure_check.stateChanged.connect(lambda state: self.azure_key_entry.setEchoMode(
-            QLineEdit.Normal if state == Qt.CheckState.Checked else QLineEdit.Password
-        ))
-        azure_key_layout.addWidget(show_azure_check)
+        self.show_azure_key_checkbox = self._create_styled_checkbox("Show")
+        self.show_azure_key_checkbox.stateChanged.connect(self._toggle_azure_key_visibility)
+        azure_key_layout.addWidget(self.show_azure_key_checkbox)
         azure_key_layout.addStretch()
         azure_frame_layout.addWidget(azure_key_frame)
 
@@ -3824,6 +3827,21 @@ class MangaTranslationTab:
         # Auto-save on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
+    
+    def _toggle_azure_key_visibility(self, state):
+        """Toggle visibility of Azure API key"""
+        from PySide6.QtWidgets import QLineEdit
+        from PySide6.QtCore import Qt
+        
+        # Check the checkbox state directly to be sure
+        is_checked = self.show_azure_key_checkbox.isChecked()
+        
+        if is_checked:
+            # Show the key
+            self.azure_key_entry.setEchoMode(QLineEdit.Normal)
+        else:
+            # Hide the key
+            self.azure_key_entry.setEchoMode(QLineEdit.Password)
     
     def _toggle_shadow_controls(self):
         """Enable/disable shadow controls based on checkbox"""
