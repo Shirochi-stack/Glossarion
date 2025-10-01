@@ -58,6 +58,7 @@ app_files = [
     # Translation modules
     ('TransateKRtoEN.py', '.'),
     ('unified_api_client.py', '.'),
+    ('google_free_translate.py', '.'),
     
     # File processors
     ('epub_converter.py', '.'),
@@ -255,6 +256,7 @@ app_modules = [
     'txt_processor',
     'scan_html_folder',
     'unified_api_client',
+    'google_free_translate',
     'chapter_splitter',
     'history_manager',
     'image_translator',

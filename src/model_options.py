@@ -124,5 +124,6 @@ def get_model_options() -> List[str]:
         
         # Last Resort
         "deepl",  # Will use DeepL API
+        "google-translate-free",  # Uses free web endpoint (no key)
         "google-translate",  # Will use Google Cloud Translate
     ]

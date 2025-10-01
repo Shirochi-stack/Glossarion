@@ -669,6 +669,7 @@ class UnifiedClient:
         'electronhub/': 'electronhub',
         'electron/': 'electronhub',
         'deepl': 'deepl',
+        'google-translate-free': 'google_translate_free',
         'google-translate': 'google_translate',
     }
     
@@ -3099,10 +3100,15 @@ class UnifiedClient:
             self.client = None  # No persistent client needed
             return 
             
+        elif self.client_type == 'google_translate_free' or self.model == 'google-translate-free':
+            self.client_type = 'google_translate_free'
+            self.client = None  # No persistent client needed
+            return
+            
         elif self.client_type == 'google_translate' or self.model.startswith('google-translate'):
             self.client_type = 'google_translate'
             self.client = None  # No persistent client needed
-            return            
+            return
  
         elif self.client_type == 'vertex_model_garden':
             # Vertex AI doesn't need a client created here
@@ -6373,6 +6379,7 @@ class UnifiedClient:
             'salesforce': self._send_openai_provider_router,  # Consolidated
             'vertex_model_garden': self._send_vertex_model_garden,
             'deepl': self._send_deepl,  # DeepL translation service
+            'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
         }
         
@@ -6391,7 +6398,7 @@ class UnifiedClient:
                 return self._send_openai_provider_router(messages, temperature, max_tokens, response_name)
             raise UnifiedClientError(f"No handler for client type: {getattr(self, 'client_type', 'unknown')}")
 
-        if self.client_type in ['deepl', 'google_translate']:
+        if self.client_type in ['deepl', 'google_translate', 'google_translate_free']:
             # These services don't use temperature or token limits
             # They just translate the text directly
             return handler(messages, None, None, response_name)
@@ -10208,3 +10215,107 @@ class UnifiedClient:
                 )
             else:
                 raise UnifiedClientError(f"Google Translate API error: {error_msg}")
+    
+    def _send_google_translate_free(self, messages, temperature=None, max_tokens=None, response_name=None):
+        """Send messages to Google Translate Free API using web endpoints (no key required)"""
+        
+        try:
+            # Import our free Google Translate class
+            from google_free_translate import GoogleFreeTranslateNew
+        except ImportError:
+            raise UnifiedClientError(
+                "Google Free Translate module not found.\n\n"
+                "Please ensure google_free_translate.py is in the src directory."
+            )
+        
+        try:
+            # Extract ONLY user content to translate - ignore AI system prompts
+            text_to_translate = ""
+            source_lang = "auto"  # Auto-detect by default
+            target_lang = "en"    # Default to English
+            
+            # Extract only user messages, ignore system prompts completely
+            for msg in messages:
+                if msg['role'] == 'user':
+                    text_to_translate = msg['content']
+                    # Simple language detection from content patterns
+                    if any(ord(char) >= 0xAC00 and ord(char) <= 0xD7AF for char in text_to_translate[:100]):
+                        source_lang = 'ko'  # Korean
+                    elif any(ord(char) >= 0x3040 and ord(char) <= 0x309F for char in text_to_translate[:100]) or \
+                         any(ord(char) >= 0x30A0 and ord(char) <= 0x30FF for char in text_to_translate[:100]):
+                        source_lang = 'ja'  # Japanese
+                    elif any(ord(char) >= 0x4E00 and ord(char) <= 0x9FFF for char in text_to_translate[:100]):
+                        source_lang = 'zh'  # Chinese
+                    break  # Take only the first user message
+            
+            if not text_to_translate:
+                # Return empty response instead of error
+                return UnifiedResponse(
+                    content="",
+                    finish_reason='complete',
+                    usage={'characters': 0},
+                    raw_response={}
+                )
+            
+            # Log the translation request
+            logger.info(f"Google Translate Free: Translating {len(text_to_translate)} characters")
+            if source_lang != "auto":
+                logger.info(f"Google Translate Free: Detected source language: {source_lang}")
+            
+            # Initialize the free translator
+            translator = GoogleFreeTranslateNew(
+                source_language=source_lang,
+                target_language=target_lang,
+                logger=logger
+            )
+            
+            # Perform translation
+            start_time = time.time()
+            
+            # Google Free Translate API call
+            result = translator.translate(text_to_translate)
+            
+            elapsed_time = time.time() - start_time
+            
+            # Extract translated text and detected language
+            translated_text = result.get('translatedText', text_to_translate)
+            detected_lang = result.get('detectedSourceLanguage', source_lang)
+            
+            # Check if there was an error
+            if 'error' in result:
+                logger.warning(f"Google Translate Free warning: {result['error']}")
+            
+            # Create UnifiedResponse object
+            response = UnifiedResponse(
+                content=translated_text,
+                finish_reason='complete',
+                usage={
+                    'characters': len(text_to_translate),
+                    'detected_source_lang': detected_lang
+                },
+                raw_response=result
+            )
+            
+            logger.info(f"Google Translate Free: Translation completed in {elapsed_time:.2f}s")
+            
+            return response
+            
+        except Exception as e:
+            error_msg = f"Google Translate Free API error: {str(e)}"
+            logger.error(f"ERROR: {error_msg}")
+            
+            # Provide helpful error messages
+            if "rate limit" in str(e).lower() or "429" in str(e):
+                raise UnifiedClientError(
+                    "Google Translate Free rate limit exceeded.\n\n"
+                    "The free web endpoint has been rate limited.\n"
+                    "Please wait a moment and try again, or use a different translation service."
+                )
+            elif "connection" in str(e).lower() or "timeout" in str(e).lower():
+                raise UnifiedClientError(
+                    "Google Translate Free connection error.\n\n"
+                    "Could not connect to Google's free translation endpoints.\n"
+                    "Please check your internet connection or try again later."
+                )
+            else:
+                raise UnifiedClientError(error_msg)
