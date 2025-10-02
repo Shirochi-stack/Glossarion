@@ -92,6 +92,8 @@ class GlossarionWeb:
         self.is_translating = False
         self.stop_flag = threading.Event()
         self.translation_thread = None
+        self.current_unified_client = None  # Track active client to allow cancellation
+        self.current_translator = None     # Track active translator to allow shutdown
         
         # Default prompts from the GUI (same as translator_gui.py)
         self.default_prompts = {
@@ -207,33 +209,118 @@ class GlossarionWeb:
         if not self.profiles:
             self.profiles = self.default_prompts.copy()
     
+    def get_default_config(self):
+        """Get default configuration for Hugging Face Spaces"""
+        return {
+            'model': 'gpt-4-turbo',
+            'api_key': '',
+            'ocr_provider': 'custom-api',
+            'bubble_detection_enabled': True,
+            'inpainting_enabled': True,
+            'manga_font_size_mode': 'auto',
+            'manga_font_size': 24,
+            'manga_font_size_multiplier': 1.0,
+            'manga_max_font_size': 48,
+            'manga_text_color': [255, 255, 255],
+            'manga_shadow_enabled': True,
+            'manga_shadow_color': [0, 0, 0],
+            'manga_shadow_offset_x': 1,
+            'manga_shadow_offset_y': 1,
+            'manga_shadow_blur': 2,
+            'manga_bg_opacity': 180,
+            'manga_bg_style': 'auto',
+            'manga_settings': {
+                'ocr': {
+                    'detector_type': 'rtdetr_onnx',
+                    'rtdetr_confidence': 0.3,
+                    'bubble_confidence': 0.3,
+                    'detect_text_bubbles': True,
+                    'detect_empty_bubbles': True,
+                    'detect_free_text': True,
+                    'bubble_max_detections_yolo': 100
+                },
+                'inpainting': {
+                    'local_method': 'anime_onnx',
+                    'method': 'local',
+                    'batch_size': 10,
+                    'enable_cache': True
+                },
+                'advanced': {
+                    'parallel_processing': True,
+                    'max_workers': 2,
+                    'parallel_panel_translation': False,
+                    'panel_max_workers': 7,
+                    'format_detection': True,
+                    'webtoon_mode': 'auto',
+                    'torch_precision': 'fp16',
+                    'auto_cleanup_models': False,
+                    'debug_mode': False,
+                    'save_intermediate': False
+                },
+                'rendering': {
+                    'auto_min_size': 12,
+                    'auto_max_size': 48,
+                    'auto_fit_style': 'balanced'
+                },
+                'font_sizing': {
+                    'algorithm': 'smart',
+                    'prefer_larger': True,
+                    'max_lines': 10,
+                    'line_spacing': 1.3,
+                    'bubble_size_factor': True,
+                    'min_size': 12,
+                    'max_size': 48
+                },
+                'tiling': {
+                    'enabled': False,
+                    'tile_size': 480,
+                    'tile_overlap': 64
+                }
+            }
+        }
+    
     def load_config(self):
-        """Load configuration"""
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            print(f"Warning: Failed to load config: {e}")
-        return {}
+        """Load configuration - from file locally, from localStorage on HF"""
+        is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+        
+        if not is_hf_spaces:
+            # Running locally - use config file
+            try:
+                if os.path.exists(self.config_file):
+                    with open(self.config_file, 'r', encoding='utf-8') as f:
+                        loaded_config = json.load(f)
+                        default_config = self.get_default_config()
+                        default_config.update(loaded_config)
+                        return default_config
+            except Exception as e:
+                print(f"Could not load config: {e}")
+        
+        # HF Spaces or if loading fails - return defaults
+        return self.get_default_config()
     
     def save_config(self, config):
-        """Save configuration with encryption"""
-        try:
-            # Encrypt sensitive fields before saving
-            encrypted_config = config.copy()
-            if API_KEY_ENCRYPTION_AVAILABLE:
-                encrypted_config = encrypt_config(encrypted_config)
-            
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
-            # Reload config to ensure consistency and decrypt it
-            self.config = self.load_config()
-            if API_KEY_ENCRYPTION_AVAILABLE:
-                self.config = decrypt_config(self.config)
-        except Exception as e:
-            return f"❌ Failed to save config: {e}"
-        return "✅ Configuration saved"
+        """Save configuration - to file locally, to localStorage on HF"""
+        is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+        
+        if not is_hf_spaces:
+            # Running locally - save to file
+            try:
+                if API_KEY_ENCRYPTION_AVAILABLE:
+                    config_to_save = encrypt_config(config.copy())
+                else:
+                    config_to_save = config
+                
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+                
+                print(f"✅ Saved to {self.config_file}")
+                return "✅ Settings saved successfully!"
+            except Exception as e:
+                print(f"❌ Save error: {e}")
+                return f"❌ Failed to save: {str(e)}"
+        
+        # HF Spaces - indicate localStorage usage
+        return "Settings saved to browser localStorage"
     
     def translate_epub(
         self,
@@ -428,15 +515,26 @@ class GlossarionWeb:
     
     def stop_translation(self):
         """Stop the ongoing translation process"""
+        print(f"DEBUG: stop_translation called, was_translating={self.is_translating}")
         if self.is_translating:
+            print("DEBUG: Setting stop flag and cancellation")
             self.stop_flag.set()
             self.is_translating = False
+            
+            # Best-effort: cancel any in-flight API operation on the active client
+            try:
+                if getattr(self, 'current_unified_client', None):
+                    self.current_unified_client.cancel_current_operation()
+                    print("DEBUG: Requested UnifiedClient cancellation")
+            except Exception as e:
+                print(f"DEBUG: UnifiedClient cancel failed: {e}")
             
             # Also propagate to MangaTranslator class if available
             try:
                 if MANGA_TRANSLATION_AVAILABLE:
                     from manga_translator import MangaTranslator
                     MangaTranslator.set_global_cancellation(True)
+                    print("DEBUG: Set MangaTranslator global cancellation")
             except ImportError:
                 pass
             
@@ -445,8 +543,23 @@ class GlossarionWeb:
                 if MANGA_TRANSLATION_AVAILABLE:
                     from unified_api_client import UnifiedClient
                     UnifiedClient.set_global_cancellation(True)
+                    print("DEBUG: Set UnifiedClient global cancellation")
             except ImportError:
                 pass
+            
+            # Kick off translator shutdown to free resources quickly
+            try:
+                tr = getattr(self, 'current_translator', None)
+                if tr and hasattr(tr, 'shutdown'):
+                    import threading as _th
+                    _th.Thread(target=tr.shutdown, name="WebMangaTranslatorShutdown", daemon=True).start()
+                    print("DEBUG: Initiated translator shutdown thread")
+                    # Clear reference so a new start creates a fresh instance
+                    self.current_translator = None
+            except Exception as e:
+                print(f"DEBUG: Failed to start translator shutdown: {e}")
+        else:
+            print("DEBUG: stop_translation called but not translating")
     
     def _reset_translation_flags(self):
         """Reset all translation flags for new translation"""
@@ -799,6 +912,8 @@ class GlossarionWeb:
                     model=model,
                     output_dir=output_dir
                 )
+                # Store reference for stop() cancellation support
+                self.current_unified_client = unified_client
             except Exception as e:
                 error_log = f"❌ Failed to initialize API client: {str(e)}"
                 yield error_log, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_log, visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
@@ -849,6 +964,16 @@ class GlossarionWeb:
                     log_callback=capture_log
                 )
                 
+                # Keep a reference for stop/shutdown support
+                self.current_translator = translator
+                
+                # Connect stop flag so translator can react immediately to stop requests
+                if hasattr(translator, 'set_stop_flag'):
+                    try:
+                        translator.set_stop_flag(self.stop_flag)
+                    except Exception:
+                        pass
+                
                 # CRITICAL: Set skip_inpainting flag directly on translator instance
                 translator.skip_inpainting = not enable_inpainting
                 print(f"Set translator.skip_inpainting = {translator.skip_inpainting}")
@@ -884,6 +1009,13 @@ class GlossarionWeb:
             # Process each image with real progress tracking
             for idx, img_file in enumerate(files_to_process, 1):
                 try:
+                    # Check for stop request before processing each image
+                    if self.stop_flag.is_set():
+                        translation_logs.append(f"\n⏹️ Translation stopped by user before image {idx}/{total_images}")
+                        self.is_translating = False
+                        yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value="⏹️ Translation stopped", visible=True), gr.update(visible=True), gr.update(value="Stopped"), gr.update(value=0)
+                        return
+                    
                     # Update current image index for log capture
                     current_image_idx[0] = idx
                     
@@ -930,6 +1062,14 @@ class GlossarionWeb:
                     # Poll for log updates while processing
                     while not processing_complete[0]:
                         time.sleep(0.5)  # Check every 0.5 seconds
+                        
+                        # Check for stop request during processing
+                        if self.stop_flag.is_set():
+                            translation_logs.append(f"\n⏹️ Translation stopped by user while processing image {idx}/{total_images}")
+                            self.is_translating = False
+                            yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value="⏹️ Translation stopped", visible=True), gr.update(visible=True), gr.update(value="Stopped"), gr.update(value=0)
+                            return
+                        
                         if should_yield_logs():
                             progress_percent = int(((idx - 0.5) / total_images) * 100)  # Mid-processing
                             status_text = f"Processing {idx}/{total_images}: {filename} (in progress...)"
@@ -1083,54 +1223,128 @@ class GlossarionWeb:
         finally:
             # Always reset translation state when done
             self.is_translating = False
+            # Clear active references on full completion
+            try:
+                self.current_translator = None
+                self.current_unified_client = None
+            except Exception:
+                pass
     
-    def translate_or_stop_manga(self, *args):
-        """Handle both translate and stop actions based on current state"""
+    def stop_manga_translation(self):
+        """Simple function to stop manga translation"""
+        print("DEBUG: Stop button clicked")
         if self.is_translating:
-            # Stop the translation
+            print("DEBUG: Stopping active translation")
             self.stop_translation()
-            # Return updates to indicate stopped state
+            # Return UI updates for button visibility and status
             return (
-                "⏹️ Translation stopped by user",
-                gr.update(visible=False),  # manga_output_image
-                gr.update(visible=False),  # manga_cbz_output
-                gr.update(value="⏹️ Translation stopped", visible=True),  # manga_status
-                gr.update(visible=False),  # manga_progress_group
-                gr.update(value="Stopped"),  # manga_progress_text
-                gr.update(value=0),  # manga_progress_bar
-                gr.update(value="🚀 Translate Manga", variant="primary")  # button state
+                gr.update(visible=True),   # translate button - show
+                gr.update(visible=False),  # stop button - hide  
+                "⏹️ Translation stopped by user"
             )
         else:
-            # Start the translation - this is a generator function
-            # First set button to stop state
-            def generator():
-                # Yield initial button state change
-                yield (
-                    "🚀 Starting translation...",
-                    gr.update(visible=False),
-                    gr.update(visible=False), 
-                    gr.update(value="Starting...", visible=True),
-                    gr.update(visible=False),
-                    gr.update(value="Initializing..."),
-                    gr.update(value=0),
-                    gr.update(value="⏹️ Stop Translation", variant="stop")
-                )
-                
-                # Call the translate function and yield all its results plus button state
-                for result in self.translate_manga(*args):
-                    if len(result) >= 7:
-                        yield result + (gr.update(value="⏹️ Stop Translation", variant="stop"),)
-                    else:
-                        yield result + (gr.update(value="⏹️ Stop Translation", variant="stop"),)
-                
-                # Final yield to reset button to translate state
-                last_result = result if 'result' in locals() else ("", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(value="Complete"), gr.update(value=100))
-                if len(last_result) >= 7:
-                    yield last_result[:7] + (gr.update(value="🚀 Translate Manga", variant="primary"),)
+            print("DEBUG: No active translation to stop")
+            return (
+                gr.update(visible=True),   # translate button - show
+                gr.update(visible=False),  # stop button - hide
+                "No active translation to stop"
+            )
+    
+    def start_manga_translation(self, *args):
+        """Simple function to start manga translation - GENERATOR FUNCTION"""
+        print("DEBUG: Translate button clicked")
+        
+        # Reset flags for new translation and mark as translating BEFORE first yield
+        self._reset_translation_flags()
+        self.is_translating = True
+        
+        # Initial yield to update button visibility
+        yield (
+            "🚀 Starting translation...",
+            gr.update(visible=False),  # manga_output_image
+            gr.update(visible=False),  # manga_cbz_output  
+            gr.update(value="Starting...", visible=True),  # manga_status
+            gr.update(visible=False),  # manga_progress_group
+            gr.update(value="Initializing..."),  # manga_progress_text
+            gr.update(value=0),  # manga_progress_bar
+            gr.update(visible=False),  # translate button - hide during translation
+            gr.update(visible=True)   # stop button - show during translation
+        )
+        
+        # Call the translate function and yield all its results
+        last_result = None
+        try:
+            for result in self.translate_manga(*args):
+                # Check if stop was requested during iteration
+                if self.stop_flag.is_set():
+                    print("DEBUG: Stop flag detected, breaking translation loop")
+                    break
+                    
+                last_result = result
+                # Pad result to include button states (translate_visible=False, stop_visible=True)
+                if len(result) >= 7:
+                    yield result + (gr.update(visible=False), gr.update(visible=True))
                 else:
-                    yield last_result + (gr.update(value="🚀 Translate Manga", variant="primary"),)
-            
-            return generator()
+                    # Pad result to match expected length (7 values) then add button states
+                    padded_result = list(result) + [gr.update(visible=False)] * (7 - len(result))
+                    yield tuple(padded_result) + (gr.update(visible=False), gr.update(visible=True))
+                    
+        except GeneratorExit:
+            print("DEBUG: Translation generator was closed")
+            self.is_translating = False
+            return
+        except Exception as e:
+            print(f"DEBUG: Exception during translation: {e}")
+            self.is_translating = False
+            # Show error and reset buttons
+            error_msg = f"❌ Error during translation: {str(e)}"
+            yield (
+                error_msg,
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(value=error_msg, visible=True),
+                gr.update(visible=False),
+                gr.update(value="Error occurred"),
+                gr.update(value=0),
+                gr.update(visible=True),   # translate button - show after error
+                gr.update(visible=False)   # stop button - hide after error
+            )
+            return
+        finally:
+            # Clear active references when the loop exits
+            self.is_translating = False
+            try:
+                self.current_translator = None
+                self.current_unified_client = None
+            except Exception:
+                pass
+        
+        # Check if we stopped early
+        if self.stop_flag.is_set():
+            yield (
+                "⏹️ Translation stopped by user",
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(value="⏹️ Translation stopped", visible=True),
+                gr.update(visible=False),
+                gr.update(value="Stopped"),
+                gr.update(value=0),
+                gr.update(visible=True),   # translate button - show after stop
+                gr.update(visible=False)   # stop button - hide after stop
+            )
+            return
+        
+        # Final yield to reset buttons after successful completion
+        print("DEBUG: Translation completed normally, resetting buttons")
+        if last_result is None:
+            last_result = ("", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(value="Complete"), gr.update(value=100))
+        
+        if len(last_result) >= 7:
+            yield last_result[:7] + (gr.update(visible=True), gr.update(visible=False))
+        else:
+            # Pad result to match expected length then add button states
+            padded_result = list(last_result) + [gr.update(visible=False)] * (7 - len(last_result))
+            yield tuple(padded_result) + (gr.update(visible=True), gr.update(visible=False))
     
     def create_interface(self):
         """Create Gradio interface"""
@@ -1158,6 +1372,177 @@ class GlossarionWeb:
             border-color: #bd2130 !important;
             color: white !important;
         }
+        """
+        
+        # JavaScript for localStorage persistence - SIMPLE VERSION
+        localStorage_js = """
+        <script>
+        console.log('Glossarion localStorage script loading...');
+        
+        // Simple localStorage functions
+        function saveToLocalStorage(key, value) {
+            try {
+                localStorage.setItem('glossarion_' + key, JSON.stringify(value));
+                console.log('Saved:', key, '=', value);
+                return true;
+            } catch (e) {
+                console.error('Save failed:', e);
+                return false;
+            }
+        }
+        
+        function loadFromLocalStorage(key, defaultValue) {
+            try {
+                const item = localStorage.getItem('glossarion_' + key);
+                return item ? JSON.parse(item) : defaultValue;
+            } catch (e) {
+                console.error('Load failed:', e);
+                return defaultValue;
+            }
+        }
+        
+        // Manual save current form values to localStorage
+        function saveCurrentSettings() {
+            const settings = {};
+            
+            // Find all input elements in Gradio
+            document.querySelectorAll('input, select, textarea').forEach(el => {
+                // Skip file inputs
+                if (el.type === 'file') return;
+                
+                // Get a unique key based on element properties
+                let key = el.id || el.name || el.placeholder || '';
+                if (!key) {
+                    // Try to get label text
+                    const label = el.closest('div')?.querySelector('label');
+                    if (label) key = label.textContent;
+                }
+                
+                if (key) {
+                    key = key.trim().replace(/[^a-zA-Z0-9]/g, '_');
+                    if (el.type === 'checkbox') {
+                        settings[key] = el.checked;
+                    } else if (el.type === 'radio') {
+                        if (el.checked) settings[key] = el.value;
+                    } else if (el.value) {
+                        settings[key] = el.value;
+                    }
+                }
+            });
+            
+            // Save all settings
+            Object.keys(settings).forEach(key => {
+                saveToLocalStorage(key, settings[key]);
+            });
+            
+            console.log('Saved', Object.keys(settings).length, 'settings');
+            return settings;
+        }
+        
+        // Export settings from localStorage
+        function exportSettings() {
+            console.log('Export started');
+            
+            // First save current form state
+            saveCurrentSettings();
+            
+            // Then export from localStorage
+            const settings = {};
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith('glossarion_')) {
+                    try {
+                        settings[key.replace('glossarion_', '')] = JSON.parse(localStorage.getItem(key));
+                    } catch (e) {
+                        // Store as-is if not JSON
+                        settings[key.replace('glossarion_', '')] = localStorage.getItem(key);
+                    }
+                }
+            }
+            
+            if (Object.keys(settings).length === 0) {
+                alert('No settings to export. Try saving some settings first.');
+                return;
+            }
+            
+            // Download as JSON
+            const blob = new Blob([JSON.stringify(settings, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'glossarion_settings_' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            console.log('Exported', Object.keys(settings).length, 'settings');
+        }
+        
+        function importSettings(fileContent) {
+            try {
+                const settings = JSON.parse(fileContent);
+                Object.keys(settings).forEach(key => {
+                    saveToLocalStorage(key, settings[key]);
+                });
+                location.reload(); // Reload to apply settings
+            } catch (e) {
+                alert('Invalid settings file format');
+            }
+        }
+        
+        // Expose to global scope
+        window.exportSettings = exportSettings;
+        window.importSettings = importSettings;
+        window.saveCurrentSettings = saveCurrentSettings;
+        window.saveToLocalStorage = saveToLocalStorage;
+        window.loadFromLocalStorage = loadFromLocalStorage;
+        
+        // Load settings from localStorage on page load for HF Spaces
+        function loadSettingsFromLocalStorage() {
+            console.log('Attempting to load settings from localStorage...');
+            try {
+                // Get all localStorage items with glossarion_ prefix
+                const settings = {};
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    if (key && key.startsWith('glossarion_')) {
+                        const cleanKey = key.replace('glossarion_', '');
+                        try {
+                            settings[cleanKey] = JSON.parse(localStorage.getItem(key));
+                        } catch (e) {
+                            settings[cleanKey] = localStorage.getItem(key);
+                        }
+                    }
+                }
+                
+                if (Object.keys(settings).length > 0) {
+                    console.log('Found', Object.keys(settings).length, 'settings in localStorage');
+                    
+                    // Try to update Gradio components
+                    // This is tricky because Gradio components are rendered dynamically
+                    // We'll need to find them by their labels or other identifiers
+                    
+                    // For now, just log what we found
+                    console.log('Settings:', settings);
+                }
+            } catch (e) {
+                console.error('Error loading from localStorage:', e);
+            }
+        }
+        
+        // Try loading settings at various points
+        window.addEventListener('load', function() {
+            console.log('Page loaded');
+            setTimeout(loadSettingsFromLocalStorage, 1000);
+            setTimeout(loadSettingsFromLocalStorage, 3000);
+        });
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM ready');
+            setTimeout(loadSettingsFromLocalStorage, 500);
+        });
+        </script>
         """
         
         with gr.Blocks(
@@ -1188,6 +1573,7 @@ class GlossarionWeb:
                 {icon_img_tag}
                 <h1>Glossarion - AI-Powered Translation</h1>
             </div>
+            {localStorage_js}
             """)
             
             gr.Markdown("""
@@ -1205,11 +1591,21 @@ class GlossarionWeb:
                                 file_count="multiple"
                             )
                             
-                            translate_manga_btn = gr.Button(
-                                "🚀 Translate Manga",
-                                variant="primary",
-                                size="lg"
-                            )
+                            with gr.Row():
+                                translate_manga_btn = gr.Button(
+                                    "🚀 Translate Manga",
+                                    variant="primary",
+                                    size="lg",
+                                    scale=2
+                                )
+                                
+                                stop_manga_btn = gr.Button(
+                                    "⏹️ Stop Translation",
+                                    variant="stop",
+                                    size="lg",
+                                    visible=False,
+                                    scale=1
+                                )
                             
                             manga_model = gr.Dropdown(
                                 choices=self.models,
@@ -1294,6 +1690,26 @@ class GlossarionWeb:
                                 inpainting = gr.Checkbox(
                                     label="Enable Text Removal (Inpainting)",
                                     value=self.config.get('inpainting_enabled', True)
+                                )
+                            
+                            with gr.Accordion("⚡ Parallel Processing", open=False):
+                                gr.Markdown("### Parallel Panel Translation")
+                                gr.Markdown("*Process multiple panels simultaneously for faster translation*")
+                                
+                                parallel_panel_translation = gr.Checkbox(
+                                    label="Enable Parallel Panel Translation",
+                                    value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
+                                    info="Translates multiple panels at once instead of sequentially"
+                                )
+                                
+                                panel_max_workers = gr.Slider(
+                                    minimum=1,
+                                    maximum=20,
+                                    value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),
+                                    step=1,
+                                    label="Max concurrent panels",
+                                    interactive=True,
+                                    info="Number of panels to process simultaneously (higher = faster but more memory)"
                                 )
                             
                             with gr.Accordion("✨ Text Visibility Settings", open=False):
@@ -1390,9 +1806,14 @@ class GlossarionWeb:
                                     label="Background Opacity"
                                 )
                                 
+                            # Ensure bg_style value is valid
+                            bg_style_value = self.config.get('manga_bg_style', 'circle')
+                            if bg_style_value not in ["box", "circle", "wrap"]:
+                                bg_style_value = 'circle'  # Default fallback
+                            
                             bg_style = gr.Radio(
                                 choices=["box", "circle", "wrap"],
-                                value=self.config.get('manga_bg_style', 'circle'),
+                                value=bg_style_value,
                                 label="Background Style"
                             )
                         
@@ -1599,14 +2020,50 @@ class GlossarionWeb:
                         outputs=None
                     )
                     
+                    # Auto-save parallel panel translation settings  
+                    def save_parallel_panel_settings(parallel_enabled, max_workers):
+                        """Save parallel panel translation settings to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            
+                            # Initialize nested structure if not exists
+                            if 'manga_settings' not in current_config:
+                                current_config['manga_settings'] = {}
+                            if 'advanced' not in current_config['manga_settings']:
+                                current_config['manga_settings']['advanced'] = {}
+                            
+                            current_config['manga_settings']['advanced']['parallel_panel_translation'] = parallel_enabled
+                            current_config['manga_settings']['advanced']['panel_max_workers'] = int(max_workers)
+                            
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save parallel panel settings: {e}")
+                            return None
+                    
+                    parallel_panel_translation.change(
+                        fn=lambda p, w: save_parallel_panel_settings(p, w),
+                        inputs=[parallel_panel_translation, panel_max_workers],
+                        outputs=None
+                    )
+                    
+                    panel_max_workers.change(
+                        fn=lambda p, w: save_parallel_panel_settings(p, w),
+                        inputs=[parallel_panel_translation, panel_max_workers],
+                        outputs=None
+                    )
+                    
                     manga_profile.change(
                         fn=update_manga_system_prompt,
                         inputs=[manga_profile],
                         outputs=[manga_system_prompt]
                     )
                     
+                    # Translate button click handler
                     translate_manga_btn.click(
-                        fn=self.translate_or_stop_manga,
+                        fn=self.start_manga_translation,
                         inputs=[
                             manga_images,
                             manga_model,
@@ -1635,8 +2092,113 @@ class GlossarionWeb:
                             parallel_panel_translation,
                             panel_max_workers
                         ],
-                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar, translate_manga_btn]
+                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar, translate_manga_btn, stop_manga_btn]
                     )
+                    
+                    # Stop button click handler
+                    stop_manga_btn.click(
+                        fn=self.stop_manga_translation,
+                        inputs=[],
+                        outputs=[translate_manga_btn, stop_manga_btn, manga_status]
+                    )
+                    
+                    # Load settings from localStorage on page load
+                    def load_settings_from_storage():
+                        """Load settings from localStorage or config file"""
+                        is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+                        
+                        if not is_hf_spaces:
+                            # Load from config file locally
+                            config = self.load_config()
+                            # Decrypt API keys if needed
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                config = decrypt_config(config)
+                            return [
+                                config.get('model', 'gpt-4-turbo'),
+                                config.get('api_key', ''),
+                                'Manga_JP',  # profile
+                                self.profiles.get('Manga_JP', ''),  # prompt
+                                config.get('ocr_provider', 'custom-api'),
+                                None,  # google_creds (file component - can't be pre-filled)
+                                config.get('azure_vision_key', ''),
+                                config.get('azure_vision_endpoint', ''),
+                                config.get('bubble_detection_enabled', True),
+                                config.get('inpainting_enabled', True),
+                                config.get('manga_font_size_mode', 'auto'),
+                                config.get('manga_font_size', 24),
+                                config.get('manga_font_multiplier', 1.0),
+                                config.get('manga_min_font_size', 12),
+                                config.get('manga_max_font_size', 48),
+                                config.get('manga_text_color', '#FFFFFF'),
+                                config.get('manga_shadow_enabled', True),
+                                config.get('manga_shadow_color', '#000000'),
+                                config.get('manga_shadow_offset_x', 1),
+                                config.get('manga_shadow_offset_y', 1),
+                                config.get('manga_shadow_blur', 2),
+                                config.get('manga_bg_opacity', 180),
+                                config.get('manga_bg_style', 'auto'),
+                                config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
+                                config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7)
+                            ]
+                        else:
+                            # For HF Spaces, return defaults (will be overridden by JS)
+                            return [
+                                'gpt-4-turbo',  # model
+                                '',  # api_key
+                                'Manga_JP',  # profile
+                                self.profiles.get('Manga_JP', ''),  # prompt
+                                'custom-api',  # ocr_provider
+                                None,  # google_creds (file component - can't be pre-filled)
+                                '',  # azure_key
+                                '',  # azure_endpoint
+                                True,  # bubble_detection
+                                True,  # inpainting
+                                'auto',  # font_size_mode
+                                24,  # font_size
+                                1.0,  # font_multiplier
+                                12,  # min_font_size
+                                48,  # max_font_size
+                                '#FFFFFF',  # text_color
+                                True,  # shadow_enabled
+                                '#000000',  # shadow_color
+                                1,  # shadow_offset_x
+                                1,  # shadow_offset_y
+                                2,  # shadow_blur
+                                180,  # bg_opacity
+                                'auto',  # bg_style
+                                False,  # parallel_panel_translation
+                                7  # panel_max_workers
+                            ]
+                    
+                    # Store references for load handler
+                    self.manga_components = {
+                        'model': manga_model,
+                        'api_key': manga_api_key,
+                        'profile': manga_profile,
+                        'prompt': manga_system_prompt,
+                        'ocr_provider': ocr_provider,
+                        'google_creds': google_creds,
+                        'azure_key': azure_key,
+                        'azure_endpoint': azure_endpoint,
+                        'bubble_detection': bubble_detection,
+                        'inpainting': inpainting,
+                        'font_size_mode': font_size_mode,
+                        'font_size': font_size,
+                        'font_multiplier': font_multiplier,
+                        'min_font_size': min_font_size,
+                        'max_font_size': max_font_size,
+                        'text_color_rgb': text_color_rgb,
+                        'shadow_enabled': shadow_enabled,
+                        'shadow_color': shadow_color,
+                        'shadow_offset_x': shadow_offset_x,
+                        'shadow_offset_y': shadow_offset_y,
+                        'shadow_blur': shadow_blur,
+                        'bg_opacity': bg_opacity,
+                        'bg_style': bg_style,
+                        'parallel_panel_translation': parallel_panel_translation,
+                        'panel_max_workers': panel_max_workers
+                    }
+                    self.load_settings_fn = load_settings_from_storage
                 
                 # Manga Settings Tab - NEW
                 with gr.Tab("🎬 Manga Settings"):
@@ -1961,29 +2523,12 @@ class GlossarionWeb:
                             interactive=True
                         )
                         
-                        gr.Markdown("**⚡ Parallel Panel Translation**")
-                        gr.Markdown("*Processes multiple text bubbles simultaneously for faster translation*")
+                        gr.Markdown("**⚡ Advanced Performance**")
                         
                         preload_local_inpainting = gr.Checkbox(
                             label="Preload local inpainting instances for panel-parallel runs",
                             value=self.config.get('manga_settings', {}).get('advanced', {}).get('preload_local_inpainting_for_panels', True),
                             info="Preloads inpainting models to speed up parallel processing"
-                        )
-                        
-                        parallel_panel_translation = gr.Checkbox(
-                            label="Enable Parallel Panel Translation",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
-                            info="Translates multiple panels at once instead of sequentially"
-                        )
-                        
-                        panel_max_workers = gr.Slider(
-                            minimum=1,
-                            maximum=20,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),
-                            step=1,
-                            label="Max concurrent panels",
-                            interactive=True,
-                            info="Number of panels to process simultaneously (higher = faster but more memory)"
                         )
                         
                         panel_start_stagger = gr.Slider(
@@ -2240,6 +2785,28 @@ class GlossarionWeb:
                             print(f"Failed to save inpainting settings: {e}")
                             return None
                     
+                    # Auto-save preload local inpainting setting
+                    def save_preload_setting(preload_enabled):
+                        """Save preload local inpainting setting to config"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            
+                            # Initialize nested structure if not exists
+                            if 'manga_settings' not in current_config:
+                                current_config['manga_settings'] = {}
+                            if 'advanced' not in current_config['manga_settings']:
+                                current_config['manga_settings']['advanced'] = {}
+                            
+                            current_config['manga_settings']['advanced']['preload_local_inpainting_for_panels'] = bool(preload_enabled)
+                            
+                            self.save_config(current_config)
+                            return None
+                        except Exception as e:
+                            print(f"Failed to save preload setting: {e}")
+                            return None
+                    
                     # Auto-save bubble detection settings
                     def save_bubble_detection_settings(detector_type_val, rtdetr_conf, bubble_conf, detect_text, detect_empty, detect_free, max_detections, local_method_val):
                         """Save bubble detection settings to config"""
@@ -2336,28 +2903,10 @@ class GlossarionWeb:
                         outputs=None
                     )
                     
-                    # Auto-save handlers for parallel panel translation settings
+                    # Auto-save handler for preload local inpainting setting
                     preload_local_inpainting.change(
-                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
-                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
-                        outputs=None
-                    )
-                    
-                    parallel_panel_translation.change(
-                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
-                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
-                        outputs=None
-                    )
-                    
-                    panel_max_workers.change(
-                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
-                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
-                        outputs=None
-                    )
-                    
-                    panel_start_stagger.change(
-                        fn=lambda pl, p, w, s: save_parallel_settings(pl, p, w, s),
-                        inputs=[preload_local_inpainting, parallel_panel_translation, panel_max_workers, panel_start_stagger],
+                        fn=lambda pl: save_preload_setting(pl),
+                        inputs=[preload_local_inpainting],
                         outputs=None
                     )
                     
@@ -2518,60 +3067,7 @@ class GlossarionWeb:
                         value=True
                     )
                     
-                    save_status = gr.Textbox(label="Settings Status", value="Settings auto-save on change", interactive=False)
-                    
-                    def save_settings(save_key, t_delay, a_delay, ch_range, tok_limit, disable_tok_limit, out_tok_limit, ctx, hist_lim, roll_hist, batch, b_size):
-                        """Auto-save settings when changed"""
-                        try:
-                            # Reload latest config first to avoid overwriting other changes
-                            current_config = self.load_config()
-                            
-                            # Update only the fields we're managing
-                            current_config.update({
-                                'save_api_key': save_key,
-                                'thread_submission_delay': float(t_delay),
-                                'delay': float(a_delay),
-                                'chapter_range': str(ch_range),
-                                'token_limit': int(tok_limit) if tok_limit else 200000,
-                                'token_limit_disabled': bool(disable_tok_limit),
-                                'max_output_tokens': int(out_tok_limit) if out_tok_limit else 16000,
-                                'contextual': bool(ctx),
-                                'translation_history_limit': int(hist_lim) if hist_lim else 2,
-                                'translation_history_rolling': bool(roll_hist),
-                                'batch_translation': bool(batch),
-                                'batch_size': int(b_size) if b_size else 3
-                            })
-                            
-                            # Save with the merged config
-                            result = self.save_config(current_config)
-                            return f"✅ {result}"
-                        except Exception as e:
-                            import traceback
-                            error_trace = traceback.format_exc()
-                            print(f"Settings save error:\n{error_trace}")
-                            return f"❌ Save failed: {str(e)}"
-                    
-                    # Auto-save on any change
-                    for component in [save_api_key, thread_delay, api_delay, chapter_range, token_limit, disable_token_limit, 
-                                     output_token_limit, contextual, history_limit, rolling_history, batch_translation, batch_size]:
-                        component.change(
-                            fn=save_settings,
-                            inputs=[
-                                save_api_key,
-                                thread_delay,
-                                api_delay,
-                                chapter_range,
-                                token_limit,
-                                disable_token_limit,
-                                output_token_limit,
-                                contextual,
-                                history_limit,
-                                rolling_history,
-                                batch_translation,
-                                batch_size
-                            ],
-                            outputs=[save_status]
-                        )
+                    save_status = gr.Textbox(label="Settings Status", value="Settings are automatically saved when changed", interactive=False)
                 
                 # Help Tab
                 with gr.Tab("❓ Help"):
@@ -2614,6 +3110,14 @@ class GlossarionWeb:
                     - Lower temperature (0.1-0.3) for more literal translations
                     - Higher temperature (0.5-0.7) for more creative translations
                     """)
+            
+            # Add load handler to restore settings on page load (inside Blocks context)
+            if hasattr(self, 'manga_components') and hasattr(self, 'load_settings_fn'):
+                app.load(
+                    fn=self.load_settings_fn,
+                    inputs=[],
+                    outputs=list(self.manga_components.values())
+                )
         
         return app
 
