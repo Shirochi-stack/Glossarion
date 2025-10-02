@@ -383,6 +383,7 @@ class GlossarionWeb:
         profile_name,
         system_prompt,
         temperature,
+        max_tokens,
         glossary_file=None
     ):
         """Translate EPUB file - yields progress updates"""
@@ -432,7 +433,7 @@ class GlossarionWeb:
             os.environ['INPUT_PATH'] = input_path
             os.environ['MODEL'] = model
             os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
-            os.environ['MAX_OUTPUT_TOKENS'] = str(self.get_config_value('max_output_tokens', 16000))
+            os.environ['MAX_OUTPUT_TOKENS'] = str(max_tokens)
             
             # Set API key environment variable
             if 'gpt' in model.lower() or 'openai' in model.lower():
@@ -1748,6 +1749,12 @@ class GlossarionWeb:
                                     label="Temperature"
                                 )
                                 
+                                epub_max_tokens = gr.Number(
+                                    label="Max Output Tokens",
+                                    value=self.get_config_value('max_output_tokens', 16000),
+                                    minimum=0
+                                )
+                                
                                 glossary_file = gr.File(
                                     label="📋 Glossary CSV (optional)",
                                     file_types=[".csv"]
@@ -1824,6 +1831,7 @@ class GlossarionWeb:
                             epub_profile,
                             epub_system_prompt,
                             epub_temperature,
+                            epub_max_tokens,
                             glossary_file
                         ],
                         outputs=[
@@ -2356,22 +2364,8 @@ class GlossarionWeb:
                         outputs=[manga_system_prompt]
                     )
                     
-                    # Save active tab when it changes
-                    def save_active_tab(evt: gr.SelectData):
-                        """Save the active tab index to config"""
-                        try:
-                            print(f"Tab changed to index: {evt.index}")
-                            current_config = self.get_current_config_for_update()
-                            current_config['active_tab_index'] = evt.index
-                            self.save_config(current_config)
-                        except Exception as e:
-                            print(f"Failed to save active tab: {e}")
-                    
-                    main_tabs.select(
-                        fn=save_active_tab,
-                        inputs=None,
-                        outputs=None
-                    )
+                    # Tab persistence is not reliably supported by Gradio
+                    # Focus on field persistence instead
                     
                     # Generic field saver for all remaining fields
                     def save_field(field_name):
@@ -2390,6 +2384,13 @@ class GlossarionWeb:
                     epub_temperature.change(
                         fn=save_field('temperature'),
                         inputs=[epub_temperature],
+                        outputs=None
+                    )
+                    
+                    # Save max output tokens
+                    epub_max_tokens.change(
+                        fn=save_field('max_output_tokens'),
+                        inputs=[epub_max_tokens],
                         outputs=None
                     )
                     
@@ -3515,6 +3516,28 @@ class GlossarionWeb:
                             inputs=settings_components,
                             outputs=[save_status, js_executor]
                         )
+                    
+                    # Connect output token limit sync between EPUB and Settings tabs
+                    def sync_tokens_to_settings(value):
+                        save_field('max_output_tokens')(value)
+                        return value
+                    
+                    def sync_tokens_to_epub(value):
+                        save_field('max_output_tokens')(value)
+                        return value
+                    
+                    # Now connect the bidirectional sync for output tokens
+                    epub_max_tokens.change(
+                        fn=sync_tokens_to_settings,
+                        inputs=[epub_max_tokens],
+                        outputs=[output_token_limit]
+                    )
+                    
+                    output_token_limit.change(
+                        fn=sync_tokens_to_epub,  
+                        inputs=[output_token_limit],
+                        outputs=[epub_max_tokens]
+                    )
                 
                 # Help Tab
                 with gr.Tab("❓ Help"):
@@ -3572,6 +3595,7 @@ class GlossarionWeb:
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # epub_profile
                     self.profiles.get(self.get_config_value('active_profile', ''), ''),  # epub_system_prompt
                     self.get_config_value('temperature', 0.3),  # epub_temperature
+                    self.get_config_value('max_output_tokens', 16000),  # epub_max_tokens
                     self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # manga_profile
@@ -3603,7 +3627,7 @@ class GlossarionWeb:
                 fn=load_all_settings,
                 inputs=[],
                 outputs=[
-                    epub_model, epub_api_key, epub_profile, epub_system_prompt, epub_temperature,
+                    epub_model, epub_api_key, epub_profile, epub_system_prompt, epub_temperature, epub_max_tokens,
                     manga_model, manga_api_key, manga_profile, manga_system_prompt,
                     ocr_provider, azure_key, azure_endpoint, bubble_detection, inpainting,
                     font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
