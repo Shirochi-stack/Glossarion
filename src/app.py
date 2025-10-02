@@ -80,10 +80,15 @@ class GlossarionWeb:
     
     def __init__(self):
         self.config_file = "config_web.json"
+        # Load raw config first
         self.config = self.load_config()
-        # Decrypt API keys for use
+        
+        # Create a decrypted version for display/use in the UI
+        # but keep the original for saving
+        self.decrypted_config = self.config.copy()
         if API_KEY_ENCRYPTION_AVAILABLE:
-            self.config = decrypt_config(self.config)
+            self.decrypted_config = decrypt_config(self.decrypted_config)
+        
         self.models = get_model_options() if TRANSLATION_AVAILABLE else ["gpt-4", "claude-3-5-sonnet"]
         print(f"🤖 Loaded {len(self.models)} models: {self.models[:5]}{'...' if len(self.models) > 5 else ''}")
         
@@ -211,6 +216,15 @@ class GlossarionWeb:
         if config_profiles:
             self.profiles.update(config_profiles)
     
+    def get_config_value(self, key, default=None):
+        """Get value from decrypted config with fallback"""
+        return self.decrypted_config.get(key, default)
+    
+    def get_current_config_for_update(self):
+        """Get the current config for updating (uses in-memory version)"""
+        # Return a copy of the in-memory config, not loaded from file
+        return self.config.copy()
+    
     def get_default_config(self):
         """Get default configuration for Hugging Face Spaces"""
         return {
@@ -291,14 +305,26 @@ class GlossarionWeb:
                 if os.path.exists(self.config_file):
                     with open(self.config_file, 'r', encoding='utf-8') as f:
                         loaded_config = json.load(f)
+                        # Start with defaults
                         default_config = self.get_default_config()
-                        default_config.update(loaded_config)
+                        # Deep merge - preserve nested structures from loaded config
+                        self._deep_merge_config(default_config, loaded_config)
                         return default_config
             except Exception as e:
                 print(f"Could not load config: {e}")
         
         # HF Spaces or if loading fails - return defaults
         return self.get_default_config()
+    
+    def _deep_merge_config(self, base, override):
+        """Deep merge override config into base config"""
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                # Recursively merge nested dicts
+                self._deep_merge_config(base[key], value)
+            else:
+                # Override the value
+                base[key] = value
     
     def save_config(self, config):
         """Save configuration - to file locally, to localStorage on HF"""
@@ -307,13 +333,38 @@ class GlossarionWeb:
         if not is_hf_spaces:
             # Running locally - save to file
             try:
-                if API_KEY_ENCRYPTION_AVAILABLE:
-                    config_to_save = encrypt_config(config.copy())
-                else:
-                    config_to_save = config
+                config_to_save = config.copy()
                 
+                # Only encrypt if we have the encryption module AND keys aren't already encrypted
+                if API_KEY_ENCRYPTION_AVAILABLE:
+                    # Check if keys need encryption (not already encrypted)
+                    needs_encryption = False
+                    for key in ['api_key', 'azure_vision_key', 'google_vision_credentials']:
+                        if key in config_to_save:
+                            value = config_to_save[key]
+                            # If it's a non-empty string that doesn't start with 'ENC:', it needs encryption
+                            if value and isinstance(value, str) and not value.startswith('ENC:'):
+                                needs_encryption = True
+                                break
+                    
+                    if needs_encryption:
+                        config_to_save = encrypt_config(config_to_save)
+                
+                print(f"DEBUG save_config called with model={config.get('model')}, batch_size={config.get('batch_size')}")
+                print(f"DEBUG self.config before={self.config.get('model') if hasattr(self, 'config') else 'N/A'}")
+                print(f"DEBUG self.decrypted_config before={self.decrypted_config.get('model') if hasattr(self, 'decrypted_config') else 'N/A'}")
                 with open(self.config_file, 'w', encoding='utf-8') as f:
                     json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+                
+                # IMPORTANT: Update the in-memory configs so the UI reflects the changes immediately
+                self.config = config_to_save
+                # Update decrypted config too
+                self.decrypted_config = config.copy()  # Use the original (unencrypted) version
+                if API_KEY_ENCRYPTION_AVAILABLE:
+                    # Make sure decrypted_config has decrypted values
+                    self.decrypted_config = decrypt_config(self.decrypted_config)
+                print(f"DEBUG self.config after={self.config.get('model')}")
+                print(f"DEBUG self.decrypted_config after={self.decrypted_config.get('model')}")
                 
                 print(f"✅ Saved to {self.config_file}")
                 return "✅ Settings saved successfully!"
@@ -332,37 +383,47 @@ class GlossarionWeb:
         profile_name,
         system_prompt,
         temperature,
-        max_tokens,
-        glossary_file=None,
-        progress=gr.Progress()
+        glossary_file=None
     ):
-        """Translate EPUB file"""
+        """Translate EPUB file - yields progress updates"""
         
         if not TRANSLATION_AVAILABLE:
-            return None, "❌ Translation modules not loaded"
+            yield None, None, None, "❌ Translation modules not loaded", None, "Error", 0
+            return
         
         if not epub_file:
-            return None, "❌ Please upload an EPUB file"
+            yield None, None, None, "❌ Please upload an EPUB file", None, "Error", 0
+            return
         
         if not api_key:
-            return None, "❌ Please provide an API key"
+            yield None, None, None, "❌ Please provide an API key", None, "Error", 0
+            return
         
         if not profile_name:
-            return None, "❌ Please select a translation profile"
+            yield None, None, None, "❌ Please select a translation profile", None, "Error", 0
+            return
+        
+        # Initialize logs list
+        translation_logs = []
         
         try:
-            # Progress tracking
-            progress(0, desc="Starting translation...")
+            # Initial status
+            translation_logs.append("📚 Starting EPUB translation...")
+            yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Starting...", 0
             
             # Save uploaded file to temp location if needed
             input_path = epub_file.name if hasattr(epub_file, 'name') else epub_file
             epub_base = os.path.splitext(os.path.basename(input_path))[0]
             
+            translation_logs.append(f"📖 Input: {os.path.basename(input_path)}")
+            translation_logs.append(f"🤖 Model: {model}")
+            translation_logs.append(f"📝 Profile: {profile_name}")
+            yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Initializing...", 5
+            
             # Use the provided system prompt (user may have edited it)
             translation_prompt = system_prompt if system_prompt else self.profiles.get(profile_name, "")
             
             # Set the input path as a command line argument simulation
-            # TransateKRtoEN.main() reads from sys.argv if config doesn't have it
             import sys
             original_argv = sys.argv.copy()
             sys.argv = ['glossarion_web.py', input_path]
@@ -371,7 +432,7 @@ class GlossarionWeb:
             os.environ['INPUT_PATH'] = input_path
             os.environ['MODEL'] = model
             os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
-            os.environ['MAX_OUTPUT_TOKENS'] = str(max_tokens)
+            os.environ['MAX_OUTPUT_TOKENS'] = str(self.get_config_value('max_output_tokens', 16000))
             
             # Set API key environment variable
             if 'gpt' in model.lower() or 'openai' in model.lower():
@@ -398,71 +459,112 @@ class GlossarionWeb:
                 with open(self.config_file, 'w', encoding='utf-8') as f:
                     json.dump(temp_config, f, ensure_ascii=False, indent=2)
             
-            progress(0.1, desc="Initializing translation...")
+            translation_logs.append("⚙️ Configuration set")
+            yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Starting translation...", 10
             
             # Create a thread-safe queue for capturing logs
             import queue
             import threading
+            import time
             log_queue = queue.Queue()
-            last_log = ""
+            translation_complete = threading.Event()
+            translation_error = [None]
             
             def log_callback(msg):
-                """Capture log messages without recursion"""
-                nonlocal last_log
+                """Capture log messages"""
                 if msg and msg.strip():
-                    last_log = msg.strip()
                     log_queue.put(msg.strip())
             
-            # Monitor logs in a separate thread
-            def update_progress():
-                while True:
+            # Run translation in a separate thread
+            def run_translation():
+                try:
+                    result = TransateKRtoEN.main(
+                        log_callback=log_callback,
+                        stop_callback=None
+                    )
+                    translation_error[0] = None
+                except Exception as e:
+                    translation_error[0] = e
+                finally:
+                    translation_complete.set()
+            
+            translation_thread = threading.Thread(target=run_translation, daemon=True)
+            translation_thread.start()
+            
+            # Monitor progress
+            last_yield_time = time.time()
+            progress_percent = 10
+            
+            while not translation_complete.is_set() or not log_queue.empty():
+                # Collect logs
+                new_logs = []
+                while not log_queue.empty():
                     try:
-                        msg = log_queue.get(timeout=0.5)
-                        # Extract progress if available
-                        if '✅' in msg or '✓' in msg:
-                            progress(0.5, desc=msg[:100])  # Limit message length
-                        elif '🔄' in msg or 'Translating' in msg:
-                            progress(0.3, desc=msg[:100])
-                        else:
-                            progress(0.2, desc=msg[:100])
+                        msg = log_queue.get_nowait()
+                        new_logs.append(msg)
                     except queue.Empty:
-                        if last_log:
-                            progress(0.2, desc=last_log[:100])
-                        continue
-                    except:
                         break
+                
+                # Add new logs
+                if new_logs:
+                    translation_logs.extend(new_logs)
+                    
+                    # Update progress based on log content
+                    for log in new_logs:
+                        if 'Chapter' in log or 'chapter' in log:
+                            progress_percent = min(progress_percent + 5, 90)
+                        elif '✅' in log or 'Complete' in log:
+                            progress_percent = min(progress_percent + 10, 95)
+                        elif 'Translating' in log:
+                            progress_percent = min(progress_percent + 2, 85)
+                
+                # Yield updates periodically
+                current_time = time.time()
+                if new_logs or (current_time - last_yield_time) > 1.0:
+                    status_text = new_logs[-1] if new_logs else "Processing..."
+                    # Keep only last 100 logs to avoid UI overflow
+                    display_logs = translation_logs[-100:] if len(translation_logs) > 100 else translation_logs
+                    yield None, None, gr.update(visible=True), "\n".join(display_logs), gr.update(visible=True), status_text, progress_percent
+                    last_yield_time = current_time
+                
+                # Small delay to avoid CPU spinning
+                time.sleep(0.1)
             
-            progress_thread = threading.Thread(target=update_progress, daemon=True)
-            progress_thread.start()
+            # Wait for thread to complete
+            translation_thread.join(timeout=5)
             
-            # Call translation function (it reads from environment and config)
-            try:
-                result = TransateKRtoEN.main(
-                    log_callback=log_callback,
-                    stop_callback=None
-                )
-            finally:
-                # Restore original sys.argv
-                sys.argv = original_argv
-                # Stop progress thread
-                log_queue.put(None)
+            # Restore original sys.argv
+            sys.argv = original_argv
             
-            progress(1.0, desc="Translation complete!")
+            # Check for errors
+            if translation_error[0]:
+                error_msg = f"❌ Translation error: {str(translation_error[0])}"
+                translation_logs.append(error_msg)
+                yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), error_msg, 0
+                return
             
-            # Check for output EPUB in the output directory
+            # Check for output EPUB
             output_dir = epub_base
+            compiled_epub = None
+            
             if os.path.exists(output_dir):
                 # Look for compiled EPUB
-                compiled_epub = os.path.join(output_dir, f"{epub_base}_translated.epub")
-                if os.path.exists(compiled_epub):
-                    return compiled_epub, f"✅ Translation successful!\n\nTranslated: {os.path.basename(compiled_epub)}"
+                potential_epub = os.path.join(output_dir, f"{epub_base}_translated.epub")
+                if os.path.exists(potential_epub):
+                    compiled_epub = potential_epub
+                    translation_logs.append(f"✅ Translation complete: {os.path.basename(compiled_epub)}")
+                    yield compiled_epub, gr.update(visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Translation complete!", 100
+                    return
             
-            return None, "❌ Translation failed - output file not created"
+            # Translation failed
+            translation_logs.append("❌ Translation failed - output file not created")
+            yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Translation failed", 0
                 
         except Exception as e:
             import traceback
             error_msg = f"❌ Error during translation:\n{str(e)}\n\n{traceback.format_exc()}"
-            return None, error_msg
+            translation_logs.append(error_msg)
+            yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Error occurred", 0
     
     def extract_glossary(
         self,
@@ -641,7 +743,7 @@ class GlossarionWeb:
         
         if ocr_provider == "google":
             # Check if credentials are provided or saved in config
-            if not google_creds_path and not self.config.get('google_vision_credentials'):
+            if not google_creds_path and not self.get_config_value('google_vision_credentials'):
                 yield "❌ Please provide Google Cloud credentials JSON file", gr.update(visible=False), gr.update(visible=False), gr.update(value="❌ Error", visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
                 return
         
@@ -672,9 +774,9 @@ class GlossarionWeb:
                     # Auto-save to config
                     self.config['google_vision_credentials'] = creds_path
                     self.save_config(self.config)
-                elif self.config.get('google_vision_credentials'):
+                elif self.get_config_value('google_vision_credentials'):
                     # Use saved credentials from config
-                    creds_path = self.config.get('google_vision_credentials')
+                    creds_path = self.get_config_value('google_vision_credentials')
                     if os.path.exists(creds_path):
                         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
                     else:
@@ -806,7 +908,7 @@ class GlossarionWeb:
             merged_config['manga_settings']['inpainting']['method'] = 'local' if enable_inpainting else 'none'
             # Make sure local_method is set from config (defaults to anime)
             if 'local_method' not in merged_config['manga_settings']['inpainting']:
-                merged_config['manga_settings']['inpainting']['local_method'] = self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime')
+                merged_config['manga_settings']['inpainting']['local_method'] = self.get_config_value('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime')
             
             # Set parallel panel translation settings from config (Manga Settings tab)
             # These are controlled in the Manga Settings tab, so reload config to get latest values
@@ -889,7 +991,7 @@ class GlossarionWeb:
                 model_path_key = f'manga_{local_method}_model_path'
                 if model_path_key not in merged_config:
                     # Use default model path or empty string
-                    default_model_path = self.config.get(model_path_key, '')
+                    default_model_path = self.get_config_value(model_path_key, '')
                     merged_config[model_path_key] = default_model_path
                     print(f"Set {model_path_key} to: {default_model_path}")
             
@@ -1349,11 +1451,14 @@ class GlossarionWeb:
             yield tuple(padded_result) + (gr.update(visible=True), gr.update(visible=False))
     
     def create_interface(self):
-        """Create Gradio interface"""
+        """Create and return the Gradio interface"""
+        # Reload config before creating interface to get latest values
+        self.config = self.load_config()
+        self.decrypted_config = decrypt_config(self.config.copy()) if API_KEY_ENCRYPTION_AVAILABLE else self.config.copy()
         
         # Load and encode icon as base64
         icon_base64 = ""
-        icon_path = "Halgakos.png" if os.path.exists("Halgakos.png") else "Halgakos.ico"
+        icon_path = "Halgakos.ico" if os.path.exists("Halgakos.ico") else "Halgakos.ico"
         if os.path.exists(icon_path):
             with open(icon_path, "rb") as f:
                 icon_base64 = base64.b64encode(f.read()).decode()
@@ -1582,7 +1687,7 @@ class GlossarionWeb:
             Translate novels and books using advanced AI models (GPT-5, Claude, etc.)
             """)
             
-            with gr.Tabs():
+            with gr.Tabs() as main_tabs:
                 # EPUB Translation Tab
                 with gr.Tab("📚 EPUB Translation"):
                     with gr.Row():
@@ -1600,7 +1705,7 @@ class GlossarionWeb:
                             
                             epub_model = gr.Dropdown(
                                 choices=self.models,
-                                value=self.config.get('model', 'gpt-4-turbo'),
+                                value=self.get_config_value('model', 'gpt-4-turbo'),
                                 label="🤖 AI Model",
                                 interactive=True,
                                 allow_custom_value=True,
@@ -1611,12 +1716,13 @@ class GlossarionWeb:
                                 label="🔑 API Key",
                                 type="password",
                                 placeholder="Enter your API key",
-                                value=self.config.get('api_key', '')
+                                value=self.get_config_value('api_key', '')
                             )
                             
                             # Use all profiles without filtering
                             profile_choices = list(self.profiles.keys())
-                            default_profile = "korean" if "korean" in self.profiles else profile_choices[0] if profile_choices else ""
+                            # Use saved active_profile instead of hardcoded default
+                            default_profile = self.get_config_value('active_profile', profile_choices[0] if profile_choices else '')
                             
                             epub_profile = gr.Dropdown(
                                 choices=profile_choices,
@@ -1637,17 +1743,9 @@ class GlossarionWeb:
                                 epub_temperature = gr.Slider(
                                     minimum=0,
                                     maximum=1,
-                                    value=0.3,
+                                    value=self.get_config_value('temperature', 0.3),
                                     step=0.1,
                                     label="Temperature"
-                                )
-                                
-                                epub_max_tokens = gr.Slider(
-                                    minimum=1000,
-                                    maximum=32000,
-                                    value=16000,
-                                    step=1000,
-                                    label="Max Output Tokens"
                                 )
                                 
                                 glossary_file = gr.File(
@@ -1673,30 +1771,50 @@ class GlossarionWeb:
                                     visible=True
                                 )
                             
+                            # Progress section (similar to manga tab)
+                            with gr.Group(visible=False) as epub_progress_group:
+                                gr.Markdown("### Progress")
+                                epub_progress_text = gr.Textbox(
+                                    label="📨 Current Status",
+                                    value="Ready to start",
+                                    interactive=False,
+                                    lines=1
+                                )
+                                epub_progress_bar = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=0,
+                                    step=1,
+                                    label="📋 Translation Progress",
+                                    interactive=False,
+                                    show_label=True
+                                )
+                            
+                            epub_logs = gr.Textbox(
+                                label="📋 Translation Logs",
+                                lines=20,
+                                max_lines=30,
+                                value="Ready to translate. Upload an EPUB file and configure settings.",
+                                visible=True,
+                                interactive=False
+                            )
+                            
                             epub_output = gr.File(
                                 label="📥 Download Translated EPUB",
                                 visible=False
                             )
                             
                             epub_status = gr.Textbox(
-                                label="📋 Translation Status",
-                                lines=20,
-                                max_lines=30,
-                                value="Ready to translate. Upload an EPUB file and configure settings.",
+                                label="Final Status",
+                                lines=3,
+                                max_lines=5,
+                                visible=False,
                                 interactive=False
                             )
                     
-                    # Update system prompt when profile changes
-                    def update_epub_system_prompt(profile_name):
-                        return self.profiles.get(profile_name, "")
+                    # Sync handlers will be connected after manga components are created
                     
-                    epub_profile.change(
-                        fn=update_epub_system_prompt,
-                        inputs=[epub_profile],
-                        outputs=[epub_system_prompt]
-                    )
-                    
-                    # Translation button handler
+                    # Translation button handler - now with progress outputs
                     translate_btn.click(
                         fn=self.translate_epub,
                         inputs=[
@@ -1706,13 +1824,20 @@ class GlossarionWeb:
                             epub_profile,
                             epub_system_prompt,
                             epub_temperature,
-                            epub_max_tokens,
                             glossary_file
                         ],
-                        outputs=[epub_output, epub_status]
+                        outputs=[
+                            epub_output,          # Download file
+                            epub_status_message,  # Top status message
+                            epub_progress_group,  # Progress group visibility
+                            epub_logs,            # Translation logs
+                            epub_status,          # Final status
+                            epub_progress_text,   # Progress text
+                            epub_progress_bar     # Progress bar
+                        ]
                     )
                 
-                # Manga Translation Tab - DEFAULT/FIRST
+                # Manga Translation Tab
                 with gr.Tab("🎨 Manga Translation"):
                     with gr.Row():
                         with gr.Column():
@@ -1740,7 +1865,7 @@ class GlossarionWeb:
                             
                             manga_model = gr.Dropdown(
                                 choices=self.models,
-                                value=self.config.get('model', 'gpt-4-turbo'),
+                                value=self.get_config_value('model', 'gpt-4-turbo'),
                                 label="🤖 AI Model",
                                 interactive=True,
                                 allow_custom_value=True,
@@ -1751,12 +1876,13 @@ class GlossarionWeb:
                                 label="🔑 API Key",
                                 type="password",
                                 placeholder="Enter your API key",
-                                value=self.config.get('api_key', '')  # Pre-fill from config
+                                value=self.get_config_value('api_key', '')  # Pre-fill from config
                             )
                             
                             # Use all profiles without filtering
                             profile_choices = list(self.profiles.keys())
-                            default_profile = "Manga_JP" if "Manga_JP" in self.profiles else profile_choices[0] if profile_choices else ""
+                            # Use the active profile from config, same as EPUB tab
+                            default_profile = self.get_config_value('active_profile', profile_choices[0] if profile_choices else '')
                             
                             manga_profile = gr.Dropdown(
                                 choices=profile_choices,
@@ -1779,12 +1905,12 @@ class GlossarionWeb:
                                 
                                 ocr_provider = gr.Radio(
                                     choices=["google", "azure", "custom-api"],
-                                    value=self.config.get('ocr_provider', 'custom-api'),
+                                    value=self.get_config_value('ocr_provider', 'custom-api'),
                                     label="OCR Provider"
                                 )
                                 
                                 # Show saved Google credentials path if available
-                                saved_google_path = self.config.get('google_vision_credentials', '')
+                                saved_google_path = self.get_config_value('google_vision_credentials', '')
                                 if saved_google_path and os.path.exists(saved_google_path):
                                     gr.Markdown(f"✅ **Saved credentials found:** `{os.path.basename(saved_google_path)}`")
                                     gr.Markdown("💡 *Using saved credentials. Upload a new file only if you want to change them.*")
@@ -1801,23 +1927,23 @@ class GlossarionWeb:
                                     label="Azure Vision API Key (if using Azure)",
                                     type="password",
                                     placeholder="Enter Azure API key",
-                                    value=self.config.get('azure_vision_key', '')
+                                    value=self.get_config_value('azure_vision_key', '')
                                 )
                                 
                                 azure_endpoint = gr.Textbox(
                                     label="Azure Vision Endpoint (if using Azure)",
                                     placeholder="https://your-resource.cognitiveservices.azure.com/",
-                                    value=self.config.get('azure_vision_endpoint', '')
+                                    value=self.get_config_value('azure_vision_endpoint', '')
                                 )
                                 
                                 bubble_detection = gr.Checkbox(
                                     label="Enable Bubble Detection",
-                                    value=self.config.get('bubble_detection_enabled', True)
+                                    value=self.get_config_value('bubble_detection_enabled', True)
                                 )
                                 
                                 inpainting = gr.Checkbox(
                                     label="Enable Text Removal (Inpainting)",
-                                    value=self.config.get('inpainting_enabled', True)
+                                    value=self.get_config_value('inpainting_enabled', True)
                                 )
                             
                             with gr.Accordion("⚡ Parallel Processing", open=False):
@@ -1826,14 +1952,14 @@ class GlossarionWeb:
                                 
                                 parallel_panel_translation = gr.Checkbox(
                                     label="Enable Parallel Panel Translation",
-                                    value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
+                                    value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
                                     info="Translates multiple panels at once instead of sequentially"
                                 )
                                 
                                 panel_max_workers = gr.Slider(
                                     minimum=1,
                                     maximum=20,
-                                    value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),
+                                    value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),
                                     step=1,
                                     label="Max concurrent panels",
                                     interactive=True,
@@ -1845,14 +1971,14 @@ class GlossarionWeb:
                                 
                                 font_size_mode = gr.Radio(
                                     choices=["auto", "fixed", "multiplier"],
-                                    value=self.config.get('manga_font_size_mode', 'auto'),
+                                    value=self.get_config_value('manga_font_size_mode', 'auto'),
                                     label="Font Size Mode"
                                 )
                                 
                                 font_size = gr.Slider(
                                     minimum=0,
                                     maximum=72,
-                                    value=self.config.get('manga_font_size', 24),
+                                    value=self.get_config_value('manga_font_size', 24),
                                     step=1,
                                     label="Fixed Font Size (0=auto, used when mode=fixed)"
                                 )
@@ -1860,7 +1986,7 @@ class GlossarionWeb:
                                 font_multiplier = gr.Slider(
                                     minimum=0.5,
                                     maximum=2.0,
-                                    value=self.config.get('manga_font_size_multiplier', 1.0),
+                                    value=self.get_config_value('manga_font_size_multiplier', 1.0),
                                     step=0.1,
                                     label="Font Size Multiplier (when mode=multiplier)"
                                 )
@@ -1868,7 +1994,7 @@ class GlossarionWeb:
                                 min_font_size = gr.Slider(
                                     minimum=0,
                                     maximum=100,
-                                    value=self.config.get('manga_settings', {}).get('rendering', {}).get('auto_min_size', 12),
+                                    value=self.get_config_value('manga_settings', {}).get('rendering', {}).get('auto_min_size', 12),
                                     step=1,
                                     label="Minimum Font Size (0=no limit)"
                                 )
@@ -1876,7 +2002,7 @@ class GlossarionWeb:
                                 max_font_size = gr.Slider(
                                     minimum=20,
                                     maximum=100,
-                                    value=self.config.get('manga_max_font_size', 48),
+                                    value=self.get_config_value('manga_max_font_size', 48),
                                     step=1,
                                     label="Maximum Font Size"
                                 )
@@ -1885,25 +2011,25 @@ class GlossarionWeb:
                                 
                                 text_color_rgb = gr.ColorPicker(
                                     label="Font Color",
-                                    value="#000000"  # Default black
+                                    value=self.get_config_value('manga_text_color', '#000000')  # Default black
                                 )
                                 
                                 gr.Markdown("### Shadow Settings")
                                 
                                 shadow_enabled = gr.Checkbox(
                                     label="Enable Text Shadow",
-                                    value=self.config.get('manga_shadow_enabled', True)
+                                    value=self.get_config_value('manga_shadow_enabled', True)
                                 )
                                 
                                 shadow_color = gr.ColorPicker(
                                     label="Shadow Color",
-                                    value="#FFFFFF"  # Default white
+                                    value=self.get_config_value('manga_shadow_color', '#FFFFFF')  # Default white
                                 )
                                 
                                 shadow_offset_x = gr.Slider(
                                     minimum=-10,
                                     maximum=10,
-                                    value=self.config.get('manga_shadow_offset_x', 2),
+                                    value=self.get_config_value('manga_shadow_offset_x', 2),
                                     step=1,
                                     label="Shadow Offset X"
                                 )
@@ -1911,7 +2037,7 @@ class GlossarionWeb:
                                 shadow_offset_y = gr.Slider(
                                     minimum=-10,
                                     maximum=10,
-                                    value=self.config.get('manga_shadow_offset_y', 2),
+                                    value=self.get_config_value('manga_shadow_offset_y', 2),
                                     step=1,
                                     label="Shadow Offset Y"
                                 )
@@ -1919,7 +2045,7 @@ class GlossarionWeb:
                                 shadow_blur = gr.Slider(
                                     minimum=0,
                                     maximum=10,
-                                    value=self.config.get('manga_shadow_blur', 0),
+                                    value=self.get_config_value('manga_shadow_blur', 0),
                                     step=1,
                                     label="Shadow Blur"
                                 )
@@ -1929,13 +2055,13 @@ class GlossarionWeb:
                                 bg_opacity = gr.Slider(
                                     minimum=0,
                                     maximum=255,
-                                    value=self.config.get('manga_bg_opacity', 130),
+                                    value=self.get_config_value('manga_bg_opacity', 130),
                                     step=1,
                                     label="Background Opacity"
                                 )
                                 
                             # Ensure bg_style value is valid
-                            bg_style_value = self.config.get('manga_bg_style', 'circle')
+                            bg_style_value = self.get_config_value('manga_bg_style', 'circle')
                             if bg_style_value not in ["box", "circle", "wrap"]:
                                 bg_style_value = 'circle'  # Default fallback
                             
@@ -2000,45 +2126,15 @@ class GlossarionWeb:
                                 visible=False
                             )
                     
-                    # Auto-save model and API key
-                    def save_manga_credentials(model, api_key):
-                        """Save model and API key to config"""
-                        try:
-                            current_config = self.load_config()
-                            current_config['model'] = model
-                            if api_key:  # Only save if not empty
-                                current_config['api_key'] = api_key
-                            self.save_config(current_config)
-                            return None  # No output needed
-                        except Exception as e:
-                            print(f"Failed to save manga credentials: {e}")
-                            return None
-                    
-                    # Update manga system prompt when profile changes
-                    def update_manga_system_prompt(profile_name):
-                        return self.profiles.get(profile_name, "")
-                    
-                    # Auto-save on model change
-                    manga_model.change(
-                        fn=lambda m, k: save_manga_credentials(m, k),
-                        inputs=[manga_model, manga_api_key],
-                        outputs=None
-                    )
-                    
-                    # Auto-save on API key change
-                    manga_api_key.change(
-                        fn=lambda m, k: save_manga_credentials(m, k),
-                        inputs=[manga_model, manga_api_key],
-                        outputs=None
-                    )
+                    # Global sync flag to prevent loops
+                    self._syncing_active = False
                     
                     # Auto-save Azure credentials on change
                     def save_azure_credentials(key, endpoint):
                         """Save Azure credentials to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             if key and key.strip():
                                 current_config['azure_vision_key'] = str(key).strip()
                             if endpoint and endpoint.strip():
@@ -2065,9 +2161,8 @@ class GlossarionWeb:
                     def save_ocr_provider(provider):
                         """Save OCR provider to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             current_config['ocr_provider'] = provider
                             self.save_config(current_config)
                             return None
@@ -2085,9 +2180,8 @@ class GlossarionWeb:
                     def save_detection_settings(bubble_det, inpaint):
                         """Save bubble detection and inpainting settings"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             current_config['bubble_detection_enabled'] = bubble_det
                             current_config['inpainting_enabled'] = inpaint
                             self.save_config(current_config)
@@ -2112,9 +2206,8 @@ class GlossarionWeb:
                     def save_font_mode(mode):
                         """Save font size mode to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             current_config['manga_font_size_mode'] = mode
                             self.save_config(current_config)
                             return None
@@ -2132,9 +2225,8 @@ class GlossarionWeb:
                     def save_bg_style(style):
                         """Save background style to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             current_config['manga_bg_style'] = style
                             self.save_config(current_config)
                             return None
@@ -2152,9 +2244,8 @@ class GlossarionWeb:
                     def save_parallel_panel_settings(parallel_enabled, max_workers):
                         """Save parallel panel translation settings to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             
                             # Initialize nested structure if not exists
                             if 'manga_settings' not in current_config:
@@ -2183,10 +2274,136 @@ class GlossarionWeb:
                         outputs=None
                     )
                     
+                    # Comprehensive sync system for ALL components
+                    def sync_all_components(source_tab, model, api_key, profile):
+                        """Sync all main components between tabs"""
+                        if self._syncing_active:
+                            return [gr.update()] * 6  # Return no updates to prevent loops
+                        
+                        try:
+                            self._syncing_active = True
+                            
+                            # Save to config
+                            current_config = self.get_current_config_for_update()
+                            current_config['model'] = model
+                            if api_key:  # Only save non-empty API keys
+                                current_config['api_key'] = api_key
+                            current_config['active_profile'] = profile
+                            self.save_config(current_config)
+                            
+                            # Get prompt for profile
+                            prompt = self.profiles.get(profile, '')
+                            
+                            # Return values to sync to the OTHER tab
+                            # Order: model, api_key, profile, system_prompt for target tab
+                            return model, api_key, profile, prompt
+                            
+                        except Exception as e:
+                            print(f"Sync error: {e}")
+                            return [gr.update()] * 4
+                        finally:
+                            self._syncing_active = False
+                    
+                    # Connect EPUB components to sync to Manga
+                    epub_model.change(
+                        fn=lambda m, k, p: sync_all_components('epub', m, k, p),
+                        inputs=[epub_model, epub_api_key, epub_profile],
+                        outputs=[manga_model, manga_api_key, manga_profile, manga_system_prompt]
+                    )
+                    
+                    epub_api_key.change(
+                        fn=lambda m, k, p: sync_all_components('epub', m, k, p),
+                        inputs=[epub_model, epub_api_key, epub_profile],
+                        outputs=[manga_model, manga_api_key, manga_profile, manga_system_prompt]
+                    )
+                    
+                    epub_profile.change(
+                        fn=lambda m, k, p: sync_all_components('epub', m, k, p),
+                        inputs=[epub_model, epub_api_key, epub_profile],
+                        outputs=[manga_model, manga_api_key, manga_profile, manga_system_prompt]
+                    )
+                    
+                    # Also update epub system prompt when profile changes
+                    epub_profile.change(
+                        fn=lambda p: self.profiles.get(p, ''),
+                        inputs=[epub_profile],
+                        outputs=[epub_system_prompt]
+                    )
+                    
+                    # Connect Manga components to sync to EPUB
+                    manga_model.change(
+                        fn=lambda m, k, p: sync_all_components('manga', m, k, p),
+                        inputs=[manga_model, manga_api_key, manga_profile],
+                        outputs=[epub_model, epub_api_key, epub_profile, epub_system_prompt]
+                    )
+                    
+                    manga_api_key.change(
+                        fn=lambda m, k, p: sync_all_components('manga', m, k, p),
+                        inputs=[manga_model, manga_api_key, manga_profile],
+                        outputs=[epub_model, epub_api_key, epub_profile, epub_system_prompt]
+                    )
+                    
                     manga_profile.change(
-                        fn=update_manga_system_prompt,
+                        fn=lambda m, k, p: sync_all_components('manga', m, k, p),
+                        inputs=[manga_model, manga_api_key, manga_profile],
+                        outputs=[epub_model, epub_api_key, epub_profile, epub_system_prompt]
+                    )
+                    
+                    # Also update manga system prompt when profile changes
+                    manga_profile.change(
+                        fn=lambda p: self.profiles.get(p, ''),
                         inputs=[manga_profile],
                         outputs=[manga_system_prompt]
+                    )
+                    
+                    # Save active tab when it changes
+                    def save_active_tab(evt: gr.SelectData):
+                        """Save the active tab index to config"""
+                        try:
+                            print(f"Tab changed to index: {evt.index}")
+                            current_config = self.get_current_config_for_update()
+                            current_config['active_tab_index'] = evt.index
+                            self.save_config(current_config)
+                        except Exception as e:
+                            print(f"Failed to save active tab: {e}")
+                    
+                    main_tabs.select(
+                        fn=save_active_tab,
+                        inputs=None,
+                        outputs=None
+                    )
+                    
+                    # Generic field saver for all remaining fields
+                    def save_field(field_name):
+                        def _save(value):
+                            if not self._syncing_active:
+                                try:
+                                    current_config = self.get_current_config_for_update()
+                                    current_config[field_name] = value
+                                    self.save_config(current_config)
+                                except Exception as e:
+                                    print(f"Failed to save {field_name}: {e}")
+                            # Don't return anything when outputs=None
+                        return _save
+                    
+                    # Save temperature
+                    epub_temperature.change(
+                        fn=save_field('temperature'),
+                        inputs=[epub_temperature],
+                        outputs=None
+                    )
+                    
+                    # Save all font/color fields that aren't already saved
+                    text_color_rgb.change(
+                        fn=save_field('manga_text_color'),
+                        inputs=[text_color_rgb],
+                        outputs=None
+                    )
+                    
+                    shadow_color.change(
+                        fn=save_field('manga_shadow_color'),
+                        inputs=[shadow_color],
+                        outputs=None
                     )
                     
                     # Translate button click handler
@@ -2244,8 +2461,8 @@ class GlossarionWeb:
                             return [
                                 config.get('model', 'gpt-4-turbo'),
                                 config.get('api_key', ''),
-                                'Manga_JP',  # profile
-                                self.profiles.get('Manga_JP', ''),  # prompt
+                                config.get('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # profile
+                                self.profiles.get(config.get('active_profile', list(self.profiles.keys())[0] if self.profiles else ''), ''),  # prompt
                                 config.get('ocr_provider', 'custom-api'),
                                 None,  # google_creds (file component - can't be pre-filled)
                                 config.get('azure_vision_key', ''),
@@ -2273,8 +2490,8 @@ class GlossarionWeb:
                             return [
                                 'gpt-4-turbo',  # model
                                 '',  # api_key
-                                'Manga_JP',  # profile
-                                self.profiles.get('Manga_JP', ''),  # prompt
+                                list(self.profiles.keys())[0] if self.profiles else '',  # profile
+                                self.profiles.get(list(self.profiles.keys())[0] if self.profiles else '', ''),  # prompt
                                 'custom-api',  # ocr_provider
                                 None,  # google_creds (file component - can't be pre-filled)
                                 '',  # azure_key
@@ -2338,7 +2555,7 @@ class GlossarionWeb:
                         
                         detector_type = gr.Radio(
                             choices=["rtdetr_onnx", "rtdetr", "yolo"],
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr_onnx'),
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr_onnx'),
                             label="Detector Type",
                             interactive=True
                         )
@@ -2346,7 +2563,7 @@ class GlossarionWeb:
                         rtdetr_confidence = gr.Slider(
                             minimum=0.0,
                             maximum=1.0,
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('rtdetr_confidence', 0.3),
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('rtdetr_confidence', 0.3),
                             step=0.05,
                             label="RT-DETR Confidence Threshold",
                             interactive=True
@@ -2355,7 +2572,7 @@ class GlossarionWeb:
                         bubble_confidence = gr.Slider(
                             minimum=0.0,
                             maximum=1.0,
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('bubble_confidence', 0.3),
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('bubble_confidence', 0.3),
                             step=0.05,
                             label="YOLO Bubble Confidence Threshold",
                             interactive=True
@@ -2363,23 +2580,23 @@ class GlossarionWeb:
                         
                         detect_text_bubbles = gr.Checkbox(
                             label="Detect Text Bubbles",
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detect_text_bubbles', True)
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detect_text_bubbles', True)
                         )
                         
                         detect_empty_bubbles = gr.Checkbox(
                             label="Detect Empty Bubbles",
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detect_empty_bubbles', True)
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detect_empty_bubbles', True)
                         )
                         
                         detect_free_text = gr.Checkbox(
                             label="Detect Free Text (outside bubbles)",
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text', True)
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detect_free_text', True)
                         )
                         
                         bubble_max_detections = gr.Slider(
                             minimum=1,
                             maximum=2000,
-                            value=self.config.get('manga_settings', {}).get('ocr', {}).get('bubble_max_detections_yolo', 100),
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('bubble_max_detections_yolo', 100),
                             step=1,
                             label="Max detections (YOLO only)",
                             interactive=True,
@@ -2390,7 +2607,7 @@ class GlossarionWeb:
                         
                         local_inpaint_method = gr.Radio(
                             choices=["anime_onnx", "anime", "lama", "lama_onnx", "aot", "aot_onnx"],
-                            value=self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx'),
+                            value=self.get_config_value('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx'),
                             label="Local Inpainting Model",
                             interactive=True
                         )
@@ -2411,13 +2628,13 @@ class GlossarionWeb:
                         
                         auto_iterations = gr.Checkbox(
                             label="Auto Iterations (Recommended)",
-                            value=self.config.get('manga_settings', {}).get('auto_iterations', True)
+                            value=self.get_config_value('manga_settings', {}).get('auto_iterations', True)
                         )
                         
                         mask_dilation = gr.Slider(
                             minimum=0,
                             maximum=20,
-                            value=self.config.get('manga_settings', {}).get('mask_dilation', 0),
+                            value=self.get_config_value('manga_settings', {}).get('mask_dilation', 0),
                             step=1,
                             label="General Mask Dilation",
                             interactive=True
@@ -2426,7 +2643,7 @@ class GlossarionWeb:
                         text_bubble_dilation = gr.Slider(
                             minimum=0,
                             maximum=20,
-                            value=self.config.get('manga_settings', {}).get('text_bubble_dilation_iterations', 2),
+                            value=self.get_config_value('manga_settings', {}).get('text_bubble_dilation_iterations', 2),
                             step=1,
                             label="Text Bubble Dilation Iterations",
                             interactive=True
@@ -2435,7 +2652,7 @@ class GlossarionWeb:
                         empty_bubble_dilation = gr.Slider(
                             minimum=0,
                             maximum=20,
-                            value=self.config.get('manga_settings', {}).get('empty_bubble_dilation_iterations', 3),
+                            value=self.get_config_value('manga_settings', {}).get('empty_bubble_dilation_iterations', 3),
                             step=1,
                             label="Empty Bubble Dilation Iterations",
                             interactive=True
@@ -2444,7 +2661,7 @@ class GlossarionWeb:
                         free_text_dilation = gr.Slider(
                             minimum=0,
                             maximum=20,
-                            value=self.config.get('manga_settings', {}).get('free_text_dilation_iterations', 3),
+                            value=self.get_config_value('manga_settings', {}).get('free_text_dilation_iterations', 3),
                             step=1,
                             label="Free Text Dilation Iterations",
                             interactive=True
@@ -2453,18 +2670,18 @@ class GlossarionWeb:
                     with gr.Accordion("🖌️ Image Preprocessing", open=False):
                         preprocessing_enabled = gr.Checkbox(
                             label="Enable Preprocessing",
-                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('enabled', False)
+                            value=self.get_config_value('manga_settings', {}).get('preprocessing', {}).get('enabled', False)
                         )
                         
                         auto_detect_quality = gr.Checkbox(
                             label="Auto Detect Image Quality",
-                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('auto_detect_quality', True)
+                            value=self.get_config_value('manga_settings', {}).get('preprocessing', {}).get('auto_detect_quality', True)
                         )
                         
                         enhancement_strength = gr.Slider(
                             minimum=1.0,
                             maximum=3.0,
-                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('enhancement_strength', 1.5),
+                            value=self.get_config_value('manga_settings', {}).get('preprocessing', {}).get('enhancement_strength', 1.5),
                             step=0.1,
                             label="Enhancement Strength",
                             interactive=True
@@ -2473,7 +2690,7 @@ class GlossarionWeb:
                         denoise_strength = gr.Slider(
                             minimum=0,
                             maximum=50,
-                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('denoise_strength', 10),
+                            value=self.get_config_value('manga_settings', {}).get('preprocessing', {}).get('denoise_strength', 10),
                             step=1,
                             label="Denoise Strength",
                             interactive=True
@@ -2481,13 +2698,13 @@ class GlossarionWeb:
                         
                         max_image_dimension = gr.Number(
                             label="Max Image Dimension (pixels)",
-                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('max_image_dimension', 2000),
+                            value=self.get_config_value('manga_settings', {}).get('preprocessing', {}).get('max_image_dimension', 2000),
                             minimum=500
                         )
                         
                         chunk_height = gr.Number(
                             label="Chunk Height for Large Images",
-                            value=self.config.get('manga_settings', {}).get('preprocessing', {}).get('chunk_height', 1000),
+                            value=self.get_config_value('manga_settings', {}).get('preprocessing', {}).get('chunk_height', 1000),
                             minimum=500
                         )
                         
@@ -2496,7 +2713,7 @@ class GlossarionWeb:
                         
                         hd_strategy = gr.Radio(
                             choices=["original", "resize", "crop"],
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy', 'resize'),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('hd_strategy', 'resize'),
                             label="HD Strategy",
                             interactive=True,
                             info="original = legacy full-image; resize/crop = faster"
@@ -2505,7 +2722,7 @@ class GlossarionWeb:
                         hd_strategy_resize_limit = gr.Slider(
                             minimum=512,
                             maximum=4096,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy_resize_limit', 1536),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('hd_strategy_resize_limit', 1536),
                             step=64,
                             label="Resize Limit (long edge, px)",
                             info="For resize strategy",
@@ -2515,7 +2732,7 @@ class GlossarionWeb:
                         hd_strategy_crop_margin = gr.Slider(
                             minimum=0,
                             maximum=256,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy_crop_margin', 16),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('hd_strategy_crop_margin', 16),
                             step=2,
                             label="Crop Margin (px)",
                             info="For crop strategy",
@@ -2525,7 +2742,7 @@ class GlossarionWeb:
                         hd_strategy_crop_trigger = gr.Slider(
                             minimum=256,
                             maximum=4096,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('hd_strategy_crop_trigger_size', 1024),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('hd_strategy_crop_trigger_size', 1024),
                             step=64,
                             label="Crop Trigger Size (px)",
                             info="Apply crop only if long edge exceeds this",
@@ -2537,13 +2754,13 @@ class GlossarionWeb:
                         
                         tiling_enabled = gr.Checkbox(
                             label="Enable Tiling",
-                            value=self.config.get('manga_settings', {}).get('tiling', {}).get('enabled', False)
+                            value=self.get_config_value('manga_settings', {}).get('tiling', {}).get('enabled', False)
                         )
                         
                         tiling_tile_size = gr.Slider(
                             minimum=256,
                             maximum=1024,
-                            value=self.config.get('manga_settings', {}).get('tiling', {}).get('tile_size', 480),
+                            value=self.get_config_value('manga_settings', {}).get('tiling', {}).get('tile_size', 480),
                             step=64,
                             label="Tile Size (px)",
                             interactive=True
@@ -2552,7 +2769,7 @@ class GlossarionWeb:
                         tiling_tile_overlap = gr.Slider(
                             minimum=0,
                             maximum=128,
-                            value=self.config.get('manga_settings', {}).get('tiling', {}).get('tile_overlap', 64),
+                            value=self.get_config_value('manga_settings', {}).get('tiling', {}).get('tile_overlap', 64),
                             step=16,
                             label="Tile Overlap (px)",
                             interactive=True
@@ -2563,20 +2780,20 @@ class GlossarionWeb:
                         
                         font_algorithm = gr.Radio(
                             choices=["smart", "simple"],
-                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('algorithm', 'smart'),
+                            value=self.get_config_value('manga_settings', {}).get('font_sizing', {}).get('algorithm', 'smart'),
                             label="Font Sizing Algorithm",
                             interactive=True
                         )
                         
                         prefer_larger = gr.Checkbox(
                             label="Prefer Larger Fonts",
-                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('prefer_larger', True)
+                            value=self.get_config_value('manga_settings', {}).get('font_sizing', {}).get('prefer_larger', True)
                         )
                         
                         max_lines = gr.Slider(
                             minimum=1,
                             maximum=20,
-                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('max_lines', 10),
+                            value=self.get_config_value('manga_settings', {}).get('font_sizing', {}).get('max_lines', 10),
                             step=1,
                             label="Maximum Lines Per Bubble",
                             interactive=True
@@ -2585,7 +2802,7 @@ class GlossarionWeb:
                         line_spacing = gr.Slider(
                             minimum=0.5,
                             maximum=3.0,
-                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('line_spacing', 1.3),
+                            value=self.get_config_value('manga_settings', {}).get('font_sizing', {}).get('line_spacing', 1.3),
                             step=0.1,
                             label="Line Spacing Multiplier",
                             interactive=True
@@ -2593,12 +2810,12 @@ class GlossarionWeb:
                         
                         bubble_size_factor = gr.Checkbox(
                             label="Use Bubble Size Factor",
-                            value=self.config.get('manga_settings', {}).get('font_sizing', {}).get('bubble_size_factor', True)
+                            value=self.get_config_value('manga_settings', {}).get('font_sizing', {}).get('bubble_size_factor', True)
                         )
                         
                         auto_fit_style = gr.Radio(
                             choices=["balanced", "aggressive", "conservative"],
-                            value=self.config.get('manga_settings', {}).get('rendering', {}).get('auto_fit_style', 'balanced'),
+                            value=self.get_config_value('manga_settings', {}).get('rendering', {}).get('auto_fit_style', 'balanced'),
                             label="Auto Fit Style",
                             interactive=True
                         )
@@ -2608,12 +2825,12 @@ class GlossarionWeb:
                         
                         format_detection = gr.Checkbox(
                             label="Enable Format Detection (manga/webtoon)",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('format_detection', True)
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('format_detection', True)
                         )
                         
                         webtoon_mode = gr.Radio(
                             choices=["auto", "force_manga", "force_webtoon"],
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('webtoon_mode', 'auto'),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('webtoon_mode', 'auto'),
                             label="Webtoon Mode",
                             interactive=True
                         )
@@ -2623,7 +2840,7 @@ class GlossarionWeb:
                         inpaint_batch_size = gr.Slider(
                             minimum=1,
                             maximum=32,
-                            value=self.config.get('manga_settings', {}).get('inpainting', {}).get('batch_size', 10),
+                            value=self.get_config_value('manga_settings', {}).get('inpainting', {}).get('batch_size', 10),
                             step=1,
                             label="Batch Size",
                             interactive=True,
@@ -2632,20 +2849,20 @@ class GlossarionWeb:
                         
                         inpaint_cache_enabled = gr.Checkbox(
                             label="Enable inpainting cache (speeds up repeated processing)",
-                            value=self.config.get('manga_settings', {}).get('inpainting', {}).get('enable_cache', True)
+                            value=self.get_config_value('manga_settings', {}).get('inpainting', {}).get('enable_cache', True)
                         )
                         
                         gr.Markdown("#### Performance")
                         
                         parallel_processing = gr.Checkbox(
                             label="Enable Parallel Processing",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)
                         )
                         
                         max_workers = gr.Slider(
                             minimum=1,
                             maximum=8,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('max_workers', 2),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('max_workers', 2),
                             step=1,
                             label="Max Worker Threads",
                             interactive=True
@@ -2655,14 +2872,14 @@ class GlossarionWeb:
                         
                         preload_local_inpainting = gr.Checkbox(
                             label="Preload local inpainting instances for panel-parallel runs",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('preload_local_inpainting_for_panels', True),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('preload_local_inpainting_for_panels', True),
                             info="Preloads inpainting models to speed up parallel processing"
                         )
                         
                         panel_start_stagger = gr.Slider(
                             minimum=0,
                             maximum=1000,
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('panel_start_stagger_ms', 30),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_start_stagger_ms', 30),
                             step=10,
                             label="Panel start stagger",
                             interactive=True,
@@ -2673,31 +2890,31 @@ class GlossarionWeb:
                         
                         torch_precision = gr.Radio(
                             choices=["fp32", "fp16"],
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('torch_precision', 'fp16'),
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('torch_precision', 'fp16'),
                             label="Torch Precision",
                             interactive=True
                         )
                         
                         auto_cleanup_models = gr.Checkbox(
                             label="Auto Cleanup Models from Memory",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('auto_cleanup_models', False)
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('auto_cleanup_models', False)
                         )
                         
                         gr.Markdown("#### Debug Options")
                         
                         debug_mode = gr.Checkbox(
                             label="Enable Debug Mode",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
                         )
                         
                         save_intermediate = gr.Checkbox(
                             label="Save Intermediate Files",
-                            value=self.config.get('manga_settings', {}).get('advanced', {}).get('save_intermediate', False)
+                            value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('save_intermediate', False)
                         )
                         
                         concise_pipeline_logs = gr.Checkbox(
                             label="Concise Pipeline Logs",
-                            value=self.config.get('concise_pipeline_logs', True)
+                            value=self.get_config_value('concise_pipeline_logs', True)
                         )
                     
                     # Button handlers for model management
@@ -2869,9 +3086,8 @@ class GlossarionWeb:
                     def save_parallel_settings(preload_enabled, parallel_enabled, max_workers, stagger_ms):
                         """Save parallel panel translation settings to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             
                             # Initialize nested structure if not exists
                             if 'manga_settings' not in current_config:
@@ -2894,9 +3110,8 @@ class GlossarionWeb:
                     def save_inpainting_settings(batch_size, cache_enabled):
                         """Save inpainting performance settings to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             
                             # Initialize nested structure if not exists
                             if 'manga_settings' not in current_config:
@@ -2917,9 +3132,8 @@ class GlossarionWeb:
                     def save_preload_setting(preload_enabled):
                         """Save preload local inpainting setting to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             
                             # Initialize nested structure if not exists
                             if 'manga_settings' not in current_config:
@@ -2939,9 +3153,8 @@ class GlossarionWeb:
                     def save_bubble_detection_settings(detector_type_val, rtdetr_conf, bubble_conf, detect_text, detect_empty, detect_free, max_detections, local_method_val):
                         """Save bubble detection settings to config"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update what we need
                             
                             # Initialize nested structure
                             if 'manga_settings' not in current_config:
@@ -3057,7 +3270,7 @@ class GlossarionWeb:
                             
                             glossary_model = gr.Dropdown(
                                 choices=self.models,
-                                value=self.config.get('model', 'gpt-4-turbo'),
+                                value=self.get_config_value('model', 'gpt-4-turbo'),
                                 label="🤖 AI Model",
                                 interactive=True,
                                 allow_custom_value=True,
@@ -3068,7 +3281,7 @@ class GlossarionWeb:
                                 label="🔑 API Key",
                                 type="password",
                                 placeholder="Enter your API key",
-                                value=self.config.get('api_key', '')
+                                value=self.get_config_value('api_key', '')
                             )
                             
                             with gr.Accordion("⚙️ Extraction Settings", open=True):
@@ -3155,7 +3368,7 @@ class GlossarionWeb:
                             thread_delay = gr.Slider(
                                 minimum=0,
                                 maximum=5,
-                                value=self.config.get('thread_submission_delay', 0.1),
+                                value=self.get_config_value('thread_submission_delay', 0.1),
                                 step=0.1,
                                 label="Threading delay (s)",
                                 interactive=True
@@ -3164,7 +3377,7 @@ class GlossarionWeb:
                             api_delay = gr.Slider(
                                 minimum=0,
                                 maximum=10,
-                                value=self.config.get('delay', 1),
+                                value=self.get_config_value('delay', 1),
                                 step=0.5,
                                 label="API call delay (s)",
                                 interactive=True
@@ -3172,52 +3385,52 @@ class GlossarionWeb:
                             
                             chapter_range = gr.Textbox(
                                 label="Chapter range (e.g., 5-10)",
-                                value=self.config.get('chapter_range', ''),
+                                value=self.get_config_value('chapter_range', ''),
                                 placeholder="Leave empty for all chapters"
                             )
                             
                             token_limit = gr.Number(
                                 label="Input Token limit",
-                                value=self.config.get('token_limit', 200000),
+                                value=self.get_config_value('token_limit', 200000),
                                 minimum=0
                             )
                             
                             disable_token_limit = gr.Checkbox(
                                 label="Disable Input Token Limit",
-                                value=self.config.get('token_limit_disabled', False)
+                                value=self.get_config_value('token_limit_disabled', False)
                             )
                             
                             output_token_limit = gr.Number(
                                 label="Output Token limit",
-                                value=self.config.get('max_output_tokens', 16000),
+                                value=self.get_config_value('max_output_tokens', 16000),
                                 minimum=0
                             )
                         
                         with gr.Column():
                             contextual = gr.Checkbox(
                                 label="Contextual Translation",
-                                value=self.config.get('contextual', False)
+                                value=self.get_config_value('contextual', False)
                             )
                             
                             history_limit = gr.Number(
                                 label="Translation History Limit",
-                                value=self.config.get('translation_history_limit', 2),
+                                value=self.get_config_value('translation_history_limit', 2),
                                 minimum=0
                             )
                             
                             rolling_history = gr.Checkbox(
                                 label="Rolling History Window",
-                                value=self.config.get('translation_history_rolling', False)
+                                value=self.get_config_value('translation_history_rolling', False)
                             )
                             
                             batch_translation = gr.Checkbox(
                                 label="Batch Translation",
-                                value=self.config.get('batch_translation', True)
+                                value=self.get_config_value('batch_translation', True)
                             )
                             
                             batch_size = gr.Number(
                                 label="Batch Size",
-                                value=self.config.get('batch_size', 10),
+                                value=self.get_config_value('batch_size', 10),
                                 minimum=1
                             )
                     
@@ -3238,9 +3451,8 @@ class GlossarionWeb:
                     def save_settings_tab(thread_delay_val, api_delay_val, chapter_range_val, token_limit_val, disable_token_limit_val, output_token_limit_val, contextual_val, history_limit_val, rolling_history_val, batch_translation_val, batch_size_val, save_api_key_val):
                         """Save settings from the Settings tab"""
                         try:
-                            current_config = self.load_config()
-                            if API_KEY_ENCRYPTION_AVAILABLE:
-                                current_config = decrypt_config(current_config)
+                            current_config = self.get_current_config_for_update()
+                            # Don't decrypt - just update non-encrypted fields
                             
                             # Update settings
                             current_config['thread_submission_delay'] = float(thread_delay_val)
@@ -3346,13 +3558,59 @@ class GlossarionWeb:
                     - Higher temperature (0.5-0.7) for more creative translations
                     """)
             
-            # Add load handler to restore settings on page load (inside Blocks context)
-            if hasattr(self, 'manga_components') and hasattr(self, 'load_settings_fn'):
-                app.load(
-                    fn=self.load_settings_fn,
-                    inputs=[],
-                    outputs=list(self.manga_components.values())
-                )
+            # Create a comprehensive load function that refreshes ALL values
+            def load_all_settings():
+                """Load all settings from config file on page refresh"""
+                # Reload config to get latest values
+                self.config = self.load_config()
+                self.decrypted_config = decrypt_config(self.config.copy()) if API_KEY_ENCRYPTION_AVAILABLE else self.config.copy()
+                
+                # Return values for all tracked components
+                return [
+                    self.get_config_value('model', 'gpt-4-turbo'),  # epub_model
+                    self.get_config_value('api_key', ''),  # epub_api_key
+                    self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # epub_profile
+                    self.profiles.get(self.get_config_value('active_profile', ''), ''),  # epub_system_prompt
+                    self.get_config_value('temperature', 0.3),  # epub_temperature
+                    self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
+                    self.get_config_value('api_key', ''),  # manga_api_key
+                    self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # manga_profile
+                    self.profiles.get(self.get_config_value('active_profile', ''), ''),  # manga_system_prompt
+                    self.get_config_value('ocr_provider', 'custom-api'),  # ocr_provider
+                    self.get_config_value('azure_vision_key', ''),  # azure_key
+                    self.get_config_value('azure_vision_endpoint', ''),  # azure_endpoint
+                    self.get_config_value('bubble_detection_enabled', True),  # bubble_detection
+                    self.get_config_value('inpainting_enabled', True),  # inpainting
+                    self.get_config_value('manga_font_size_mode', 'auto'),  # font_size_mode
+                    self.get_config_value('manga_font_size', 24),  # font_size
+                    self.get_config_value('manga_font_multiplier', 1.0),  # font_multiplier
+                    self.get_config_value('manga_min_font_size', 12),  # min_font_size
+                    self.get_config_value('manga_max_font_size', 48),  # max_font_size
+                    self.get_config_value('manga_text_color', '#000000'),  # text_color_rgb
+                    self.get_config_value('manga_shadow_enabled', True),  # shadow_enabled
+                    self.get_config_value('manga_shadow_color', '#FFFFFF'),  # shadow_color
+                    self.get_config_value('manga_shadow_offset_x', 2),  # shadow_offset_x
+                    self.get_config_value('manga_shadow_offset_y', 2),  # shadow_offset_y
+                    self.get_config_value('manga_shadow_blur', 0),  # shadow_blur
+                    self.get_config_value('manga_bg_opacity', 130),  # bg_opacity
+                    self.get_config_value('manga_bg_style', 'circle'),  # bg_style
+                    self.get_config_value('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),  # parallel_panel_translation
+                    self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),  # panel_max_workers
+                ]
+            
+            # Add load handler to restore settings on page load
+            app.load(
+                fn=load_all_settings,
+                inputs=[],
+                outputs=[
+                    epub_model, epub_api_key, epub_profile, epub_system_prompt, epub_temperature,
+                    manga_model, manga_api_key, manga_profile, manga_system_prompt,
+                    ocr_provider, azure_key, azure_endpoint, bubble_detection, inpainting,
+                    font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
+                    text_color_rgb, shadow_enabled, shadow_color, shadow_offset_x, shadow_offset_y,
+                    shadow_blur, bg_opacity, bg_style, parallel_panel_translation, panel_max_workers
+                ]
+            )
         
         return app
 

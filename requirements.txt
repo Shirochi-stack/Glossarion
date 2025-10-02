@@ -11,6 +11,7 @@ ebooklib
 requests
 tqdm
 langdetect
+PySide6
 
 # AI/API Clients
 openai==1.94.0
