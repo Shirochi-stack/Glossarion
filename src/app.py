@@ -1276,11 +1276,43 @@ class GlossarionWeb:
             # Apply text visibility settings to config
             # Convert hex color to RGB tuple
             def hex_to_rgb(hex_color):
-                hex_color = hex_color.lstrip('#')
-                return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                # Handle different color formats
+                if isinstance(hex_color, (list, tuple)):
+                    # Already RGB format
+                    return tuple(hex_color[:3])
+                elif isinstance(hex_color, str):
+                    # Remove any brackets or spaces if present
+                    hex_color = hex_color.strip().strip('[]').strip()
+                    if hex_color.startswith('#'):
+                        # Hex format
+                        hex_color = hex_color.lstrip('#')
+                        if len(hex_color) == 6:
+                            return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                        elif len(hex_color) == 3:
+                            # Short hex format like #FFF
+                            return tuple(int(hex_color[i]*2, 16) for i in range(3))
+                    elif ',' in hex_color:
+                        # RGB string format like "255, 0, 0"
+                        try:
+                            parts = hex_color.split(',')
+                            return tuple(int(p.strip()) for p in parts[:3])
+                        except:
+                            pass
+                # Default to black if parsing fails
+                return (0, 0, 0)
             
-            text_rgb = hex_to_rgb(text_color)
-            shadow_rgb = hex_to_rgb(shadow_color)
+            # Debug logging for color values
+            print(f"DEBUG: text_color type: {type(text_color)}, value: {text_color}")
+            print(f"DEBUG: shadow_color type: {type(shadow_color)}, value: {shadow_color}")
+            
+            try:
+                text_rgb = hex_to_rgb(text_color)
+                shadow_rgb = hex_to_rgb(shadow_color)
+            except Exception as e:
+                print(f"WARNING: Error converting colors: {e}")
+                print(f"WARNING: Using default colors - text: black, shadow: white")
+                text_rgb = (0, 0, 0)  # Default to black text
+                shadow_rgb = (255, 255, 255)  # Default to white shadow
             
             self.config['manga_font_size_mode'] = font_size_mode
             self.config['manga_font_size'] = int(font_size)
@@ -2624,9 +2656,17 @@ class GlossarionWeb:
                                 
                                 gr.Markdown("### Text Color")
                                 
+                                # Convert RGB array to hex if needed
+                                def to_hex_color(color_value, default='#000000'):
+                                    if isinstance(color_value, (list, tuple)) and len(color_value) >= 3:
+                                        return '#{:02x}{:02x}{:02x}'.format(int(color_value[0]), int(color_value[1]), int(color_value[2]))
+                                    elif isinstance(color_value, str):
+                                        return color_value if color_value.startswith('#') else default
+                                    return default
+                                
                                 text_color_rgb = gr.ColorPicker(
                                     label="Font Color",
-                                    value=self.get_config_value('manga_text_color', '#000000')  # Default black
+                                    value=to_hex_color(self.get_config_value('manga_text_color', '#000000'), '#000000')
                                 )
                                 
                                 gr.Markdown("### Shadow Settings")
@@ -2638,7 +2678,7 @@ class GlossarionWeb:
                                 
                                 shadow_color = gr.ColorPicker(
                                     label="Shadow Color",
-                                    value=self.get_config_value('manga_shadow_color', '#FFFFFF')  # Default white
+                                    value=to_hex_color(self.get_config_value('manga_shadow_color', '#FFFFFF'), '#FFFFFF')
                                 )
                                 
                                 shadow_offset_x = gr.Slider(
@@ -4601,6 +4641,14 @@ class GlossarionWeb:
                 self.config = self.load_config()
                 self.decrypted_config = decrypt_config(self.config.copy()) if API_KEY_ENCRYPTION_AVAILABLE else self.config.copy()
                 
+                # Helper function to convert RGB arrays to hex
+                def to_hex_color(color_value, default='#000000'):
+                    if isinstance(color_value, (list, tuple)) and len(color_value) >= 3:
+                        return '#{:02x}{:02x}{:02x}'.format(int(color_value[0]), int(color_value[1]), int(color_value[2]))
+                    elif isinstance(color_value, str):
+                        return color_value if color_value.startswith('#') else default
+                    return default
+                
                 # Return values for all tracked components
                 return [
                     self.get_config_value('model', 'gpt-4-turbo'),  # epub_model
@@ -4665,9 +4713,10 @@ class GlossarionWeb:
                     self.get_config_value('manga_font_multiplier', 1.0),  # font_multiplier
                     self.get_config_value('manga_min_font_size', 12),  # min_font_size
                     self.get_config_value('manga_max_font_size', 48),  # max_font_size
-                    self.get_config_value('manga_text_color', '#000000'),  # text_color_rgb
+                    # Convert colors to hex format if they're stored as RGB arrays
+                    to_hex_color(self.get_config_value('manga_text_color', '#000000'), '#000000'),  # text_color_rgb
                     self.get_config_value('manga_shadow_enabled', True),  # shadow_enabled
-                    self.get_config_value('manga_shadow_color', '#FFFFFF'),  # shadow_color
+                    to_hex_color(self.get_config_value('manga_shadow_color', '#FFFFFF'), '#FFFFFF'),  # shadow_color
                     self.get_config_value('manga_shadow_offset_x', 2),  # shadow_offset_x
                     self.get_config_value('manga_shadow_offset_y', 2),  # shadow_offset_y
                     self.get_config_value('manga_shadow_blur', 0),  # shadow_blur
