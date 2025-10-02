@@ -622,6 +622,10 @@ class GlossarionWeb:
             # Set output directory to current working directory
             os.environ['OUTPUT_DIRECTORY'] = os.getcwd()
             
+            # Set critical safety features
+            os.environ['EMERGENCY_PARAGRAPH_RESTORATION'] = '0'  # DISABLED
+            os.environ['REMOVE_AI_ARTIFACTS'] = '1'  # ENABLED
+            
             # Set all additional environment variables from config
             self.set_all_environment_variables()
             
