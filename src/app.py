@@ -1755,9 +1755,31 @@ class GlossarionWeb:
                                     minimum=0
                                 )
                                 
+                                gr.Markdown("### Image Translation")
+                                
+                                enable_image_translation = gr.Checkbox(
+                                    label="Enable Image Translation",
+                                    value=self.get_config_value('enable_image_translation', False),
+                                    info="Extracts and translates text from images using vision models"
+                                )
+                                
+                                gr.Markdown("### Glossary Settings")
+                                
+                                enable_auto_glossary = gr.Checkbox(
+                                    label="Enable Automatic Glossary Generation",
+                                    value=self.get_config_value('enable_auto_glossary', False),
+                                    info="Automatic extraction and translation of character names/terms"
+                                )
+                                
+                                append_glossary = gr.Checkbox(
+                                    label="Append Glossary to System Prompt",
+                                    value=self.get_config_value('append_glossary_to_prompt', True),
+                                    info="Applies to ALL glossaries - manual and automatic"
+                                )
+                                
                                 glossary_file = gr.File(
-                                    label="📋 Glossary CSV (optional)",
-                                    file_types=[".csv"]
+                                    label="📋 Manual Glossary CSV (optional)",
+                                    file_types=[".csv", ".json", ".txt"]
                                 )
                         
                         with gr.Column():
@@ -2391,6 +2413,26 @@ class GlossarionWeb:
                     epub_max_tokens.change(
                         fn=save_field('max_output_tokens'),
                         inputs=[epub_max_tokens],
+                        outputs=None
+                    )
+                    
+                    # Save image translation toggle
+                    enable_image_translation.change(
+                        fn=save_field('enable_image_translation'),
+                        inputs=[enable_image_translation],
+                        outputs=None
+                    )
+                    
+                    # Save glossary toggles
+                    enable_auto_glossary.change(
+                        fn=save_field('enable_auto_glossary'),
+                        inputs=[enable_auto_glossary],
+                        outputs=None
+                    )
+                    
+                    append_glossary.change(
+                        fn=save_field('append_glossary_to_prompt'),
+                        inputs=[append_glossary],
                         outputs=None
                     )
                     
@@ -3596,6 +3638,9 @@ class GlossarionWeb:
                     self.profiles.get(self.get_config_value('active_profile', ''), ''),  # epub_system_prompt
                     self.get_config_value('temperature', 0.3),  # epub_temperature
                     self.get_config_value('max_output_tokens', 16000),  # epub_max_tokens
+                    self.get_config_value('enable_image_translation', False),  # enable_image_translation
+                    self.get_config_value('enable_auto_glossary', False),  # enable_auto_glossary  
+                    self.get_config_value('append_glossary_to_prompt', True),  # append_glossary
                     self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # manga_profile
@@ -3628,6 +3673,7 @@ class GlossarionWeb:
                 inputs=[],
                 outputs=[
                     epub_model, epub_api_key, epub_profile, epub_system_prompt, epub_temperature, epub_max_tokens,
+                    enable_image_translation, enable_auto_glossary, append_glossary,
                     manga_model, manga_api_key, manga_profile, manga_system_prompt,
                     ocr_provider, azure_key, azure_endpoint, bubble_detection, inpainting,
                     font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
