@@ -204,10 +204,12 @@ class GlossarionWeb:
             "Original": "Return everything exactly as seen on the source."
         }
         
-        # Load profiles from config, fallback to defaults
-        self.profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
-        if not self.profiles:
-            self.profiles = self.default_prompts.copy()
+        # Load profiles from config and merge with defaults
+        # Always include default prompts, then overlay any custom ones from config
+        self.profiles = self.default_prompts.copy()
+        config_profiles = self.config.get('prompt_profiles', {})
+        if config_profiles:
+            self.profiles.update(config_profiles)
     
     def get_default_config(self):
         """Get default configuration for Hugging Face Spaces"""
@@ -228,7 +230,7 @@ class GlossarionWeb:
             'manga_shadow_offset_y': 1,
             'manga_shadow_blur': 2,
             'manga_bg_opacity': 180,
-            'manga_bg_style': 'auto',
+            'manga_bg_style': 'circle',
             'manga_settings': {
                 'ocr': {
                     'detector_type': 'rtdetr_onnx',
@@ -240,7 +242,7 @@ class GlossarionWeb:
                     'bubble_max_detections_yolo': 100
                 },
                 'inpainting': {
-                    'local_method': 'anime_onnx',
+                    'local_method': 'anime',
                     'method': 'local',
                     'batch_size': 10,
                     'enable_cache': True
@@ -802,9 +804,9 @@ class GlossarionWeb:
             merged_config['manga_settings']['ocr']['provider'] = ocr_provider
             merged_config['manga_settings']['ocr']['bubble_detection_enabled'] = enable_bubble_detection
             merged_config['manga_settings']['inpainting']['method'] = 'local' if enable_inpainting else 'none'
-            # Make sure local_method is set from config (defaults to anime_onnx)
+            # Make sure local_method is set from config (defaults to anime)
             if 'local_method' not in merged_config['manga_settings']['inpainting']:
-                merged_config['manga_settings']['inpainting']['local_method'] = self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx')
+                merged_config['manga_settings']['inpainting']['local_method'] = self.config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime')
             
             # Set parallel panel translation settings from config (Manga Settings tab)
             # These are controlled in the Manga Settings tab, so reload config to get latest values
@@ -882,7 +884,7 @@ class GlossarionWeb:
             
             # Ensure model path is in config for local inpainting
             if enable_inpainting:
-                local_method = merged_config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx')
+                local_method = merged_config.get('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime')
                 # Set the model path key that MangaTranslator expects
                 model_path_key = f'manga_{local_method}_model_path'
                 if model_path_key not in merged_config:
@@ -1581,6 +1583,135 @@ class GlossarionWeb:
             """)
             
             with gr.Tabs():
+                # EPUB Translation Tab
+                with gr.Tab("📚 EPUB Translation"):
+                    with gr.Row():
+                        with gr.Column():
+                            epub_file = gr.File(
+                                label="📖 Upload EPUB File",
+                                file_types=[".epub"]
+                            )
+                            
+                            translate_btn = gr.Button(
+                                "🚀 Translate EPUB",
+                                variant="primary",
+                                size="lg"
+                            )
+                            
+                            epub_model = gr.Dropdown(
+                                choices=self.models,
+                                value=self.config.get('model', 'gpt-4-turbo'),
+                                label="🤖 AI Model",
+                                interactive=True,
+                                allow_custom_value=True,
+                                filterable=True
+                            )
+                            
+                            epub_api_key = gr.Textbox(
+                                label="🔑 API Key",
+                                type="password",
+                                placeholder="Enter your API key",
+                                value=self.config.get('api_key', '')
+                            )
+                            
+                            # Use all profiles without filtering
+                            profile_choices = list(self.profiles.keys())
+                            default_profile = "korean" if "korean" in self.profiles else profile_choices[0] if profile_choices else ""
+                            
+                            epub_profile = gr.Dropdown(
+                                choices=profile_choices,
+                                value=default_profile,
+                                label="📝 Translation Profile"
+                            )
+                            
+                            epub_system_prompt = gr.Textbox(
+                                label="System Prompt (Translation Instructions)",
+                                lines=8,
+                                max_lines=15,
+                                interactive=True,
+                                placeholder="Select a profile to load translation instructions...",
+                                value=self.profiles.get(default_profile, '') if default_profile else ''
+                            )
+                            
+                            with gr.Accordion("⚙️ Advanced Settings", open=False):
+                                epub_temperature = gr.Slider(
+                                    minimum=0,
+                                    maximum=1,
+                                    value=0.3,
+                                    step=0.1,
+                                    label="Temperature"
+                                )
+                                
+                                epub_max_tokens = gr.Slider(
+                                    minimum=1000,
+                                    maximum=32000,
+                                    value=16000,
+                                    step=1000,
+                                    label="Max Output Tokens"
+                                )
+                                
+                                glossary_file = gr.File(
+                                    label="📋 Glossary CSV (optional)",
+                                    file_types=[".csv"]
+                                )
+                        
+                        with gr.Column():
+                            # Add logo and status at top
+                            with gr.Row():
+                                gr.Image(
+                                    value="Halgakos.png",
+                                    label=None,
+                                    show_label=False,
+                                    width=80,
+                                    height=80,
+                                    interactive=False,
+                                    show_download_button=False,
+                                    container=False
+                                )
+                                epub_status_message = gr.Markdown(
+                                    value="### Ready to translate\nUpload an EPUB file and click 'Translate EPUB' to begin.",
+                                    visible=True
+                                )
+                            
+                            epub_output = gr.File(
+                                label="📥 Download Translated EPUB",
+                                visible=False
+                            )
+                            
+                            epub_status = gr.Textbox(
+                                label="📋 Translation Status",
+                                lines=20,
+                                max_lines=30,
+                                value="Ready to translate. Upload an EPUB file and configure settings.",
+                                interactive=False
+                            )
+                    
+                    # Update system prompt when profile changes
+                    def update_epub_system_prompt(profile_name):
+                        return self.profiles.get(profile_name, "")
+                    
+                    epub_profile.change(
+                        fn=update_epub_system_prompt,
+                        inputs=[epub_profile],
+                        outputs=[epub_system_prompt]
+                    )
+                    
+                    # Translation button handler
+                    translate_btn.click(
+                        fn=self.translate_epub,
+                        inputs=[
+                            epub_file,
+                            epub_model,
+                            epub_api_key,
+                            epub_profile,
+                            epub_system_prompt,
+                            epub_temperature,
+                            epub_max_tokens,
+                            glossary_file
+                        ],
+                        outputs=[epub_output, epub_status]
+                    )
+                
                 # Manga Translation Tab - DEFAULT/FIRST
                 with gr.Tab("🎨 Manga Translation"):
                     with gr.Row():
@@ -1623,16 +1754,13 @@ class GlossarionWeb:
                                 value=self.config.get('api_key', '')  # Pre-fill from config
                             )
                             
-                            # Filter manga-specific profiles
-                            manga_profile_choices = [k for k in self.profiles.keys() if k.startswith('Manga_')]
-                            if not manga_profile_choices:
-                                manga_profile_choices = list(self.profiles.keys())  # Fallback to all
-                            
-                            default_manga_profile = "Manga_JP" if "Manga_JP" in self.profiles else manga_profile_choices[0] if manga_profile_choices else ""
+                            # Use all profiles without filtering
+                            profile_choices = list(self.profiles.keys())
+                            default_profile = "Manga_JP" if "Manga_JP" in self.profiles else profile_choices[0] if profile_choices else ""
                             
                             manga_profile = gr.Dropdown(
-                                choices=manga_profile_choices,
-                                value=default_manga_profile,
+                                choices=profile_choices,
+                                value=default_profile,
                                 label="📝 Translation Profile"
                             )
                             
@@ -1643,7 +1771,7 @@ class GlossarionWeb:
                                 max_lines=15,
                                 interactive=True,
                                 placeholder="Select a manga profile to load translation instructions...",
-                                value=self.profiles.get(default_manga_profile, '') if default_manga_profile else ''
+                                value=self.profiles.get(default_profile, '') if default_profile else ''
                             )
                             
                             with gr.Accordion("⚙️ OCR Settings", open=False):
@@ -2912,8 +3040,8 @@ class GlossarionWeb:
                     
                     gr.Markdown("\n---\n**Note:** These settings will be saved to your config and applied to all manga translations.")
                 
-                # Glossary Extraction Tab - TEMPORARILY HIDDEN
-                with gr.Tab("📝 Glossary Extraction", visible=False):
+                # Glossary Extraction Tab
+                with gr.Tab("📝 Glossary Extraction"):
                     with gr.Row():
                         with gr.Column():
                             glossary_epub = gr.File(
@@ -2921,44 +3049,76 @@ class GlossarionWeb:
                                 file_types=[".epub"]
                             )
                             
+                            extract_btn = gr.Button(
+                                "🔍 Extract Glossary",
+                                variant="primary",
+                                size="lg"
+                            )
+                            
                             glossary_model = gr.Dropdown(
                                 choices=self.models,
-                                value="gpt-4-turbo",
-                                label="🤖 AI Model"
+                                value=self.config.get('model', 'gpt-4-turbo'),
+                                label="🤖 AI Model",
+                                interactive=True,
+                                allow_custom_value=True,
+                                filterable=True
                             )
                             
                             glossary_api_key = gr.Textbox(
                                 label="🔑 API Key",
                                 type="password",
-                                placeholder="Enter API key"
+                                placeholder="Enter your API key",
+                                value=self.config.get('api_key', '')
                             )
                             
-                            min_freq = gr.Slider(
-                                minimum=1,
-                                maximum=10,
-                                value=2,
-                                step=1,
-                                label="Minimum Frequency"
-                            )
-                            
-                            max_names_slider = gr.Slider(
-                                minimum=10,
-                                maximum=200,
-                                value=50,
-                                step=10,
-                                label="Max Character Names"
-                            )
-                            
-                            extract_btn = gr.Button(
-                                "🔍 Extract Glossary",
-                                variant="primary"
-                            )
+                            with gr.Accordion("⚙️ Extraction Settings", open=True):
+                                min_freq = gr.Slider(
+                                    minimum=1,
+                                    maximum=10,
+                                    value=2,
+                                    step=1,
+                                    label="Minimum Frequency",
+                                    info="Minimum times a name must appear to be included"
+                                )
+                                
+                                max_names_slider = gr.Slider(
+                                    minimum=10,
+                                    maximum=200,
+                                    value=50,
+                                    step=10,
+                                    label="Max Character Names",
+                                    info="Maximum number of character names to extract"
+                                )
                         
                         with gr.Column():
-                            glossary_output = gr.File(label="📥 Download Glossary CSV")
+                            # Add logo and status at top
+                            with gr.Row():
+                                gr.Image(
+                                    value="Halgakos.png",
+                                    label=None,
+                                    show_label=False,
+                                    width=80,
+                                    height=80,
+                                    interactive=False,
+                                    show_download_button=False,
+                                    container=False
+                                )
+                                glossary_status_message = gr.Markdown(
+                                    value="### Ready to extract\nUpload an EPUB file and click 'Extract Glossary' to begin.",
+                                    visible=True
+                                )
+                            
+                            glossary_output = gr.File(
+                                label="📥 Download Glossary CSV",
+                                visible=False
+                            )
+                            
                             glossary_status = gr.Textbox(
-                                label="Status",
-                                lines=10
+                                label="📋 Extraction Status",
+                                lines=20,
+                                max_lines=30,
+                                value="Ready to extract. Upload an EPUB file and configure settings.",
+                                interactive=False
                             )
                     
                     extract_btn.click(
@@ -2995,17 +3155,19 @@ class GlossarionWeb:
                             thread_delay = gr.Slider(
                                 minimum=0,
                                 maximum=5,
-                                value=self.config.get('thread_submission_delay', 0.5),
+                                value=self.config.get('thread_submission_delay', 0.1),
                                 step=0.1,
-                                label="Threading delay (s)"
+                                label="Threading delay (s)",
+                                interactive=True
                             )
                             
                             api_delay = gr.Slider(
                                 minimum=0,
                                 maximum=10,
-                                value=self.config.get('delay', 2),
+                                value=self.config.get('delay', 1),
                                 step=0.5,
-                                label="API call delay (s)"
+                                label="API call delay (s)",
+                                interactive=True
                             )
                             
                             chapter_range = gr.Textbox(
@@ -3050,12 +3212,12 @@ class GlossarionWeb:
                             
                             batch_translation = gr.Checkbox(
                                 label="Batch Translation",
-                                value=self.config.get('batch_translation', False)
+                                value=self.config.get('batch_translation', True)
                             )
                             
                             batch_size = gr.Number(
                                 label="Batch Size",
-                                value=self.config.get('batch_size', 3),
+                                value=self.config.get('batch_size', 10),
                                 minimum=1
                             )
                     
@@ -3068,6 +3230,79 @@ class GlossarionWeb:
                     )
                     
                     save_status = gr.Textbox(label="Settings Status", value="Settings are automatically saved when changed", interactive=False)
+                    
+                    # Hidden HTML component for JavaScript execution
+                    js_executor = gr.HTML("", visible=False)
+                    
+                    # Auto-save function for settings tab
+                    def save_settings_tab(thread_delay_val, api_delay_val, chapter_range_val, token_limit_val, disable_token_limit_val, output_token_limit_val, contextual_val, history_limit_val, rolling_history_val, batch_translation_val, batch_size_val, save_api_key_val):
+                        """Save settings from the Settings tab"""
+                        try:
+                            current_config = self.load_config()
+                            if API_KEY_ENCRYPTION_AVAILABLE:
+                                current_config = decrypt_config(current_config)
+                            
+                            # Update settings
+                            current_config['thread_submission_delay'] = float(thread_delay_val)
+                            current_config['delay'] = float(api_delay_val)
+                            current_config['chapter_range'] = str(chapter_range_val)
+                            current_config['token_limit'] = int(token_limit_val)
+                            current_config['token_limit_disabled'] = bool(disable_token_limit_val)
+                            current_config['max_output_tokens'] = int(output_token_limit_val)
+                            current_config['contextual'] = bool(contextual_val)
+                            current_config['translation_history_limit'] = int(history_limit_val)
+                            current_config['translation_history_rolling'] = bool(rolling_history_val)
+                            current_config['batch_translation'] = bool(batch_translation_val)
+                            current_config['batch_size'] = int(batch_size_val)
+                            
+                            # Save to file
+                            self.save_config(current_config)
+                            
+                            # JavaScript to save to localStorage
+                            js_code = """
+                            <script>
+                            (function() {
+                                // Save individual settings to localStorage
+                                window.saveToLocalStorage('thread_delay', %f);
+                                window.saveToLocalStorage('api_delay', %f);
+                                window.saveToLocalStorage('chapter_range', '%s');
+                                window.saveToLocalStorage('token_limit', %d);
+                                window.saveToLocalStorage('disable_token_limit', %s);
+                                window.saveToLocalStorage('output_token_limit', %d);
+                                window.saveToLocalStorage('contextual', %s);
+                                window.saveToLocalStorage('history_limit', %d);
+                                window.saveToLocalStorage('rolling_history', %s);
+                                window.saveToLocalStorage('batch_translation', %s);
+                                window.saveToLocalStorage('batch_size', %d);
+                                console.log('Settings saved to localStorage');
+                            })();
+                            </script>
+                            """ % (
+                                thread_delay_val, api_delay_val, chapter_range_val, token_limit_val,
+                                str(disable_token_limit_val).lower(), output_token_limit_val,
+                                str(contextual_val).lower(), history_limit_val,
+                                str(rolling_history_val).lower(), str(batch_translation_val).lower(),
+                                batch_size_val
+                            )
+                            
+                            return "✅ Settings saved successfully", js_code
+                        except Exception as e:
+                            return f"❌ Failed to save: {str(e)}", ""
+                    
+                    # Add change handlers to all settings components
+                    settings_components = [
+                        thread_delay, api_delay, chapter_range, token_limit, 
+                        disable_token_limit, output_token_limit, contextual, 
+                        history_limit, rolling_history, batch_translation, 
+                        batch_size, save_api_key
+                    ]
+                    
+                    for component in settings_components:
+                        component.change(
+                            fn=save_settings_tab,
+                            inputs=settings_components,
+                            outputs=[save_status, js_executor]
+                        )
                 
                 # Help Tab
                 with gr.Tab("❓ Help"):
