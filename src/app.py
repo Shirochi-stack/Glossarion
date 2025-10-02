@@ -2603,9 +2603,9 @@ class GlossarionWeb:
                 Translate novels and books using advanced AI models (GPT-5, Claude, etc.)
                 """)
                 
-                """
+                
                 # Add save button at the top - COMMENTED OUT
-                 with gr.Column(scale=0):
+                with gr.Column(scale=0):
                      save_config_btn = gr.Button(
                          "💾 Save Config",
                          variant="secondary",
@@ -2615,7 +2615,7 @@ class GlossarionWeb:
                          "",
                          visible=False
                      )
-                """
+                
             with gr.Tabs() as main_tabs:
                 # EPUB Translation Tab
                 with gr.Tab("📚 EPUB Translation"):
@@ -5178,9 +5178,9 @@ class GlossarionWeb:
                     self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),  # panel_max_workers
                 ]
             
-            """
+            
             # Configure Save Config button now that all components exist - COMMENTED OUT
-             save_config_btn.click(
+            save_config_btn.click(
                  fn=save_all_config,
                  inputs=[
                      # EPUB tab fields
@@ -5231,7 +5231,7 @@ class GlossarionWeb:
                  ],
                  outputs=[save_status_text]
              )
-            """
+            
             # Add load handler to restore settings on page load
             app.load(
                 fn=load_all_settings,
