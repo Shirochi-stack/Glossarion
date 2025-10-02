@@ -622,12 +622,18 @@ class GlossarionWeb:
             # Set output directory to current working directory
             os.environ['OUTPUT_DIRECTORY'] = os.getcwd()
             
-            # Set critical safety features
-            os.environ['EMERGENCY_PARAGRAPH_RESTORATION'] = '0'  # DISABLED
-            os.environ['REMOVE_AI_ARTIFACTS'] = '1'  # ENABLED
-            
             # Set all additional environment variables from config
             self.set_all_environment_variables()
+            
+            # OVERRIDE critical safety features AFTER config load
+            # CORRECT variable name is EMERGENCY_PARAGRAPH_RESTORE (no ATION)
+            os.environ['EMERGENCY_PARAGRAPH_RESTORE'] = '0'  # DISABLED
+            os.environ['REMOVE_AI_ARTIFACTS'] = '1'  # ENABLED
+            
+            # Debug: Verify settings
+            translation_logs.append(f"\n🔧 Debug: EMERGENCY_PARAGRAPH_RESTORE = '{os.environ.get('EMERGENCY_PARAGRAPH_RESTORE', 'NOT SET')}'")
+            translation_logs.append(f"🔧 Debug: REMOVE_AI_ARTIFACTS = '{os.environ.get('REMOVE_AI_ARTIFACTS', 'NOT SET')}'")
+            yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Configuration set...", 10
             
             # Set API key environment variable
             if 'gpt' in model.lower() or 'openai' in model.lower():
@@ -2597,18 +2603,19 @@ class GlossarionWeb:
                 Translate novels and books using advanced AI models (GPT-5, Claude, etc.)
                 """)
                 
+                """
                 # Add save button at the top - COMMENTED OUT
-                # with gr.Column(scale=0):
-                #     save_config_btn = gr.Button(
-                #         "💾 Save Config",
-                #         variant="secondary",
-                #         size="sm"
-                #     )
-                #     save_status_text = gr.Markdown(
-                #         "",
-                #         visible=False
-                #     )
-            
+                 with gr.Column(scale=0):
+                     save_config_btn = gr.Button(
+                         "💾 Save Config",
+                         variant="secondary",
+                         size="sm"
+                     )
+                     save_status_text = gr.Markdown(
+                         "",
+                         visible=False
+                     )
+                """
             with gr.Tabs() as main_tabs:
                 # EPUB Translation Tab
                 with gr.Tab("📚 EPUB Translation"):
@@ -5171,59 +5178,60 @@ class GlossarionWeb:
                     self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),  # panel_max_workers
                 ]
             
+            """
             # Configure Save Config button now that all components exist - COMMENTED OUT
-            # save_config_btn.click(
-            #     fn=save_all_config,
-            #     inputs=[
-            #         # EPUB tab fields
-            #         epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
-            #         enable_image_translation, enable_auto_glossary, append_glossary,
-            #         # Auto glossary settings
-            #         auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
-            #         auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
-            #         enable_post_translation_scan,
-            #         # Manual glossary extraction settings
-            #         min_freq, max_names_slider, max_titles,
-            #         max_text_size, max_sentences, translation_batch,
-            #         chapter_split_threshold, filter_mode, strip_honorifics,
-            #         fuzzy_threshold, extraction_prompt, format_instructions,
-            #         use_legacy_csv,
-            #         # QA Scanner settings
-            #         min_foreign_chars, check_repetition, check_glossary_leakage,
-            #         min_file_length, check_multiple_headers, check_missing_html,
-            #         check_insufficient_paragraphs, min_paragraph_percentage,
-            #         report_format, auto_save_report,
-            #         # Chapter processing options
-            #         batch_translate_headers, headers_per_batch, use_ncx_navigation,
-            #         attach_css_to_chapters, retain_source_extension,
-            #         use_conservative_batching, disable_gemini_safety,
-            #         use_http_openrouter, disable_openrouter_compression,
-            #         text_extraction_method, file_filtering_level,
-            #         # Thinking mode settings
-            #         enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
-            #         enable_gemini_thinking, gemini_thinking_budget,
-            #         # Manga tab fields  
-            #         manga_model, manga_api_key, manga_profile,
-            #         ocr_provider, azure_key, azure_endpoint,
-            #         bubble_detection, inpainting,
-            #         font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
-            #         text_color_rgb, shadow_enabled, shadow_color,
-            #         shadow_offset_x, shadow_offset_y, shadow_blur,
-            #         bg_opacity, bg_style,
-            #         parallel_panel_translation, panel_max_workers,
-            #         # Advanced Settings fields
-            #         detector_type, rtdetr_confidence, bubble_confidence,
-            #         detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
-            #         local_inpaint_method, webtoon_mode,
-            #         inpaint_batch_size, inpaint_cache_enabled,
-            #         parallel_processing, max_workers,
-            #         preload_local_inpainting, panel_start_stagger,
-            #         torch_precision, auto_cleanup_models,
-            #         debug_mode, save_intermediate, concise_pipeline_logs
-            #     ],
-            #     outputs=[save_status_text]
-            # )
-            
+             save_config_btn.click(
+                 fn=save_all_config,
+                 inputs=[
+                     # EPUB tab fields
+                     epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
+                     enable_image_translation, enable_auto_glossary, append_glossary,
+                     # Auto glossary settings
+                     auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
+                     auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
+                     enable_post_translation_scan,
+                     # Manual glossary extraction settings
+                     min_freq, max_names_slider, max_titles,
+                     max_text_size, max_sentences, translation_batch,
+                     chapter_split_threshold, filter_mode, strip_honorifics,
+                     fuzzy_threshold, extraction_prompt, format_instructions,
+                     use_legacy_csv,
+                     # QA Scanner settings
+                     min_foreign_chars, check_repetition, check_glossary_leakage,
+                     min_file_length, check_multiple_headers, check_missing_html,
+                     check_insufficient_paragraphs, min_paragraph_percentage,
+                     report_format, auto_save_report,
+                     # Chapter processing options
+                     batch_translate_headers, headers_per_batch, use_ncx_navigation,
+                     attach_css_to_chapters, retain_source_extension,
+                     use_conservative_batching, disable_gemini_safety,
+                     use_http_openrouter, disable_openrouter_compression,
+                     text_extraction_method, file_filtering_level,
+                     # Thinking mode settings
+                     enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
+                     enable_gemini_thinking, gemini_thinking_budget,
+                     # Manga tab fields  
+                     manga_model, manga_api_key, manga_profile,
+                     ocr_provider, azure_key, azure_endpoint,
+                     bubble_detection, inpainting,
+                     font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
+                     text_color_rgb, shadow_enabled, shadow_color,
+                     shadow_offset_x, shadow_offset_y, shadow_blur,
+                     bg_opacity, bg_style,
+                     parallel_panel_translation, panel_max_workers,
+                     # Advanced Settings fields
+                     detector_type, rtdetr_confidence, bubble_confidence,
+                     detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
+                     local_inpaint_method, webtoon_mode,
+                     inpaint_batch_size, inpaint_cache_enabled,
+                     parallel_processing, max_workers,
+                     preload_local_inpainting, panel_start_stagger,
+                     torch_precision, auto_cleanup_models,
+                     debug_mode, save_intermediate, concise_pipeline_logs
+                 ],
+                 outputs=[save_status_text]
+             )
+            """
             # Add load handler to restore settings on page load
             app.load(
                 fn=load_all_settings,
