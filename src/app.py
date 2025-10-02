@@ -79,7 +79,23 @@ class GlossarionWeb:
     """Web interface for Glossarion translator"""
     
     def __init__(self):
-        self.config_file = "config_web.json"
+        # Determine config file path based on environment
+        is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+        
+        if is_hf_spaces:
+            # Use /data directory for Hugging Face Spaces persistent storage
+            data_dir = '/data'
+            if not os.path.exists(data_dir):
+                # Fallback to current directory if /data doesn't exist
+                data_dir = '.'
+            self.config_file = os.path.join(data_dir, 'config_web.json')
+            print(f"🤗 HF Spaces detected - using config path: {self.config_file}")
+            print(f"📁 Directory exists: {os.path.exists(os.path.dirname(self.config_file))}")
+        else:
+            # Local mode - use current directory
+            self.config_file = "config_web.json"
+            print(f"🏠 Local mode - using config path: {self.config_file}")
+        
         # Load raw config first
         self.config = self.load_config()
         
@@ -302,24 +318,30 @@ class GlossarionWeb:
         }
     
     def load_config(self):
-        """Load configuration - from file locally, from localStorage on HF"""
+        """Load configuration - from persistent file on HF Spaces or local file"""
         is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
         
-        if not is_hf_spaces:
-            # Running locally - use config file
-            try:
-                if os.path.exists(self.config_file):
-                    with open(self.config_file, 'r', encoding='utf-8') as f:
-                        loaded_config = json.load(f)
-                        # Start with defaults
-                        default_config = self.get_default_config()
-                        # Deep merge - preserve nested structures from loaded config
-                        self._deep_merge_config(default_config, loaded_config)
-                        return default_config
-            except Exception as e:
-                print(f"Could not load config: {e}")
+        # Try to load from file (works both locally and on HF Spaces with persistent storage)
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+                    # Start with defaults
+                    default_config = self.get_default_config()
+                    # Deep merge - preserve nested structures from loaded config
+                    self._deep_merge_config(default_config, loaded_config)
+                    
+                    if is_hf_spaces:
+                        print(f"✅ Loaded config from persistent storage: {self.config_file}")
+                    else:
+                        print(f"✅ Loaded config from local file: {self.config_file}")
+                    
+                    return default_config
+        except Exception as e:
+            print(f"Could not load config from {self.config_file}: {e}")
         
-        # HF Spaces or if loading fails - return defaults
+        # If loading fails or file doesn't exist - return defaults
+        print(f"📝 Using default configuration")
         return self.get_default_config()
     
     def _deep_merge_config(self, base, override):
@@ -333,53 +355,70 @@ class GlossarionWeb:
                 base[key] = value
     
     def save_config(self, config):
-        """Save configuration - to file locally, to localStorage on HF"""
+        """Save configuration - to persistent file on HF Spaces or local file"""
         is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
         
-        if not is_hf_spaces:
-            # Running locally - save to file
-            try:
-                config_to_save = config.copy()
+        # Always try to save to file (works both locally and on HF Spaces with persistent storage)
+        try:
+            config_to_save = config.copy()
+            
+            # Only encrypt if we have the encryption module AND keys aren't already encrypted
+            if API_KEY_ENCRYPTION_AVAILABLE:
+                # Check if keys need encryption (not already encrypted)
+                needs_encryption = False
+                for key in ['api_key', 'azure_vision_key', 'google_vision_credentials']:
+                    if key in config_to_save:
+                        value = config_to_save[key]
+                        # If it's a non-empty string that doesn't start with 'ENC:', it needs encryption
+                        if value and isinstance(value, str) and not value.startswith('ENC:'):
+                            needs_encryption = True
+                            break
                 
-                # Only encrypt if we have the encryption module AND keys aren't already encrypted
-                if API_KEY_ENCRYPTION_AVAILABLE:
-                    # Check if keys need encryption (not already encrypted)
-                    needs_encryption = False
-                    for key in ['api_key', 'azure_vision_key', 'google_vision_credentials']:
-                        if key in config_to_save:
-                            value = config_to_save[key]
-                            # If it's a non-empty string that doesn't start with 'ENC:', it needs encryption
-                            if value and isinstance(value, str) and not value.startswith('ENC:'):
-                                needs_encryption = True
-                                break
-                    
-                    if needs_encryption:
-                        config_to_save = encrypt_config(config_to_save)
-                
-                print(f"DEBUG save_config called with model={config.get('model')}, batch_size={config.get('batch_size')}")
-                print(f"DEBUG self.config before={self.config.get('model') if hasattr(self, 'config') else 'N/A'}")
-                print(f"DEBUG self.decrypted_config before={self.decrypted_config.get('model') if hasattr(self, 'decrypted_config') else 'N/A'}")
-                with open(self.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(config_to_save, f, ensure_ascii=False, indent=2)
-                
-                # IMPORTANT: Update the in-memory configs so the UI reflects the changes immediately
-                self.config = config_to_save
-                # Update decrypted config too
-                self.decrypted_config = config.copy()  # Use the original (unencrypted) version
-                if API_KEY_ENCRYPTION_AVAILABLE:
-                    # Make sure decrypted_config has decrypted values
-                    self.decrypted_config = decrypt_config(self.decrypted_config)
-                print(f"DEBUG self.config after={self.config.get('model')}")
-                print(f"DEBUG self.decrypted_config after={self.decrypted_config.get('model')}")
-                
+                if needs_encryption:
+                    config_to_save = encrypt_config(config_to_save)
+            
+            # Create directory if it doesn't exist (important for HF Spaces)
+            os.makedirs(os.path.dirname(self.config_file) or '.', exist_ok=True)
+            
+            # Debug output
+            if is_hf_spaces:
+                print(f"📝 Saving to HF Spaces persistent storage: {self.config_file}")
+            
+            print(f"DEBUG save_config called with model={config.get('model')}, batch_size={config.get('batch_size')}")
+            print(f"DEBUG self.config before={self.config.get('model') if hasattr(self, 'config') else 'N/A'}")
+            print(f"DEBUG self.decrypted_config before={self.decrypted_config.get('model') if hasattr(self, 'decrypted_config') else 'N/A'}")
+            
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+            
+            # IMPORTANT: Update the in-memory configs so the UI reflects the changes immediately
+            self.config = config_to_save
+            # Update decrypted config too
+            self.decrypted_config = config.copy()  # Use the original (unencrypted) version
+            if API_KEY_ENCRYPTION_AVAILABLE:
+                # Make sure decrypted_config has decrypted values
+                self.decrypted_config = decrypt_config(self.decrypted_config)
+            
+            print(f"DEBUG self.config after={self.config.get('model')}")
+            print(f"DEBUG self.decrypted_config after={self.decrypted_config.get('model')}")
+            
+            if is_hf_spaces:
+                print(f"✅ Saved to persistent storage: {self.config_file}")
+                # Also verify the file was written
+                if os.path.exists(self.config_file):
+                    file_size = os.path.getsize(self.config_file)
+                    print(f"✅ File confirmed: {file_size} bytes")
+                return "✅ Settings saved to persistent storage!"
+            else:
                 print(f"✅ Saved to {self.config_file}")
                 return "✅ Settings saved successfully!"
-            except Exception as e:
-                print(f"❌ Save error: {e}")
-                return f"❌ Failed to save: {str(e)}"
-        
-        # HF Spaces - indicate localStorage usage
-        return "Settings saved to browser localStorage"
+                
+        except Exception as e:
+            print(f"❌ Save error: {e}")
+            if is_hf_spaces:
+                print(f"💡 Note: Make sure you have persistent storage enabled for your Space")
+                return f"❌ Failed to save: {str(e)}\n\nNote: Persistent storage may not be enabled"
+            return f"❌ Failed to save: {str(e)}"
     
     def translate_epub(
         self,
@@ -610,9 +649,20 @@ class GlossarionWeb:
         model,
         api_key,
         min_frequency,
-        max_names
+        max_names,
+        max_titles=30,
+        max_text_size=50000,
+        max_sentences=200,
+        translation_batch=50,
+        chapter_split_threshold=8192,
+        filter_mode='all',
+        strip_honorifics=True,
+        fuzzy_threshold=0.90,
+        extraction_prompt=None,
+        format_instructions=None,
+        use_legacy_csv=False
     ):
-        """Extract glossary from EPUB - yields progress updates"""
+        """Extract glossary from EPUB with manual extraction settings - yields progress updates"""
         
         if not epub_file:
             yield None, None, None, "❌ Please upload an EPUB file", None, "Error", 0
@@ -648,8 +698,24 @@ class GlossarionWeb:
             os.environ['MODEL'] = model
             os.environ['GLOSSARY_MIN_FREQUENCY'] = str(min_frequency)
             os.environ['GLOSSARY_MAX_NAMES'] = str(max_names)
+            os.environ['GLOSSARY_MAX_TITLES'] = str(max_titles)
+            os.environ['GLOSSARY_BATCH_SIZE'] = str(translation_batch)
+            os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(max_text_size)
+            os.environ['GLOSSARY_MAX_SENTENCES'] = str(max_sentences)
+            os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(chapter_split_threshold)
+            os.environ['GLOSSARY_FILTER_MODE'] = filter_mode
+            os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if strip_honorifics else '0'
+            os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(fuzzy_threshold)
+            os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if use_legacy_csv else '0'
             
-            extraction_logs.append(f"⚙️ Settings: Min frequency={min_frequency}, Max names={max_names}")
+            # Set prompts if provided
+            if extraction_prompt:
+                os.environ['GLOSSARY_SYSTEM_PROMPT'] = extraction_prompt
+            if format_instructions:
+                os.environ['GLOSSARY_FORMAT_INSTRUCTIONS'] = format_instructions
+            
+            extraction_logs.append(f"⚙️ Settings: Min freq={min_frequency}, Max names={max_names}, Filter={filter_mode}")
+            extraction_logs.append(f"⚙️ Options: Strip honorifics={strip_honorifics}, Fuzzy threshold={fuzzy_threshold:.2f}")
             yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Processing...", 40
             
             # Create a thread-safe queue for capturing logs
@@ -1844,9 +1910,22 @@ class GlossarionWeb:
             {localStorage_js}
             """)
             
-            gr.Markdown("""
-            Translate novels and books using advanced AI models (GPT-5, Claude, etc.)
-            """)
+            with gr.Row():
+                gr.Markdown("""
+                Translate novels and books using advanced AI models (GPT-5, Claude, etc.)
+                """)
+                
+                # Add save button at the top
+                with gr.Column(scale=0):
+                    save_config_btn = gr.Button(
+                        "💾 Save Config",
+                        variant="secondary",
+                        size="sm"
+                    )
+                    save_status_text = gr.Markdown(
+                        "",
+                        visible=False
+                    )
             
             with gr.Tabs() as main_tabs:
                 # EPUB Translation Tab
@@ -1945,6 +2024,75 @@ class GlossarionWeb:
                                     label="Append Glossary to System Prompt",
                                     value=self.get_config_value('append_glossary_to_prompt', True),
                                     info="Applies to ALL glossaries - manual and automatic"
+                                )
+                                
+                                # Automatic glossary extraction settings (only show when enabled)
+                                with gr.Group(visible=self.get_config_value('enable_auto_glossary', False)) as auto_glossary_settings:
+                                    gr.Markdown("#### Automatic Glossary Extraction Settings")
+                                    
+                                    with gr.Row():
+                                        auto_glossary_min_freq = gr.Slider(
+                                            minimum=1,
+                                            maximum=10,
+                                            value=self.get_config_value('glossary_min_frequency', 2),
+                                            step=1,
+                                            label="Min Frequency",
+                                            info="Minimum times a name must appear"
+                                        )
+                                        
+                                        auto_glossary_max_names = gr.Slider(
+                                            minimum=10,
+                                            maximum=200,
+                                            value=self.get_config_value('glossary_max_names', 50),
+                                            step=10,
+                                            label="Max Names",
+                                            info="Maximum number of character names"
+                                        )
+                                    
+                                    with gr.Row():
+                                        auto_glossary_max_titles = gr.Slider(
+                                            minimum=10,
+                                            maximum=100,
+                                            value=self.get_config_value('glossary_max_titles', 30),
+                                            step=5,
+                                            label="Max Titles",
+                                            info="Maximum number of titles/terms"
+                                        )
+                                        
+                                        auto_glossary_batch_size = gr.Slider(
+                                            minimum=10,
+                                            maximum=100,
+                                            value=self.get_config_value('glossary_batch_size', 50),
+                                            step=5,
+                                            label="Translation Batch Size",
+                                            info="Terms per API call"
+                                        )
+                                    
+                                    auto_glossary_filter_mode = gr.Radio(
+                                        choices=[
+                                            ("All names & terms", "all"),
+                                            ("Names with honorifics only", "only_with_honorifics"),
+                                            ("Names without honorifics & terms", "only_without_honorifics")
+                                        ],
+                                        value=self.get_config_value('glossary_filter_mode', 'all'),
+                                        label="Filter Mode",
+                                        info="What types of names to extract"
+                                    )
+                                    
+                                    auto_glossary_fuzzy_threshold = gr.Slider(
+                                        minimum=0.5,
+                                        maximum=1.0,
+                                        value=self.get_config_value('glossary_fuzzy_threshold', 0.90),
+                                        step=0.05,
+                                        label="Fuzzy Matching Threshold",
+                                        info="How similar names must be to match (0.9 = 90% match)"
+                                    )
+                                
+                                # Toggle visibility of auto glossary settings
+                                enable_auto_glossary.change(
+                                    fn=lambda x: gr.update(visible=x),
+                                    inputs=[enable_auto_glossary],
+                                    outputs=[auto_glossary_settings]
                                 )
                                 
                                 glossary_file = gr.File(
@@ -2354,279 +2502,168 @@ class GlossarionWeb:
                             print(f"Failed to save Azure credentials: {e}")
                             return None
                     
-                    azure_key.change(
-                        fn=lambda k, e: save_azure_credentials(k, e),
-                        inputs=[azure_key, azure_endpoint],
-                        outputs=None
-                    )
+                    # All auto-save handlers removed - use manual Save Config button to avoid constant writes to persistent storage
                     
-                    azure_endpoint.change(
-                        fn=lambda k, e: save_azure_credentials(k, e),
-                        inputs=[azure_key, azure_endpoint],
-                        outputs=None
-                    )
-                    
-                    # Auto-save OCR provider on change
-                    def save_ocr_provider(provider):
-                        """Save OCR provider to config"""
-                        try:
-                            current_config = self.get_current_config_for_update()
-                            # Don't decrypt - just update what we need
-                            current_config['ocr_provider'] = provider
-                            self.save_config(current_config)
-                            return None
-                        except Exception as e:
-                            print(f"Failed to save OCR provider: {e}")
-                            return None
-                    
-                    ocr_provider.change(
-                        fn=save_ocr_provider,
-                        inputs=[ocr_provider],
-                        outputs=None
-                    )
-                    
-                    # Auto-save bubble detection and inpainting on change
-                    def save_detection_settings(bubble_det, inpaint):
-                        """Save bubble detection and inpainting settings"""
-                        try:
-                            current_config = self.get_current_config_for_update()
-                            # Don't decrypt - just update what we need
-                            current_config['bubble_detection_enabled'] = bubble_det
-                            current_config['inpainting_enabled'] = inpaint
-                            self.save_config(current_config)
-                            return None
-                        except Exception as e:
-                            print(f"Failed to save detection settings: {e}")
-                            return None
-                    
-                    bubble_detection.change(
-                        fn=lambda b, i: save_detection_settings(b, i),
-                        inputs=[bubble_detection, inpainting],
-                        outputs=None
-                    )
-                    
-                    inpainting.change(
-                        fn=lambda b, i: save_detection_settings(b, i),
-                        inputs=[bubble_detection, inpainting],
-                        outputs=None
-                    )
-                    
-                    # Auto-save font size mode on change
-                    def save_font_mode(mode):
-                        """Save font size mode to config"""
-                        try:
-                            current_config = self.get_current_config_for_update()
-                            # Don't decrypt - just update what we need
-                            current_config['manga_font_size_mode'] = mode
-                            self.save_config(current_config)
-                            return None
-                        except Exception as e:
-                            print(f"Failed to save font mode: {e}")
-                            return None
-                    
-                    font_size_mode.change(
-                        fn=save_font_mode,
-                        inputs=[font_size_mode],
-                        outputs=None
-                    )
-                    
-                    # Auto-save background style on change
-                    def save_bg_style(style):
-                        """Save background style to config"""
-                        try:
-                            current_config = self.get_current_config_for_update()
-                            # Don't decrypt - just update what we need
-                            current_config['manga_bg_style'] = style
-                            self.save_config(current_config)
-                            return None
-                        except Exception as e:
-                            print(f"Failed to save bg style: {e}")
-                            return None
-                    
-                    bg_style.change(
-                        fn=save_bg_style,
-                        inputs=[bg_style],
-                        outputs=None
-                    )
-                    
-                    # Auto-save parallel panel translation settings  
-                    def save_parallel_panel_settings(parallel_enabled, max_workers):
-                        """Save parallel panel translation settings to config"""
-                        try:
-                            current_config = self.get_current_config_for_update()
-                            # Don't decrypt - just update what we need
-                            
-                            # Initialize nested structure if not exists
-                            if 'manga_settings' not in current_config:
-                                current_config['manga_settings'] = {}
-                            if 'advanced' not in current_config['manga_settings']:
-                                current_config['manga_settings']['advanced'] = {}
-                            
-                            current_config['manga_settings']['advanced']['parallel_panel_translation'] = parallel_enabled
-                            current_config['manga_settings']['advanced']['panel_max_workers'] = int(max_workers)
-                            
-                            self.save_config(current_config)
-                            return None
-                        except Exception as e:
-                            print(f"Failed to save parallel panel settings: {e}")
-                            return None
-                    
-                    parallel_panel_translation.change(
-                        fn=lambda p, w: save_parallel_panel_settings(p, w),
-                        inputs=[parallel_panel_translation, panel_max_workers],
-                        outputs=None
-                    )
-                    
-                    panel_max_workers.change(
-                        fn=lambda p, w: save_parallel_panel_settings(p, w),
-                        inputs=[parallel_panel_translation, panel_max_workers],
-                        outputs=None
-                    )
-                    
-                    # Comprehensive sync system for ALL components
-                    def sync_all_components(source_tab, model, api_key, profile):
-                        """Sync all main components between tabs"""
-                        if self._syncing_active:
-                            return [gr.update()] * 6  # Return no updates to prevent loops
-                        
-                        try:
-                            self._syncing_active = True
-                            
-                            # Save to config
-                            current_config = self.get_current_config_for_update()
-                            current_config['model'] = model
-                            if api_key:  # Only save non-empty API keys
-                                current_config['api_key'] = api_key
-                            current_config['active_profile'] = profile
-                            self.save_config(current_config)
-                            
-                            # Get prompt for profile
-                            prompt = self.profiles.get(profile, '')
-                            
-                            # Return values to sync to the OTHER tab
-                            # Order: model, api_key, profile, system_prompt for target tab
-                            return model, api_key, profile, prompt
-                            
-                        except Exception as e:
-                            print(f"Sync error: {e}")
-                            return [gr.update()] * 4
-                        finally:
-                            self._syncing_active = False
-                    
-                    # Connect EPUB components to sync to Manga
-                    epub_model.change(
-                        fn=lambda m, k, p: sync_all_components('epub', m, k, p),
-                        inputs=[epub_model, epub_api_key, epub_profile],
-                        outputs=[manga_model, manga_api_key, manga_profile, manga_system_prompt]
-                    )
-                    
-                    epub_api_key.change(
-                        fn=lambda m, k, p: sync_all_components('epub', m, k, p),
-                        inputs=[epub_model, epub_api_key, epub_profile],
-                        outputs=[manga_model, manga_api_key, manga_profile, manga_system_prompt]
-                    )
-                    
-                    epub_profile.change(
-                        fn=lambda m, k, p: sync_all_components('epub', m, k, p),
-                        inputs=[epub_model, epub_api_key, epub_profile],
-                        outputs=[manga_model, manga_api_key, manga_profile, manga_system_prompt]
-                    )
-                    
-                    # Also update epub system prompt when profile changes
+                    # Only update system prompts when profiles change - no cross-tab syncing
                     epub_profile.change(
                         fn=lambda p: self.profiles.get(p, ''),
                         inputs=[epub_profile],
                         outputs=[epub_system_prompt]
                     )
                     
-                    # Connect Manga components to sync to EPUB
-                    manga_model.change(
-                        fn=lambda m, k, p: sync_all_components('manga', m, k, p),
-                        inputs=[manga_model, manga_api_key, manga_profile],
-                        outputs=[epub_model, epub_api_key, epub_profile, epub_system_prompt]
-                    )
-                    
-                    manga_api_key.change(
-                        fn=lambda m, k, p: sync_all_components('manga', m, k, p),
-                        inputs=[manga_model, manga_api_key, manga_profile],
-                        outputs=[epub_model, epub_api_key, epub_profile, epub_system_prompt]
-                    )
-                    
-                    manga_profile.change(
-                        fn=lambda m, k, p: sync_all_components('manga', m, k, p),
-                        inputs=[manga_model, manga_api_key, manga_profile],
-                        outputs=[epub_model, epub_api_key, epub_profile, epub_system_prompt]
-                    )
-                    
-                    # Also update manga system prompt when profile changes
                     manga_profile.change(
                         fn=lambda p: self.profiles.get(p, ''),
                         inputs=[manga_profile],
                         outputs=[manga_system_prompt]
                     )
                     
-                    # Tab persistence is not reliably supported by Gradio
-                    # Focus on field persistence instead
+                    # Manual save function for all configuration
+                    def save_all_config(
+                        model, api_key, profile, temperature, max_tokens,
+                        enable_image_trans, enable_auto_gloss, append_gloss,
+                        # Auto glossary settings
+                        auto_gloss_min_freq, auto_gloss_max_names, auto_gloss_max_titles,
+                        auto_gloss_batch_size, auto_gloss_filter_mode, auto_gloss_fuzzy,
+                        # Manual glossary extraction settings
+                        manual_min_freq, manual_max_names, manual_max_titles,
+                        manual_max_text_size, manual_max_sentences, manual_trans_batch,
+                        manual_chapter_split, manual_filter_mode, manual_strip_honorifics,
+                        manual_fuzzy, manual_extraction_prompt, manual_format_instructions,
+                        manual_use_legacy_csv,
+                        manga_model, manga_api_key, manga_profile,
+                        ocr_prov, azure_k, azure_e,
+                        bubble_det, inpaint,
+                        font_mode, font_s, font_mult, min_font, max_font,
+                        text_col, shadow_en, shadow_col,
+                        shadow_x, shadow_y, shadow_b,
+                        bg_op, bg_st,
+                        parallel_trans, panel_workers,
+                        # Advanced Settings fields
+                        detector_type_val, rtdetr_conf, bubble_conf,
+                        detect_text, detect_empty, detect_free, max_detections,
+                        local_method_val, webtoon_val,
+                        batch_size_val, cache_enabled_val,
+                        parallel_proc, max_work,
+                        preload_local, stagger_ms,
+                        torch_prec, auto_cleanup,
+                        debug, save_inter, concise_logs
+                    ):
+                        """Save all configuration values at once"""
+                        try:
+                            config = self.get_current_config_for_update()
+                            
+                            # Save all values
+                            config['model'] = model
+                            if api_key:  # Only save non-empty API keys
+                                config['api_key'] = api_key
+                            config['active_profile'] = profile
+                            config['temperature'] = temperature
+                            config['max_output_tokens'] = max_tokens
+                            config['enable_image_translation'] = enable_image_trans
+                            config['enable_auto_glossary'] = enable_auto_gloss
+                            config['append_glossary_to_prompt'] = append_gloss
+                            
+                            # Auto glossary settings
+                            config['glossary_min_frequency'] = auto_gloss_min_freq
+                            config['glossary_max_names'] = auto_gloss_max_names
+                            config['glossary_max_titles'] = auto_gloss_max_titles
+                            config['glossary_batch_size'] = auto_gloss_batch_size
+                            config['glossary_filter_mode'] = auto_gloss_filter_mode
+                            config['glossary_fuzzy_threshold'] = auto_gloss_fuzzy
+                            
+                            # Manual glossary extraction settings
+                            config['manual_glossary_min_frequency'] = manual_min_freq
+                            config['manual_glossary_max_names'] = manual_max_names
+                            config['manual_glossary_max_titles'] = manual_max_titles
+                            config['glossary_max_text_size'] = manual_max_text_size
+                            config['glossary_max_sentences'] = manual_max_sentences
+                            config['manual_glossary_batch_size'] = manual_trans_batch
+                            config['glossary_chapter_split_threshold'] = manual_chapter_split
+                            config['manual_glossary_filter_mode'] = manual_filter_mode
+                            config['strip_honorifics'] = manual_strip_honorifics
+                            config['manual_glossary_fuzzy_threshold'] = manual_fuzzy
+                            config['manual_glossary_prompt'] = manual_extraction_prompt
+                            config['glossary_format_instructions'] = manual_format_instructions
+                            config['glossary_use_legacy_csv'] = manual_use_legacy_csv
+                            
+                            # Manga settings
+                            config['ocr_provider'] = ocr_prov
+                            if azure_k:
+                                config['azure_vision_key'] = azure_k
+                            if azure_e:
+                                config['azure_vision_endpoint'] = azure_e
+                            config['bubble_detection_enabled'] = bubble_det
+                            config['inpainting_enabled'] = inpaint
+                            config['manga_font_size_mode'] = font_mode
+                            config['manga_font_size'] = font_s
+                            config['manga_font_multiplier'] = font_mult
+                            config['manga_min_font_size'] = min_font
+                            config['manga_max_font_size'] = max_font
+                            config['manga_text_color'] = text_col
+                            config['manga_shadow_enabled'] = shadow_en
+                            config['manga_shadow_color'] = shadow_col
+                            config['manga_shadow_offset_x'] = shadow_x
+                            config['manga_shadow_offset_y'] = shadow_y
+                            config['manga_shadow_blur'] = shadow_b
+                            config['manga_bg_opacity'] = bg_op
+                            config['manga_bg_style'] = bg_st
+                            
+                            # Advanced settings
+                            if 'manga_settings' not in config:
+                                config['manga_settings'] = {}
+                            if 'advanced' not in config['manga_settings']:
+                                config['manga_settings']['advanced'] = {}
+                            config['manga_settings']['advanced']['parallel_panel_translation'] = parallel_trans
+                            config['manga_settings']['advanced']['panel_max_workers'] = panel_workers
+                            
+                            # Advanced bubble detection and inpainting settings
+                            if 'ocr' not in config['manga_settings']:
+                                config['manga_settings']['ocr'] = {}
+                            if 'inpainting' not in config['manga_settings']:
+                                config['manga_settings']['inpainting'] = {}
+                                
+                            config['manga_settings']['ocr']['detector_type'] = detector_type_val
+                            config['manga_settings']['ocr']['rtdetr_confidence'] = rtdetr_conf
+                            config['manga_settings']['ocr']['bubble_confidence'] = bubble_conf
+                            config['manga_settings']['ocr']['detect_text_bubbles'] = detect_text
+                            config['manga_settings']['ocr']['detect_empty_bubbles'] = detect_empty
+                            config['manga_settings']['ocr']['detect_free_text'] = detect_free
+                            config['manga_settings']['ocr']['bubble_max_detections_yolo'] = max_detections
+                            config['manga_settings']['inpainting']['local_method'] = local_method_val
+                            config['manga_settings']['advanced']['webtoon_mode'] = webtoon_val
+                            config['manga_settings']['inpainting']['batch_size'] = batch_size_val
+                            config['manga_settings']['inpainting']['enable_cache'] = cache_enabled_val
+                            config['manga_settings']['advanced']['parallel_processing'] = parallel_proc
+                            config['manga_settings']['advanced']['max_workers'] = max_work
+                            config['manga_settings']['advanced']['preload_local_inpainting_for_panels'] = preload_local
+                            config['manga_settings']['advanced']['panel_start_stagger_ms'] = stagger_ms
+                            config['manga_settings']['advanced']['torch_precision'] = torch_prec
+                            config['manga_settings']['advanced']['auto_cleanup_models'] = auto_cleanup
+                            config['manga_settings']['advanced']['debug_mode'] = debug
+                            config['manga_settings']['advanced']['save_intermediate'] = save_inter
+                            config['concise_pipeline_logs'] = concise_logs
+                            
+                            # Save to file
+                            result = self.save_config(config)
+                            
+                            # Show success message for 3 seconds
+                            return gr.update(value=result, visible=True)
+                            
+                        except Exception as e:
+                            return gr.update(value=f"❌ Save failed: {str(e)}", visible=True)
                     
-                    # Generic field saver for all remaining fields
-                    def save_field(field_name):
-                        def _save(value):
-                            if not self._syncing_active:
-                                try:
-                                    current_config = self.get_current_config_for_update()
-                                    current_config[field_name] = value
-                                    self.save_config(current_config)
-                                except Exception as e:
-                                    print(f"Failed to save {field_name}: {e}")
-                            # Don't return anything when outputs=None
-                        return _save
+                    # Save button will be configured after all components are created
                     
-                    # Save temperature
-                    epub_temperature.change(
-                        fn=save_field('temperature'),
-                        inputs=[epub_temperature],
-                        outputs=None
-                    )
+                    # Auto-hide status message after 3 seconds
+                    def hide_status_after_delay():
+                        import time
+                        time.sleep(3)
+                        return gr.update(visible=False)
                     
-                    # Save max output tokens
-                    epub_max_tokens.change(
-                        fn=save_field('max_output_tokens'),
-                        inputs=[epub_max_tokens],
-                        outputs=None
-                    )
+                    # Note: We can't use the change event to auto-hide because it would trigger immediately
+                    # The status will remain visible until manually dismissed or page refresh
                     
-                    # Save image translation toggle
-                    enable_image_translation.change(
-                        fn=save_field('enable_image_translation'),
-                        inputs=[enable_image_translation],
-                        outputs=None
-                    )
-                    
-                    # Save glossary toggles
-                    enable_auto_glossary.change(
-                        fn=save_field('enable_auto_glossary'),
-                        inputs=[enable_auto_glossary],
-                        outputs=None
-                    )
-                    
-                    append_glossary.change(
-                        fn=save_field('append_glossary_to_prompt'),
-                        inputs=[append_glossary],
-                        outputs=None
-                    )
-                    
-                    # Save all font/color fields that aren't already saved
-                    text_color_rgb.change(
-                        fn=save_field('manga_text_color'),
-                        inputs=[text_color_rgb],
-                        outputs=None
-                    )
-                    
-                    shadow_color.change(
-                        fn=save_field('manga_shadow_color'),
-                        inputs=[shadow_color],
-                        outputs=None
-                    )
+                    # All individual field auto-save handlers removed - use manual Save Config button instead
                     
                     # Translate button click handler
                     translate_manga_btn.click(
@@ -3404,79 +3441,17 @@ class GlossarionWeb:
                             print(f"Failed to save bubble detection settings: {e}")
                             return None
                     
-                    # Auto-save handlers for bubble detection settings
-                    detector_type.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    rtdetr_confidence.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    bubble_confidence.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    detect_text_bubbles.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    detect_empty_bubbles.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    detect_free_text.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    bubble_max_detections.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    local_inpaint_method.change(
-                        fn=lambda dt, rc, bc, det_text, det_empty, det_free, max_det, local_method: save_bubble_detection_settings(dt, rc, bc, det_text, det_empty, det_free, max_det, local_method),
-                        inputs=[detector_type, rtdetr_confidence, bubble_confidence, detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections, local_inpaint_method],
-                        outputs=None
-                    )
-                    
-                    # Auto-save handlers for inpainting performance settings
-                    inpaint_batch_size.change(
-                        fn=lambda bs, ce: save_inpainting_settings(bs, ce),
-                        inputs=[inpaint_batch_size, inpaint_cache_enabled],
-                        outputs=None
-                    )
-                    
-                    inpaint_cache_enabled.change(
-                        fn=lambda bs, ce: save_inpainting_settings(bs, ce),
-                        inputs=[inpaint_batch_size, inpaint_cache_enabled],
-                        outputs=None
-                    )
-                    
-                    # Auto-save handler for preload local inpainting setting
-                    preload_local_inpainting.change(
-                        fn=lambda pl: save_preload_setting(pl),
-                        inputs=[preload_local_inpainting],
-                        outputs=None
-                    )
+                    # All Advanced Settings auto-save handlers removed - use manual Save Config button
                     
                     gr.Markdown("\n---\n**Note:** These settings will be saved to your config and applied to all manga translations.")
                 
-                # Glossary Extraction Tab
-                with gr.Tab("📝 Glossary Extraction"):
+                # Manual Glossary Extraction Tab
+                with gr.Tab("📝 Manual Glossary Extraction"):
+                    gr.Markdown("""
+                    ### Extract character names and terms from EPUB files
+                    Configure extraction settings below, then upload an EPUB file to extract a glossary.
+                    """)
+                    
                     with gr.Row():
                         with gr.Column():
                             glossary_epub = gr.File(
@@ -3516,24 +3491,153 @@ class GlossarionWeb:
                                 value=self.get_config_value('api_key', '')
                             )
                             
-                            with gr.Accordion("⚙️ Extraction Settings", open=True):
-                                min_freq = gr.Slider(
-                                    minimum=1,
-                                    maximum=10,
-                                    value=2,
-                                    step=1,
-                                    label="Minimum Frequency",
-                                    info="Minimum times a name must appear to be included"
-                                )
+                            # Tabs for different settings sections
+                            with gr.Tabs():
+                                # Extraction Settings Tab
+                                with gr.Tab("Extraction Settings"):
+                                    with gr.Accordion("🎯 Targeted Extraction Settings", open=True):
+                                        with gr.Row():
+                                            with gr.Column():
+                                                min_freq = gr.Slider(
+                                                    minimum=1,
+                                                    maximum=10,
+                                                    value=self.get_config_value('glossary_min_frequency', 2),
+                                                    step=1,
+                                                    label="Min frequency",
+                                                    info="How many times a name must appear (lower = more terms)"
+                                                )
+                                                
+                                                max_titles = gr.Slider(
+                                                    minimum=10,
+                                                    maximum=100,
+                                                    value=self.get_config_value('glossary_max_titles', 30),
+                                                    step=5,
+                                                    label="Max titles",
+                                                    info="Limits to prevent huge glossaries"
+                                                )
+                                                
+                                                max_text_size = gr.Number(
+                                                    label="Max text size",
+                                                    value=self.get_config_value('glossary_max_text_size', 50000),
+                                                    info="Characters to analyze (0 = entire text)"
+                                                )
+                                                
+                                                max_sentences = gr.Slider(
+                                                    minimum=50,
+                                                    maximum=500,
+                                                    value=self.get_config_value('glossary_max_sentences', 200),
+                                                    step=10,
+                                                    label="Max sentences",
+                                                    info="Maximum sentences to send to AI (increase for more context)"
+                                                )
+                                            
+                                            with gr.Column():
+                                                max_names_slider = gr.Slider(
+                                                    minimum=10,
+                                                    maximum=200,
+                                                    value=self.get_config_value('glossary_max_names', 50),
+                                                    step=10,
+                                                    label="Max names",
+                                                    info="Maximum number of character names to extract"
+                                                )
+                                                
+                                                translation_batch = gr.Slider(
+                                                    minimum=10,
+                                                    maximum=100,
+                                                    value=self.get_config_value('glossary_batch_size', 50),
+                                                    step=5,
+                                                    label="Translation batch",
+                                                    info="Terms per API call (larger = faster but may reduce quality)"
+                                                )
+                                                
+                                                chapter_split_threshold = gr.Number(
+                                                    label="Chapter split threshold",
+                                                    value=self.get_config_value('glossary_chapter_split_threshold', 8192),
+                                                    info="Split large texts into chunks (0 = no splitting)"
+                                                )
+                                        
+                                        # Filter mode selection
+                                        filter_mode = gr.Radio(
+                                            choices=[
+                                                "all",
+                                                "only_with_honorifics",
+                                                "only_without_honorifics"
+                                            ],
+                                            value=self.get_config_value('glossary_filter_mode', 'all'),
+                                            label="Filter mode",
+                                            info="What types of names to extract"
+                                        )
+                                        
+                                        # Strip honorifics checkbox
+                                        strip_honorifics = gr.Checkbox(
+                                            label="Remove honorifics from extracted names",
+                                            value=self.get_config_value('strip_honorifics', True),
+                                            info="Remove suffixes like '님', 'さん', '先生' from names"
+                                        )
+                                        
+                                        # Fuzzy threshold slider
+                                        fuzzy_threshold = gr.Slider(
+                                            minimum=0.5,
+                                            maximum=1.0,
+                                            value=self.get_config_value('glossary_fuzzy_threshold', 0.90),
+                                            step=0.05,
+                                            label="Fuzzy threshold",
+                                            info="How similar names must be to match (0.9 = 90% match, 1.0 = exact match)"
+                                        )
+                        
                                 
-                                max_names_slider = gr.Slider(
-                                    minimum=10,
-                                    maximum=200,
-                                    value=50,
-                                    step=10,
-                                    label="Max Character Names",
-                                    info="Maximum number of character names to extract"
-                                )
+                                # Extraction Prompt Tab
+                                with gr.Tab("Extraction Prompt"):
+                                    gr.Markdown("""
+                                    ### System Prompt for Extraction
+                                    Customize how the AI extracts names and terms from your text.
+                                    """)
+                                    
+                                    extraction_prompt = gr.Textbox(
+                                        label="Extraction Template (Use placeholders: {language}, {min_frequency}, {max_names}, {max_titles})",
+                                        lines=10,
+                                        value=self.get_config_value('manual_glossary_prompt', 
+                                            "Extract character names and important terms from the following text.\n\n"
+                                            "Output format:\n{fields}\n\n"
+                                            "Rules:\n- Output ONLY CSV lines in the exact format shown above\n"
+                                            "- No headers, no extra text, no JSON\n"
+                                            "- One entry per line\n"
+                                            "- Leave gender empty for terms (just end with comma)")
+                                    )
+                                    
+                                    reset_extraction_prompt_btn = gr.Button(
+                                        "Reset to Default",
+                                        variant="secondary",
+                                        size="sm"
+                                    )
+                                
+                                # Format Instructions Tab
+                                with gr.Tab("Format Instructions"):
+                                    gr.Markdown("""
+                                    ### Output Format Instructions
+                                    These instructions tell the AI exactly how to format the extracted glossary.
+                                    """)
+                                    
+                                    format_instructions = gr.Textbox(
+                                        label="Format Instructions (Use placeholder: {text_sample})",
+                                        lines=10,
+                                        value=self.get_config_value('glossary_format_instructions',
+                                            "Return the results in EXACT CSV format with this header:\n"
+                                            "type,raw_name,translated_name\n\n"
+                                            "For example:\n"
+                                            "character,김상현,Kim Sang-hyun\n"
+                                            "character,갈편제,Gale Hardest\n"
+                                            "term,마법사,Mage\n\n"
+                                            "Only include terms that actually appear in the text.\n"
+                                            "Do not use quotes around values unless they contain commas.\n\n"
+                                            "Text to analyze:\n{text_sample}")
+                                    )
+                                    
+                                    use_legacy_csv = gr.Checkbox(
+                                        label="Use legacy CSV format",
+                                        value=self.get_config_value('glossary_use_legacy_csv', False),
+                                        info="When disabled: Uses clean format with sections (===CHARACTERS===). When enabled: Uses traditional CSV format with repeated type columns."
+                                    )
                         
                         with gr.Column():
                             # Add logo and status at top
@@ -3601,7 +3705,18 @@ class GlossarionWeb:
                             glossary_model,
                             glossary_api_key,
                             min_freq,
-                            max_names_slider
+                            max_names_slider,
+                            max_titles,
+                            max_text_size,
+                            max_sentences,
+                            translation_batch,
+                            chapter_split_threshold,
+                            filter_mode,
+                            strip_honorifics,
+                            fuzzy_threshold,
+                            extraction_prompt,
+                            format_instructions,
+                            use_legacy_csv
                         ],
                         outputs=[
                             glossary_output,
@@ -3719,7 +3834,7 @@ class GlossarionWeb:
                         value=True
                     )
                     
-                    save_status = gr.Textbox(label="Settings Status", value="Settings are automatically saved when changed", interactive=False)
+                    save_status = gr.Textbox(label="Settings Status", value="Use the 'Save Config' button to save changes", interactive=False)
                     
                     # Hidden HTML component for JavaScript execution
                     js_executor = gr.HTML("", visible=False)
@@ -3778,42 +3893,9 @@ class GlossarionWeb:
                         except Exception as e:
                             return f"❌ Failed to save: {str(e)}", ""
                     
-                    # Add change handlers to all settings components
-                    settings_components = [
-                        thread_delay, api_delay, chapter_range, token_limit, 
-                        disable_token_limit, output_token_limit, contextual, 
-                        history_limit, rolling_history, batch_translation, 
-                        batch_size, save_api_key
-                    ]
+                    # Settings tab auto-save handlers removed - use manual Save Config button
                     
-                    for component in settings_components:
-                        component.change(
-                            fn=save_settings_tab,
-                            inputs=settings_components,
-                            outputs=[save_status, js_executor]
-                        )
-                    
-                    # Connect output token limit sync between EPUB and Settings tabs
-                    def sync_tokens_to_settings(value):
-                        save_field('max_output_tokens')(value)
-                        return value
-                    
-                    def sync_tokens_to_epub(value):
-                        save_field('max_output_tokens')(value)
-                        return value
-                    
-                    # Now connect the bidirectional sync for output tokens
-                    epub_max_tokens.change(
-                        fn=sync_tokens_to_settings,
-                        inputs=[epub_max_tokens],
-                        outputs=[output_token_limit]
-                    )
-                    
-                    output_token_limit.change(
-                        fn=sync_tokens_to_epub,  
-                        inputs=[output_token_limit],
-                        outputs=[epub_max_tokens]
-                    )
+                    # Token sync handlers removed - use manual Save Config button
                 
                 # Help Tab
                 with gr.Tab("❓ Help"):
@@ -3875,6 +3957,25 @@ class GlossarionWeb:
                     self.get_config_value('enable_image_translation', False),  # enable_image_translation
                     self.get_config_value('enable_auto_glossary', False),  # enable_auto_glossary  
                     self.get_config_value('append_glossary_to_prompt', True),  # append_glossary
+                    # Auto glossary settings
+                    self.get_config_value('glossary_min_frequency', 2),  # auto_glossary_min_freq
+                    self.get_config_value('glossary_max_names', 50),  # auto_glossary_max_names
+                    self.get_config_value('glossary_max_titles', 30),  # auto_glossary_max_titles
+                    self.get_config_value('glossary_batch_size', 50),  # auto_glossary_batch_size
+                    self.get_config_value('glossary_filter_mode', 'all'),  # auto_glossary_filter_mode
+                    self.get_config_value('glossary_fuzzy_threshold', 0.90),  # auto_glossary_fuzzy_threshold
+                    # Manual glossary extraction settings
+                    self.get_config_value('manual_glossary_min_frequency', self.get_config_value('glossary_min_frequency', 2)),  # min_freq
+                    self.get_config_value('manual_glossary_max_names', self.get_config_value('glossary_max_names', 50)),  # max_names_slider
+                    self.get_config_value('manual_glossary_max_titles', self.get_config_value('glossary_max_titles', 30)),  # max_titles
+                    self.get_config_value('glossary_max_text_size', 50000),  # max_text_size
+                    self.get_config_value('glossary_max_sentences', 200),  # max_sentences
+                    self.get_config_value('manual_glossary_batch_size', self.get_config_value('glossary_batch_size', 50)),  # translation_batch
+                    self.get_config_value('glossary_chapter_split_threshold', 8192),  # chapter_split_threshold
+                    self.get_config_value('manual_glossary_filter_mode', self.get_config_value('glossary_filter_mode', 'all')),  # filter_mode
+                    self.get_config_value('strip_honorifics', True),  # strip_honorifics
+                    self.get_config_value('manual_glossary_fuzzy_threshold', self.get_config_value('glossary_fuzzy_threshold', 0.90)),  # fuzzy_threshold
+                    # Manga settings
                     self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
                     self.get_config_value('active_profile', list(self.profiles.keys())[0] if self.profiles else ''),  # manga_profile
@@ -3901,6 +4002,44 @@ class GlossarionWeb:
                     self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),  # panel_max_workers
                 ]
             
+            # Configure Save Config button now that all components exist
+            save_config_btn.click(
+                fn=save_all_config,
+                inputs=[
+                    # EPUB tab fields
+                    epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
+                    enable_image_translation, enable_auto_glossary, append_glossary,
+                    # Auto glossary settings
+                    auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
+                    auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
+                    # Manual glossary extraction settings
+                    min_freq, max_names_slider, max_titles,
+                    max_text_size, max_sentences, translation_batch,
+                    chapter_split_threshold, filter_mode, strip_honorifics,
+                    fuzzy_threshold, extraction_prompt, format_instructions,
+                    use_legacy_csv,
+                    # Manga tab fields  
+                    manga_model, manga_api_key, manga_profile,
+                    ocr_provider, azure_key, azure_endpoint,
+                    bubble_detection, inpainting,
+                    font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
+                    text_color_rgb, shadow_enabled, shadow_color,
+                    shadow_offset_x, shadow_offset_y, shadow_blur,
+                    bg_opacity, bg_style,
+                    parallel_panel_translation, panel_max_workers,
+                    # Advanced Settings fields
+                    detector_type, rtdetr_confidence, bubble_confidence,
+                    detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
+                    local_inpaint_method, webtoon_mode,
+                    inpaint_batch_size, inpaint_cache_enabled,
+                    parallel_processing, max_workers,
+                    preload_local_inpainting, panel_start_stagger,
+                    torch_precision, auto_cleanup_models,
+                    debug_mode, save_intermediate, concise_pipeline_logs
+                ],
+                outputs=[save_status_text]
+            )
+            
             # Add load handler to restore settings on page load
             app.load(
                 fn=load_all_settings,
@@ -3908,6 +4047,15 @@ class GlossarionWeb:
                 outputs=[
                     epub_model, epub_api_key, epub_profile, epub_system_prompt, epub_temperature, epub_max_tokens,
                     enable_image_translation, enable_auto_glossary, append_glossary,
+                    # Auto glossary settings
+                    auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
+                    auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
+                    # Manual glossary extraction settings
+                    min_freq, max_names_slider, max_titles,
+                    max_text_size, max_sentences, translation_batch,
+                    chapter_split_threshold, filter_mode, strip_honorifics,
+                    fuzzy_threshold,
+                    # Manga settings
                     manga_model, manga_api_key, manga_profile, manga_system_prompt,
                     ocr_provider, azure_key, azure_endpoint, bubble_detection, inpainting,
                     font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
