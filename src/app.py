@@ -429,6 +429,7 @@ class GlossarionWeb:
         system_prompt,
         temperature,
         max_tokens,
+        enable_image_trans=False,
         glossary_file=None
     ):
         """Translate EPUB file - yields progress updates"""
@@ -479,6 +480,7 @@ class GlossarionWeb:
             os.environ['MODEL'] = model
             os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
             os.environ['MAX_OUTPUT_TOKENS'] = str(max_tokens)
+            os.environ['ENABLE_IMAGE_TRANSLATION'] = '1' if enable_image_trans else '0'
             
             # Set API key environment variable
             if 'gpt' in model.lower() or 'openai' in model.lower():
@@ -600,18 +602,30 @@ class GlossarionWeb:
             output_dir = epub_base
             compiled_epub = None
             
-            if os.path.exists(output_dir):
-                # Look for compiled EPUB
-                potential_epub = os.path.join(output_dir, f"{epub_base}_translated.epub")
+            # Look for multiple possible output locations
+            possible_paths = [
+                os.path.join(output_dir, f"{epub_base}_translated.epub"),
+                os.path.join(output_dir, f"{epub_base}.epub"),
+                f"{epub_base}_translated.epub",
+                os.path.join(".", output_dir, f"{epub_base}_translated.epub")
+            ]
+            
+            for potential_epub in possible_paths:
                 if os.path.exists(potential_epub):
                     compiled_epub = potential_epub
-                    translation_logs.append(f"✅ Translation complete: {os.path.basename(compiled_epub)}")
-                    yield compiled_epub, gr.update(visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Translation complete!", 100
-                    return
+                    break
+            
+            if compiled_epub:
+                translation_logs.append(f"✅ Translation complete: {os.path.basename(compiled_epub)}")
+                translation_logs.append(f"📥 Click 'Download Translated EPUB' below to save your file")
+                # Make the file component visible with the translated file
+                yield compiled_epub, gr.update(value="### ✅ Translation Complete!", visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(value="Translation complete!", visible=True), "Translation complete!", 100
+                return
             
             # Translation failed
             translation_logs.append("❌ Translation failed - output file not created")
-            yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Translation failed", 0
+            translation_logs.append(f"🔍 Checked paths: {', '.join(possible_paths)}")
+            yield None, gr.update(value="### ❌ Translation Failed", visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(value="Translation failed - output not found", visible=True), "Translation failed", 0
                 
         except Exception as e:
             import traceback
@@ -850,21 +864,76 @@ class GlossarionWeb:
                     min_paragraph_percentage, report_format, auto_save_report):
         """Run Quick QA scan on output folder - yields progress updates"""
         
-        if not folder_path or not folder_path.strip():
-            yield gr.update(visible=False), gr.update(value="### ❌ Error", visible=True), gr.update(visible=False), "❌ Please enter an output folder path", gr.update(visible=False), "Error", 0
+        # Handle both string paths and File objects
+        if hasattr(folder_path, 'name'):
+            # It's a File object from Gradio
+            folder_path = folder_path.name
+        
+        if not folder_path:
+            yield gr.update(visible=False), gr.update(value="### ❌ Error", visible=True), gr.update(visible=False), "❌ Please provide a folder path or upload a ZIP file", gr.update(visible=False), "Error", 0
             return
         
-        folder_path = folder_path.strip()
+        if isinstance(folder_path, str):
+            folder_path = folder_path.strip()
         
         if not os.path.exists(folder_path):
-            yield gr.update(visible=False), gr.update(value=f"### ❌ Folder not found", visible=True), gr.update(visible=False), f"❌ Folder not found: {folder_path}", gr.update(visible=False), "Error", 0
-            return
-            
-        if not os.path.isdir(folder_path):
-            yield gr.update(visible=False), gr.update(value=f"### ❌ Not a folder", visible=True), gr.update(visible=False), f"❌ Path is not a folder: {folder_path}", gr.update(visible=False), "Error", 0
+            yield gr.update(visible=False), gr.update(value=f"### ❌ File/Folder not found", visible=True), gr.update(visible=False), f"❌ File/Folder not found: {folder_path}", gr.update(visible=False), "Error", 0
             return
         
+        # Initialize scan_logs early
         scan_logs = []
+        
+        # Check if it's a ZIP or EPUB file (for Hugging Face Spaces or convenience)
+        if os.path.isfile(folder_path) and (folder_path.lower().endswith('.zip') or folder_path.lower().endswith('.epub')):
+            # Extract ZIP/EPUB to temp folder
+            import zipfile
+            import tempfile
+            
+            temp_dir = tempfile.mkdtemp(prefix="qa_scan_")
+            
+            try:
+                file_type = "EPUB" if folder_path.lower().endswith('.epub') else "ZIP"
+                scan_logs.append(f"📦 Extracting {file_type} file: {os.path.basename(folder_path)}")
+                
+                with zipfile.ZipFile(folder_path, 'r') as zip_ref:
+                    # For EPUB files, look for the content folders
+                    if file_type == "EPUB":
+                        # EPUB files typically have OEBPS, EPUB, or similar content folders
+                        all_files = zip_ref.namelist()
+                        # Extract everything
+                        zip_ref.extractall(temp_dir)
+                        
+                        # Try to find the content directory
+                        content_dirs = ['OEBPS', 'EPUB', 'OPS', 'content']
+                        actual_content_dir = None
+                        for dir_name in content_dirs:
+                            potential_dir = os.path.join(temp_dir, dir_name)
+                            if os.path.exists(potential_dir):
+                                actual_content_dir = potential_dir
+                                break
+                        
+                        # If no standard content dir found, use the temp_dir itself
+                        if actual_content_dir:
+                            folder_path = actual_content_dir
+                            scan_logs.append(f"📁 Found EPUB content directory: {os.path.basename(actual_content_dir)}")
+                        else:
+                            folder_path = temp_dir
+                            scan_logs.append(f"📁 Using extracted root directory")
+                    else:
+                        # Regular ZIP file
+                        zip_ref.extractall(temp_dir)
+                        folder_path = temp_dir
+                        
+                scan_logs.append(f"✅ Successfully extracted to temporary folder")
+                # Continue with normal processing, but include initial logs
+                # Note: we'll need to pass scan_logs through the rest of the function
+                
+            except Exception as e:
+                yield gr.update(visible=False), gr.update(value=f"### ❌ {file_type} extraction failed", visible=True), gr.update(visible=False), f"❌ Failed to extract {file_type}: {str(e)}", gr.update(visible=False), "Error", 0
+                return
+        elif not os.path.isdir(folder_path):
+            yield gr.update(visible=False), gr.update(value=f"### ❌ Not a folder, ZIP, or EPUB", visible=True), gr.update(visible=False), f"❌ Path is not a folder, ZIP, or EPUB file: {folder_path}", gr.update(visible=False), "Error", 0
+            return
         
         try:
             scan_logs.append("🔍 Starting Quick QA Scan...")
@@ -2462,6 +2531,7 @@ class GlossarionWeb:
                             epub_system_prompt,
                             epub_temperature,
                             epub_max_tokens,
+                            enable_image_translation,
                             glossary_file
                         ],
                         outputs=[
@@ -4085,17 +4155,36 @@ class GlossarionWeb:
                 with gr.Tab("🔍 QA Scanner"):
                     gr.Markdown("""
                     ### Quick Scan for Translation Quality
-                    Scan translated output folders for common issues like untranslated text, formatting problems, and quality concerns.
-                    **Note:** Select the output folder containing the extracted/translated HTML files, not the EPUB file itself.
+                    Scan translated content for common issues like untranslated text, formatting problems, and quality concerns.
+                    
+                    **Supported inputs:**
+                    - 📁 Output folder containing extracted HTML/XHTML files
+                    - 📖 EPUB file (will be automatically extracted and scanned)
+                    - 📦 ZIP file containing HTML/XHTML files
                     """)
                     
                     with gr.Row():
                         with gr.Column():
-                            qa_folder_path = gr.Textbox(
-                                label="📁 Output Folder Path",
-                                placeholder="Enter the path to your translated output folder (e.g., C:\\translations\\book_output)",
-                                info="The folder containing HTML/XHTML files from the translated EPUB"
-                            )
+                            # Check if running on Hugging Face Spaces
+                            is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
+                            
+                            if is_hf_spaces:
+                                gr.Markdown("""
+                                **🤗 Hugging Face Spaces Mode**
+                                Upload an EPUB or ZIP file containing the translated content.
+                                The scanner will extract and analyze the HTML/XHTML files inside.
+                                """)
+                                qa_folder_path = gr.File(
+                                    label="📂 Upload EPUB or ZIP file",
+                                    file_types=[".epub", ".zip"],
+                                    type="filepath"
+                                )
+                            else:
+                                qa_folder_path = gr.Textbox(
+                                    label="📁 Path to Folder, EPUB, or ZIP",
+                                    placeholder="Enter path to: folder with HTML files, EPUB file, or ZIP file",
+                                    info="Can be a folder path, or direct path to an EPUB/ZIP file"
+                                )
                             
                             with gr.Row():
                                 qa_scan_btn = gr.Button(
