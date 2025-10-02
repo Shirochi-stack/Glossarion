@@ -269,7 +269,7 @@ class GlossarionWeb:
             'manga_bg_style': 'circle',
             'manga_settings': {
                 'ocr': {
-                    'detector_type': 'rtdetr_onnx',
+                    'detector_type': 'rtdetr',
                     'rtdetr_confidence': 0.3,
                     'bubble_confidence': 0.3,
                     'detect_text_bubbles': True,
@@ -353,6 +353,141 @@ class GlossarionWeb:
             else:
                 # Override the value
                 base[key] = value
+    
+    def set_all_environment_variables(self):
+        """Set all environment variables from config for translation engines"""
+        config = self.get_config_value
+        
+        # Chapter Processing Options
+        os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if config('batch_translate_headers', False) else '0'
+        os.environ['HEADERS_PER_BATCH'] = str(config('headers_per_batch', 400))
+        os.environ['USE_NCX_NAVIGATION'] = '1' if config('use_ncx_navigation', False) else '0'
+        os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if config('attach_css_to_chapters', False) else '0'
+        os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if config('retain_source_extension', True) else '0'
+        os.environ['USE_CONSERVATIVE_BATCHING'] = '1' if config('use_conservative_batching', False) else '0'
+        os.environ['DISABLE_GEMINI_SAFETY'] = '1' if config('disable_gemini_safety', False) else '0'
+        os.environ['USE_HTTP_OPENROUTER'] = '1' if config('use_http_openrouter', False) else '0'
+        os.environ['DISABLE_OPENROUTER_COMPRESSION'] = '1' if config('disable_openrouter_compression', False) else '0'
+        
+        # Chapter Extraction Settings
+        os.environ['TEXT_EXTRACTION_METHOD'] = config('text_extraction_method', 'standard')
+        os.environ['FILE_FILTERING_LEVEL'] = config('file_filtering_level', 'smart')
+        
+        # Thinking Mode Settings
+        os.environ['ENABLE_GPT_THINKING'] = '1' if config('enable_gpt_thinking', True) else '0'
+        os.environ['GPT_THINKING_EFFORT'] = config('gpt_thinking_effort', 'medium')
+        os.environ['OR_THINKING_TOKENS'] = str(config('or_thinking_tokens', 2000))
+        os.environ['ENABLE_GEMINI_THINKING'] = '1' if config('enable_gemini_thinking', True) else '0'
+        os.environ['GEMINI_THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
+        
+        # Translation Settings
+        os.environ['CONTEXTUAL'] = '1' if config('contextual', False) else '0'
+        os.environ['TRANSLATION_HISTORY_LIMIT'] = str(config('translation_history_limit', 2))
+        os.environ['TRANSLATION_HISTORY_ROLLING'] = '1' if config('translation_history_rolling', False) else '0'
+        os.environ['BATCH_TRANSLATION'] = '1' if config('batch_translation', True) else '0'
+        os.environ['BATCH_SIZE'] = str(config('batch_size', 10))
+        os.environ['THREAD_SUBMISSION_DELAY'] = str(config('thread_submission_delay', 0.1))
+        os.environ['DELAY'] = str(config('delay', 1))
+        os.environ['CHAPTER_RANGE'] = config('chapter_range', '')
+        os.environ['TOKEN_LIMIT'] = str(config('token_limit', 200000))
+        os.environ['TOKEN_LIMIT_DISABLED'] = '1' if config('token_limit_disabled', False) else '0'
+        os.environ['DISABLE_INPUT_TOKEN_LIMIT'] = '1' if config('token_limit_disabled', False) else '0'
+        
+        # Glossary Settings
+        os.environ['ENABLE_AUTO_GLOSSARY'] = '1' if config('enable_auto_glossary', False) else '0'
+        os.environ['APPEND_GLOSSARY_TO_PROMPT'] = '1' if config('append_glossary_to_prompt', True) else '0'
+        os.environ['GLOSSARY_MIN_FREQUENCY'] = str(config('glossary_min_frequency', 2))
+        os.environ['GLOSSARY_MAX_NAMES'] = str(config('glossary_max_names', 50))
+        os.environ['GLOSSARY_MAX_TITLES'] = str(config('glossary_max_titles', 30))
+        os.environ['GLOSSARY_BATCH_SIZE'] = str(config('glossary_batch_size', 50))
+        os.environ['GLOSSARY_FILTER_MODE'] = config('glossary_filter_mode', 'all')
+        os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config('glossary_fuzzy_threshold', 0.90))
+        
+        # Manual Glossary Settings
+        os.environ['MANUAL_GLOSSARY_MIN_FREQUENCY'] = str(config('manual_glossary_min_frequency', 2))
+        os.environ['MANUAL_GLOSSARY_MAX_NAMES'] = str(config('manual_glossary_max_names', 50))
+        os.environ['MANUAL_GLOSSARY_MAX_TITLES'] = str(config('manual_glossary_max_titles', 30))
+        os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(config('glossary_max_text_size', 50000))
+        os.environ['GLOSSARY_MAX_SENTENCES'] = str(config('glossary_max_sentences', 200))
+        os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(config('glossary_chapter_split_threshold', 8192))
+        os.environ['MANUAL_GLOSSARY_FILTER_MODE'] = config('manual_glossary_filter_mode', 'all')
+        os.environ['STRIP_HONORIFICS'] = '1' if config('strip_honorifics', True) else '0'
+        os.environ['MANUAL_GLOSSARY_FUZZY_THRESHOLD'] = str(config('manual_glossary_fuzzy_threshold', 0.90))
+        os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if config('glossary_use_legacy_csv', False) else '0'
+        
+        # QA Scanner Settings
+        os.environ['ENABLE_POST_TRANSLATION_SCAN'] = '1' if config('enable_post_translation_scan', False) else '0'
+        os.environ['QA_MIN_FOREIGN_CHARS'] = str(config('qa_min_foreign_chars', 10))
+        os.environ['QA_CHECK_REPETITION'] = '1' if config('qa_check_repetition', True) else '0'
+        os.environ['QA_CHECK_GLOSSARY_LEAKAGE'] = '1' if config('qa_check_glossary_leakage', True) else '0'
+        os.environ['QA_MIN_FILE_LENGTH'] = str(config('qa_min_file_length', 0))
+        os.environ['QA_CHECK_MULTIPLE_HEADERS'] = '1' if config('qa_check_multiple_headers', True) else '0'
+        os.environ['QA_CHECK_MISSING_HTML'] = '1' if config('qa_check_missing_html', True) else '0'
+        os.environ['QA_CHECK_INSUFFICIENT_PARAGRAPHS'] = '1' if config('qa_check_insufficient_paragraphs', True) else '0'
+        os.environ['QA_MIN_PARAGRAPH_PERCENTAGE'] = str(config('qa_min_paragraph_percentage', 30))
+        os.environ['QA_REPORT_FORMAT'] = config('qa_report_format', 'detailed')
+        os.environ['QA_AUTO_SAVE_REPORT'] = '1' if config('qa_auto_save_report', True) else '0'
+        
+        # Manga/Image Translation Settings (when available)
+        os.environ['BUBBLE_DETECTION_ENABLED'] = '1' if config('bubble_detection_enabled', True) else '0'
+        os.environ['INPAINTING_ENABLED'] = '1' if config('inpainting_enabled', True) else '0'
+        os.environ['MANGA_FONT_SIZE_MODE'] = config('manga_font_size_mode', 'auto')
+        os.environ['MANGA_FONT_SIZE'] = str(config('manga_font_size', 24))
+        os.environ['MANGA_FONT_MULTIPLIER'] = str(config('manga_font_multiplier', 1.0))
+        os.environ['MANGA_MIN_FONT_SIZE'] = str(config('manga_min_font_size', 12))
+        os.environ['MANGA_MAX_FONT_SIZE'] = str(config('manga_max_font_size', 48))
+        os.environ['MANGA_SHADOW_ENABLED'] = '1' if config('manga_shadow_enabled', True) else '0'
+        os.environ['MANGA_SHADOW_OFFSET_X'] = str(config('manga_shadow_offset_x', 2))
+        os.environ['MANGA_SHADOW_OFFSET_Y'] = str(config('manga_shadow_offset_y', 2))
+        os.environ['MANGA_SHADOW_BLUR'] = str(config('manga_shadow_blur', 0))
+        os.environ['MANGA_BG_OPACITY'] = str(config('manga_bg_opacity', 130))
+        os.environ['MANGA_BG_STYLE'] = config('manga_bg_style', 'circle')
+        
+        # OCR Provider Settings
+        os.environ['OCR_PROVIDER'] = config('ocr_provider', 'custom-api')
+        
+        # Advanced Manga Settings
+        manga_settings = config('manga_settings', {})
+        if manga_settings:
+            advanced = manga_settings.get('advanced', {})
+            os.environ['PARALLEL_PANEL_TRANSLATION'] = '1' if advanced.get('parallel_panel_translation', False) else '0'
+            os.environ['PANEL_MAX_WORKERS'] = str(advanced.get('panel_max_workers', 7))
+            os.environ['PANEL_START_STAGGER_MS'] = str(advanced.get('panel_start_stagger_ms', 0))
+            os.environ['WEBTOON_MODE'] = '1' if advanced.get('webtoon_mode', False) else '0'
+            os.environ['DEBUG_MODE'] = '1' if advanced.get('debug_mode', False) else '0'
+            os.environ['SAVE_INTERMEDIATE'] = '1' if advanced.get('save_intermediate', False) else '0'
+            os.environ['PARALLEL_PROCESSING'] = '1' if advanced.get('parallel_processing', True) else '0'
+            os.environ['MAX_WORKERS'] = str(advanced.get('max_workers', 4))
+            os.environ['AUTO_CLEANUP_MODELS'] = '1' if advanced.get('auto_cleanup_models', False) else '0'
+            os.environ['TORCH_PRECISION'] = advanced.get('torch_precision', 'auto')
+            os.environ['PRELOAD_LOCAL_INPAINTING_FOR_PANELS'] = '1' if advanced.get('preload_local_inpainting_for_panels', False) else '0'
+            
+            # OCR settings
+            ocr = manga_settings.get('ocr', {})
+            os.environ['DETECTOR_TYPE'] = ocr.get('detector_type', 'rtdetr')
+            os.environ['RTDETR_CONFIDENCE'] = str(ocr.get('rtdetr_confidence', 0.3))
+            os.environ['BUBBLE_CONFIDENCE'] = str(ocr.get('bubble_confidence', 0.3))
+            os.environ['DETECT_TEXT_BUBBLES'] = '1' if ocr.get('detect_text_bubbles', True) else '0'
+            os.environ['DETECT_EMPTY_BUBBLES'] = '1' if ocr.get('detect_empty_bubbles', True) else '0'
+            os.environ['DETECT_FREE_TEXT'] = '1' if ocr.get('detect_free_text', True) else '0'
+            os.environ['BUBBLE_MAX_DETECTIONS_YOLO'] = str(ocr.get('bubble_max_detections_yolo', 100))
+            
+            # Inpainting settings
+            inpainting = manga_settings.get('inpainting', {})
+            os.environ['LOCAL_INPAINT_METHOD'] = inpainting.get('local_method', 'anime_onnx')
+            os.environ['INPAINT_BATCH_SIZE'] = str(inpainting.get('batch_size', 10))
+            os.environ['INPAINT_CACHE_ENABLED'] = '1' if inpainting.get('enable_cache', True) else '0'
+            
+            # HD Strategy
+            os.environ['HD_STRATEGY'] = advanced.get('hd_strategy', 'resize')
+            os.environ['HD_RESIZE_LIMIT'] = str(advanced.get('hd_strategy_resize_limit', 1536))
+            os.environ['HD_CROP_MARGIN'] = str(advanced.get('hd_strategy_crop_margin', 16))
+            os.environ['HD_CROP_TRIGGER'] = str(advanced.get('hd_strategy_crop_trigger_size', 1024))
+        
+        # Concise Pipeline Logs
+        os.environ['CONCISE_PIPELINE_LOGS'] = '1' if config('concise_pipeline_logs', False) else '0'
+        
+        print("✅ All environment variables set from configuration")
     
     def save_config(self, config):
         """Save configuration - to persistent file on HF Spaces or local file"""
@@ -481,6 +616,9 @@ class GlossarionWeb:
             os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
             os.environ['MAX_OUTPUT_TOKENS'] = str(max_tokens)
             os.environ['ENABLE_IMAGE_TRANSLATION'] = '1' if enable_image_trans else '0'
+            
+            # Set all additional environment variables from config
+            self.set_all_environment_variables()
             
             # Set API key environment variable
             if 'gpt' in model.lower() or 'openai' in model.lower():
@@ -696,6 +834,9 @@ class GlossarionWeb:
             extraction_logs.append(f"📖 Input: {os.path.basename(input_path)}")
             extraction_logs.append(f"🤖 Model: {model}")
             yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Initializing...", 10
+            
+            # Set all environment variables from config
+            self.set_all_environment_variables()
             
             # Set API key
             if 'gpt' in model.lower():
@@ -1303,6 +1444,9 @@ class GlossarionWeb:
         
         try:
             
+            # Set all environment variables from config
+            self.set_all_environment_variables()
+            
             # Set API key environment variable
             if 'gpt' in model.lower() or 'openai' in model.lower():
                 os.environ['OPENAI_API_KEY'] = api_key
@@ -1770,10 +1914,11 @@ class GlossarionWeb:
                             translated_files.append(final_output)
                             translation_logs.append(f"✅ Image {idx}/{total_images} COMPLETE: {filename} | Total: {len(translated_files)}/{total_images} done")
                             translation_logs.append("")
-                            # Yield progress update with completed image
+                            # Yield progress update with all translated images so far
                             progress_percent = int((idx / total_images) * 100)
                             status_text = f"Completed {idx}/{total_images}: {filename}"
-                            yield "\n".join(translation_logs), gr.update(value=final_output, visible=True), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
+                            # Show all translated files as gallery
+                            yield "\n".join(translation_logs), gr.update(value=translated_files, visible=True), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                         else:
                             translation_logs.append(f"⚠️ Image {idx}/{total_images}: Output file missing for {filename}")
                             translation_logs.append(f"⚠️ Warning: Output file not found for image {idx}")
@@ -1848,14 +1993,24 @@ class GlossarionWeb:
                 except Exception as e:
                     translation_logs.append(f"❌ Error creating CBZ: {str(e)}")
             
-            # Build final status
+            # Build final status with detailed panel information
             final_status_lines = []
             if translated_files:
                 final_status_lines.append(f"✅ Successfully translated {len(translated_files)}/{total_images} image(s)!")
+                final_status_lines.append("")
+                final_status_lines.append("🖼️ **Translated Panels:**")
+                for i, file_path in enumerate(translated_files, 1):
+                    filename = os.path.basename(file_path)
+                    final_status_lines.append(f"  {i}. {filename}")
+                
+                final_status_lines.append("")
+                final_status_lines.append("🔄 **Download Options:**")
                 if cbz_mode and cbz_output_path:
-                    final_status_lines.append(f"\n📦 CBZ Output: {cbz_output_path}")
+                    final_status_lines.append(f"  📦 CBZ Archive: {os.path.basename(cbz_output_path)}")
+                    final_status_lines.append(f"  📁 Location: {cbz_output_path}")
                 else:
-                    final_status_lines.append(f"\nOutput directory: {output_dir}")
+                    final_status_lines.append(f"  📁 Output directory: {output_dir}")
+                    final_status_lines.append("  🖼️ Individual images: Click on images in gallery above to download")
             else:
                 final_status_lines.append("❌ Translation failed - no images were processed")
             
@@ -1865,11 +2020,11 @@ class GlossarionWeb:
             # Format: (logs_textbox, output_image, cbz_file, status_textbox, progress_group, progress_text, progress_bar)
             final_progress_text = f"Complete! Processed {len(translated_files)}/{total_images} images"
             if translated_files:
-                # If CBZ mode, show CBZ file for download; otherwise show first image
+                # Show all translated images in gallery
                 if cbz_mode and cbz_output_path and os.path.exists(cbz_output_path):
                     yield (
                         "\n".join(translation_logs), 
-                        gr.update(value=translated_files[0], visible=True), 
+                        gr.update(value=translated_files, visible=True),  # Show all images in gallery
                         gr.update(value=cbz_output_path, visible=True),  # CBZ file for download with visibility
                         gr.update(value=final_status_text, visible=True),
                         gr.update(visible=True),
@@ -1879,7 +2034,7 @@ class GlossarionWeb:
                 else:
                     yield (
                         "\n".join(translation_logs), 
-                        gr.update(value=translated_files[0], visible=True), 
+                        gr.update(value=translated_files, visible=True),  # Show all images in gallery
                         gr.update(visible=False),  # Hide CBZ component
                         gr.update(value=final_status_text, visible=True),
                         gr.update(visible=True),
@@ -1943,7 +2098,7 @@ class GlossarionWeb:
         # Initial yield to update button visibility
         yield (
             "🚀 Starting translation...",
-            gr.update(visible=False),  # manga_output_image
+            gr.update(visible=False),  # manga_output_gallery - hide initially
             gr.update(visible=False),  # manga_cbz_output  
             gr.update(value="Starting...", visible=True),  # manga_status
             gr.update(visible=False),  # manga_progress_group
@@ -2667,16 +2822,29 @@ class GlossarionWeb:
                                 gr.Markdown("### Parallel Panel Translation")
                                 gr.Markdown("*Process multiple panels simultaneously for faster translation*")
                                 
+                                # Check environment variables first, then config
+                                parallel_enabled = os.getenv('PARALLEL_PANEL_TRANSLATION', '').lower() == 'true'
+                                if not parallel_enabled:
+                                    # Fall back to config if not set in env
+                                    parallel_enabled = self.get_config_value('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+                                
+                                # Get max workers from env or config
+                                max_workers_env = os.getenv('PANEL_MAX_WORKERS', '')
+                                if max_workers_env.isdigit():
+                                    max_workers = int(max_workers_env)
+                                else:
+                                    max_workers = self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7)
+                                
                                 parallel_panel_translation = gr.Checkbox(
                                     label="Enable Parallel Panel Translation",
-                                    value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
+                                    value=parallel_enabled,
                                     info="Translates multiple panels at once instead of sequentially"
                                 )
                                 
                                 panel_max_workers = gr.Slider(
                                     minimum=1,
                                     maximum=20,
-                                    value=self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),
+                                    value=max_workers,
                                     step=1,
                                     label="Max concurrent panels",
                                     interactive=True,
@@ -2842,7 +3010,19 @@ class GlossarionWeb:
                                 interactive=False
                             )
                             
-                            manga_output_image = gr.Image(label="📷 Translated Image Preview", visible=False)
+                            # Use Gallery to show all translated images
+                            manga_output_gallery = gr.Gallery(
+                                label="📷 Translated Images (click to download)",
+                                visible=False,
+                                show_label=True,
+                                elem_id="manga_output_gallery",
+                                columns=3,
+                                rows=2,
+                                height="auto",
+                                allow_preview=True,
+                                show_download_button=True  # Allow download of individual images
+                            )
+                            # Keep CBZ output for bulk download
                             manga_cbz_output = gr.File(label="📦 Download Translated CBZ", visible=False)
                             manga_status = gr.Textbox(
                                 label="Final Status",
@@ -3109,7 +3289,7 @@ class GlossarionWeb:
                             parallel_panel_translation,
                             panel_max_workers
                         ],
-                        outputs=[manga_logs, manga_output_image, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar, translate_manga_btn, stop_manga_btn]
+                        outputs=[manga_logs, manga_output_gallery, manga_cbz_output, manga_status, manga_progress_group, manga_progress_text, manga_progress_bar, translate_manga_btn, stop_manga_btn]
                     )
                     
                     # Stop button click handler
@@ -3227,7 +3407,7 @@ class GlossarionWeb:
                         
                         detector_type = gr.Radio(
                             choices=["rtdetr_onnx", "rtdetr", "yolo"],
-                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr_onnx'),
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr'),
                             label="Detector Type",
                             interactive=True
                         )
