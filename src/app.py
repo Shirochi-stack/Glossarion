@@ -100,6 +100,12 @@ class GlossarionWeb:
         self.current_unified_client = None  # Track active client to allow cancellation
         self.current_translator = None     # Track active translator to allow shutdown
         
+        # Add stop flags for different translation types
+        self.epub_translation_stop = False
+        self.epub_translation_thread = None
+        self.glossary_extraction_stop = False
+        self.glossary_extraction_thread = None
+        
         # Default prompts from the GUI (same as translator_gui.py)
         self.default_prompts = {
             "korean": (
@@ -497,6 +503,13 @@ class GlossarionWeb:
             progress_percent = 10
             
             while not translation_complete.is_set() or not log_queue.empty():
+                # Check if stop was requested
+                if self.epub_translation_stop:
+                    translation_logs.append("⚠️ Stopping translation...")
+                    # Try to stop the translation thread
+                    translation_complete.set()
+                    break
+                    
                 # Collect logs
                 new_logs = []
                 while not log_queue.empty():
@@ -567,56 +580,203 @@ class GlossarionWeb:
             translation_logs.append(error_msg)
             yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), "Error occurred", 0
     
+    def translate_epub_with_stop(self, *args):
+        """Wrapper for translate_epub that includes button visibility control"""
+        self.epub_translation_stop = False
+        
+        # Show stop button, hide translate button at start
+        for result in self.translate_epub(*args):
+            if self.epub_translation_stop:
+                # Translation was stopped
+                yield result[0], result[1], result[2], result[3] + "\n\n⚠️ Translation stopped by user", result[4], "Stopped", 0, gr.update(visible=True), gr.update(visible=False)
+                return
+            # Add button visibility updates to the yields
+            yield result[0], result[1], result[2], result[3], result[4], result[5], result[6], gr.update(visible=False), gr.update(visible=True)
+        
+        # Reset buttons at the end
+        yield result[0], result[1], result[2], result[3], result[4], result[5], result[6], gr.update(visible=True), gr.update(visible=False)
+    
+    def stop_epub_translation(self):
+        """Stop the ongoing EPUB translation"""
+        self.epub_translation_stop = True
+        if self.epub_translation_thread and self.epub_translation_thread.is_alive():
+            # The thread will check the stop flag
+            pass
+        return gr.update(visible=True), gr.update(visible=False), "Translation stopped"
+    
     def extract_glossary(
         self,
         epub_file,
         model,
         api_key,
         min_frequency,
-        max_names,
-        progress=gr.Progress()
+        max_names
     ):
-        """Extract glossary from EPUB"""
+        """Extract glossary from EPUB - yields progress updates"""
         
         if not epub_file:
-            return None, "❌ Please upload an EPUB file"
+            yield None, None, None, "❌ Please upload an EPUB file", None, "Error", 0
+            return
+        
+        extraction_logs = []
         
         try:
             import extract_glossary_from_epub
             
-            progress(0, desc="Starting glossary extraction...")
+            extraction_logs.append("🔍 Starting glossary extraction...")
+            yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Starting...", 0
             
-            input_path = epub_file.name
+            input_path = epub_file.name if hasattr(epub_file, 'name') else epub_file
             output_path = input_path.replace('.epub', '_glossary.csv')
+            
+            extraction_logs.append(f"📖 Input: {os.path.basename(input_path)}")
+            extraction_logs.append(f"🤖 Model: {model}")
+            yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Initializing...", 10
             
             # Set API key
             if 'gpt' in model.lower():
                 os.environ['OPENAI_API_KEY'] = api_key
             elif 'claude' in model.lower():
                 os.environ['ANTHROPIC_API_KEY'] = api_key
+            else:
+                os.environ['API_KEY'] = api_key
             
-            progress(0.2, desc="Extracting text...")
+            extraction_logs.append("📋 Extracting text from EPUB...")
+            yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Extracting text...", 20
             
             # Set environment variables for glossary extraction
             os.environ['MODEL'] = model
             os.environ['GLOSSARY_MIN_FREQUENCY'] = str(min_frequency)
             os.environ['GLOSSARY_MAX_NAMES'] = str(max_names)
             
-            # Call with proper arguments (check the actual signature)
-            result = extract_glossary_from_epub.main(
-                log_callback=None,
-                stop_callback=None
-            )
+            extraction_logs.append(f"⚙️ Settings: Min frequency={min_frequency}, Max names={max_names}")
+            yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Processing...", 40
             
-            progress(1.0, desc="Glossary extraction complete!")
+            # Create a thread-safe queue for capturing logs
+            import queue
+            import threading
+            import time
+            log_queue = queue.Queue()
+            extraction_complete = threading.Event()
+            extraction_error = [None]
+            extraction_result = [None]
+            
+            def log_callback(msg):
+                """Capture log messages"""
+                if msg and msg.strip():
+                    log_queue.put(msg.strip())
+            
+            # Run extraction in a separate thread
+            def run_extraction():
+                try:
+                    result = extract_glossary_from_epub.main(
+                        log_callback=log_callback,
+                        stop_callback=None
+                    )
+                    extraction_result[0] = result
+                    extraction_error[0] = None
+                except Exception as e:
+                    extraction_error[0] = e
+                finally:
+                    extraction_complete.set()
+            
+            extraction_thread = threading.Thread(target=run_extraction, daemon=True)
+            extraction_thread.start()
+            
+            # Monitor progress
+            last_yield_time = time.time()
+            progress_percent = 40
+            
+            while not extraction_complete.is_set() or not log_queue.empty():
+                # Check if stop was requested
+                if self.glossary_extraction_stop:
+                    extraction_logs.append("⚠️ Stopping extraction...")
+                    # Try to stop the extraction thread
+                    extraction_complete.set()
+                    break
+                    
+                # Collect logs
+                new_logs = []
+                while not log_queue.empty():
+                    try:
+                        msg = log_queue.get_nowait()
+                        new_logs.append(msg)
+                    except queue.Empty:
+                        break
+                
+                # Add new logs
+                if new_logs:
+                    extraction_logs.extend(new_logs)
+                    
+                    # Update progress based on log content
+                    for log in new_logs:
+                        if 'Processing' in log or 'Extracting' in log:
+                            progress_percent = min(progress_percent + 5, 80)
+                        elif 'Writing' in log or 'Saving' in log:
+                            progress_percent = min(progress_percent + 10, 90)
+                
+                # Yield updates periodically
+                current_time = time.time()
+                if new_logs or (current_time - last_yield_time) > 1.0:
+                    status_text = new_logs[-1] if new_logs else "Processing..."
+                    # Keep only last 100 logs
+                    display_logs = extraction_logs[-100:] if len(extraction_logs) > 100 else extraction_logs
+                    yield None, None, gr.update(visible=True), "\n".join(display_logs), gr.update(visible=True), status_text, progress_percent
+                    last_yield_time = current_time
+                
+                # Small delay to avoid CPU spinning
+                time.sleep(0.1)
+            
+            # Wait for thread to complete
+            extraction_thread.join(timeout=5)
+            
+            # Check for errors
+            if extraction_error[0]:
+                error_msg = f"❌ Extraction error: {str(extraction_error[0])}"
+                extraction_logs.append(error_msg)
+                yield None, None, gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), error_msg, 0
+                return
+            
+            extraction_logs.append("🖍️ Writing glossary to CSV...")
+            yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Writing CSV...", 95
             
             if os.path.exists(output_path):
-                return output_path, f"✅ Glossary extracted!\n\nSaved to: {os.path.basename(output_path)}"
+                extraction_logs.append(f"✅ Glossary extracted successfully!")
+                extraction_logs.append(f"💾 Saved to: {os.path.basename(output_path)}")
+                yield output_path, gr.update(visible=True), gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), "Extraction complete!", 100
             else:
-                return None, "❌ Glossary extraction failed"
+                extraction_logs.append("❌ Glossary extraction failed - output file not created")
+                yield None, None, gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), "Extraction failed", 0
                 
         except Exception as e:
-            return None, f"❌ Error: {str(e)}"
+            import traceback
+            error_msg = f"❌ Error during extraction:\n{str(e)}\n\n{traceback.format_exc()}"
+            extraction_logs.append(error_msg)
+            yield None, None, gr.update(visible=False), "\n".join(extraction_logs), gr.update(visible=True), "Error occurred", 0
+    
+    def extract_glossary_with_stop(self, *args):
+        """Wrapper for extract_glossary that includes button visibility control"""
+        self.glossary_extraction_stop = False
+        
+        # Show stop button, hide extract button at start
+        for result in self.extract_glossary(*args):
+            if self.glossary_extraction_stop:
+                # Extraction was stopped
+                yield result[0], result[1], result[2], result[3] + "\n\n⚠️ Extraction stopped by user", result[4], "Stopped", 0, gr.update(visible=True), gr.update(visible=False)
+                return
+            # Add button visibility updates to the yields
+            yield result[0], result[1], result[2], result[3], result[4], result[5], result[6], gr.update(visible=False), gr.update(visible=True)
+        
+        # Reset buttons at the end
+        yield result[0], result[1], result[2], result[3], result[4], result[5], result[6], gr.update(visible=True), gr.update(visible=False)
+    
+    def stop_glossary_extraction(self):
+        """Stop the ongoing glossary extraction"""
+        self.glossary_extraction_stop = True
+        if self.glossary_extraction_thread and self.glossary_extraction_thread.is_alive():
+            # The thread will check the stop flag
+            pass
+        return gr.update(visible=True), gr.update(visible=False), "Extraction stopped"
     
     def stop_translation(self):
         """Stop the ongoing translation process"""
@@ -1698,11 +1858,21 @@ class GlossarionWeb:
                                 file_types=[".epub"]
                             )
                             
-                            translate_btn = gr.Button(
-                                "🚀 Translate EPUB",
-                                variant="primary",
-                                size="lg"
-                            )
+                            with gr.Row():
+                                translate_btn = gr.Button(
+                                    "🚀 Translate EPUB",
+                                    variant="primary",
+                                    size="lg",
+                                    scale=2
+                                )
+                                
+                                stop_epub_btn = gr.Button(
+                                    "⏹️ Stop Translation",
+                                    variant="stop",
+                                    size="lg",
+                                    visible=False,
+                                    scale=1
+                                )
                             
                             epub_model = gr.Dropdown(
                                 choices=self.models,
@@ -1845,7 +2015,7 @@ class GlossarionWeb:
                     
                     # Translation button handler - now with progress outputs
                     translate_btn.click(
-                        fn=self.translate_epub,
+                        fn=self.translate_epub_with_stop,
                         inputs=[
                             epub_file,
                             epub_model,
@@ -1863,8 +2033,17 @@ class GlossarionWeb:
                             epub_logs,            # Translation logs
                             epub_status,          # Final status
                             epub_progress_text,   # Progress text
-                            epub_progress_bar     # Progress bar
+                            epub_progress_bar,    # Progress bar
+                            translate_btn,        # Show/hide translate button
+                            stop_epub_btn        # Show/hide stop button
                         ]
+                    )
+                    
+                    # Stop button handler
+                    stop_epub_btn.click(
+                        fn=self.stop_epub_translation,
+                        inputs=[],
+                        outputs=[translate_btn, stop_epub_btn, epub_status]
                     )
                 
                 # Manga Translation Tab
@@ -3305,11 +3484,21 @@ class GlossarionWeb:
                                 file_types=[".epub"]
                             )
                             
-                            extract_btn = gr.Button(
-                                "🔍 Extract Glossary",
-                                variant="primary",
-                                size="lg"
-                            )
+                            with gr.Row():
+                                extract_btn = gr.Button(
+                                    "🔍 Extract Glossary",
+                                    variant="primary",
+                                    size="lg",
+                                    scale=2
+                                )
+                                
+                                stop_glossary_btn = gr.Button(
+                                    "⏹️ Stop Extraction",
+                                    variant="stop",
+                                    size="lg",
+                                    visible=False,
+                                    scale=1
+                                )
                             
                             glossary_model = gr.Dropdown(
                                 choices=self.models,
@@ -3364,21 +3553,49 @@ class GlossarionWeb:
                                     visible=True
                                 )
                             
+                            # Progress section (similar to translation tabs)
+                            with gr.Group(visible=False) as glossary_progress_group:
+                                gr.Markdown("### Progress")
+                                glossary_progress_text = gr.Textbox(
+                                    label="📨 Current Status",
+                                    value="Ready to start",
+                                    interactive=False,
+                                    lines=1
+                                )
+                                glossary_progress_bar = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=0,
+                                    step=1,
+                                    label="📋 Extraction Progress",
+                                    interactive=False,
+                                    show_label=True
+                                )
+                            
+                            glossary_logs = gr.Textbox(
+                                label="📋 Extraction Logs",
+                                lines=20,
+                                max_lines=30,
+                                value="Ready to extract. Upload an EPUB file and configure settings.",
+                                visible=True,
+                                interactive=False
+                            )
+                            
                             glossary_output = gr.File(
                                 label="📥 Download Glossary CSV",
                                 visible=False
                             )
                             
                             glossary_status = gr.Textbox(
-                                label="📋 Extraction Status",
-                                lines=20,
-                                max_lines=30,
-                                value="Ready to extract. Upload an EPUB file and configure settings.",
+                                label="Final Status",
+                                lines=3,
+                                max_lines=5,
+                                visible=False,
                                 interactive=False
                             )
                     
                     extract_btn.click(
-                        fn=self.extract_glossary,
+                        fn=self.extract_glossary_with_stop,
                         inputs=[
                             glossary_epub,
                             glossary_model,
@@ -3386,7 +3603,24 @@ class GlossarionWeb:
                             min_freq,
                             max_names_slider
                         ],
-                        outputs=[glossary_output, glossary_status]
+                        outputs=[
+                            glossary_output,
+                            glossary_status_message,
+                            glossary_progress_group,
+                            glossary_logs,
+                            glossary_status,
+                            glossary_progress_text,
+                            glossary_progress_bar,
+                            extract_btn,
+                            stop_glossary_btn
+                        ]
+                    )
+                    
+                    # Stop button handler
+                    stop_glossary_btn.click(
+                        fn=self.stop_glossary_extraction,
+                        inputs=[],
+                        outputs=[extract_btn, stop_glossary_btn, glossary_status]
                     )
                 
                 # Settings Tab
