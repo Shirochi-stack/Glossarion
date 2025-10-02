@@ -12,22 +12,6 @@ import tempfile
 import base64
 from pathlib import Path
 
-# Import spaces for Hugging Face Zero GPU support
-try:
-    import spaces
-    SPACES_AVAILABLE = True
-    print("✅ Hugging Face Spaces Zero GPU support available")
-except ImportError:
-    SPACES_AVAILABLE = False
-    print("ℹ️ Running without Hugging Face Spaces Zero GPU support")
-    # Create a dummy decorator for local development
-    class spaces:
-        @staticmethod
-        def GPU(duration=60):
-            def decorator(func):
-                return func
-            return decorator
-
 # Import API key encryption/decryption
 try:
     from api_key_encryption import APIKeyEncryption
@@ -76,23 +60,8 @@ try:
     from unified_api_client import UnifiedClient
     MANGA_TRANSLATION_AVAILABLE = True
     print("✅ Manga translation modules loaded successfully")
-    
-    # Import torch for device handling in Zero GPU
-    try:
-        import torch
-        TORCH_AVAILABLE = True
-        # Check if CUDA is available
-        if torch.cuda.is_available():
-            print(f"🎮 GPU detected: {torch.cuda.get_device_name(0)}")
-        else:
-            print("ℹ️ No GPU detected, will use CPU")
-    except ImportError:
-        TORCH_AVAILABLE = False
-        print("ℹ️ PyTorch not available")
-        
 except ImportError as e:
     MANGA_TRANSLATION_AVAILABLE = False
-    TORCH_AVAILABLE = False
     print(f"⚠️ Manga translation modules not found: {e}")
     print(f"⚠️ Current working directory: {os.getcwd()}")
     print(f"⚠️ Python path: {sys.path[:3]}...")
@@ -105,92 +74,6 @@ except ImportError as e:
         else:
             print(f"❌ Missing: {file}")
 
-
-def get_device():
-    """Get the appropriate device for Zero GPU or regular GPU/CPU"""
-    if TORCH_AVAILABLE:
-        import torch
-        # In Zero GPU environment, always use cuda if available
-        if torch.cuda.is_available():
-            return torch.device('cuda')
-        else:
-            return torch.device('cpu')
-    return None
-
-@spaces.GPU(duration=300)
-def process_manga_with_gpu(image_path, config_dict):
-    """Standalone GPU function for Zero GPU - processes manga without thread locks"""
-    """
-    This function is designed to work with Hugging Face Zero GPU.
-    It recreates necessary objects inside the GPU context to avoid pickling issues.
-    """
-    
-    if not MANGA_TRANSLATION_AVAILABLE:
-        return {'success': False, 'errors': ['Manga translation modules not available']}
-    
-    try:
-        from manga_translator import MangaTranslator
-        from unified_api_client import UnifiedClient
-        
-        # Extract configuration
-        output_path = config_dict['output_path']
-        ocr_config = config_dict['ocr_config']
-        api_key = config_dict['api_key']
-        model = config_dict['model']
-        output_dir = config_dict['output_dir']
-        idx = config_dict['batch_index']
-        total = config_dict['batch_total']
-        enable_inpainting = config_dict.get('enable_inpainting', True)
-        
-        # Create a simple mock GUI object
-        class MockGUI:
-            def __init__(self, model, api_key):
-                self.model_var = type('obj', (object,), {'get': lambda: model})()
-                self.api_key_entry = type('obj', (object,), {'get': lambda: api_key})()
-        
-        mock_gui = MockGUI(model, api_key)
-        
-        # Create unified client
-        unified_client = UnifiedClient(
-            api_key=api_key,
-            model=model,
-            output_dir=output_dir
-        )
-        
-        # Create translator
-        translator = MangaTranslator(
-            ocr_config=ocr_config,
-            unified_client=unified_client,
-            main_gui=mock_gui,
-            log_callback=lambda msg: print(f"GPU: {msg}")
-        )
-        
-        # Configure inpainting
-        translator.skip_inpainting = not enable_inpainting
-        
-        # Process the image on GPU
-        result = translator.process_image(
-            image_path=image_path,
-            output_path=output_path,
-            batch_index=idx,
-            batch_total=total
-        )
-        
-        # Clean up
-        del translator
-        del unified_client
-        
-        if TORCH_AVAILABLE:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        
-        return result
-        
-    except Exception as e:
-        import traceback
-        print(f"GPU processing error: {traceback.format_exc()}")
-        return {'success': False, 'errors': [str(e)]}
 
 class GlossarionWeb:
     """Web interface for Glossarion translator"""
@@ -386,7 +269,7 @@ class GlossarionWeb:
             'manga_bg_style': 'circle',
             'manga_settings': {
                 'ocr': {
-                    'detector_type': 'rtdetr',
+                    'detector_type': 'rtdetr_onnx',
                     'rtdetr_confidence': 0.3,
                     'bubble_confidence': 0.3,
                     'detect_text_bubbles': True,
@@ -581,7 +464,7 @@ class GlossarionWeb:
             
             # OCR settings
             ocr = manga_settings.get('ocr', {})
-            os.environ['DETECTOR_TYPE'] = ocr.get('detector_type', 'rtdetr')
+            os.environ['DETECTOR_TYPE'] = ocr.get('detector_type', 'rtdetr_onnx')
             os.environ['RTDETR_CONFIDENCE'] = str(ocr.get('rtdetr_confidence', 0.3))
             os.environ['BUBBLE_CONFIDENCE'] = str(ocr.get('bubble_confidence', 0.3))
             os.environ['DETECT_TEXT_BUBBLES'] = '1' if ocr.get('detect_text_bubbles', True) else '0'
@@ -1489,23 +1372,6 @@ class GlossarionWeb:
         except ImportError:
             pass
     
-    def _process_manga_on_gpu(self, input_path, output_path, translator, idx, total_images):
-        """Process manga panel (GPU allocation handled by modules themselves)"""
-        if not MANGA_TRANSLATION_AVAILABLE:
-            return {'success': False, 'errors': ['Manga translation not available']}
-        
-        try:
-            # Process image - GPU allocation handled internally by the modules
-            result = translator.process_image(
-                image_path=input_path,
-                output_path=output_path,
-                batch_index=idx,
-                batch_total=total_images
-            )
-            return result
-        except Exception as e:
-            return {'success': False, 'errors': [str(e)]}
-    
     def translate_manga(
         self,
         image_files,
@@ -1577,19 +1443,6 @@ class GlossarionWeb:
                 return
         
         try:
-            # Set Zero GPU optimizations if running in Spaces
-            if SPACES_AVAILABLE and os.getenv('SPACE_ID'):
-                # Optimize for Zero GPU environment
-                os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-                os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # Non-blocking for better performance
-                
-                # Force models to use available GPU
-                if TORCH_AVAILABLE:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()  # Clear any existing cache
-                        print(f"🎮 Zero GPU: Using {torch.cuda.get_device_name(0)}")
-                        print(f"💾 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
             
             # Set all environment variables from config
             self.set_all_environment_variables()
@@ -1930,14 +1783,6 @@ class GlossarionWeb:
                 print(f"Full inpainting config: {inpaint_cfg}")
                 print("=== END DEBUG ===\n")
                 
-                # Set device for Zero GPU if available
-                if SPACES_AVAILABLE and os.getenv('SPACE_ID'):
-                    device = get_device()
-                    if device and TORCH_AVAILABLE:
-                        # Configure for Zero GPU usage
-                        os.environ['DEVICE'] = str(device)
-                        print(f"🎮 Zero GPU: Models will use {device}")
-                
                 translator = MangaTranslator(
                     ocr_config=ocr_config,
                     unified_client=unified_client,
@@ -2022,79 +1867,45 @@ class GlossarionWeb:
                     last_yield_time[0] = time.time()
                     yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
                     
-                    # Choose processing method based on environment
-                    is_spaces_gpu = SPACES_AVAILABLE and os.getenv('SPACE_ID')
+                    # Start processing in a thread so we can yield logs periodically
+                    import threading
+                    processing_complete = [False]
+                    result_container = [None]
                     
-                    if is_spaces_gpu:
-                        # Use GPU-safe method for Spaces (no threading)
-                        translation_logs.append(f"🎮 Using Zero GPU for processing")
+                    def process_wrapper():
+                        result_container[0] = translator.process_image(
+                            image_path=input_path,
+                            output_path=output_path,
+                            batch_index=idx,
+                            batch_total=total_images
+                        )
+                        processing_complete[0] = True
+                    
+                    # Start processing in background
+                    process_thread = threading.Thread(target=process_wrapper, daemon=True)
+                    process_thread.start()
+                    
+                    # Poll for log updates while processing
+                    while not processing_complete[0]:
+                        time.sleep(0.5)  # Check every 0.5 seconds
                         
-                        # Create config dict for GPU processing
-                        gpu_config = {
-                            'output_path': output_path,
-                            'ocr_config': ocr_config,
-                            'api_key': api_key,
-                            'model': model,
-                            'output_dir': output_dir,
-                            'batch_index': idx,
-                            'batch_total': total_images,
-                            'enable_inpainting': enable_inpainting
-                        }
+                        # Check for stop request during processing
+                        if self.stop_flag.is_set():
+                            translation_logs.append(f"\n⏹️ Translation stopped by user while processing image {idx}/{total_images}")
+                            self.is_translating = False
+                            yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value="⏹️ Translation stopped", visible=True), gr.update(visible=True), gr.update(value="Stopped"), gr.update(value=0)
+                            return
                         
-                        # Direct GPU processing without threading
-                        try:
-                            # Use the standalone GPU function
-                            result = process_manga_with_gpu(input_path, gpu_config)
-                        except Exception as gpu_error:
-                            # Handle GPU processing error
-                            result = {'success': False, 'errors': [f"GPU processing error: {str(gpu_error)}"]}
-                            translation_logs.append(f"⚠️ GPU processing failed, error: {str(gpu_error)[:100]}")
-                        
-                        # Yield progress update
-                        progress_percent = int(((idx - 0.5) / total_images) * 100)
-                        status_text = f"Processing {idx}/{total_images}: {filename}"
-                        yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
-                        
-                    else:
-                        # Original threaded processing for local development
-                        import threading
-                        processing_complete = [False]
-                        result_container = [None]
-                        
-                        def process_wrapper():
-                            result_container[0] = translator.process_image(
-                                image_path=input_path,
-                                output_path=output_path,
-                                batch_index=idx,
-                                batch_total=total_images
-                            )
-                            processing_complete[0] = True
-                        
-                        # Start processing in background
-                        process_thread = threading.Thread(target=process_wrapper, daemon=True)
-                        process_thread.start()
-                        
-                        # Poll for log updates while processing
-                        while not processing_complete[0]:
-                            time.sleep(0.5)  # Check every 0.5 seconds
-                            
-                            # Check for stop request during processing
-                            if self.stop_flag.is_set():
-                                translation_logs.append(f"\n⏹️ Translation stopped by user while processing image {idx}/{total_images}")
-                                self.is_translating = False
-                                yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(value="⏹️ Translation stopped", visible=True), gr.update(visible=True), gr.update(value="Stopped"), gr.update(value=0)
-                                return
-                            
-                            if should_yield_logs():
-                                progress_percent = int(((idx - 0.5) / total_images) * 100)  # Mid-processing
-                                status_text = f"Processing {idx}/{total_images}: {filename} (in progress...)"
-                                last_yield_log_count[0] = len(translation_logs)
-                                last_yield_time[0] = time.time()
-                                yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
-                        
-                        # Wait for thread to complete
-                        process_thread.join(timeout=1)
-                        result = result_container[0]
+                        if should_yield_logs():
+                            progress_percent = int(((idx - 0.5) / total_images) * 100)  # Mid-processing
+                            status_text = f"Processing {idx}/{total_images}: {filename} (in progress...)"
+                            last_yield_log_count[0] = len(translation_logs)
+                            last_yield_time[0] = time.time()
+                            yield "\n".join(translation_logs), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), gr.update(value=status_text), gr.update(value=progress_percent)
+                    
+                    # Wait for thread to complete
+                    process_thread.join(timeout=1)
+                    result = result_container[0]
                     
                     if result.get('success'):
                         # Use the output path from the result
@@ -2255,17 +2066,6 @@ class GlossarionWeb:
                 self.current_unified_client = None
             except Exception:
                 pass
-            
-            # Clean up GPU memory if using Zero GPU
-            if SPACES_AVAILABLE and TORCH_AVAILABLE:
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-                        print("🧿 Zero GPU: Memory cleaned up")
-                except Exception as e:
-                    print(f"⚠️ Could not clean GPU memory: {e}")
     
     def stop_manga_translation(self):
         """Simple function to stop manga translation"""
@@ -3607,7 +3407,7 @@ class GlossarionWeb:
                         
                         detector_type = gr.Radio(
                             choices=["rtdetr_onnx", "rtdetr", "yolo"],
-                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr'),
+                            value=self.get_config_value('manga_settings', {}).get('ocr', {}).get('detector_type', 'rtdetr_onnx'),
                             label="Detector Type",
                             interactive=True
                         )
@@ -5292,37 +5092,13 @@ def main():
     # Check if running on Hugging Face Spaces
     is_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
     if is_spaces:
-        print("\n" + "="*60)
         print("🤗 Running on Hugging Face Spaces")
         print(f"📁 Space ID: {os.getenv('SPACE_ID', 'Unknown')}")
+        print(f"📁 Files in current directory: {len(os.listdir('.'))} items")
         print(f"📁 Working directory: {os.getcwd()}")
-        print(f"😎 Manga modules available: {MANGA_TRANSLATION_AVAILABLE}")
-        
-        # Check Zero GPU configuration
-        if SPACES_AVAILABLE:
-            print("✅ Zero GPU support is ENABLED")
-            if TORCH_AVAILABLE:
-                import torch
-                if torch.cuda.is_available():
-                    print(f"🎮 GPU detected: {torch.cuda.get_device_name(0)}")
-                    print(f"💾 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-                else:
-                    print("ℹ️ GPU will be allocated dynamically by Zero GPU")
-            else:
-                print("⚠️ PyTorch not available - GPU features may be limited")
-        else:
-            print("⚠️ Spaces library not installed - Zero GPU disabled")
-            print("💡 To enable Zero GPU, add 'spaces' to requirements.txt")
-        
-        print("="*60 + "\n")
+        print(f"😎 Available manga modules: {MANGA_TRANSLATION_AVAILABLE}")
     else:
         print("🏠 Running locally")
-        if TORCH_AVAILABLE:
-            import torch
-            if torch.cuda.is_available():
-                print(f"🎮 Local GPU: {torch.cuda.get_device_name(0)}")
-            else:
-                print("ℹ️ No GPU detected, using CPU")
     
     web_app = GlossarionWeb()
     app = web_app.create_interface()
