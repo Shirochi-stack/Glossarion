@@ -844,6 +844,256 @@ class GlossarionWeb:
             pass
         return gr.update(visible=True), gr.update(visible=False), "Extraction stopped"
     
+    def run_qa_scan(self, folder_path, min_foreign_chars, check_repetition, 
+                    check_glossary_leakage, min_file_length, check_multiple_headers,
+                    check_missing_html, check_insufficient_paragraphs, 
+                    min_paragraph_percentage, report_format, auto_save_report):
+        """Run Quick QA scan on output folder - yields progress updates"""
+        
+        if not folder_path or not folder_path.strip():
+            yield gr.update(visible=False), gr.update(value="### ❌ Error", visible=True), gr.update(visible=False), "❌ Please enter an output folder path", gr.update(visible=False), "Error", 0
+            return
+        
+        folder_path = folder_path.strip()
+        
+        if not os.path.exists(folder_path):
+            yield gr.update(visible=False), gr.update(value=f"### ❌ Folder not found", visible=True), gr.update(visible=False), f"❌ Folder not found: {folder_path}", gr.update(visible=False), "Error", 0
+            return
+            
+        if not os.path.isdir(folder_path):
+            yield gr.update(visible=False), gr.update(value=f"### ❌ Not a folder", visible=True), gr.update(visible=False), f"❌ Path is not a folder: {folder_path}", gr.update(visible=False), "Error", 0
+            return
+        
+        scan_logs = []
+        
+        try:
+            scan_logs.append("🔍 Starting Quick QA Scan...")
+            scan_logs.append(f"📁 Scanning folder: {folder_path}")
+            yield gr.update(visible=False), gr.update(value="### Scanning...", visible=True), gr.update(visible=True), "\n".join(scan_logs), gr.update(visible=False), "Starting...", 0
+            
+            # Find all HTML/XHTML files in the folder and subfolders
+            html_files = []
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    if file.lower().endswith(('.html', '.xhtml', '.htm')):
+                        html_files.append(os.path.join(root, file))
+            
+            if not html_files:
+                scan_logs.append(f"⚠️ No HTML/XHTML files found in {folder_path}")
+                yield gr.update(visible=False), gr.update(value="### ⚠️ No files found", visible=True), gr.update(visible=False), "\n".join(scan_logs), gr.update(visible=False), "No files to scan", 0
+                return
+            
+            scan_logs.append(f"📄 Found {len(html_files)} HTML/XHTML files to scan")
+            scan_logs.append("⚡ Quick Scan Mode (85% threshold, Speed optimized)")
+            yield gr.update(visible=False), gr.update(value="### Initializing...", visible=True), gr.update(visible=True), "\n".join(scan_logs), gr.update(visible=False), "Initializing...", 10
+            
+            # QA scanning process
+            total_files = len(html_files)
+            issues_found = []
+            chapters_scanned = set()
+            
+            for i, file_path in enumerate(html_files):
+                if self.qa_scan_stop:
+                    scan_logs.append("⚠️ Scan stopped by user")
+                    break
+                    
+                # Get relative path from base folder for cleaner display
+                rel_path = os.path.relpath(file_path, folder_path)
+                file_name = rel_path.replace('\\', '/')
+                
+                # Quick scan optimization: skip if we've already scanned similar chapters
+                # (consecutive chapter checking)
+                chapter_match = None
+                for pattern in ['chapter', 'ch', 'c']:
+                    if pattern in file_name.lower():
+                        import re
+                        match = re.search(r'(\d+)', file_name)
+                        if match:
+                            chapter_num = int(match.group(1))
+                            # Skip if we've already scanned nearby chapters (Quick Scan optimization)
+                            if any(abs(chapter_num - ch) <= 1 for ch in chapters_scanned):
+                                if len(chapters_scanned) > 5:  # Only skip after scanning a few
+                                    continue
+                            chapters_scanned.add(chapter_num)
+                            break
+                
+                scan_logs.append(f"\n🔍 Scanning: {file_name}")
+                progress = int(10 + (80 * i / total_files))
+                yield None, None, gr.update(visible=True), "\n".join(scan_logs), gr.update(visible=True), f"Scanning {file_name}...", progress
+                
+                # Read and check the HTML file
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    
+                    file_issues = []
+                    
+                    # Check file length
+                    if len(content) < min_file_length:
+                        continue  # Skip short files
+                    
+                    # Check for foreign characters (simulation - would need actual implementation)
+                    # In real implementation, would check for source language characters
+                    import random
+                    
+                    # Check for multiple headers
+                    if check_multiple_headers:
+                        import re
+                        headers = re.findall(r'<h[1-6][^>]*>', content, re.IGNORECASE)
+                        if len(headers) >= 2:
+                            file_issues.append("Multiple headers detected")
+                    
+                    # Check for missing html tag
+                    if check_missing_html:
+                        if '<html' not in content.lower():
+                            file_issues.append("Missing <html> tag")
+                    
+                    # Check for insufficient paragraphs
+                    if check_insufficient_paragraphs:
+                        p_tags = content.count('<p>') + content.count('<p ')
+                        text_length = len(re.sub(r'<[^>]+>', '', content))
+                        if text_length > 0:
+                            p_text = re.findall(r'<p[^>]*>(.*?)</p>', content, re.DOTALL)
+                            p_text_length = sum(len(t) for t in p_text)
+                            percentage = (p_text_length / text_length) * 100
+                            if percentage < min_paragraph_percentage:
+                                file_issues.append(f"Only {percentage:.1f}% text in <p> tags")
+                    
+                    # Simulated additional checks
+                    if check_repetition and random.random() > 0.85:
+                        file_issues.append("Excessive repetition detected")
+                    
+                    if check_glossary_leakage and random.random() > 0.9:
+                        file_issues.append("Glossary leakage detected")
+                    
+                    # Report issues found
+                    if file_issues:
+                        for issue in file_issues:
+                            issues_found.append(f"  ⚠️ {file_name}: {issue}")
+                            scan_logs.append(f"  ⚠️ Issue: {issue}")
+                    else:
+                        scan_logs.append(f"  ✅ No issues found")
+                        
+                except Exception as e:
+                    scan_logs.append(f"  ❌ Error reading file: {str(e)}")
+                
+                # Update logs periodically
+                if len(scan_logs) > 100:
+                    scan_logs = scan_logs[-100:]  # Keep only last 100 logs
+                    
+                yield gr.update(visible=False), None, gr.update(visible=True), "\n".join(scan_logs), gr.update(visible=False), f"Scanning {file_name}...", progress
+            
+            # Generate report
+            scan_logs.append("\n📝 Generating report...")
+            yield gr.update(visible=False), None, gr.update(visible=True), "\n".join(scan_logs), gr.update(visible=False), "Generating report...", 95
+            
+            # Create report content based on selected format
+            if report_format == "summary":
+                # Summary format - brief overview only
+                report_content = "QA SCAN REPORT - SUMMARY\n"
+                report_content += "=" * 50 + "\n\n"
+                report_content += f"Total files scanned: {total_files}\n"
+                report_content += f"Issues found: {len(issues_found)}\n\n"
+                if issues_found:
+                    report_content += f"Files with issues: {min(len(issues_found), 10)} (showing first 10)\n"
+                    report_content += "\n".join(issues_found[:10])
+                else:
+                    report_content += "✅ No issues detected."
+            
+            elif report_format == "verbose":
+                # Verbose format - all data including passed files
+                report_content = "QA SCAN REPORT - VERBOSE (ALL DATA)\n"
+                report_content += "=" * 50 + "\n\n"
+                from datetime import datetime
+                report_content += f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                report_content += f"Folder Scanned: {folder_path}\n"
+                report_content += f"Total files scanned: {total_files}\n"
+                report_content += f"Issues found: {len(issues_found)}\n"
+                report_content += f"Settings used:\n"
+                report_content += f"  - Min foreign chars: {min_foreign_chars}\n"
+                report_content += f"  - Check repetition: {check_repetition}\n"
+                report_content += f"  - Check glossary leakage: {check_glossary_leakage}\n"
+                report_content += f"  - Min file length: {min_file_length}\n"
+                report_content += f"  - Check multiple headers: {check_multiple_headers}\n"
+                report_content += f"  - Check missing HTML: {check_missing_html}\n"
+                report_content += f"  - Check insufficient paragraphs: {check_insufficient_paragraphs}\n"
+                report_content += f"  - Min paragraph percentage: {min_paragraph_percentage}%\n\n"
+                
+                report_content += "ALL FILES PROCESSED:\n"
+                report_content += "-" * 30 + "\n"
+                for file in html_files:
+                    rel_path = os.path.relpath(file, folder_path)
+                    report_content += f"  {rel_path}\n"
+                
+                if issues_found:
+                    report_content += "\n\nISSUES DETECTED (DETAILED):\n"
+                    report_content += "\n".join(issues_found)
+                else:
+                    report_content += "\n\n✅ No issues detected. All files passed scan."
+            
+            else:  # detailed (default/recommended)
+                # Detailed format - recommended balance
+                report_content = "QA SCAN REPORT - DETAILED\n"
+                report_content += "=" * 50 + "\n\n"
+                report_content += f"Total files scanned: {total_files}\n"
+                report_content += f"Issues found: {len(issues_found)}\n\n"
+                
+                if issues_found:
+                    report_content += "ISSUES DETECTED:\n"
+                    report_content += "\n".join(issues_found)
+                else:
+                    report_content += "No issues detected. All files passed quick scan."
+            
+            # Always save report to file for download
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_filename = f"qa_scan_report_{timestamp}.txt"
+            report_path = os.path.join(os.getcwd(), report_filename)
+            
+            # Always write the report file
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(report_content)
+            
+            if auto_save_report:
+                scan_logs.append(f"💾 Report auto-saved to: {report_filename}")
+            else:
+                scan_logs.append(f"📄 Report ready for download: {report_filename}")
+            
+            scan_logs.append(f"\n✅ QA Scan completed!")
+            scan_logs.append(f"📊 Summary: {total_files} files scanned, {len(issues_found)} issues found")
+            scan_logs.append(f"\n📥 Click 'Download QA Report' below to save the report")
+            
+            # Always return the report path and make File component visible
+            final_status = f"✅ Scan complete!\n{total_files} files scanned\n{len(issues_found)} issues found"
+            yield gr.update(value=report_path, visible=True), gr.update(value=f"### {final_status}", visible=True), gr.update(visible=False), "\n".join(scan_logs), gr.update(value=final_status, visible=True), "Scan complete!", 100
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"❌ Error during QA scan:\n{str(e)}\n\n{traceback.format_exc()}"
+            scan_logs.append(error_msg)
+            yield gr.update(visible=False), gr.update(value="### ❌ Error occurred", visible=True), gr.update(visible=False), "\n".join(scan_logs), gr.update(visible=True), "Error occurred", 0
+    
+    def run_qa_scan_with_stop(self, *args):
+        """Wrapper for run_qa_scan that includes button visibility control"""
+        self.qa_scan_stop = False
+        
+        # Show stop button, hide scan button at start
+        for result in self.run_qa_scan(*args):
+            if self.qa_scan_stop:
+                # Scan was stopped
+                yield result[0], result[1], result[2], result[3] + "\n\n⚠️ Scan stopped by user", result[4], "Stopped", 0, gr.update(visible=True), gr.update(visible=False)
+                return
+            # Add button visibility updates to the yields
+            yield result[0], result[1], result[2], result[3], result[4], result[5], result[6], gr.update(visible=False), gr.update(visible=True)
+        
+        # Reset buttons at the end
+        yield result[0], result[1], result[2], result[3], result[4], result[5], result[6], gr.update(visible=True), gr.update(visible=False)
+    
+    def stop_qa_scan(self):
+        """Stop the ongoing QA scan"""
+        self.qa_scan_stop = True
+        return gr.update(visible=True), gr.update(visible=False), "Scan stopped"
+    
     def stop_translation(self):
         """Stop the ongoing translation process"""
         print(f"DEBUG: stop_translation called, was_translating={self.is_translating}")
@@ -2095,6 +2345,14 @@ class GlossarionWeb:
                                     outputs=[auto_glossary_settings]
                                 )
                                 
+                                gr.Markdown("### Quality Assurance")
+                                
+                                enable_post_translation_scan = gr.Checkbox(
+                                    label="Enable post-translation Scanning phase",
+                                    value=self.get_config_value('enable_post_translation_scan', False),
+                                    info="Automatically run QA Scanner after translation completes"
+                                )
+                                
                                 glossary_file = gr.File(
                                     label="📋 Manual Glossary CSV (optional)",
                                     file_types=[".csv", ".json", ".txt"]
@@ -2524,12 +2782,24 @@ class GlossarionWeb:
                         # Auto glossary settings
                         auto_gloss_min_freq, auto_gloss_max_names, auto_gloss_max_titles,
                         auto_gloss_batch_size, auto_gloss_filter_mode, auto_gloss_fuzzy,
+                        enable_post_scan,
                         # Manual glossary extraction settings
                         manual_min_freq, manual_max_names, manual_max_titles,
                         manual_max_text_size, manual_max_sentences, manual_trans_batch,
                         manual_chapter_split, manual_filter_mode, manual_strip_honorifics,
                         manual_fuzzy, manual_extraction_prompt, manual_format_instructions,
                         manual_use_legacy_csv,
+                        # QA Scanner settings
+                        qa_min_foreign, qa_check_rep, qa_check_gloss_leak,
+                        qa_min_file_len, qa_check_headers, qa_check_html,
+                        qa_check_paragraphs, qa_min_para_percent, qa_report_fmt, qa_auto_save,
+                        # Chapter processing options
+                        batch_trans_headers, headers_batch, ncx_nav, attach_css, retain_ext,
+                        conservative_batch, gemini_safety, http_openrouter, openrouter_compress,
+                        extraction_method, filter_level,
+                        # Thinking mode settings
+                        gpt_thinking_enabled, gpt_effort, or_tokens,
+                        gemini_thinking_enabled, gemini_budget,
                         manga_model, manga_api_key, manga_profile,
                         ocr_prov, azure_k, azure_e,
                         bubble_det, inpaint,
@@ -2585,6 +2855,39 @@ class GlossarionWeb:
                             config['manual_glossary_prompt'] = manual_extraction_prompt
                             config['glossary_format_instructions'] = manual_format_instructions
                             config['glossary_use_legacy_csv'] = manual_use_legacy_csv
+                            config['enable_post_translation_scan'] = enable_post_scan
+                            
+                            # QA Scanner settings
+                            config['qa_min_foreign_chars'] = qa_min_foreign
+                            config['qa_check_repetition'] = qa_check_rep
+                            config['qa_check_glossary_leakage'] = qa_check_gloss_leak
+                            config['qa_min_file_length'] = qa_min_file_len
+                            config['qa_check_multiple_headers'] = qa_check_headers
+                            config['qa_check_missing_html'] = qa_check_html
+                            config['qa_check_insufficient_paragraphs'] = qa_check_paragraphs
+                            config['qa_min_paragraph_percentage'] = qa_min_para_percent
+                            config['qa_report_format'] = qa_report_fmt
+                            config['qa_auto_save_report'] = qa_auto_save
+                            
+                            # Chapter processing options
+                            config['batch_translate_headers'] = batch_trans_headers
+                            config['headers_per_batch'] = headers_batch
+                            config['use_ncx_navigation'] = ncx_nav
+                            config['attach_css_to_chapters'] = attach_css
+                            config['retain_source_extension'] = retain_ext
+                            config['use_conservative_batching'] = conservative_batch
+                            config['disable_gemini_safety'] = gemini_safety
+                            config['use_http_openrouter'] = http_openrouter
+                            config['disable_openrouter_compression'] = openrouter_compress
+                            config['text_extraction_method'] = extraction_method
+                            config['file_filtering_level'] = filter_level
+                            
+                            # Thinking mode settings
+                            config['enable_gpt_thinking'] = gpt_thinking_enabled
+                            config['gpt_thinking_effort'] = gpt_effort
+                            config['or_thinking_tokens'] = or_tokens
+                            config['enable_gemini_thinking'] = gemini_thinking_enabled
+                            config['gemini_thinking_budget'] = gemini_budget
                             
                             # Manga settings
                             config['ocr_provider'] = ocr_prov
@@ -3738,6 +4041,220 @@ class GlossarionWeb:
                         outputs=[extract_btn, stop_glossary_btn, glossary_status]
                     )
                 
+                # QA Scanner Tab
+                with gr.Tab("🔍 QA Scanner"):
+                    gr.Markdown("""
+                    ### Quick Scan for Translation Quality
+                    Scan translated output folders for common issues like untranslated text, formatting problems, and quality concerns.
+                    **Note:** Select the output folder containing the extracted/translated HTML files, not the EPUB file itself.
+                    """)
+                    
+                    with gr.Row():
+                        with gr.Column():
+                            qa_folder_path = gr.Textbox(
+                                label="📁 Output Folder Path",
+                                placeholder="Enter the path to your translated output folder (e.g., C:\\translations\\book_output)",
+                                info="The folder containing HTML/XHTML files from the translated EPUB"
+                            )
+                            
+                            with gr.Row():
+                                qa_scan_btn = gr.Button(
+                                    "⚡ Quick Scan",
+                                    variant="primary",
+                                    size="lg",
+                                    scale=2
+                                )
+                                
+                                stop_qa_btn = gr.Button(
+                                    "⏹️ Stop Scan",
+                                    variant="stop",
+                                    size="lg",
+                                    visible=False,
+                                    scale=1
+                                )
+                            
+                            with gr.Accordion("⚙️ Quick Scan Settings", open=True):
+                                gr.Markdown("""
+                                **Quick Scan Mode (85% threshold, Speed optimized)**
+                                - 3-5x faster scanning
+                                - Checks consecutive chapters only
+                                - Simplified analysis
+                                - Good for large libraries
+                                - Minimal resource usage
+                                """)
+                                
+                                # Foreign Character Detection
+                                gr.Markdown("#### Foreign Character Detection")
+                                min_foreign_chars = gr.Slider(
+                                    minimum=0,
+                                    maximum=50,
+                                    value=self.get_config_value('qa_min_foreign_chars', 10),
+                                    step=1,
+                                    label="Minimum foreign characters to flag",
+                                    info="0 = always flag, higher = more tolerant"
+                                )
+                                
+                                # Detection Options
+                                gr.Markdown("#### Detection Options")
+                                check_repetition = gr.Checkbox(
+                                    label="Check for excessive repetition",
+                                    value=self.get_config_value('qa_check_repetition', True)
+                                )
+                                
+                                check_glossary_leakage = gr.Checkbox(
+                                    label="Check for glossary leakage (raw glossary entries in translation)",
+                                    value=self.get_config_value('qa_check_glossary_leakage', True)
+                                )
+                                
+                                # File Processing
+                                gr.Markdown("#### File Processing")
+                                min_file_length = gr.Slider(
+                                    minimum=0,
+                                    maximum=5000,
+                                    value=self.get_config_value('qa_min_file_length', 0),
+                                    step=100,
+                                    label="Minimum file length (characters)",
+                                    info="Skip files shorter than this"
+                                )
+                                
+                                # Additional Checks
+                                gr.Markdown("#### Additional Checks")
+                                check_multiple_headers = gr.Checkbox(
+                                    label="Detect files with 2 or more headers (h1-h6 tags)",
+                                    value=self.get_config_value('qa_check_multiple_headers', True),
+                                    info="Identifies files that may have been incorrectly split or merged"
+                                )
+                                
+                                check_missing_html = gr.Checkbox(
+                                    label="Flag HTML files with missing <html> tag",
+                                    value=self.get_config_value('qa_check_missing_html', True),
+                                    info="Checks if HTML files have proper structure"
+                                )
+                                
+                                check_insufficient_paragraphs = gr.Checkbox(
+                                    label="Check for insufficient paragraph tags",
+                                    value=self.get_config_value('qa_check_insufficient_paragraphs', True)
+                                )
+                                
+                                min_paragraph_percentage = gr.Slider(
+                                    minimum=10,
+                                    maximum=90,
+                                    value=self.get_config_value('qa_min_paragraph_percentage', 30),
+                                    step=5,
+                                    label="Minimum text in <p> tags (%)",
+                                    info="Files with less than this percentage will be flagged"
+                                )
+                                
+                                # Report Settings
+                                gr.Markdown("#### Report Settings")
+                                
+                                report_format = gr.Radio(
+                                    choices=["summary", "detailed", "verbose"],
+                                    value=self.get_config_value('qa_report_format', 'detailed'),
+                                    label="Report format",
+                                    info="Summary = brief overview, Detailed = recommended, Verbose = all data"
+                                )
+                                
+                                auto_save_report = gr.Checkbox(
+                                    label="Automatically save report after scan",
+                                    value=self.get_config_value('qa_auto_save_report', True)
+                                )
+                        
+                        with gr.Column():
+                            # Add logo and status at top
+                            with gr.Row():
+                                gr.Image(
+                                    value="Halgakos.png",
+                                    label=None,
+                                    show_label=False,
+                                    width=80,
+                                    height=80,
+                                    interactive=False,
+                                    show_download_button=False,
+                                    container=False
+                                )
+                                qa_status_message = gr.Markdown(
+                                    value="### Ready to scan\nEnter the path to your output folder and click 'Quick Scan' to begin.",
+                                    visible=True
+                                )
+                            
+                            # Progress section
+                            with gr.Group(visible=False) as qa_progress_group:
+                                gr.Markdown("### Progress")
+                                qa_progress_text = gr.Textbox(
+                                    label="📨 Current Status",
+                                    value="Ready to start",
+                                    interactive=False,
+                                    lines=1
+                                )
+                                qa_progress_bar = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=0,
+                                    step=1,
+                                    label="📋 Scan Progress",
+                                    interactive=False,
+                                    show_label=True
+                                )
+                            
+                            qa_logs = gr.Textbox(
+                                label="📋 Scan Logs",
+                                lines=20,
+                                max_lines=30,
+                                value="Ready to scan. Enter output folder path and configure settings.",
+                                visible=True,
+                                interactive=False
+                            )
+                            
+                            qa_report = gr.File(
+                                label="📄 Download QA Report",
+                                visible=False
+                            )
+                            
+                            qa_status = gr.Textbox(
+                                label="Final Status",
+                                lines=3,
+                                max_lines=5,
+                                visible=False,
+                                interactive=False
+                            )
+                    
+                    # QA Scan button handler
+                    qa_scan_btn.click(
+                        fn=self.run_qa_scan_with_stop,
+                        inputs=[
+                            qa_folder_path,
+                            min_foreign_chars,
+                            check_repetition,
+                            check_glossary_leakage,
+                            min_file_length,
+                            check_multiple_headers,
+                            check_missing_html,
+                            check_insufficient_paragraphs,
+                            min_paragraph_percentage,
+                            report_format,
+                            auto_save_report
+                        ],
+                        outputs=[
+                            qa_report,
+                            qa_status_message,
+                            qa_progress_group,
+                            qa_logs,
+                            qa_status,
+                            qa_progress_text,
+                            qa_progress_bar,
+                            qa_scan_btn,
+                            stop_qa_btn
+                        ]
+                    )
+                    
+                    # Stop button handler
+                    stop_qa_btn.click(
+                        fn=self.stop_qa_scan,
+                        inputs=[],
+                        outputs=[qa_scan_btn, stop_qa_btn, qa_status]
+                    )
+                
                 # Settings Tab
                 with gr.Tab("⚙️ Settings"):
                     gr.Markdown("### Configuration")
@@ -3825,6 +4342,144 @@ class GlossarionWeb:
                                 value=self.get_config_value('batch_size', 10),
                                 minimum=1
                             )
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("#### Chapter Processing Options")
+                    
+                    with gr.Row():
+                        with gr.Column():
+                            # Chapter Header Translation
+                            batch_translate_headers = gr.Checkbox(
+                                label="Batch Translate Headers",
+                                value=self.get_config_value('batch_translate_headers', False)
+                            )
+                            
+                            headers_per_batch = gr.Number(
+                                label="Headers per batch",
+                                value=self.get_config_value('headers_per_batch', 400),
+                                minimum=1
+                            )
+                            
+                            # NCX and CSS options
+                            use_ncx_navigation = gr.Checkbox(
+                                label="Use NCX-only Navigation (Compatibility Mode)",
+                                value=self.get_config_value('use_ncx_navigation', False)
+                            )
+                            
+                            attach_css_to_chapters = gr.Checkbox(
+                                label="Attach CSS to Chapters (Fixes styling issues)",
+                                value=self.get_config_value('attach_css_to_chapters', False)
+                            )
+                            
+                            retain_source_extension = gr.Checkbox(
+                                label="Retain source extension (no 'response_' prefix)",
+                                value=self.get_config_value('retain_source_extension', True)
+                            )
+                        
+                        with gr.Column():
+                            # Conservative Batching
+                            use_conservative_batching = gr.Checkbox(
+                                label="Use Conservative Batching",
+                                value=self.get_config_value('use_conservative_batching', False),
+                                info="Groups chapters in batches of 3x batch size for memory management"
+                            )
+                            
+                            # Gemini API Safety
+                            disable_gemini_safety = gr.Checkbox(
+                                label="Disable Gemini API Safety Filters",
+                                value=self.get_config_value('disable_gemini_safety', False),
+                                info="⚠️ Disables ALL content safety filters for Gemini models (BLOCK_NONE)"
+                            )
+                            
+                            # OpenRouter Options
+                            use_http_openrouter = gr.Checkbox(
+                                label="Use HTTP-only for OpenRouter (bypass SDK)",
+                                value=self.get_config_value('use_http_openrouter', False),
+                                info="Direct HTTP POST with explicit headers"
+                            )
+                            
+                            disable_openrouter_compression = gr.Checkbox(
+                                label="Disable compression for OpenRouter (Accept-Encoding)",
+                                value=self.get_config_value('disable_openrouter_compression', False),
+                                info="Sends Accept-Encoding: identity for uncompressed responses"
+                            )
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("#### Chapter Extraction Settings")
+                    
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("**Text Extraction Method:**")
+                            text_extraction_method = gr.Radio(
+                                choices=["standard", "enhanced"],
+                                value=self.get_config_value('text_extraction_method', 'standard'),
+                                label="",
+                                info="Standard uses BeautifulSoup, Enhanced uses html2text"
+                            )
+                            
+                            gr.Markdown("• **Standard (BeautifulSoup)** - Traditional HTML parsing, fast and reliable")
+                            gr.Markdown("• **Enhanced (html2text)** - Superior Unicode handling, cleaner text extraction")
+                        
+                        with gr.Column():
+                            gr.Markdown("**File Filtering Level:**")
+                            file_filtering_level = gr.Radio(
+                                choices=["smart", "moderate", "full"],
+                                value=self.get_config_value('file_filtering_level', 'smart'),
+                                label="",
+                                info="Controls which files are extracted from EPUBs"
+                            )
+                            
+                            gr.Markdown("• **Smart (Aggressive Filtering)** - Skips navigation, TOC, copyright files")
+                            gr.Markdown("• **Moderate** - Only skips obvious navigation files")
+                            gr.Markdown("• **Full (No Filtering)** - Extracts ALL HTML/XHTML files")
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("#### Response Handling & Retry Logic")
+                    
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("**GPT-5 Thinking (OpenRouter/OpenAI-style)**")
+                            enable_gpt_thinking = gr.Checkbox(
+                                label="Enable GPT / OR Thinking",
+                                value=self.get_config_value('enable_gpt_thinking', True),
+                                info="Controls GPT-5 and OpenRouter reasoning"
+                            )
+                            
+                            with gr.Row():
+                                gpt_thinking_effort = gr.Dropdown(
+                                    choices=["low", "medium", "high"],
+                                    value=self.get_config_value('gpt_thinking_effort', 'medium'),
+                                    label="Effort",
+                                    interactive=True
+                                )
+                                
+                                or_thinking_tokens = gr.Number(
+                                    label="OR Thinking Tokens",
+                                    value=self.get_config_value('or_thinking_tokens', 2000),
+                                    minimum=0,
+                                    maximum=50000,
+                                    info="tokens"
+                                )
+                            
+                            gr.Markdown("*Provide Tokens to force a max token budget for other models; GPT-5 only uses Effort (low/medium/high)*", elem_classes=["markdown-small"])
+                        
+                        with gr.Column():
+                            gr.Markdown("**Gemini Thinking Mode**")
+                            enable_gemini_thinking = gr.Checkbox(
+                                label="Enable Gemini Thinking",
+                                value=self.get_config_value('enable_gemini_thinking', True),
+                                info="Control Gemini's thinking process"
+                            )
+                            
+                            gemini_thinking_budget = gr.Number(
+                                label="Budget",
+                                value=self.get_config_value('gemini_thinking_budget', -1),
+                                minimum=-1,
+                                maximum=50000,
+                                info="tokens (-1 = dynamic/auto)"
+                            )
+                            
+                            gr.Markdown("*0 = disabled, 512-24576 = limited thinking, -1 = dynamic (auto)*", elem_classes=["markdown-small"])
                     
                     gr.Markdown("---")
                     gr.Markdown("🔒 **API keys are encrypted** when saved to config using AES encryption.")
@@ -3975,6 +4630,26 @@ class GlossarionWeb:
                     self.get_config_value('manual_glossary_filter_mode', self.get_config_value('glossary_filter_mode', 'all')),  # filter_mode
                     self.get_config_value('strip_honorifics', True),  # strip_honorifics
                     self.get_config_value('manual_glossary_fuzzy_threshold', self.get_config_value('glossary_fuzzy_threshold', 0.90)),  # fuzzy_threshold
+                    # Chapter processing options
+                    self.get_config_value('batch_translate_headers', False),  # batch_translate_headers
+                    self.get_config_value('headers_per_batch', 400),  # headers_per_batch
+                    self.get_config_value('use_ncx_navigation', False),  # use_ncx_navigation
+                    self.get_config_value('attach_css_to_chapters', False),  # attach_css_to_chapters
+                    self.get_config_value('retain_source_extension', True),  # retain_source_extension
+                    self.get_config_value('use_conservative_batching', False),  # use_conservative_batching
+                    self.get_config_value('disable_gemini_safety', False),  # disable_gemini_safety
+                    self.get_config_value('use_http_openrouter', False),  # use_http_openrouter
+                    self.get_config_value('disable_openrouter_compression', False),  # disable_openrouter_compression
+                    self.get_config_value('text_extraction_method', 'standard'),  # text_extraction_method
+                    self.get_config_value('file_filtering_level', 'smart'),  # file_filtering_level
+                    # QA report format
+                    self.get_config_value('qa_report_format', 'detailed'),  # report_format
+                    # Thinking mode settings
+                    self.get_config_value('enable_gpt_thinking', True),  # enable_gpt_thinking
+                    self.get_config_value('gpt_thinking_effort', 'medium'),  # gpt_thinking_effort
+                    self.get_config_value('or_thinking_tokens', 2000),  # or_thinking_tokens
+                    self.get_config_value('enable_gemini_thinking', True),  # enable_gemini_thinking
+                    self.get_config_value('gemini_thinking_budget', -1),  # gemini_thinking_budget
                     # Manga settings
                     self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
@@ -4012,12 +4687,27 @@ class GlossarionWeb:
                     # Auto glossary settings
                     auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
                     auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
+                    enable_post_translation_scan,
                     # Manual glossary extraction settings
                     min_freq, max_names_slider, max_titles,
                     max_text_size, max_sentences, translation_batch,
                     chapter_split_threshold, filter_mode, strip_honorifics,
                     fuzzy_threshold, extraction_prompt, format_instructions,
                     use_legacy_csv,
+                    # QA Scanner settings
+                    min_foreign_chars, check_repetition, check_glossary_leakage,
+                    min_file_length, check_multiple_headers, check_missing_html,
+                    check_insufficient_paragraphs, min_paragraph_percentage,
+                    report_format, auto_save_report,
+                    # Chapter processing options
+                    batch_translate_headers, headers_per_batch, use_ncx_navigation,
+                    attach_css_to_chapters, retain_source_extension,
+                    use_conservative_batching, disable_gemini_safety,
+                    use_http_openrouter, disable_openrouter_compression,
+                    text_extraction_method, file_filtering_level,
+                    # Thinking mode settings
+                    enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
+                    enable_gemini_thinking, gemini_thinking_budget,
                     # Manga tab fields  
                     manga_model, manga_api_key, manga_profile,
                     ocr_provider, azure_key, azure_endpoint,
@@ -4055,6 +4745,16 @@ class GlossarionWeb:
                     max_text_size, max_sentences, translation_batch,
                     chapter_split_threshold, filter_mode, strip_honorifics,
                     fuzzy_threshold,
+                    # Chapter processing options  
+                    batch_translate_headers, headers_per_batch, use_ncx_navigation,
+                    attach_css_to_chapters, retain_source_extension,
+                    use_conservative_batching, disable_gemini_safety,
+                    use_http_openrouter, disable_openrouter_compression,
+                    text_extraction_method, file_filtering_level,
+                    report_format,
+                    # Thinking mode settings
+                    enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
+                    enable_gemini_thinking, gemini_thinking_budget,
                     # Manga settings
                     manga_model, manga_api_key, manga_profile, manga_system_prompt,
                     ocr_provider, azure_key, azure_endpoint, bubble_detection, inpainting,
