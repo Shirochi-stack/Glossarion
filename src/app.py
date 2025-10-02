@@ -574,7 +574,7 @@ class GlossarionWeb:
             return
         
         if not epub_file:
-            yield None, None, None, "❌ Please upload an EPUB file", None, "Error", 0
+            yield None, None, None, "❌ Please upload an EPUB or TXT file", None, "Error", 0
             return
         
         if not api_key:
@@ -590,11 +590,14 @@ class GlossarionWeb:
         
         try:
             # Initial status
-            translation_logs.append("📚 Starting EPUB translation...")
+            input_path = epub_file.name if hasattr(epub_file, 'name') else epub_file
+            file_ext = os.path.splitext(input_path)[1].lower()
+            file_type = "EPUB" if file_ext == ".epub" else "TXT"
+            
+            translation_logs.append(f"📚 Starting {file_type} translation...")
             yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Starting...", 0
             
             # Save uploaded file to temp location if needed
-            input_path = epub_file.name if hasattr(epub_file, 'name') else epub_file
             epub_base = os.path.splitext(os.path.basename(input_path))[0]
             
             translation_logs.append(f"📖 Input: {os.path.basename(input_path)}")
@@ -616,6 +619,8 @@ class GlossarionWeb:
             os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
             os.environ['MAX_OUTPUT_TOKENS'] = str(max_tokens)
             os.environ['ENABLE_IMAGE_TRANSLATION'] = '1' if enable_image_trans else '0'
+            # Set output directory to current working directory
+            os.environ['OUTPUT_DIRECTORY'] = os.getcwd()
             
             # Set all additional environment variables from config
             self.set_all_environment_variables()
@@ -729,41 +734,208 @@ class GlossarionWeb:
             # Restore original sys.argv
             sys.argv = original_argv
             
-            # Check for errors
+            # Log any errors but don't fail immediately - check for output first
             if translation_error[0]:
-                error_msg = f"❌ Translation error: {str(translation_error[0])}"
+                error_msg = f"⚠️ Translation completed with warnings: {str(translation_error[0])}"
                 translation_logs.append(error_msg)
-                yield None, None, gr.update(visible=False), "\n".join(translation_logs), gr.update(visible=True), error_msg, 0
-                return
+                translation_logs.append("🔍 Checking for output file...")
             
-            # Check for output EPUB
+            # Check for output file - just grab any .epub from the output directory
             output_dir = epub_base
             compiled_epub = None
             
-            # Look for multiple possible output locations
-            possible_paths = [
-                os.path.join(output_dir, f"{epub_base}_translated.epub"),
-                os.path.join(output_dir, f"{epub_base}.epub"),
-                f"{epub_base}_translated.epub",
-                os.path.join(".", output_dir, f"{epub_base}_translated.epub")
-            ]
+            # First, try to find ANY .epub file in the output directory
+            output_dir_path = os.path.join(os.getcwd(), output_dir)
+            if os.path.isdir(output_dir_path):
+                translation_logs.append(f"\n📂 Checking output directory: {output_dir_path}")
+                for file in os.listdir(output_dir_path):
+                    if file.endswith('.epub'):
+                        full_path = os.path.join(output_dir_path, file)
+                        # Make sure it's not a temp/backup file
+                        if os.path.isfile(full_path) and os.path.getsize(full_path) > 1000:
+                            compiled_epub = full_path
+                            translation_logs.append(f"  ✅ Found EPUB in output dir: {file}")
+                            break
             
-            for potential_epub in possible_paths:
-                if os.path.exists(potential_epub):
-                    compiled_epub = potential_epub
-                    break
-            
+            # If we found it in the output directory, return it immediately
             if compiled_epub:
-                translation_logs.append(f"✅ Translation complete: {os.path.basename(compiled_epub)}")
-                translation_logs.append(f"📥 Click 'Download Translated EPUB' below to save your file")
-                # Make the file component visible with the translated file
-                yield compiled_epub, gr.update(value="### ✅ Translation Complete!", visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(value="Translation complete!", visible=True), "Translation complete!", 100
+                file_size = os.path.getsize(compiled_epub)
+                translation_logs.append(f"\n✅ Translation complete: {os.path.basename(compiled_epub)}")
+                translation_logs.append(f"🔗 File path: {compiled_epub}")
+                translation_logs.append(f"📏 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your file")
+                final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
+                
+                yield (
+                    compiled_epub,
+                    gr.update(value="### ✅ Translation Complete!", visible=True),
+                    gr.update(visible=False),
+                    "\n".join(translation_logs),
+                    gr.update(value=final_status, visible=True),
+                    final_status,
+                    100
+                )
                 return
             
-            # Translation failed
-            translation_logs.append("❌ Translation failed - output file not created")
-            translation_logs.append(f"🔍 Checked paths: {', '.join(possible_paths)}")
-            yield None, gr.update(value="### ❌ Translation Failed", visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(value="Translation failed - output not found", visible=True), "Translation failed", 0
+            # Determine output extension based on input file type
+            output_ext = ".epub" if file_ext == ".epub" else ".txt"
+            
+            # Get potential base directories
+            base_dirs = [
+                os.getcwd(),  # Current working directory
+                os.path.dirname(input_path),  # Input file directory
+                "/tmp",  # Common temp directory on Linux/HF Spaces
+                "/home/user/app",  # HF Spaces app directory
+                os.path.expanduser("~"),  # Home directory
+            ]
+            
+            # Look for multiple possible output locations
+            possible_paths = []
+            
+            # Extract title from input filename for more patterns
+            # e.g., "tales of terror_dick donovan 2" -> "Tales of Terror"
+            title_parts = os.path.basename(input_path).replace(output_ext, '').split('_')
+            possible_titles = [
+                epub_base,  # Original: tales of terror_dick donovan 2
+                ' '.join(title_parts[:-2]).title() if len(title_parts) > 2 else epub_base,  # Tales Of Terror
+            ]
+            
+            for base_dir in base_dirs:
+                if base_dir and os.path.exists(base_dir):
+                    for title in possible_titles:
+                        # Direct in base directory
+                        possible_paths.append(os.path.join(base_dir, f"{title}_translated{output_ext}"))
+                        possible_paths.append(os.path.join(base_dir, f"{title}{output_ext}"))
+                        # In output subdirectory
+                        possible_paths.append(os.path.join(base_dir, output_dir, f"{title}_translated{output_ext}"))
+                        possible_paths.append(os.path.join(base_dir, output_dir, f"{title}{output_ext}"))
+                        # In nested output directory
+                        possible_paths.append(os.path.join(base_dir, epub_base, f"{title}_translated{output_ext}"))
+                        possible_paths.append(os.path.join(base_dir, epub_base, f"{title}{output_ext}"))
+            
+            # Also add relative paths
+            possible_paths.extend([
+                f"{epub_base}_translated{output_ext}",
+                os.path.join(output_dir, f"{epub_base}_translated{output_ext}"),
+                os.path.join(output_dir, f"{epub_base}{output_ext}"),
+            ])
+            
+            # Also search for any translated file in the output directory
+            if os.path.isdir(output_dir):
+                for file in os.listdir(output_dir):
+                    if file.endswith(f'_translated{output_ext}'):
+                        possible_paths.insert(0, os.path.join(output_dir, file))
+            
+            # Add debug information about current environment
+            translation_logs.append(f"\n📁 Debug Info:")
+            translation_logs.append(f"  Current working directory: {os.getcwd()}")
+            translation_logs.append(f"  Input file directory: {os.path.dirname(input_path)}")
+            translation_logs.append(f"  Looking for: {epub_base}_translated{output_ext}")
+            
+            translation_logs.append(f"\n🔍 Searching for output file...")
+            for potential_epub in possible_paths[:10]:  # Show first 10 paths
+                translation_logs.append(f"  Checking: {potential_epub}")
+                if os.path.exists(potential_epub):
+                    compiled_epub = potential_epub
+                    translation_logs.append(f"  ✅ Found: {potential_epub}")
+                    break
+            
+            if not compiled_epub and len(possible_paths) > 10:
+                translation_logs.append(f"  ... and {len(possible_paths) - 10} more paths")
+            
+            if compiled_epub:
+                # Verify file exists and is readable
+                if os.path.exists(compiled_epub) and os.path.isfile(compiled_epub):
+                    file_size = os.path.getsize(compiled_epub)
+                    translation_logs.append(f"✅ Translation complete: {os.path.basename(compiled_epub)}")
+                    translation_logs.append(f"🔗 File path: {compiled_epub}")
+                    translation_logs.append(f"📏 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                    translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your file")
+                    # Make the file component visible with the translated file
+                    final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
+                    
+                    # Return the actual file path WITH visibility update
+                    yield (
+                        compiled_epub,  # epub_output - The file path (Gradio will handle it)
+                        gr.update(value="### ✅ Translation Complete!", visible=True),  # epub_status_message
+                        gr.update(visible=False),  # epub_progress_group
+                        "\n".join(translation_logs),  # epub_logs
+                        gr.update(value=final_status, visible=True),  # epub_status
+                        final_status,  # epub_progress_text
+                        100  # epub_progress_bar
+                    )
+                    return
+                else:
+                    translation_logs.append(f"⚠️ File found but not accessible: {compiled_epub}")
+                    compiled_epub = None  # Force search
+            
+            # Output file not found - search recursively in relevant directories
+            translation_logs.append("⚠️ Output file not in expected locations, searching recursively...")
+            found_files = []
+            
+            # Search in multiple directories
+            search_dirs = [
+                os.getcwd(),  # Current directory
+                os.path.dirname(input_path),  # Input file directory
+                "/tmp",  # Temp directory (HF Spaces)
+                "/home/user/app",  # HF Spaces app directory
+            ]
+            
+            for search_dir in search_dirs:
+                if not os.path.exists(search_dir):
+                    continue
+                    
+                translation_logs.append(f"  Searching in: {search_dir}")
+                try:
+                    for root, dirs, files in os.walk(search_dir, topdown=True):
+                        # Limit depth to 3 levels and skip hidden/system directories
+                        depth = root[len(search_dir):].count(os.sep)
+                        if depth >= 3:
+                            dirs[:] = []  # Don't go deeper
+                        else:
+                            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules', 'venv', '.git']]
+                        
+                        for file in files:
+                            # Look for files with _translated in name or matching our pattern
+                            if (f'_translated{output_ext}' in file or 
+                                (file.endswith(output_ext) and epub_base in file)):
+                                full_path = os.path.join(root, file)
+                                found_files.append(full_path)
+                                translation_logs.append(f"    ✅ Found: {full_path}")
+                except (PermissionError, OSError) as e:
+                    translation_logs.append(f"    ⚠️ Could not search {search_dir}: {e}")
+            
+            if found_files:
+                # Use the most recently modified file
+                compiled_epub = max(found_files, key=os.path.getmtime)
+                
+                # Verify file exists and get info
+                if os.path.exists(compiled_epub) and os.path.isfile(compiled_epub):
+                    file_size = os.path.getsize(compiled_epub)
+                    translation_logs.append(f"✅ Found output file: {os.path.basename(compiled_epub)}")
+                    translation_logs.append(f"🔗 File path: {compiled_epub}")
+                    translation_logs.append(f"📏 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                    translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your file")
+                    # Return the actual file path directly
+                    yield (
+                        compiled_epub,  # epub_output - Just the file path
+                        gr.update(value="### ✅ Translation Complete!", visible=True),  # epub_status_message
+                        gr.update(visible=False),  # epub_progress_group
+                        "\n".join(translation_logs),  # epub_logs
+                        gr.update(value="Translation complete!", visible=True),  # epub_status
+                        "Translation complete!",  # epub_progress_text
+                        100  # epub_progress_bar
+                    )
+                    return
+            
+            # Still couldn't find output - report failure
+            translation_logs.append("❌ Could not locate translated output file")
+            translation_logs.append(f"🔍 Checked paths: {', '.join(possible_paths[:5])}...")
+            translation_logs.append("\n💡 Troubleshooting tips:")
+            translation_logs.append("  1. Check if TransateKRtoEN.py completed successfully")
+            translation_logs.append("  2. Look for any error messages in the logs above")
+            translation_logs.append("  3. The output might be in a subdirectory - check manually")
+            yield None, gr.update(value="### ⚠️ Output Not Found", visible=True), gr.update(visible=False), "\n".join(translation_logs), gr.update(value="Translation process completed but output file not found", visible=True), "Output not found", 90
                 
         except Exception as e:
             import traceback
@@ -2421,17 +2593,17 @@ class GlossarionWeb:
                 Translate novels and books using advanced AI models (GPT-5, Claude, etc.)
                 """)
                 
-                # Add save button at the top
-                with gr.Column(scale=0):
-                    save_config_btn = gr.Button(
-                        "💾 Save Config",
-                        variant="secondary",
-                        size="sm"
-                    )
-                    save_status_text = gr.Markdown(
-                        "",
-                        visible=False
-                    )
+                # Add save button at the top - COMMENTED OUT
+                # with gr.Column(scale=0):
+                #     save_config_btn = gr.Button(
+                #         "💾 Save Config",
+                #         variant="secondary",
+                #         size="sm"
+                #     )
+                #     save_status_text = gr.Markdown(
+                #         "",
+                #         visible=False
+                #     )
             
             with gr.Tabs() as main_tabs:
                 # EPUB Translation Tab
@@ -2439,8 +2611,8 @@ class GlossarionWeb:
                     with gr.Row():
                         with gr.Column():
                             epub_file = gr.File(
-                                label="📖 Upload EPUB File",
-                                file_types=[".epub"]
+                                label="📖 Upload EPUB or TXT File",
+                                file_types=[".epub", ".txt"]
                             )
                             
                             with gr.Row():
@@ -2628,7 +2800,7 @@ class GlossarionWeb:
                                     container=False
                                 )
                                 epub_status_message = gr.Markdown(
-                                    value="### Ready to translate\nUpload an EPUB file and click 'Translate EPUB' to begin.",
+                                    value="### Ready to translate\nUpload an EPUB or TXT file and click 'Translate' to begin.",
                                     visible=True
                                 )
                             
@@ -2655,14 +2827,14 @@ class GlossarionWeb:
                                 label="📋 Translation Logs",
                                 lines=20,
                                 max_lines=30,
-                                value="Ready to translate. Upload an EPUB file and configure settings.",
+                                value="Ready to translate. Upload an EPUB or TXT file and configure settings.",
                                 visible=True,
                                 interactive=False
                             )
                             
                             epub_output = gr.File(
-                                label="📥 Download Translated EPUB",
-                                visible=False
+                                label="📥 Download Translated File",
+                                visible=True  # Always visible, will show file when ready
                             )
                             
                             epub_status = gr.Textbox(
@@ -4995,58 +5167,58 @@ class GlossarionWeb:
                     self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),  # panel_max_workers
                 ]
             
-            # Configure Save Config button now that all components exist
-            save_config_btn.click(
-                fn=save_all_config,
-                inputs=[
-                    # EPUB tab fields
-                    epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
-                    enable_image_translation, enable_auto_glossary, append_glossary,
-                    # Auto glossary settings
-                    auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
-                    auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
-                    enable_post_translation_scan,
-                    # Manual glossary extraction settings
-                    min_freq, max_names_slider, max_titles,
-                    max_text_size, max_sentences, translation_batch,
-                    chapter_split_threshold, filter_mode, strip_honorifics,
-                    fuzzy_threshold, extraction_prompt, format_instructions,
-                    use_legacy_csv,
-                    # QA Scanner settings
-                    min_foreign_chars, check_repetition, check_glossary_leakage,
-                    min_file_length, check_multiple_headers, check_missing_html,
-                    check_insufficient_paragraphs, min_paragraph_percentage,
-                    report_format, auto_save_report,
-                    # Chapter processing options
-                    batch_translate_headers, headers_per_batch, use_ncx_navigation,
-                    attach_css_to_chapters, retain_source_extension,
-                    use_conservative_batching, disable_gemini_safety,
-                    use_http_openrouter, disable_openrouter_compression,
-                    text_extraction_method, file_filtering_level,
-                    # Thinking mode settings
-                    enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
-                    enable_gemini_thinking, gemini_thinking_budget,
-                    # Manga tab fields  
-                    manga_model, manga_api_key, manga_profile,
-                    ocr_provider, azure_key, azure_endpoint,
-                    bubble_detection, inpainting,
-                    font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
-                    text_color_rgb, shadow_enabled, shadow_color,
-                    shadow_offset_x, shadow_offset_y, shadow_blur,
-                    bg_opacity, bg_style,
-                    parallel_panel_translation, panel_max_workers,
-                    # Advanced Settings fields
-                    detector_type, rtdetr_confidence, bubble_confidence,
-                    detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
-                    local_inpaint_method, webtoon_mode,
-                    inpaint_batch_size, inpaint_cache_enabled,
-                    parallel_processing, max_workers,
-                    preload_local_inpainting, panel_start_stagger,
-                    torch_precision, auto_cleanup_models,
-                    debug_mode, save_intermediate, concise_pipeline_logs
-                ],
-                outputs=[save_status_text]
-            )
+            # Configure Save Config button now that all components exist - COMMENTED OUT
+            # save_config_btn.click(
+            #     fn=save_all_config,
+            #     inputs=[
+            #         # EPUB tab fields
+            #         epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
+            #         enable_image_translation, enable_auto_glossary, append_glossary,
+            #         # Auto glossary settings
+            #         auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
+            #         auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
+            #         enable_post_translation_scan,
+            #         # Manual glossary extraction settings
+            #         min_freq, max_names_slider, max_titles,
+            #         max_text_size, max_sentences, translation_batch,
+            #         chapter_split_threshold, filter_mode, strip_honorifics,
+            #         fuzzy_threshold, extraction_prompt, format_instructions,
+            #         use_legacy_csv,
+            #         # QA Scanner settings
+            #         min_foreign_chars, check_repetition, check_glossary_leakage,
+            #         min_file_length, check_multiple_headers, check_missing_html,
+            #         check_insufficient_paragraphs, min_paragraph_percentage,
+            #         report_format, auto_save_report,
+            #         # Chapter processing options
+            #         batch_translate_headers, headers_per_batch, use_ncx_navigation,
+            #         attach_css_to_chapters, retain_source_extension,
+            #         use_conservative_batching, disable_gemini_safety,
+            #         use_http_openrouter, disable_openrouter_compression,
+            #         text_extraction_method, file_filtering_level,
+            #         # Thinking mode settings
+            #         enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
+            #         enable_gemini_thinking, gemini_thinking_budget,
+            #         # Manga tab fields  
+            #         manga_model, manga_api_key, manga_profile,
+            #         ocr_provider, azure_key, azure_endpoint,
+            #         bubble_detection, inpainting,
+            #         font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
+            #         text_color_rgb, shadow_enabled, shadow_color,
+            #         shadow_offset_x, shadow_offset_y, shadow_blur,
+            #         bg_opacity, bg_style,
+            #         parallel_panel_translation, panel_max_workers,
+            #         # Advanced Settings fields
+            #         detector_type, rtdetr_confidence, bubble_confidence,
+            #         detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
+            #         local_inpaint_method, webtoon_mode,
+            #         inpaint_batch_size, inpaint_cache_enabled,
+            #         parallel_processing, max_workers,
+            #         preload_local_inpainting, panel_start_stagger,
+            #         torch_precision, auto_cleanup_models,
+            #         debug_mode, save_intermediate, concise_pipeline_logs
+            #     ],
+            #     outputs=[save_status_text]
+            # )
             
             # Add load handler to restore settings on page load
             app.load(
