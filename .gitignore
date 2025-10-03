@@ -26,6 +26,7 @@ src/**
 !src/*.spec
 !src/*.bat
 !src/*.vbs
+!src/*.png
 # Explicitly include application icon in src
 !src/Halgakos.ico
 
@@ -57,3 +58,6 @@ PATH
 src/test_azure.py
 src/test_azure.py
 src/test_azure.py
+
+# Explicitly ignore local PowerShell helper
+src/wait_and_open.ps1
