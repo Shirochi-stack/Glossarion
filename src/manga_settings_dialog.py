@@ -1546,13 +1546,13 @@ class MangaSettingsDialog(QDialog):
         help_text.setWordWrap(True)
         mask_dilation_layout.addWidget(help_text)
         
-        content_layout.addStretch()
+        main_layout.addStretch()
         
         # Note about method selection
         info_widget = QWidget()
         info_layout = QHBoxLayout(info_widget)
         info_layout.setContentsMargins(20, 0, 20, 0)
-        content_layout.addWidget(info_widget)
+        main_layout.addWidget(info_widget)
         
         info_label = QLabel(
             "ℹ️ Note: Inpainting method (Cloud/Local) and model selection are configured\n"
