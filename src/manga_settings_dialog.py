@@ -70,7 +70,7 @@ class MangaSettingsDialog(QDialog):
                 'png_compress_level': 6,
                 'webp_quality': 85
             },
-'ocr': {
+            'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
                 'confidence_threshold': 0.7,
                 'merge_nearby_threshold': 20,
@@ -1344,11 +1344,10 @@ class MangaSettingsDialog(QDialog):
         mask_layout.setSpacing(4)
         
         # Auto toggle (affects both mask dilation and iterations)
-        if not hasattr(self, 'auto_iterations_enabled'):
-            self.auto_iterations_enabled = QCheckBox("Auto (affects mask dilation and iterations)")
-            self.auto_iterations_enabled.setChecked(self.settings.get('auto_iterations', True))
-            self.auto_iterations_enabled.toggled.connect(self._toggle_iteration_controls)
-        mask_layout.addWidget(self.auto_iterations_enabled)
+        self.auto_iterations_checkbox = QCheckBox("Auto (affects mask dilation and iterations)")
+        self.auto_iterations_checkbox.setChecked(self.settings.get('auto_iterations', True))
+        self.auto_iterations_checkbox.toggled.connect(self._toggle_iteration_controls)
+        mask_layout.addWidget(self.auto_iterations_checkbox)
 
         # Mask Dilation frame (affected by auto setting)
         mask_dilation_group = QGroupBox("Mask Dilation")
@@ -1402,10 +1401,8 @@ class MangaSettingsDialog(QDialog):
         iterations_layout.addWidget(all_iter_widget)
         
         # Auto-iterations toggle (secondary control reflects the same setting)
-        if not hasattr(self, 'auto_iterations_enabled'):
-            self.auto_iterations_enabled = self.settings.get('auto_iterations', True)
         self.auto_iter_secondary_checkbox = QCheckBox("Auto (set by image: B&W vs Color)")
-        self.auto_iter_secondary_checkbox.setChecked(self.auto_iterations_enabled)
+        self.auto_iter_secondary_checkbox.setChecked(self.settings.get('auto_iterations', True))
         self.auto_iter_secondary_checkbox.stateChanged.connect(self._toggle_iteration_controls)
         all_iter_layout.addWidget(self.auto_iter_secondary_checkbox)
         
@@ -1642,8 +1639,12 @@ class MangaSettingsDialog(QDialog):
         self.free_text_iter_spinbox.setValue(free_text_iter)
         self._toggle_iteration_controls()
     
-    def _create_cloud_api_tab(self, parent):
+    def _create_cloud_api_tab(self):
             """Create cloud API settings tab"""
+            # Create tab widget and add to tab widget
+            tab_widget = QWidget()
+            self.tab_widget.addTab(tab_widget, "Cloud API")
+            
             # Create scroll area for content
             scroll_area = QScrollArea()
             scroll_area.setWidgetResizable(True)
@@ -1657,7 +1658,7 @@ class MangaSettingsDialog(QDialog):
             scroll_area.setWidget(content_widget)
             
             # Add scroll area to parent layout
-            parent_layout = QVBoxLayout(parent)
+            parent_layout = QVBoxLayout(tab_widget)
             parent_layout.setContentsMargins(0, 0, 0, 0)
             parent_layout.addWidget(scroll_area)
             
@@ -1863,7 +1864,7 @@ class MangaSettingsDialog(QDialog):
         
     def _toggle_preprocessing(self):
         """Enable/disable preprocessing controls based on main toggle"""
-        enabled = self.preprocess_checkbox.isChecked()
+        enabled = self.preprocess_enabled.isChecked()
         
         # Widgets that must remain enabled regardless of toggle (widgets only, not Qt variables)
         always_on = []
@@ -1975,12 +1976,61 @@ class MangaSettingsDialog(QDialog):
         except Exception:
             pass
 
+    def _on_hd_strategy_change(self):
+        """Show/hide HD strategy controls based on selected strategy."""
+        try:
+            strategy = self.hd_strategy_combo.currentText()
+        except Exception:
+            strategy = 'original'
+        
+        # Show/hide resize limit based on strategy
+        if hasattr(self, 'hd_resize_frame'):
+            self.hd_resize_frame.setVisible(strategy == 'resize')
+        
+        # Show/hide crop params based on strategy
+        if hasattr(self, 'hd_crop_margin_frame'):
+            self.hd_crop_margin_frame.setVisible(strategy == 'crop')
+        if hasattr(self, 'hd_crop_trigger_frame'):
+            self.hd_crop_trigger_frame.setVisible(strategy == 'crop')
+    
+    def _toggle_compression_enabled(self):
+        """Enable/disable compression controls based on compression toggle."""
+        try:
+            enabled = bool(self.compression_enabled.isChecked())
+        except Exception:
+            enabled = False
+        
+        # Enable/disable all compression format controls
+        compression_widgets = [
+            getattr(self, 'format_label', None),
+            getattr(self, 'compression_format_combo', None),
+            getattr(self, 'jpeg_frame', None),
+            getattr(self, 'jpeg_label', None),
+            getattr(self, 'jpeg_quality_spin', None),
+            getattr(self, 'jpeg_help', None),
+            getattr(self, 'png_frame', None),
+            getattr(self, 'png_label', None),
+            getattr(self, 'png_level_spin', None),
+            getattr(self, 'png_help', None),
+            getattr(self, 'webp_frame', None),
+            getattr(self, 'webp_label', None),
+            getattr(self, 'webp_quality_spin', None),
+            getattr(self, 'webp_help', None),
+        ]
+        
+        for widget in compression_widgets:
+            try:
+                if widget is not None:
+                    widget.setEnabled(enabled)
+            except Exception:
+                pass
+    
     def _toggle_compression_format(self):
         """Show only the controls relevant to the selected format (hide others)."""
         fmt = self.compression_format_combo.currentText().lower() if hasattr(self, 'compression_format_combo') else 'jpeg'
         try:
             # Hide all rows first
-            for row in [getattr(self, 'jpeg_row', None), getattr(self, 'png_row', None), getattr(self, 'webp_row', None)]:
+            for row in [getattr(self, 'jpeg_frame', None), getattr(self, 'png_frame', None), getattr(self, 'webp_frame', None)]:
                 try:
                     if row is not None:
                         row.setVisible(False)
@@ -1988,14 +2038,14 @@ class MangaSettingsDialog(QDialog):
                     pass
             # Show the selected one
             if fmt == 'jpeg':
-                if hasattr(self, 'jpeg_row') and self.jpeg_row is not None:
-                    self.jpeg_row.setVisible(True)
+                if hasattr(self, 'jpeg_frame') and self.jpeg_frame is not None:
+                    self.jpeg_frame.setVisible(True)
             elif fmt == 'png':
-                if hasattr(self, 'png_row') and self.png_row is not None:
-                    self.png_row.setVisible(True)
+                if hasattr(self, 'png_frame') and self.png_frame is not None:
+                    self.png_frame.setVisible(True)
             else:  # webp
-                if hasattr(self, 'webp_row') and self.webp_row is not None:
-                    self.webp_row.setVisible(True)
+                if hasattr(self, 'webp_frame') and self.webp_frame is not None:
+                    self.webp_frame.setVisible(True)
         except Exception:
             pass
     
@@ -2016,8 +2066,12 @@ class MangaSettingsDialog(QDialog):
         except Exception:
             pass
 
-    def _create_ocr_tab(self, parent):
+    def _create_ocr_tab(self):
         """Create OCR settings tab with all options"""
+        # Create tab widget and add to tab widget
+        tab_widget = QWidget()
+        self.tab_widget.addTab(tab_widget, "OCR")
+        
         # Create scroll area for OCR settings
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -2031,7 +2085,7 @@ class MangaSettingsDialog(QDialog):
         scroll_area.setWidget(content_widget)
         
         # Add scroll area to parent layout
-        parent_layout = QVBoxLayout(parent)
+        parent_layout = QVBoxLayout(tab_widget)
         parent_layout.setContentsMargins(0, 0, 0, 0)
         parent_layout.addWidget(scroll_area)
         
@@ -3111,13 +3165,13 @@ class MangaSettingsDialog(QDialog):
 
     def _update_azure_label(self):
         """Update Azure multiplier label"""
-        value = self.azure_merge_multiplier.get()
-        self.azure_label.config(text=f"{value:.1f}x")
+        # This method is deprecated - Azure multiplier UI was removed
+        pass
 
     def _set_azure_multiplier(self, value):
         """Set Azure multiplier from preset"""
-        self.azure_merge_multiplier.set(value)
-        self._update_azure_label()
+        # This method is deprecated - Azure multiplier UI was removed
+        pass
     
     def _create_advanced_tab(self):
         """Create advanced settings tab with all options"""
@@ -3523,9 +3577,15 @@ class MangaSettingsDialog(QDialog):
 
     def _toggle_workers(self):
         """Enable/disable worker settings based on parallel processing toggle"""
-        enabled = bool(self.parallel_processing.get())
-        self.workers_spinbox.config(state='normal' if enabled else 'disabled')
-        self.workers_label.config(fg='white' if enabled else 'gray')
+        if hasattr(self, 'parallel_processing_checkbox'):
+            enabled = bool(self.parallel_processing_checkbox.isChecked())
+            if hasattr(self, 'workers_spinbox'):
+                self.workers_spinbox.setEnabled(enabled)
+            if hasattr(self, 'workers_label'):
+                if enabled:
+                    self.workers_label.setStyleSheet("color: white;")
+                else:
+                    self.workers_label.setStyleSheet("color: gray;")
 
     def _apply_defaults_to_controls(self):
         """Apply default values to all visible Tk variables/controls across tabs without rebuilding the dialog."""
