@@ -1961,9 +1961,9 @@ class MangaTranslationTab:
             req_label.setAlignment(Qt.AlignLeft)
             req_layout.addWidget(req_label)
             
-            main_layout.addWidget(req_frame)
+        main_layout.addWidget(req_frame)
         
-        # File selection frame
+        # File selection frame - SPANS BOTH COLUMNS
         file_frame = QGroupBox("Select Manga Images")
         file_frame_font = QFont("Arial", 10)
         file_frame_font.setBold(True)
@@ -2009,7 +2009,25 @@ class MangaTranslationTab:
         
         main_layout.addWidget(file_frame)
         
-        # Settings frame
+        # Create 2-column layout for settings
+        columns_container = QWidget()
+        columns_layout = QHBoxLayout(columns_container)
+        columns_layout.setContentsMargins(0, 0, 0, 0)
+        columns_layout.setSpacing(10)
+        
+        # Left column (Column 1)
+        left_column = QWidget()
+        left_column_layout = QVBoxLayout(left_column)
+        left_column_layout.setContentsMargins(0, 0, 0, 0)
+        left_column_layout.setSpacing(6)
+        
+        # Right column (Column 2)
+        right_column = QWidget()
+        right_column_layout = QVBoxLayout(right_column)
+        right_column_layout.setContentsMargins(0, 0, 0, 0)
+        right_column_layout.setSpacing(6)
+        
+        # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
         settings_frame_font = QFont("Arial", 10)
         settings_frame_font.setBold(True)
@@ -2396,15 +2414,30 @@ class MangaTranslationTab:
         visual_toggle_layout.addStretch()
         
         visual_layout.addWidget(visual_toggle_frame)
+        
+        # Output settings - moved here to be below visual context
+        output_settings_frame = QWidget()
+        output_settings_layout = QHBoxLayout(output_settings_frame)
+        output_settings_layout.setContentsMargins(20, 10, 0, 0)
+        output_settings_layout.setSpacing(10)
+        
+        self.create_subfolder_checkbox = self._create_styled_checkbox("Create 'translated' subfolder for output")
+        self.create_subfolder_checkbox.setChecked(self.main_gui.config.get('manga_create_subfolder', True))
+        self.create_subfolder_checkbox.stateChanged.connect(self._save_rendering_settings)
+        output_settings_layout.addWidget(self.create_subfolder_checkbox)
+        output_settings_layout.addStretch()
+        
+        visual_layout.addWidget(output_settings_frame)
+        
         context_frame_layout.addWidget(visual_frame)
         
         # Add the completed context_frame to settings_frame
         settings_frame_layout.addWidget(context_frame)
         
-        # Add main settings frame to main layout
-        main_layout.addWidget(settings_frame)
+        # Add main settings frame to left column
+        left_column_layout.addWidget(settings_frame)
         
-        # Text Rendering Settings Frame
+        # Text Rendering Settings Frame - SPLIT BETWEEN COLUMNS
         render_frame = QGroupBox("Text Visibility Settings")
         render_frame_font = QFont("Arial", 12)
         render_frame_font.setBold(True)
@@ -2436,6 +2469,9 @@ class MangaTranslationTab:
         
         # Inpainting section
         inpaint_group = QGroupBox("Inpainting")
+        inpaint_group_font = QFont("Arial", 11)
+        inpaint_group_font.setBold(True)
+        inpaint_group.setFont(inpaint_group_font)
         inpaint_group_layout = QVBoxLayout(inpaint_group)
         inpaint_group_layout.setContentsMargins(15, 15, 15, 10)
         inpaint_group_layout.setSpacing(10)
@@ -2716,11 +2752,14 @@ class MangaTranslationTab:
         # Add inpaint_group to render_frame
         render_frame_layout.addWidget(inpaint_group)
         
-        # Add render_frame to main layout
-        main_layout.addWidget(render_frame)
+        # Add render_frame (inpainting only) to LEFT COLUMN
+        left_column_layout.addWidget(render_frame)
         
-        # Background Settings (moved into inpainting section)
+        # Background Settings - MOVED TO RIGHT COLUMN
         self.bg_settings_frame = QGroupBox("Background Settings")
+        bg_settings_font = QFont("Arial", 10)
+        bg_settings_font.setBold(True)
+        self.bg_settings_frame.setFont(bg_settings_font)
         bg_settings_layout = QVBoxLayout(self.bg_settings_frame)
         bg_settings_layout.setContentsMargins(10, 10, 10, 10)
         bg_settings_layout.setSpacing(8)
@@ -2835,11 +2874,21 @@ class MangaTranslationTab:
         
         bg_settings_layout.addWidget(style_frame)
         
-        # Add bg_settings_frame to render_frame_layout
-        render_frame_layout.addWidget(self.bg_settings_frame)
-
-        # Font Settings group (consolidated)
+        # Add Background Settings to RIGHT COLUMN
+        right_column_layout.addWidget(self.bg_settings_frame)
+        
+        # Font Settings group (consolidated) - GOES TO RIGHT COLUMN (after background settings)
+        font_render_frame = QGroupBox("Font & Text Settings")
+        font_render_frame_font = QFont("Arial", 10)
+        font_render_frame_font.setBold(True)
+        font_render_frame.setFont(font_render_frame_font)
+        font_render_frame_layout = QVBoxLayout(font_render_frame)
+        font_render_frame_layout.setContentsMargins(15, 15, 15, 10)
+        font_render_frame_layout.setSpacing(10)
         self.sizing_group = QGroupBox("Font Settings")
+        sizing_group_font = QFont("Arial", 9)
+        sizing_group_font.setBold(True)
+        self.sizing_group.setFont(sizing_group_font)
         sizing_group_layout = QVBoxLayout(self.sizing_group)
         sizing_group_layout.setContentsMargins(10, 10, 10, 10)
         sizing_group_layout.setSpacing(8)
@@ -3198,6 +3247,9 @@ class MangaTranslationTab:
         # Update multiplier label with loaded value
         self._update_multiplier_label(self.font_size_multiplier_value)
         
+        # Add sizing_group to font_render_frame (right column)
+        font_render_frame_layout.addWidget(self.sizing_group)
+        
         # Font style selection (moved into Font Settings)
         font_style_frame = QWidget()
         font_style_layout = QHBoxLayout(font_style_frame)
@@ -3218,10 +3270,7 @@ class MangaTranslationTab:
         font_style_layout.addWidget(self.font_combo)
         font_style_layout.addStretch()
         
-        sizing_group_layout.addWidget(font_style_frame)
-        
-        # Add sizing_group to render_frame_layout
-        render_frame_layout.addWidget(self.sizing_group)
+        font_render_frame_layout.addWidget(font_style_frame)
         
         # Font color selection (moved into Font Settings)
         color_frame = QWidget()
@@ -3271,7 +3320,7 @@ class MangaTranslationTab:
         color_layout.addWidget(choose_color_btn)
         color_layout.addStretch()
         
-        sizing_group_layout.addWidget(color_frame)
+        font_render_frame_layout.addWidget(color_frame)
         
         self._update_color_preview(None)  # Initialize with loaded colors
         
@@ -3287,7 +3336,7 @@ class MangaTranslationTab:
         shadow_header_layout.addWidget(self.shadow_enabled_checkbox)
         shadow_header_layout.addStretch()
         
-        sizing_group_layout.addWidget(shadow_header)
+        font_render_frame_layout.addWidget(shadow_header)
         
         # Shadow controls container
         self.shadow_controls = QWidget()
@@ -3420,30 +3469,31 @@ class MangaTranslationTab:
         
         shadow_controls_layout.addWidget(blur_frame)
         
-        # Add shadow_controls to sizing_group_layout
-        sizing_group_layout.addWidget(self.shadow_controls)
+        # Add shadow_controls to font_render_frame_layout
+        font_render_frame_layout.addWidget(self.shadow_controls)
         
         # Initially disable shadow controls
         self._toggle_shadow_controls()
         
-        # Output settings
-        output_frame = QWidget()
-        output_layout = QHBoxLayout(output_frame)
-        output_layout.setContentsMargins(0, 5, 0, 0)
+        # Add font_render_frame to RIGHT COLUMN
+        right_column_layout.addWidget(font_render_frame)
         
-        self.create_subfolder_checkbox = self._create_styled_checkbox("Create 'translated' subfolder for output")
-        self.create_subfolder_checkbox.setChecked(self.main_gui.config.get('manga_create_subfolder', True))
-        self.create_subfolder_checkbox.stateChanged.connect(self._save_rendering_settings)
-        output_layout.addWidget(self.create_subfolder_checkbox)
-        output_layout.addStretch()
+        # Add stretch to balance columns
+        left_column_layout.addStretch()
+        right_column_layout.addStretch()
         
-        settings_frame_layout.addWidget(output_frame)
+        # Add columns to container
+        columns_layout.addWidget(left_column)
+        columns_layout.addWidget(right_column)
         
-        # Control buttons
+        # Add columns container to main layout
+        main_layout.addWidget(columns_container)
+        
+        # Control buttons - CENTERED AND ENLARGED
         control_frame = QWidget()
         control_layout = QHBoxLayout(control_frame)
-        control_layout.setContentsMargins(10, 6, 10, 6)
-        control_layout.setSpacing(6)
+        control_layout.setContentsMargins(10, 10, 10, 10)
+        control_layout.setSpacing(20)
         
         # Check if ready based on selected provider
         # Get API key from main GUI - handle both Tkinter and PySide6
@@ -3472,19 +3522,22 @@ class MangaTranslationTab:
             # Local providers (manga-ocr, easyocr, etc.) only need API key for translation
             is_ready = has_api_key
 
+        # Add stretch before buttons to center them
+        control_layout.addStretch()
+        
         self.start_button = QPushButton("▶ Start Translation")
         self.start_button.clicked.connect(self._start_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setMinimumHeight(40)
-        self.start_button.setMinimumWidth(160)
+        self.start_button.setMinimumHeight(60)
+        self.start_button.setMinimumWidth(250)
         self.start_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #28a745; "
             "  color: white; "
-            "  padding: 10px 20px; "
-            "  font-size: 12pt; "
+            "  padding: 15px 30px; "
+            "  font-size: 14pt; "
             "  font-weight: bold; "
-            "  border-radius: 5px; "
+            "  border-radius: 8px; "
             "} "
             "QPushButton:hover { background-color: #218838; } "
             "QPushButton:disabled { "
@@ -3509,16 +3562,16 @@ class MangaTranslationTab:
         self.stop_button = QPushButton("⏹ Stop")
         self.stop_button.clicked.connect(self._stop_translation)
         self.stop_button.setEnabled(False)
-        self.stop_button.setMinimumHeight(40)
-        self.stop_button.setMinimumWidth(160)
+        self.stop_button.setMinimumHeight(60)
+        self.stop_button.setMinimumWidth(250)
         self.stop_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #dc3545; "
             "  color: white; "
-            "  padding: 10px 20px; "
-            "  font-size: 12pt; "
+            "  padding: 15px 30px; "
+            "  font-size: 14pt; "
             "  font-weight: bold; "
-            "  border-radius: 5px; "
+            "  border-radius: 8px; "
             "} "
             "QPushButton:hover { background-color: #c82333; } "
             "QPushButton:disabled { "
@@ -3527,6 +3580,8 @@ class MangaTranslationTab:
             "}"
         )
         control_layout.addWidget(self.stop_button)
+        
+        # Add stretch after buttons to center them
         control_layout.addStretch()
         
         main_layout.addWidget(control_frame)

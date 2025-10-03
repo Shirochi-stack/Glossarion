@@ -2117,7 +2117,7 @@ Text to analyze:
         
         # Size and position the dialog
         screen = app.primaryScreen().geometry()
-        dialog_width = min(900, int(screen.width() * 0.9))
+        dialog_width = min(1400, int(screen.width() * 0.95))  # Increased from 900 to 1400 for 2-column layout
         dialog_height = min(900, int(screen.height() * 0.95))  # Increased from 700 to 900
         dialog.resize(dialog_width, dialog_height)
         
