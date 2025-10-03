@@ -3904,144 +3904,143 @@ class MangaSettingsDialog(QDialog):
         """Save all settings including expanded iteration controls"""
         try:
             # Collect all preprocessing settings
-            self.settings['preprocessing']['enabled'] = self.preprocess_enabled.get()
-            self.settings['preprocessing']['auto_detect_quality'] = self.auto_detect.get()
-            self.settings['preprocessing']['contrast_threshold'] = self.contrast_threshold.get()
-            self.settings['preprocessing']['sharpness_threshold'] = self.sharpness_threshold.get()
-            self.settings['preprocessing']['enhancement_strength'] = self.enhancement_strength.get()
-            self.settings['preprocessing']['noise_threshold'] = self.noise_threshold.get()
-            self.settings['preprocessing']['denoise_strength'] = self.denoise_strength.get()
-            self.settings['preprocessing']['max_image_dimension'] = self.max_dimension.get()
-            self.settings['preprocessing']['max_image_pixels'] = self.max_pixels.get()
-            self.settings['preprocessing']['chunk_height'] = self.chunk_height.get()
-            self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap.get()
+            self.settings['preprocessing']['enabled'] = self.preprocess_enabled.isChecked()
+            self.settings['preprocessing']['auto_detect_quality'] = self.auto_detect.isChecked()
+            self.settings['preprocessing']['contrast_threshold'] = self.contrast_threshold.value()
+            self.settings['preprocessing']['sharpness_threshold'] = self.sharpness_threshold.value()
+            self.settings['preprocessing']['enhancement_strength'] = self.enhancement_strength.value()
+            self.settings['preprocessing']['noise_threshold'] = self.noise_threshold.value()
+            self.settings['preprocessing']['denoise_strength'] = self.denoise_strength.value()
+            self.settings['preprocessing']['max_image_dimension'] = self.dimension_spinbox.value()
+            self.settings['preprocessing']['max_image_pixels'] = self.pixels_spinbox.value()
+            self.settings['preprocessing']['chunk_height'] = self.chunk_height_spinbox.value()
+            self.settings['preprocessing']['chunk_overlap'] = self.chunk_overlap_spinbox.value()
+            
             # Compression (saved separately from preprocessing)
             if 'compression' not in self.settings:
                 self.settings['compression'] = {}
-            self.settings['compression']['enabled'] = bool(self.compression_enabled_var.get()) if hasattr(self, 'compression_enabled_var') else False
-            self.settings['compression']['format'] = str(self.compression_format_var.get()) if hasattr(self, 'compression_format_var') else 'jpeg'
-            self.settings['compression']['jpeg_quality'] = int(self.jpeg_quality_var.get()) if hasattr(self, 'jpeg_quality_var') else 85
-            self.settings['compression']['png_compress_level'] = int(self.png_level_var.get()) if hasattr(self, 'png_level_var') else 6
-            self.settings['compression']['webp_quality'] = int(self.webp_quality_var.get()) if hasattr(self, 'webp_quality_var') else 85
+            self.settings['compression']['enabled'] = bool(self.compression_enabled.isChecked())
+            self.settings['compression']['format'] = str(self.compression_format_combo.currentText())
+            self.settings['compression']['jpeg_quality'] = int(self.jpeg_quality_spin.value())
+            self.settings['compression']['png_compress_level'] = int(self.png_level_spin.value())
+            self.settings['compression']['webp_quality'] = int(self.webp_quality_spin.value())
+            
             # TILING SETTINGS - save under preprocessing (primary) and mirror under 'tiling' for backward compatibility
-            self.settings['preprocessing']['inpaint_tiling_enabled'] = self.inpaint_tiling_enabled.get()
-            self.settings['preprocessing']['inpaint_tile_size'] = self.inpaint_tile_size.get()
-            self.settings['preprocessing']['inpaint_tile_overlap'] = self.inpaint_tile_overlap.get()
+            self.settings['preprocessing']['inpaint_tiling_enabled'] = self.inpaint_tiling_enabled.isChecked()
+            self.settings['preprocessing']['inpaint_tile_size'] = self.tile_size_spinbox.value()
+            self.settings['preprocessing']['inpaint_tile_overlap'] = self.tile_overlap_spinbox.value()
             # Back-compat mirror
             self.settings['tiling'] = {
-                'enabled': self.inpaint_tiling_enabled.get(),
-                'tile_size': self.inpaint_tile_size.get(),
-                'tile_overlap': self.inpaint_tile_overlap.get()
+                'enabled': self.inpaint_tiling_enabled.isChecked(),
+                'tile_size': self.tile_size_spinbox.value(),
+                'tile_overlap': self.tile_overlap_spinbox.value()
             }
             
             # OCR settings
-            self.settings['ocr']['language_hints'] = [code for code, var in self.lang_vars.items() if var.get()]
-            self.settings['ocr']['confidence_threshold'] = self.confidence_threshold.get()
-            self.settings['ocr']['text_detection_mode'] = self.detection_mode.get()
-            self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold.get()
-            self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation.get()
-            self.settings['ocr']['azure_merge_multiplier'] = self.azure_merge_multiplier.get()
-            self.settings['ocr']['azure_reading_order'] = self.azure_reading_order.get()
-            self.settings['ocr']['azure_model_version'] = self.azure_model_version.get()
-            self.settings['ocr']['azure_max_wait'] = self.azure_max_wait.get()
-            self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval.get()
-            self.settings['ocr']['min_text_length'] = self.min_text_length_var.get()
-            self.settings['ocr']['exclude_english_text'] = self.exclude_english_var.get()
-            self.settings['ocr']['roi_locality_enabled'] = bool(self.roi_locality_var.get()) if hasattr(self, 'roi_locality_var') else True
+            self.settings['ocr']['language_hints'] = [code for code, checkbox in self.lang_checkboxes.items() if checkbox.isChecked()]
+            self.settings['ocr']['confidence_threshold'] = self.confidence_threshold_slider.value() / 100.0
+            self.settings['ocr']['text_detection_mode'] = self.detection_mode_combo.currentText()
+            self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold_spinbox.value()
+            self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation_checkbox.isChecked()
+            self.settings['ocr']['azure_merge_multiplier'] = self.azure_merge_multiplier_slider.value() / 100.0
+            self.settings['ocr']['azure_reading_order'] = self.azure_reading_order_combo.currentText()
+            self.settings['ocr']['azure_model_version'] = self.azure_model_version_combo.currentText()
+            self.settings['ocr']['azure_max_wait'] = self.azure_max_wait_spinbox.value()
+            self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval_slider.value() / 100.0
+            self.settings['ocr']['min_text_length'] = self.min_text_length_spinbox.value()
+            self.settings['ocr']['exclude_english_text'] = self.exclude_english_checkbox.isChecked()
+            
             # OCR batching & locality
-            self.settings['ocr']['ocr_batch_enabled'] = bool(self.ocr_batch_enabled_var.get()) if hasattr(self, 'ocr_batch_enabled_var') else True
-            self.settings['ocr']['ocr_batch_size'] = int(self.ocr_batch_size_var.get()) if hasattr(self, 'ocr_batch_size_var') else 8
-            self.settings['ocr']['ocr_max_concurrency'] = int(self.ocr_max_conc_var.get()) if hasattr(self, 'ocr_max_conc_var') else 2
-            self.settings['ocr']['roi_padding_ratio'] = float(self.roi_padding_ratio_var.get()) if hasattr(self, 'roi_padding_ratio_var') else 0.08
-            self.settings['ocr']['roi_min_side_px'] = int(self.roi_min_side_var.get()) if hasattr(self, 'roi_min_side_var') else 12
-            self.settings['ocr']['roi_min_area_px'] = int(self.roi_min_area_var.get()) if hasattr(self, 'roi_min_area_var') else 100
-            self.settings['ocr']['roi_max_side'] = int(self.roi_max_side_var.get()) if hasattr(self, 'roi_max_side_var') else 0
-            self.settings['ocr']['english_exclude_threshold'] = self.english_exclude_threshold.get()
-            self.settings['ocr']['english_exclude_min_chars'] = self.english_exclude_min_chars.get()
-            self.settings['ocr']['english_exclude_short_tokens'] = self.english_exclude_short_tokens.get()
+            self.settings['ocr']['ocr_batch_enabled'] = bool(self.ocr_batch_enabled_checkbox.isChecked())
+            self.settings['ocr']['ocr_batch_size'] = int(self.ocr_batch_size_spinbox.value())
+            self.settings['ocr']['ocr_max_concurrency'] = int(self.ocr_max_conc_spinbox.value())
+            self.settings['ocr']['roi_locality_enabled'] = bool(self.roi_locality_checkbox.isChecked())
+            self.settings['ocr']['roi_padding_ratio'] = float(self.roi_padding_ratio_slider.value() / 100.0)
+            self.settings['ocr']['roi_min_side_px'] = int(self.roi_min_side_spinbox.value())
+            self.settings['ocr']['roi_min_area_px'] = int(self.roi_min_area_spinbox.value())
+            self.settings['ocr']['roi_max_side'] = int(self.roi_max_side_spinbox.value())
+            self.settings['ocr']['english_exclude_threshold'] = self.english_exclude_threshold_slider.value() / 100.0
+            self.settings['ocr']['english_exclude_min_chars'] = self.english_exclude_min_chars_spinbox.value()
+            self.settings['ocr']['english_exclude_short_tokens'] = self.english_exclude_short_tokens_checkbox.isChecked()
             
             # Bubble detection settings
-            self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled.get()
-            self.settings['ocr']['bubble_model_path'] = self.bubble_model_path.get()
-            self.settings['ocr']['bubble_confidence'] = self.bubble_confidence.get()
-            self.settings['ocr']['rtdetr_confidence'] = self.bubble_confidence.get()
-            self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles.get()
-            self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles.get()
-            self.settings['ocr']['detect_free_text'] = self.detect_free_text.get()
-            self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_path.get()
-            self.settings['ocr']['bubble_max_detections_yolo'] = int(self.bubble_max_det_yolo_var.get())
+            self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled_checkbox.isChecked()
+            self.settings['ocr']['bubble_model_path'] = self.bubble_model_entry.text()
+            self.settings['ocr']['bubble_confidence'] = self.bubble_conf_slider.value() / 100.0
+            self.settings['ocr']['rtdetr_confidence'] = self.bubble_conf_slider.value() / 100.0
+            self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles_checkbox.isChecked()
+            self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles_checkbox.isChecked()
+            self.settings['ocr']['detect_free_text'] = self.detect_free_text_checkbox.isChecked()
+            self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_entry.text()
+            self.settings['ocr']['bubble_max_detections_yolo'] = int(self.bubble_max_det_yolo_spinbox.value())
             
             # Save the detector type properly
-            if hasattr(self, 'detector_type'):
-                detector_display = self.detector_type.get()
-                if 'RTEDR_onnx' in detector_display or 'ONNX' in detector_display.upper():
-                    self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
-                elif 'RT-DETR' in detector_display:
-                    self.settings['ocr']['detector_type'] = 'rtdetr'
-                elif 'YOLOv8' in detector_display:
-                    self.settings['ocr']['detector_type'] = 'yolo'
-                elif detector_display == 'Custom Model':
-                    self.settings['ocr']['detector_type'] = 'custom'
-                    self.settings['ocr']['custom_model_path'] = self.bubble_model_path.get()
-                else:
-                    self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
+            detector_display = self.detector_type_combo.currentText()
+            if 'RTEDR_onnx' in detector_display or 'ONNX' in detector_display.upper():
+                self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
+            elif 'RT-DETR' in detector_display:
+                self.settings['ocr']['detector_type'] = 'rtdetr'
+            elif 'YOLOv8' in detector_display:
+                self.settings['ocr']['detector_type'] = 'yolo'
+            elif detector_display == 'Custom Model':
+                self.settings['ocr']['detector_type'] = 'custom'
+                self.settings['ocr']['custom_model_path'] = self.bubble_model_entry.text()
+            else:
+                self.settings['ocr']['detector_type'] = 'rtdetr_onnx'
             
             # Inpainting settings
-            if hasattr(self, 'inpaint_batch_size'):
-                if 'inpainting' not in self.settings:
-                    self.settings['inpainting'] = {}
-                self.settings['inpainting']['batch_size'] = self.inpaint_batch_size.get()
-                self.settings['inpainting']['enable_cache'] = self.enable_cache_var.get()
-                
-                # Save all dilation settings
-                self.settings['mask_dilation'] = self.mask_dilation_var.get()
-                self.settings['use_all_iterations'] = self.use_all_iterations_var.get()
-                self.settings['all_iterations'] = self.all_iterations_var.get()
-                self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
-                self.settings['empty_bubble_dilation_iterations'] = self.empty_bubble_iterations_var.get()
-                self.settings['free_text_dilation_iterations'] = self.free_text_iterations_var.get()
-                self.settings['auto_iterations'] = self.auto_iterations_var.get()
-                
-                # Legacy support
-                self.settings['bubble_dilation_iterations'] = self.text_bubble_iterations_var.get()
-                self.settings['dilation_iterations'] = self.text_bubble_iterations_var.get()
+            if 'inpainting' not in self.settings:
+                self.settings['inpainting'] = {}
+            self.settings['inpainting']['batch_size'] = self.inpaint_batch_size_spinbox.value()
+            self.settings['inpainting']['enable_cache'] = self.enable_cache_checkbox.isChecked()
+            
+            # Save all dilation settings
+            self.settings['mask_dilation'] = self.mask_dilation_spinbox.value()
+            self.settings['use_all_iterations'] = self.use_all_iterations_checkbox.isChecked()
+            self.settings['all_iterations'] = self.all_iterations_spinbox.value()
+            self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iter_spinbox.value()
+            self.settings['empty_bubble_dilation_iterations'] = self.empty_bubble_iter_spinbox.value()
+            self.settings['free_text_dilation_iterations'] = self.free_text_iter_spinbox.value()
+            self.settings['auto_iterations'] = self.auto_iterations_checkbox.isChecked()
+            
+            # Legacy support
+            self.settings['bubble_dilation_iterations'] = self.text_bubble_iter_spinbox.value()
+            self.settings['dilation_iterations'] = self.text_bubble_iter_spinbox.value()
             
             # Advanced settings
-            self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
-            self.settings['advanced']['webtoon_mode'] = self.webtoon_mode.get()
-            self.settings['advanced']['debug_mode'] = bool(self.debug_mode.get())
-            self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
-            self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
-            self.settings['advanced']['max_workers'] = self.max_workers.get()
+            self.settings['advanced']['format_detection'] = bool(self.format_detection_checkbox.isChecked())
+            self.settings['advanced']['webtoon_mode'] = self.webtoon_mode_combo.currentText()
+            self.settings['advanced']['debug_mode'] = bool(self.debug_mode_checkbox.isChecked())
+            self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate_checkbox.isChecked())
+            self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing_checkbox.isChecked())
+            self.settings['advanced']['max_workers'] = self.max_workers_spinbox.value()
             
             # Save HD strategy settings
-            try:
-                self.settings['advanced']['hd_strategy'] = str(self.hd_strategy_var.get())
-                self.settings['advanced']['hd_strategy_resize_limit'] = int(self.hd_resize_limit_var.get())
-                self.settings['advanced']['hd_strategy_crop_margin'] = int(self.hd_crop_margin_var.get())
-                self.settings['advanced']['hd_strategy_crop_trigger_size'] = int(self.hd_crop_trigger_var.get())
-                # Also reflect into environment for immediate effect in this session
-                os.environ['HD_STRATEGY'] = self.settings['advanced']['hd_strategy']
-                os.environ['HD_RESIZE_LIMIT'] = str(self.settings['advanced']['hd_strategy_resize_limit'])
-                os.environ['HD_CROP_MARGIN'] = str(self.settings['advanced']['hd_strategy_crop_margin'])
-                os.environ['HD_CROP_TRIGGER'] = str(self.settings['advanced']['hd_strategy_crop_trigger_size'])
-            except Exception:
-                pass
+            self.settings['advanced']['hd_strategy'] = str(self.hd_strategy_combo.currentText())
+            self.settings['advanced']['hd_strategy_resize_limit'] = int(self.hd_resize_limit_spin.value())
+            self.settings['advanced']['hd_strategy_crop_margin'] = int(self.hd_crop_margin_spin.value())
+            self.settings['advanced']['hd_strategy_crop_trigger_size'] = int(self.hd_crop_trigger_spin.value())
+            # Also reflect into environment for immediate effect in this session
+            os.environ['HD_STRATEGY'] = self.settings['advanced']['hd_strategy']
+            os.environ['HD_RESIZE_LIMIT'] = str(self.settings['advanced']['hd_strategy_resize_limit'])
+            os.environ['HD_CROP_MARGIN'] = str(self.settings['advanced']['hd_strategy_crop_margin'])
+            os.environ['HD_CROP_TRIGGER'] = str(self.settings['advanced']['hd_strategy_crop_trigger_size'])
             
             # Save parallel rendering toggle
-            if hasattr(self, 'render_parallel_var'):
-                self.settings['advanced']['render_parallel'] = bool(self.render_parallel_var.get())
+            if hasattr(self, 'render_parallel_checkbox'):
+                self.settings['advanced']['render_parallel'] = bool(self.render_parallel_checkbox.isChecked())
+                
             # Panel-level parallel translation settings
-            self.settings['advanced']['parallel_panel_translation'] = bool(self.parallel_panel_var.get())
-            self.settings['advanced']['panel_max_workers'] = int(self.panel_max_workers_var.get())
-            self.settings['advanced']['panel_start_stagger_ms'] = int(self.panel_stagger_ms_var.get())
+            self.settings['advanced']['parallel_panel_translation'] = bool(self.parallel_panel_checkbox.isChecked())
+            self.settings['advanced']['panel_max_workers'] = int(self.panel_max_workers_spinbox.value())
+            self.settings['advanced']['panel_start_stagger_ms'] = int(self.panel_stagger_ms_spinbox.value())
             # New: preload local inpainting for panels
-            if hasattr(self, 'preload_local_panels_var'):
-                self.settings['advanced']['preload_local_inpainting_for_panels'] = bool(self.preload_local_panels_var.get())
+            if hasattr(self, 'preload_local_panels_checkbox'):
+                self.settings['advanced']['preload_local_inpainting_for_panels'] = bool(self.preload_local_panels_checkbox.isChecked())
             
             # Memory management settings
             self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models_checkbox.isChecked())
-            self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_checkbox.isChecked())
+            self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_models_checkbox.isChecked())
             self.settings['advanced']['unload_models_after_translation'] = bool(self.unload_models_checkbox.isChecked() if hasattr(self, 'unload_models_checkbox') else False)
             
             # ONNX auto-convert settings (persist and apply to environment)
@@ -4068,64 +4067,28 @@ class MangaSettingsDialog(QDialog):
                 if 'advanced' not in self.settings:
                     self.settings['advanced'] = {}
                 self.settings['advanced']['force_deep_cleanup_each_image'] = bool(self.force_deep_cleanup_checkbox.isChecked())
+                
             # RAM cap settings
             if hasattr(self, 'ram_cap_enabled_checkbox'):
                 self.settings['advanced']['ram_cap_enabled'] = bool(self.ram_cap_enabled_checkbox.isChecked())
             if hasattr(self, 'ram_cap_mb_spinbox'):
-                try:
-                    self.settings['advanced']['ram_cap_mb'] = int(self.ram_cap_mb_spinbox.value())
-                except Exception:
-                    self.settings['advanced']['ram_cap_mb'] = 0
+                self.settings['advanced']['ram_cap_mb'] = int(self.ram_cap_mb_spinbox.value())
             if hasattr(self, 'ram_cap_mode_combo'):
                 mode = self.ram_cap_mode_combo.currentText()
-                if mode not in ['soft', 'hard (Windows only)']:
-                    mode = 'soft'
-                # Normalize to 'soft' or 'hard'
                 self.settings['advanced']['ram_cap_mode'] = 'hard' if mode.startswith('hard') else 'soft'
             if hasattr(self, 'ram_gate_timeout_spinbox'):
-                try:
-                    self.settings['advanced']['ram_gate_timeout_sec'] = float(self.ram_gate_timeout_spinbox.value())
-                except Exception:
-                    self.settings['advanced']['ram_gate_timeout_sec'] = 10.0
+                self.settings['advanced']['ram_gate_timeout_sec'] = float(self.ram_gate_timeout_spinbox.value())
             if hasattr(self, 'ram_gate_floor_spinbox'):
-                try:
-                    self.settings['advanced']['ram_min_floor_over_baseline_mb'] = int(self.ram_gate_floor_spinbox.value())
-                except Exception:
-                    self.settings['advanced']['ram_min_floor_over_baseline_mb'] = 128
+                self.settings['advanced']['ram_min_floor_over_baseline_mb'] = int(self.ram_gate_floor_spinbox.value())
             
             # Cloud API settings
-            if hasattr(self, 'cloud_model_var'):
-                self.settings['cloud_inpaint_model'] = self.cloud_model_var.get()
-                self.settings['cloud_custom_version'] = self.custom_version_var.get()
-                self.settings['cloud_inpaint_prompt'] = self.cloud_prompt_var.get()
-                self.settings['cloud_negative_prompt'] = self.cloud_negative_prompt_var.get()
-                self.settings['cloud_inference_steps'] = self.cloud_steps_var.get()
-                self.settings['cloud_timeout'] = self.cloud_timeout_var.get()
-            
-            # Font sizing settings from Font Sizing tab
-            if hasattr(self, 'font_algorithm_var'):
-                if 'font_sizing' not in self.settings:
-                    self.settings['font_sizing'] = {}
-                self.settings['font_sizing']['algorithm'] = self.font_algorithm_var.get()
-                self.settings['font_sizing']['min_size'] = self.min_font_size_var.get()
-                self.settings['font_sizing']['max_size'] = self.max_font_size_var.get()
-                self.settings['font_sizing']['min_readable'] = self.min_readable_var.get()
-                self.settings['font_sizing']['prefer_larger'] = self.prefer_larger_var.get()
-                self.settings['font_sizing']['bubble_size_factor'] = self.bubble_size_factor_var.get()
-                self.settings['font_sizing']['line_spacing'] = self.line_spacing_var.get()
-                self.settings['font_sizing']['max_lines'] = self.max_lines_var.get()
-            
-            # SAVE FONT SIZE CONTROLS FROM RENDERING (if they exist)
-            if hasattr(self, 'font_size_mode_var'):
-                if 'rendering' not in self.settings:
-                    self.settings['rendering'] = {}
-                
-                self.settings['rendering']['font_size_mode'] = self.font_size_mode_var.get()
-                self.settings['rendering']['fixed_font_size'] = self.fixed_font_size_var.get()
-                self.settings['rendering']['font_scale'] = self.font_scale_var.get()
-                self.settings['rendering']['auto_min_size'] = self.min_font_size_var.get() if hasattr(self, 'min_font_size_var') else 10
-                self.settings['rendering']['auto_max_size'] = self.max_font_size_var.get() if hasattr(self, 'max_font_size_var') else 28
-                self.settings['rendering']['auto_fit_style'] = self.auto_fit_style_var.get()
+            if hasattr(self, 'cloud_model_selected'):
+                self.settings['cloud_inpaint_model'] = self.cloud_model_selected
+                self.settings['cloud_custom_version'] = self.custom_version_entry.text()
+                self.settings['cloud_inpaint_prompt'] = self.cloud_prompt_entry.text()
+                self.settings['cloud_negative_prompt'] = self.negative_entry.text()
+                self.settings['cloud_inference_steps'] = self.steps_spinbox.value()
+                self.settings['cloud_timeout'] = self.cloud_timeout_spinbox.value()
             
             # Clear bubble detector cache to force reload with new settings
             if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, 'translator'):
@@ -4138,24 +4101,21 @@ class MangaSettingsDialog(QDialog):
             # Save to file - using the correct method name
             try:
                 if hasattr(self.main_gui, 'save_config'):
-                    self.main_gui.save_config()
-                    print("Settings saved successfully via save_config")
-                    time.sleep(0.1)  # Brief pause for stability
-                    print("💤 Main settings save pausing briefly for stability")
+                    self.main_gui.save_config(show_message=False)
+                    print("Settings saved successfully")
                 elif hasattr(self.main_gui, 'save_configuration'):
                     self.main_gui.save_configuration()
-                    print("Settings saved successfully via save_configuration")
+                    print("Settings saved successfully")
                 else:
-                    print("Warning: No save method found on main_gui")
                     # Try direct save as fallback
                     if hasattr(self.main_gui, 'config_file'):
-                        import json
                         with open(self.main_gui.config_file, 'w') as f:
                             json.dump(self.config, f, indent=2)
                         print("Settings saved directly to config file")
             except Exception as e:
                 print(f"Error saving configuration: {e}")
                 QMessageBox.critical(self, "Save Error", f"Failed to save settings: {e}")
+                return
             
             # Call callback if provided
             if self.callback:
@@ -4168,7 +4128,9 @@ class MangaSettingsDialog(QDialog):
             self.accept()
                 
         except Exception as e:
+            import traceback
             print(f"Critical error in _save_settings: {e}")
+            print(traceback.format_exc())
             QMessageBox.critical(self, "Save Error", f"Failed to save settings: {e}")
 
     def _reset_defaults(self):
@@ -4185,21 +4147,19 @@ class MangaSettingsDialog(QDialog):
                 del self.config['manga_settings']
         except Exception:
             pass
-        # Persist changes
+        # Persist changes WITHOUT showing message
         try:
             if hasattr(self.main_gui, 'save_config'):
-                self.main_gui.save_config()
+                self.main_gui.save_config(show_message=False)
             elif hasattr(self.main_gui, 'save_configuration'):
                 self.main_gui.save_configuration()
             elif hasattr(self.main_gui, 'config_file') and isinstance(self.main_gui.config_file, str):
                 with open(self.main_gui.config_file, 'w', encoding='utf-8') as f:
-                    import json
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
         except Exception:
             try:
                 if hasattr(self.main_gui, 'CONFIG_FILE') and isinstance(self.main_gui.CONFIG_FILE, str):
                     with open(self.main_gui.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                        import json
                         json.dump(self.config, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
@@ -4208,12 +4168,8 @@ class MangaSettingsDialog(QDialog):
         try:
             MangaSettingsDialog(parent=self.parent, main_gui=self.main_gui, config=self.config, callback=self.callback)
         except Exception:
-            try:
-                QMessageBox.information(self, "Reset", "Settings reset. Please reopen the dialog.")
-            except Exception:
-                pass
+            pass  # Don't show any message
 
     def _cancel(self):
         """Cancel without saving"""
         self.reject()
-
