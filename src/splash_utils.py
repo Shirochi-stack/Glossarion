@@ -303,32 +303,46 @@ class SplashManager:
     def close_splash(self):
         """Close the splash screen"""
         try:
-            # Stop timer
+            # Stop timer first
             if self.timer:
                 self.timer.stop()
                 self.timer = None
             
-            # Set to 100%
-            self.progress_value = 100
-            if self.progress_bar:
-                self.progress_bar.setValue(100)
-            if self.progress_label:
-                self.progress_label.setText("100%")
-            
-            # Process events one last time
-            if self.app:
-                self.app.processEvents()
-            
-            time.sleep(0.1)
-            
-            # Close splash window
+            # Update progress to 100% before closing (only if window still exists)
             if self.splash_window:
-                self.splash_window.close()
+                try:
+                    self.progress_value = 100
+                    if self.progress_bar:
+                        self.progress_bar.setValue(100)
+                    if self.progress_label:
+                        self.progress_label.setText("100%")
+                    
+                    # Process events one last time
+                    if self.app:
+                        self.app.processEvents()
+                    
+                    time.sleep(0.1)
+                except RuntimeError:
+                    # Widget already deleted by Qt, that's okay
+                    pass
+                
+                # Close splash window
+                try:
+                    self.splash_window.close()
+                except RuntimeError:
+                    # Already deleted
+                    pass
+                
                 self.splash_window = None
             
             print("✅ Splash screen closed")
             
         except Exception as e:
             print(f"⚠️ Error closing splash: {e}")
+        finally:
+            # Ensure cleanup
             self.timer = None
             self.splash_window = None
+            self.progress_bar = None
+            self.progress_label = None
+            self.status_label = None
