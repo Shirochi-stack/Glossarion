@@ -1829,13 +1829,13 @@ class MangaTranslationTab:
             }
             QRadioButton {
                 color: white;
-                spacing: 6px;
+                spacing: 5px;
             }
             QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
+                width: 13px;
+                height: 13px;
                 border: 2px solid #5a9fd4;
-                border-radius: 8px;
+                border-radius: 7px;
                 background-color: #2d2d2d;
             }
             QRadioButton::indicator:checked {
@@ -2446,27 +2446,6 @@ class MangaTranslationTab:
         render_frame_layout.setContentsMargins(15, 15, 15, 10)
         render_frame_layout.setSpacing(10)
         
-        # Advanced Settings button at the top of render_frame
-        advanced_button_frame = QWidget()
-        advanced_button_layout = QHBoxLayout(advanced_button_frame)
-        advanced_button_layout.setContentsMargins(0, 0, 0, 10)
-        advanced_button_layout.setSpacing(10)
-
-        advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
-        desc_font = QFont("Arial", 9)
-        advanced_settings_desc.setFont(desc_font)
-        advanced_settings_desc.setStyleSheet("color: gray;")
-        advanced_button_layout.addWidget(advanced_settings_desc)
-        
-        advanced_button_layout.addStretch()
-        
-        advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
-        advanced_settings_btn.clicked.connect(self._open_advanced_settings)
-        advanced_settings_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
-        advanced_button_layout.addWidget(advanced_settings_btn)
-        
-        render_frame_layout.addWidget(advanced_button_frame)
-        
         # Inpainting section
         inpaint_group = QGroupBox("Inpainting")
         inpaint_group_font = QFont("Arial", 11)
@@ -2755,6 +2734,27 @@ class MangaTranslationTab:
         # Add render_frame (inpainting only) to LEFT COLUMN
         left_column_layout.addWidget(render_frame)
         
+        # Advanced Settings button at the TOP OF RIGHT COLUMN
+        advanced_button_frame = QWidget()
+        advanced_button_layout = QHBoxLayout(advanced_button_frame)
+        advanced_button_layout.setContentsMargins(0, 0, 0, 10)
+        advanced_button_layout.setSpacing(10)
+
+        advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
+        desc_font = QFont("Arial", 9)
+        advanced_settings_desc.setFont(desc_font)
+        advanced_settings_desc.setStyleSheet("color: gray;")
+        advanced_button_layout.addWidget(advanced_settings_desc)
+        
+        advanced_button_layout.addStretch()
+        
+        advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
+        advanced_settings_btn.clicked.connect(self._open_advanced_settings)
+        advanced_settings_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        advanced_button_layout.addWidget(advanced_settings_btn)
+        
+        right_column_layout.addWidget(advanced_button_frame)
+        
         # Background Settings - MOVED TO RIGHT COLUMN
         self.bg_settings_frame = QGroupBox("Background Settings")
         bg_settings_font = QFont("Arial", 10)
@@ -2924,7 +2924,7 @@ class MangaTranslationTab:
         font_frame_container = QWidget()
         font_frame_layout = QVBoxLayout(font_frame_container)
         font_frame_layout.setContentsMargins(0, 5, 0, 5)
-        font_frame_layout.setSpacing(5)
+        font_frame_layout.setSpacing(10)
         
         # Mode selection frame
         mode_frame = QWidget()
@@ -2968,7 +2968,7 @@ class MangaTranslationTab:
         # Fixed font size frame
         self.fixed_size_frame = QWidget()
         fixed_size_layout = QHBoxLayout(self.fixed_size_frame)
-        fixed_size_layout.setContentsMargins(0, 0, 0, 0)
+        fixed_size_layout.setContentsMargins(0, 8, 0, 0)
         fixed_size_layout.setSpacing(10)
 
         fixed_size_label = QLabel("Font Size:")
@@ -2996,7 +2996,7 @@ class MangaTranslationTab:
         # Dynamic multiplier frame
         self.multiplier_frame = QWidget()
         multiplier_layout = QHBoxLayout(self.multiplier_frame)
-        multiplier_layout.setContentsMargins(0, 0, 0, 0)
+        multiplier_layout.setContentsMargins(0, 8, 0, 0)
         multiplier_layout.setSpacing(10)
 
         multiplier_label_text = QLabel("Size Multiplier:")
@@ -3478,23 +3478,7 @@ class MangaTranslationTab:
         # Add font_render_frame to RIGHT COLUMN
         right_column_layout.addWidget(font_render_frame)
         
-        # Add stretch to balance columns
-        left_column_layout.addStretch()
-        right_column_layout.addStretch()
-        
-        # Add columns to container
-        columns_layout.addWidget(left_column)
-        columns_layout.addWidget(right_column)
-        
-        # Add columns container to main layout
-        main_layout.addWidget(columns_container)
-        
-        # Control buttons - CENTERED AND ENLARGED
-        control_frame = QWidget()
-        control_layout = QHBoxLayout(control_frame)
-        control_layout.setContentsMargins(10, 10, 10, 10)
-        control_layout.setSpacing(20)
-        
+        # Control buttons - IN LEFT COLUMN
         # Check if ready based on selected provider
         # Get API key from main GUI - handle both Tkinter and PySide6
         try:
@@ -3521,20 +3505,21 @@ class MangaTranslationTab:
         else:
             # Local providers (manga-ocr, easyocr, etc.) only need API key for translation
             is_ready = has_api_key
-
-        # Add stretch before buttons to center them
-        control_layout.addStretch()
+        
+        control_frame = QWidget()
+        control_layout = QVBoxLayout(control_frame)
+        control_layout.setContentsMargins(10, 15, 10, 10)
+        control_layout.setSpacing(15)
         
         self.start_button = QPushButton("▶ Start Translation")
         self.start_button.clicked.connect(self._start_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setMinimumHeight(60)
-        self.start_button.setMinimumWidth(250)
+        self.start_button.setMinimumHeight(80)
         self.start_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #28a745; "
             "  color: white; "
-            "  padding: 15px 30px; "
+            "  padding: 20px 30px; "
             "  font-size: 14pt; "
             "  font-weight: bold; "
             "  border-radius: 8px; "
@@ -3562,13 +3547,12 @@ class MangaTranslationTab:
         self.stop_button = QPushButton("⏹ Stop")
         self.stop_button.clicked.connect(self._stop_translation)
         self.stop_button.setEnabled(False)
-        self.stop_button.setMinimumHeight(60)
-        self.stop_button.setMinimumWidth(250)
+        self.stop_button.setMinimumHeight(80)
         self.stop_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #dc3545; "
             "  color: white; "
-            "  padding: 15px 30px; "
+            "  padding: 20px 30px; "
             "  font-size: 14pt; "
             "  font-weight: bold; "
             "  border-radius: 8px; "
@@ -3581,10 +3565,19 @@ class MangaTranslationTab:
         )
         control_layout.addWidget(self.stop_button)
         
-        # Add stretch after buttons to center them
-        control_layout.addStretch()
+        # Add control buttons to LEFT COLUMN
+        left_column_layout.addWidget(control_frame)
         
-        main_layout.addWidget(control_frame)
+        # Add stretch to balance columns
+        left_column_layout.addStretch()
+        right_column_layout.addStretch()
+        
+        # Add columns to container
+        columns_layout.addWidget(left_column)
+        columns_layout.addWidget(right_column)
+        
+        # Add columns container to main layout
+        main_layout.addWidget(columns_container)
         
         # Progress frame
         progress_frame = QGroupBox("Progress")
