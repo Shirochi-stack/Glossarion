@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QLabel, QPushButton, QCheckBox, QSpinBox, QDoubleSpinBox,
                                 QSlider, QComboBox, QLineEdit, QGroupBox, QTabWidget,
                                 QWidget, QScrollArea, QFrame, QRadioButton, QButtonGroup,
-                                QMessageBox, QFileDialog, QSizePolicy)
+                                QMessageBox, QFileDialog, QSizePolicy, QApplication)
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject
 from PySide6.QtGui import QFont, QIcon
 from typing import Dict, Any, Optional, Callable
@@ -1343,8 +1343,8 @@ class MangaSettingsDialog(QDialog):
         mask_layout.setContentsMargins(8, 8, 8, 6)
         mask_layout.setSpacing(4)
         
-        # Auto toggle (affects both mask dilation and iterations)
-        self.auto_iterations_checkbox = QCheckBox("Auto (affects mask dilation and iterations)")
+        # Auto toggle (affects iterations only, NOT mask dilation)
+        self.auto_iterations_checkbox = QCheckBox("Auto (Set by image: B&W vs Color)")
         self.auto_iterations_checkbox.setChecked(self.settings.get('auto_iterations', True))
         self.auto_iterations_checkbox.toggled.connect(self._toggle_iteration_controls)
         mask_layout.addWidget(self.auto_iterations_checkbox)
@@ -1403,7 +1403,7 @@ class MangaSettingsDialog(QDialog):
         # Auto-iterations toggle (secondary control reflects the same setting)
         self.auto_iter_secondary_checkbox = QCheckBox("Auto (set by image: B&W vs Color)")
         self.auto_iter_secondary_checkbox.setChecked(self.settings.get('auto_iterations', True))
-        self.auto_iter_secondary_checkbox.stateChanged.connect(self._toggle_iteration_controls)
+        self.auto_iter_secondary_checkbox.toggled.connect(self._toggle_iteration_controls)
         all_iter_layout.addWidget(self.auto_iter_secondary_checkbox)
         
         all_iter_layout.addSpacing(10)
@@ -1411,7 +1411,7 @@ class MangaSettingsDialog(QDialog):
         # Checkbox to enable/disable uniform iterations
         self.use_all_iterations_checkbox = QCheckBox("Use Same For All:")
         self.use_all_iterations_checkbox.setChecked(self.settings.get('use_all_iterations', True))
-        self.use_all_iterations_checkbox.stateChanged.connect(self._toggle_iteration_controls)
+        self.use_all_iterations_checkbox.toggled.connect(self._toggle_iteration_controls)
         all_iter_layout.addWidget(self.use_all_iterations_checkbox)
         
         all_iter_layout.addSpacing(10)
@@ -1567,12 +1567,12 @@ class MangaSettingsDialog(QDialog):
 
     def _toggle_iteration_controls(self):
         """Enable/disable iteration controls based on Auto and 'Use Same For All' toggles"""
-        # Get auto checkbox state
+        # Get auto checkbox state - check BOTH auto checkboxes
         auto_on = False
         if hasattr(self, 'auto_iterations_checkbox'):
-            auto_on = self.auto_iterations_checkbox.isChecked()
-        elif hasattr(self, 'auto_iter_secondary_checkbox'):
-            auto_on = self.auto_iter_secondary_checkbox.isChecked()
+            auto_on = auto_on or self.auto_iterations_checkbox.isChecked()
+        if hasattr(self, 'auto_iter_secondary_checkbox'):
+            auto_on = auto_on or self.auto_iter_secondary_checkbox.isChecked()
         
         # Get use_all checkbox state
         use_all = False
@@ -1583,7 +1583,8 @@ class MangaSettingsDialog(QDialog):
         self.auto_iterations_enabled = auto_on
         
         if auto_on:
-            # Disable everything when auto is on
+            # Disable iterations controls when auto is on, INCLUDING the "Use Same For All" checkbox
+            # BUT DO NOT touch mask dilation - it should always stay enabled
             try:
                 self.all_iterations_spinbox.setEnabled(False)
             except Exception:
@@ -1593,11 +1594,7 @@ class MangaSettingsDialog(QDialog):
                     self.use_all_iterations_checkbox.setEnabled(False)
             except Exception:
                 pass
-            try:
-                if hasattr(self, 'mask_dilation_spinbox'):
-                    self.mask_dilation_spinbox.setEnabled(False)
-            except Exception:
-                pass
+            # DO NOT disable mask_dilation_spinbox or dilation_label - leave them enabled
             for label, spinbox in getattr(self, 'individual_iteration_controls', []):
                 try:
                     spinbox.setEnabled(False)
@@ -1606,21 +1603,18 @@ class MangaSettingsDialog(QDialog):
                     pass
             return
         
-        # Auto off -> respect 'use all'
-        try:
-            self.all_iterations_spinbox.setEnabled(use_all)
-        except Exception:
-            pass
+        # Auto off -> enable "Use Same For All" and respect its state
         try:
             if hasattr(self, 'use_all_iterations_checkbox'):
                 self.use_all_iterations_checkbox.setEnabled(True)
         except Exception:
             pass
+        
         try:
-            if hasattr(self, 'mask_dilation_spinbox'):
-                self.mask_dilation_spinbox.setEnabled(True)
+            self.all_iterations_spinbox.setEnabled(use_all)
         except Exception:
             pass
+        # Mask dilation always stays enabled regardless of auto state
         for label, spinbox in getattr(self, 'individual_iteration_controls', []):
             enabled = not use_all
             try:
@@ -1866,63 +1860,23 @@ class MangaSettingsDialog(QDialog):
         """Enable/disable preprocessing controls based on main toggle"""
         enabled = self.preprocess_enabled.isChecked()
         
-        # Widgets that must remain enabled regardless of toggle (widgets only, not Qt variables)
-        always_on = []
-        for name in [
-            'tiling_frame',
-            'tile_size_spinbox', 'tile_overlap_spinbox',
-            'chunk_frame', 'chunk_height_spinbox', 'chunk_overlap_spinbox',
-            'chunk_height_label', 'chunk_overlap_label',
-            'chunk_height_unit_label', 'chunk_overlap_unit_label',
-            # Compression controls should always be active (separate from preprocessing)
-            'compression_frame', 'compression_toggle', 'compression_format_combo', 'jpeg_quality_spin', 'png_level_spin', 'webp_quality_spin'
-        ]:
-            if hasattr(self, name):
-                always_on.append(getattr(self, name))
-        
+        # Process each control in preprocessing_controls list
         for control in self.preprocessing_controls:
             try:
-                if control in always_on:
-                    # Ensure enabled
-                    if isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox)):
-                        control.setEnabled(True)
-                    elif isinstance(control, QGroupBox):
-                        control.setStyleSheet("")
-                        self._toggle_frame_children(control, True)
-                    elif isinstance(control, QLabel):
-                        control.setStyleSheet("")
-                    elif isinstance(control, QWidget):
-                        self._toggle_frame_children(control, True)
-                    continue
-            except Exception:
+                if isinstance(control, QGroupBox):
+                    # Enable/disable entire group box children
+                    self._toggle_frame_children(control, enabled)
+                elif isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox)):
+                    control.setEnabled(enabled)
+                elif isinstance(control, QLabel):
+                    # For labels: clear stylesheet when enabled to use default theme styling
+                    if enabled:
+                        control.setStyleSheet("")  # Clear any styling to use default
+                    else:
+                        control.setStyleSheet("color: #666666;")  # Grey when disabled
+            except Exception as e:
                 pass
-            
-            # Normal enable/disable logic for other controls
-            if isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox)):
-                control.setEnabled(enabled)
-            elif isinstance(control, QGroupBox):
-                control.setStyleSheet("" if enabled else "color: gray;")
-            elif isinstance(control, QLabel):
-                control.setStyleSheet("" if enabled else "color: gray;")
-            elif isinstance(control, QWidget):
-                self._toggle_frame_children(control, enabled)
         
-        # Final enforcement for always-on widgets (in case they were not in list)
-        try:
-            if hasattr(self, 'chunk_height_spinbox'):
-                self.chunk_height_spinbox.setEnabled(True)
-            if hasattr(self, 'chunk_overlap_spinbox'):
-                self.chunk_overlap_spinbox.setEnabled(True)
-            if hasattr(self, 'chunk_height_label'):
-                self.chunk_height_label.setStyleSheet("")
-            if hasattr(self, 'chunk_overlap_label'):
-                self.chunk_overlap_label.setStyleSheet("")
-            if hasattr(self, 'chunk_height_unit_label'):
-                self.chunk_height_unit_label.setStyleSheet("")
-            if hasattr(self, 'chunk_overlap_unit_label'):
-                self.chunk_overlap_unit_label.setStyleSheet("")
-        except Exception:
-            pass
         # Ensure tiling fields respect their own toggle regardless of preprocessing state
         try:
             if hasattr(self, '_toggle_tiling_controls'):
@@ -1932,14 +1886,22 @@ class MangaSettingsDialog(QDialog):
     
     def _toggle_frame_children(self, widget, enabled):
         """Recursively enable/disable all children of a widget"""
+        # Handle input controls
         for child in widget.findChildren(QWidget):
-            if isinstance(child, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox)):
+            if isinstance(child, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox, QLineEdit)):
                 try:
                     child.setEnabled(enabled)
                 except Exception:
                     pass
-            elif isinstance(child, QLabel):
-                child.setStyleSheet("" if enabled else "color: gray;")
+        # Handle labels separately - clear stylesheet when enabled
+        for child in widget.findChildren(QLabel):
+            try:
+                if enabled:
+                    child.setStyleSheet("")  # Clear to use default theme styling
+                else:
+                    child.setStyleSheet("color: #666666;")  # Grey when disabled
+            except Exception:
+                pass
 
     def _toggle_roi_locality_controls(self):
         """Show/hide ROI locality controls based on toggle."""
@@ -1964,17 +1926,28 @@ class MangaSettingsDialog(QDialog):
     def _toggle_tiling_controls(self):
         """Enable/disable tiling size/overlap fields based on tiling toggle."""
         try:
-            enabled = bool(self.inpaint_tiling_checkbox.isChecked())
+            enabled = bool(self.inpaint_tiling_enabled.isChecked())
         except Exception:
             enabled = False
-        try:
-            self.tile_size_spinbox.setEnabled(enabled)
-        except Exception:
-            pass
-        try:
-            self.tile_overlap_spinbox.setEnabled(enabled)
-        except Exception:
-            pass
+        
+        # Enable/disable tiling widgets and their labels
+        widgets_to_toggle = [
+            ('tile_size_spinbox', 'tile_size_label', 'tile_size_unit_label'),
+            ('tile_overlap_spinbox', 'tile_overlap_label', 'tile_overlap_unit_label')
+        ]
+        
+        for widget_names in widgets_to_toggle:
+            for widget_name in widget_names:
+                try:
+                    widget = getattr(self, widget_name, None)
+                    if widget is not None:
+                        if isinstance(widget, QLabel):
+                            widget.setEnabled(enabled)
+                            widget.setStyleSheet("" if enabled else "color: gray;")
+                        else:
+                            widget.setEnabled(enabled)
+                except Exception:
+                    pass
 
     def _on_hd_strategy_change(self):
         """Show/hide HD strategy controls based on selected strategy."""
@@ -3291,6 +3264,7 @@ class MangaSettingsDialog(QDialog):
         # Singleton mode checkbox - will connect handler later after panel widgets created
         self.use_singleton_models_checkbox = QCheckBox("Use single model instances (saves RAM, only affects local models)")
         self.use_singleton_models_checkbox.setChecked(self.settings.get('advanced', {}).get('use_singleton_models', True))
+        self.use_singleton_models_checkbox.toggled.connect(self._toggle_singleton_controls)
         memory_layout.addWidget(self.use_singleton_models_checkbox)
         
         # Singleton note
@@ -3336,6 +3310,7 @@ class MangaSettingsDialog(QDialog):
 
         self.parallel_panel_checkbox = QCheckBox("Enable parallel panel translation (process multiple images concurrently)")
         self.parallel_panel_checkbox.setChecked(self.settings.get('advanced', {}).get('parallel_panel_translation', False))
+        self.parallel_panel_checkbox.toggled.connect(self._toggle_panel_controls)
         panel_layout.addWidget(self.parallel_panel_checkbox)
         
         # Inpainting Performance (add to performance group)
@@ -3377,9 +3352,9 @@ class MangaSettingsDialog(QDialog):
         panels_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.addWidget(panels_frame)
         
-        panels_label = QLabel("Max concurrent panels:")
-        panels_label.setMinimumWidth(150)
-        panels_layout.addWidget(panels_label)
+        self.panels_label = QLabel("Max concurrent panels:")
+        self.panels_label.setMinimumWidth(150)
+        panels_layout.addWidget(self.panels_label)
         
         self.panel_max_workers_spinbox = QSpinBox()
         self.panel_max_workers_spinbox.setRange(1, 12)
@@ -3393,17 +3368,22 @@ class MangaSettingsDialog(QDialog):
         stagger_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.addWidget(stagger_frame)
         
-        stagger_label = QLabel("Panel start stagger:")
-        stagger_label.setMinimumWidth(150)
-        stagger_layout.addWidget(stagger_label)
+        self.stagger_label = QLabel("Panel start stagger:")
+        self.stagger_label.setMinimumWidth(150)
+        stagger_layout.addWidget(self.stagger_label)
         
         self.panel_stagger_ms_spinbox = QSpinBox()
         self.panel_stagger_ms_spinbox.setRange(0, 1000)
         self.panel_stagger_ms_spinbox.setValue(self.settings.get('advanced', {}).get('panel_start_stagger_ms', 30))
         stagger_layout.addWidget(self.panel_stagger_ms_spinbox)
         
-        stagger_layout.addWidget(QLabel("ms"))
+        self.stagger_unit_label = QLabel("ms")
+        stagger_layout.addWidget(self.stagger_unit_label)
         stagger_layout.addStretch()
+        
+        # Initialize panel controls state
+        self._toggle_panel_controls()
+        self._toggle_singleton_controls()
 
         # ONNX conversion settings
         onnx_group = QGroupBox("ONNX Conversion")
@@ -3579,13 +3559,52 @@ class MangaSettingsDialog(QDialog):
         """Enable/disable worker settings based on parallel processing toggle"""
         if hasattr(self, 'parallel_processing_checkbox'):
             enabled = bool(self.parallel_processing_checkbox.isChecked())
-            if hasattr(self, 'workers_spinbox'):
-                self.workers_spinbox.setEnabled(enabled)
+            if hasattr(self, 'max_workers_spinbox'):
+                self.max_workers_spinbox.setEnabled(enabled)
             if hasattr(self, 'workers_label'):
-                if enabled:
-                    self.workers_label.setStyleSheet("color: white;")
-                else:
-                    self.workers_label.setStyleSheet("color: gray;")
+                self.workers_label.setStyleSheet("" if enabled else "color: gray;")
+    
+    def _toggle_singleton_controls(self):
+        """Enable/disable parallel panel translation based on singleton toggle."""
+        # When singleton mode is ENABLED, parallel panel translation should be DISABLED
+        try:
+            singleton_enabled = bool(self.use_singleton_models_checkbox.isChecked())
+        except Exception:
+            singleton_enabled = True  # Default
+        
+        # Disable parallel panel checkbox when singleton is enabled
+        if hasattr(self, 'parallel_panel_checkbox'):
+            self.parallel_panel_checkbox.setEnabled(not singleton_enabled)
+            if singleton_enabled:
+                # Also gray out the label when disabled
+                pass  # The checkbox itself shows as disabled
+    
+    def _toggle_panel_controls(self):
+        """Enable/disable panel control fields based on parallel panel toggle."""
+        try:
+            enabled = bool(self.parallel_panel_checkbox.isChecked())
+        except Exception:
+            enabled = False
+        
+        # Enable/disable panel control widgets and their labels
+        panel_widgets = [
+            ('panel_max_workers_spinbox', 'panels_label'),
+            ('panel_stagger_ms_spinbox', 'stagger_label', 'stagger_unit_label'),
+            ('preload_local_panels_checkbox',)  # Add preload checkbox
+        ]
+        
+        for widget_names in panel_widgets:
+            for widget_name in widget_names:
+                try:
+                    widget = getattr(self, widget_name, None)
+                    if widget is not None:
+                        if isinstance(widget, QLabel):
+                            widget.setEnabled(enabled)
+                            widget.setStyleSheet("" if enabled else "color: gray;")
+                        else:
+                            widget.setEnabled(enabled)
+                except Exception:
+                    pass
 
     def _apply_defaults_to_controls(self):
         """Apply default values to all visible Tk variables/controls across tabs without rebuilding the dialog."""
