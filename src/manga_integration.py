@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
                                QDialog, QButtonGroup, QApplication)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot
-from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent
 import tkinter as tk
 from tkinter import ttk, filedialog as tk_filedialog, messagebox as tk_messagebox, scrolledtext
 try:
@@ -353,6 +353,9 @@ class MangaTranslationTab:
 
         # Start update loop
         self._process_updates()
+        
+        # Install event filter for F11 fullscreen toggle
+        self._install_fullscreen_handler()
     
     def _is_stop_requested(self) -> bool:
         """Check if stop has been requested using multiple sources"""
@@ -396,6 +399,44 @@ class MangaTranslationTab:
             self.stop_flag.clear()
         self._reset_global_cancellation()
         self._log("🔄 Stop flags reset for new translation", "debug")
+    
+    def _install_fullscreen_handler(self):
+        """Install event filter to handle F11 key for fullscreen toggle"""
+        if not self.dialog:
+            return
+        
+        # Create event filter for the dialog
+        class FullscreenEventFilter(QObject):
+            def __init__(self, dialog_ref):
+                super().__init__()
+                self.dialog = dialog_ref
+                self.is_fullscreen = False
+                self.normal_geometry = None
+            
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.KeyPress:
+                    key_event = event
+                    if key_event.key() == Qt.Key_F11:
+                        self.toggle_fullscreen()
+                        return True
+                return False
+            
+            def toggle_fullscreen(self):
+                if self.is_fullscreen:
+                    # Exit fullscreen
+                    self.dialog.setWindowState(self.dialog.windowState() & ~Qt.WindowFullScreen)
+                    if self.normal_geometry:
+                        self.dialog.setGeometry(self.normal_geometry)
+                    self.is_fullscreen = False
+                else:
+                    # Enter fullscreen
+                    self.normal_geometry = self.dialog.geometry()
+                    self.dialog.setWindowState(self.dialog.windowState() | Qt.WindowFullScreen)
+                    self.is_fullscreen = True
+        
+        # Create and install the event filter
+        self._fullscreen_filter = FullscreenEventFilter(self.dialog)
+        self.dialog.installEventFilter(self._fullscreen_filter)
     
     def _distribute_stop_flags(self):
         """Distribute stop flags to all manga translation components"""
