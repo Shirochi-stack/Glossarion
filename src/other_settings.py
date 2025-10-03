@@ -17,6 +17,7 @@ import ttkbootstrap as tb
 # Local imports - these will be available through the TranslatorGUI instance
 # Import UIHelper and CONFIG_FILE from translator_gui for use in the methods
 from translator_gui import UIHelper, CONFIG_FILE
+from ai_hunter_enhanced import AIHunterConfigGUI
 
 
 def setup_other_settings_methods(gui_instance):

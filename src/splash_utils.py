@@ -1,127 +1,173 @@
-#splah_utils.py
+# splash_utils.py - PySide6 Version
+import sys
 import time
 import atexit
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget, QProgressBar
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap, QPalette, QColor, QFont
 
 class SplashManager:
-    """Simple splash screen manager that works with main thread"""
+    """PySide6 splash screen manager - shows faster than Tkinter"""
     
     def __init__(self):
         self.splash_window = None
+        self.app = None
         self._status_text = "Initializing..."
         self.progress_value = 0  # Track actual progress 0-100
-        self.canvas_width = 320  # Progress bar dimensions (increased from 300)
-        self.canvas_height = 36  # Increased from 30
-        self._after_id = None
+        self.timer = None
+        self.status_label = None
+        self.progress_bar = None
+        self.progress_label = None
         
     def start_splash(self):
-        """Create splash window on main thread"""
+        """Create splash window with PySide6"""
         try:
-            import tkinter as tk
+            print("🎨 Starting PySide6 splash screen...")
             
-            print("🎨 Starting splash screen...")
+            # Create QApplication if it doesn't exist
+            if not QApplication.instance():
+                self.app = QApplication(sys.argv)
+            else:
+                self.app = QApplication.instance()
             
-            # Create splash window on main thread
-            self.splash_window = tk.Tk()
-            self.splash_window.title("Loading Glossarion...")
-            self.splash_window.geometry("450x350")
-            self.splash_window.configure(bg='#2b2b2b')
-            self.splash_window.resizable(False, False)
-            self.splash_window.overrideredirect(True)
+            # Create main splash widget
+            self.splash_window = QWidget()
+            self.splash_window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+            self.splash_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            self.splash_window.setFixedSize(450, 350)
             
-            # Center the window
-            self.splash_window.update_idletasks()
-            x = (self.splash_window.winfo_screenwidth() // 2) - 225
-            y = (self.splash_window.winfo_screenheight() // 2) - 175
-            self.splash_window.geometry(f"450x350+{x}+{y}")
+            # Set dark background with border
+            palette = self.splash_window.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor('#2b2b2b'))
+            self.splash_window.setPalette(palette)
+            self.splash_window.setAutoFillBackground(True)
             
-            # Add content
-            main_frame = tk.Frame(self.splash_window, bg='#2b2b2b', relief='raised', bd=2)
-            main_frame.pack(fill='both', expand=True, padx=2, pady=2)
+            # Add border using stylesheet (only to main window, not children)
+            self.splash_window.setStyleSheet("""
+                QWidget#splash_main {
+                    background-color: #2b2b2b;
+                    border: 1px solid #3d4450;
+                    border-radius: 8px;
+                }
+            """)
+            self.splash_window.setObjectName("splash_main")
             
-            # Load the actual Halgakos.ico icon
-            self._load_icon(main_frame)
+            # Main layout
+            layout = QVBoxLayout()
+            layout.setContentsMargins(20, 20, 20, 20)
+            layout.setSpacing(10)
+            
+            # Load and add icon
+            self._load_icon(layout)
             
             # Title
-            title_label = tk.Label(main_frame, text="Glossarion v4.8.5", 
-                                  bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
-            title_label.pack(pady=(10, 5))
+            title_label = QLabel("Glossarion v4.8.5")
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title_font = QFont("Arial", 20, QFont.Weight.Bold)
+            title_label.setFont(title_font)
+            title_label.setStyleSheet("color: #4a9eff; background: transparent;")
+            layout.addWidget(title_label)
             
             # Subtitle
-            subtitle_label = tk.Label(main_frame, text="Advanced AI Translation Suite", 
-                                     bg='#2b2b2b', fg='#cccccc', font=('Arial', 12))
-            subtitle_label.pack(pady=(0, 15))
+            subtitle_label = QLabel("Advanced AI Translation Suite")
+            subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            subtitle_font = QFont("Arial", 12)
+            subtitle_label.setFont(subtitle_font)
+            subtitle_label.setStyleSheet("color: #cccccc; background: transparent;")
+            layout.addWidget(subtitle_label)
             
-            # Status
-            self.status_label = tk.Label(main_frame, text=self._status_text, 
-                                        bg='#2b2b2b', fg='#ffffff', font=('Arial', 11))
-            self.status_label.pack(pady=(10, 10))
+            layout.addSpacing(10)
             
-            # Progress bar container
-            progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
-            progress_frame.pack(pady=(5, 15))  # Adjusted padding for larger bar
+            # Status label with fixed height to prevent shaking
+            self.status_label = QLabel(self._status_text)
+            self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            status_font = QFont("Arial", 11)
+            self.status_label.setFont(status_font)
+            self.status_label.setFixedHeight(30)  # Fixed height to prevent layout shifts
+            self.status_label.setStyleSheet("color: #ffffff; background: transparent;")
+            layout.addWidget(self.status_label)
             
-            # Progress bar background
-            self.progress_bg = tk.Canvas(progress_frame, width=self.canvas_width, height=self.canvas_height, 
-                                        bg='#2b2b2b', highlightthickness=0)
-            self.progress_bg.pack()
+            # Progress bar
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setMinimum(0)
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_bar.setFixedHeight(36)
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 2px solid #666666;
+                    border-radius: 5px;
+                    background-color: #1a1a1a;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                      stop:0 #6bb6ff, stop:1 #4a9eff);
+                    border-radius: 3px;
+                }
+            """)
+            layout.addWidget(self.progress_bar)
             
-            # Create border
-            self.progress_bg.create_rectangle(1, 1, self.canvas_width-1, self.canvas_height-1, 
-                                            outline='#666666', width=2)
+            # Progress percentage label (overlaid on progress bar)
+            self.progress_label = QLabel("0%", self.progress_bar)
+            self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            progress_font = QFont("Montserrat", 12, QFont.Weight.Bold)
+            self.progress_label.setFont(progress_font)
+            self.progress_label.setStyleSheet("""
+                color: #ffffff;
+                background: transparent;
+                border: none;
+            """)
+            # Position label over progress bar with fixed geometry
+            self.progress_label.setGeometry(0, 0, 400, 36)  # Fixed width to match progress bar
+            self.progress_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             
-            # Create background
-            self.progress_bg.create_rectangle(3, 3, self.canvas_width-3, self.canvas_height-3, 
-                                            fill='#1a1a1a', outline='')
-            
-            # Progress bar fill (will be updated)
-            self.progress_fill = None
-            
-            # Progress percentage text - moved up and with better font
-            text_x = self.canvas_width // 2  # 160 for 320px width
-            text_y = 13.5  # Positioned slightly above center for visual balance
-            
-            # Use a cleaner, more modern font
-            progress_font = ('Montserrat', 12, 'bold')  # Increased size to 12
-            
-            # Create outline for better readability
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx != 0 or dy != 0:
-                        self.progress_bg.create_text(text_x + dx, text_y + dy, text="0%", 
-                                                   fill='#000000', font=progress_font,
-                                                   tags="outline", anchor='center')
-            
-            # Main text on top (white)
-            self.progress_text = self.progress_bg.create_text(text_x, text_y, text="0%", 
-                                                             fill='#ffffff', font=progress_font,
-                                                             anchor='center')
+            layout.addSpacing(5)
             
             # Version info
-            version_label = tk.Label(main_frame, text="Starting up...", 
-                                   bg='#2b2b2b', fg='#888888', font=('Arial', 9))
-            version_label.pack(side='bottom', pady=(0, 15))
+            version_label = QLabel("Starting up...")
+            version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            version_font = QFont("Arial", 9)
+            version_label.setFont(version_font)
+            version_label.setStyleSheet("color: #888888; background: transparent;")
+            layout.addWidget(version_label)
+            
+            layout.addStretch()
+            
+            self.splash_window.setLayout(layout)
+            
+            # Center the window
+            screen = self.app.primaryScreen().geometry()
+            x = (screen.width() - self.splash_window.width()) // 2
+            y = (screen.height() - self.splash_window.height()) // 2
+            self.splash_window.move(x, y)
+            
+            # Show splash
+            self.splash_window.show()
             
             # Start progress animation
             self._animate_progress()
             
-            # Update the display
-            self.splash_window.update()
+            # Process events to show immediately
+            self.app.processEvents()
             
             # Register cleanup
             atexit.register(self.close_splash)
+            
+            print("✅ PySide6 splash screen displayed")
             return True
             
         except Exception as e:
             print(f"⚠️ Could not start splash: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
-    def _load_icon(self, parent):
+    def _load_icon(self, layout):
         """Load the Halgakos.ico icon"""
         try:
-            # Get icon path - handle both development and packaged modes
             import os
-            import sys
-            import tkinter as tk
             
             if getattr(sys, 'frozen', False):
                 # Running as .exe
@@ -133,215 +179,156 @@ class SplashManager:
             ico_path = os.path.join(base_dir, 'Halgakos.ico')
             
             if os.path.isfile(ico_path):
-                try:
-                    # Try PIL first for better quality
-                    from PIL import Image, ImageTk
-                    pil_image = Image.open(ico_path)
-                    pil_image = pil_image.resize((128, 128), Image.Resampling.LANCZOS)
-                    icon_photo = ImageTk.PhotoImage(pil_image, master=self.splash_window)
-                    icon_label = tk.Label(parent, image=icon_photo, bg='#2b2b2b')
-                    icon_label.image = icon_photo  # Keep reference
-                    icon_label.pack(pady=(20, 10))
+                # Load icon with Qt
+                pixmap = QPixmap(ico_path)
+                if not pixmap.isNull():
+                    # Scale to 128x128 with smooth transformation
+                    pixmap = pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, 
+                                          Qt.TransformationMode.SmoothTransformation)
+                    icon_label = QLabel()
+                    icon_label.setPixmap(pixmap)
+                    icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    icon_label.setStyleSheet("background: transparent;")
+                    layout.addWidget(icon_label)
                     return
-                except ImportError:
-                    # Fallback to basic tkinter
-                    try:
-                        icon_image = tk.PhotoImage(file=ico_path)
-                        icon_label = tk.Label(parent, image=icon_image, bg='#2b2b2b')
-                        icon_label.image = icon_image
-                        icon_label.pack(pady=(20, 10))
-                        return
-                    except tk.TclError:
-                        pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Could not load icon: {e}")
         
         # Fallback emoji if icon loading fails
-        import tkinter as tk
-        icon_frame = tk.Frame(parent, bg='#4a9eff', width=128, height=128)
-        icon_frame.pack(pady=(20, 10))
-        icon_frame.pack_propagate(False)
-        
-        icon_label = tk.Label(icon_frame, text="📚", font=('Arial', 64), 
-                             bg='#4a9eff', fg='white')
-        icon_label.pack(expand=True)
+        icon_label = QLabel("📚")
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_font = QFont("Arial", 64)
+        icon_label.setFont(icon_font)
+        icon_label.setStyleSheet("background: #4a9eff; color: white; border-radius: 10px;")
+        icon_label.setFixedSize(128, 128)
+        layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _animate_progress(self):
         """Animate progress bar filling up"""
-        # Cancel any existing after callback first
-        if self._after_id:
-            try:
-                self.splash_window.after_cancel(self._after_id)
-            except:
-                pass
-            self._after_id = None
-            
-        if self.splash_window and self.splash_window.winfo_exists():
-            try:
+        if not self.timer:
+            self.timer = QTimer()
+            self.timer.timeout.connect(self._update_progress)
+            self.timer.start(100)  # Update every 100ms
+    
+    def _update_progress(self):
+        """Update progress animation"""
+        try:
+            if self.splash_window and self.progress_value < 100:
                 # Auto-increment progress for visual effect during startup
-                if self.progress_value < 100:
-                    # Increment at different rates for different phases
-                    if self.progress_value < 30:
-                        self.progress_value += 8  # Fast initial progress
-                    elif self.progress_value < 70:
-                        self.progress_value += 4  # Medium progress
-                    elif self.progress_value < 90:
-                        self.progress_value += 2  # Slow progress
-                    else:
-                        self.progress_value += 1  # Very slow final progress
-                    
-                    # Cap at 99% until explicitly set to 100%
-                    if self.progress_value >= 99:
-                        self.progress_value = 99
+                if self.progress_value < 30:
+                    self.progress_value += 8  # Fast initial progress
+                elif self.progress_value < 70:
+                    self.progress_value += 4  # Medium progress
+                elif self.progress_value < 90:
+                    self.progress_value += 2  # Slow progress
+                else:
+                    self.progress_value += 1  # Very slow final progress
                 
-                # Update progress bar fill
-                if self.progress_fill:
-                    self.progress_bg.delete(self.progress_fill)
-                # Also delete old highlight
-                self.progress_bg.delete("highlight")
+                # Cap at 99% until explicitly set to 100%
+                if self.progress_value >= 99:
+                    self.progress_value = 99
                 
-                # Calculate fill width (3 to canvas_width-3)
-                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))  # -6 for borders
-                if fill_width > 0:
-                    # Create gradient effect
-                    self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, self.canvas_height - 3, 
-                        fill='#4a9eff', outline=''
-                    )
-                    
-                    # Add a highlight effect (adjusted for new height)
-                    if fill_width > 10:
-                        self.progress_bg.create_rectangle(
-                            3, 3, min(13, 3 + fill_width), 12,
-                            fill='#6bb6ff', outline='', tags="highlight"
-                        )
+                # Update progress bar
+                if self.progress_bar:
+                    self.progress_bar.setValue(self.progress_value)
                 
-                # Update percentage text without changing position
-                percent_text = f"{self.progress_value}%"
+                # Update percentage text
+                if self.progress_label:
+                    self.progress_label.setText(f"{self.progress_value}%")
                 
-                # Update main text
-                self.progress_bg.itemconfig(self.progress_text, text=percent_text)
-                
-                # Update all outline layers
-                for item in self.progress_bg.find_withtag("outline"):
-                    self.progress_bg.itemconfig(item, text=percent_text)
-                
-                # Ensure text stays on top of progress fill
-                self.progress_bg.tag_raise("outline")
-                self.progress_bg.tag_raise(self.progress_text)
-
-                # Store the after ID so we can cancel it later
-                self._after_id = self.splash_window.after(100, self._animate_progress)
-                
-            except Exception:
-                self._after_id = None
-                pass
+                # Process events
+                if self.app:
+                    self.app.processEvents()
+        except Exception:
+            pass
     
     def update_status(self, message):
-            """Update splash status and progress with enhanced module loading support"""
-            self._status_text = message
-            try:
-                if self.splash_window and hasattr(self, 'status_label'):
-                    self.status_label.config(text=message)
+        """Update splash status and progress"""
+        self._status_text = message
+        try:
+            if self.splash_window and self.status_label:
+                self.status_label.setText(message)
+                
+                # Enhanced progress mapping
+                progress_map = {
+                    "Loading theme framework...": 5,
+                    "Loading UI framework...": 8,
                     
-                    # Enhanced progress mapping starting module loading at 10%
-                    progress_map = {
-                        "Loading theme framework...": 5,
-                        "Loading UI framework...": 8,
-                        
-                        # Module loading phase - starts at 10% and goes to 85%
-                        "Loading translation modules...": 10,
-                        "Initializing module system...": 15,
-                        "Loading translation engine...": 20,
-                        "Validating translation engine...": 30,
-                        "✅ translation engine loaded": 40,
-                        "Loading glossary extractor...": 45,
-                        "Validating glossary extractor...": 55,
-                        "✅ glossary extractor loaded": 65,
-                        "Loading EPUB converter...": 70,
-                        "✅ EPUB converter loaded": 75,
-                        "Loading QA scanner...": 78,
-                        "✅ QA scanner loaded": 82,
-                        "Finalizing module initialization...": 85,
-                        "✅ All modules loaded successfully": 88,
-                        
-                        "Creating main window...": 92,
-                        "Ready!": 100
-                    }
+                    # Module loading phase - starts at 10% and goes to 85%
+                    "Loading translation modules...": 10,
+                    "Initializing module system...": 15,
+                    "Loading translation engine...": 20,
+                    "Validating translation engine...": 30,
+                    "✅ translation engine loaded": 40,
+                    "Loading glossary extractor...": 45,
+                    "Validating glossary extractor...": 55,
+                    "✅ glossary extractor loaded": 65,
+                    "Loading EPUB converter...": 70,
+                    "✅ EPUB converter loaded": 75,
+                    "Loading QA scanner...": 78,
+                    "✅ QA scanner loaded": 82,
+                    "Finalizing module initialization...": 85,
+                    "✅ All modules loaded successfully": 88,
                     
-                    # Check for exact matches first
-                    if message in progress_map:
-                        self.set_progress(progress_map[message])
-                    else:
-                        # Check for partial matches
-                        for key, value in progress_map.items():
-                            if key in message:
-                                self.set_progress(value)
-                                break
-                    
-                    self.splash_window.update()
-            except:
-                pass
+                    "Creating main window...": 92,
+                    "Ready!": 100
+                }
+                
+                # Check for exact matches first
+                if message in progress_map:
+                    self.set_progress(progress_map[message])
+                else:
+                    # Check for partial matches
+                    for key, value in progress_map.items():
+                        if key in message:
+                            self.set_progress(value)
+                            break
+                
+                # Process events
+                if self.app:
+                    self.app.processEvents()
+        except Exception:
+            pass
     
     def set_progress(self, value):
         """Manually set progress value (0-100)"""
         self.progress_value = max(0, min(100, value))
+        if self.progress_bar:
+            self.progress_bar.setValue(self.progress_value)
+        if self.progress_label:
+            self.progress_label.setText(f"{self.progress_value}%")
+        if self.app:
+            self.app.processEvents()
     
     def close_splash(self):
-            """Close the splash screen with proper text visibility"""
-            try:
-                # IMPORTANT: Cancel the animation first
-                if self._after_id and self.splash_window:
-                    try:
-                        self.splash_window.after_cancel(self._after_id)
-                    except:
-                        pass
-                    self._after_id = None
-                
-                if self.splash_window and self.splash_window.winfo_exists():
-                    # Set to 100% and ensure text is visible
-                    self.progress_value = 100
-                    
-                    # Update display one last time without scheduling another callback
-                    if hasattr(self, 'progress_fill') and self.progress_fill:
-                        self.progress_bg.delete(self.progress_fill)
-                    self.progress_bg.delete("highlight")
-                    
-                    # Create the 100% progress bar (but leave space for text)
-                    fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))
-                    if fill_width > 0:
-                        # Create progress fill that doesn't cover the text area
-                        self.progress_fill = self.progress_bg.create_rectangle(
-                            3, 3, 3 + fill_width, self.canvas_height - 3, 
-                            fill='#4a9eff', outline=''
-                        )
-                        
-                        # Add highlight effect
-                        if fill_width > 10:
-                            self.progress_bg.create_rectangle(
-                                3, 3, min(13, 3 + fill_width), 12,
-                                fill='#6bb6ff', outline='', tags="highlight"
-                            )
-                    
-                    # CRITICAL: Make sure text stays on top and is visible
-                    if hasattr(self, 'progress_text'):
-                        self.progress_bg.itemconfig(self.progress_text, text="100%", fill='#ffffff')
-                    
-                    # Update all outline layers for better visibility
-                    for item in self.progress_bg.find_withtag("outline"):
-                        self.progress_bg.itemconfig(item, text="100%", fill='#000000')
-                    
-                    # Ensure text layers are on top of progress fill
-                    self.progress_bg.tag_raise("outline")
-                    if hasattr(self, 'progress_text'):
-                        self.progress_bg.tag_raise(self.progress_text)
-                    
-                    self.splash_window.update()
-                    time.sleep(0.1)
-                    
-                    self.splash_window.destroy()
-                    self.splash_window = None
-            except:
-                # Ensure cleanup even on error
-                self._after_id = None
+        """Close the splash screen"""
+        try:
+            # Stop timer
+            if self.timer:
+                self.timer.stop()
+                self.timer = None
+            
+            # Set to 100%
+            self.progress_value = 100
+            if self.progress_bar:
+                self.progress_bar.setValue(100)
+            if self.progress_label:
+                self.progress_label.setText("100%")
+            
+            # Process events one last time
+            if self.app:
+                self.app.processEvents()
+            
+            time.sleep(0.1)
+            
+            # Close splash window
+            if self.splash_window:
+                self.splash_window.close()
                 self.splash_window = None
+            
+            print("✅ Splash screen closed")
+            
+        except Exception as e:
+            print(f"⚠️ Error closing splash: {e}")
+            self.timer = None
+            self.splash_window = None
