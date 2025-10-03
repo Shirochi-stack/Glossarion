@@ -165,6 +165,70 @@ class MangaSettingsDialog(QDialog):
         # Show dialog
         self.show_dialog()
             
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay (same as manga_integration.py)"""
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly after widget is shown
+        def position_checkmark():
+            # Position over the checkbox indicator
+            checkmark.setGeometry(2, 1, 14, 14)
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark():
+            if checkbox.isChecked():
+                position_checkmark()
+                checkmark.show()
+            else:
+                checkmark.hide()
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        # Delay initial positioning to ensure widget is properly rendered
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        
+        return checkbox
+    
     def _disable_spinbox_scroll(self, widget):
         """Disable mouse wheel scrolling on a spinbox, combobox, or slider (PySide6 version)"""
         # Install event filter to block wheel events
@@ -834,7 +898,7 @@ class MangaSettingsDialog(QDialog):
         enable_layout.setContentsMargins(8, 8, 8, 6)
         enable_layout.setSpacing(4)
         
-        self.preprocess_enabled = QCheckBox("Enable Image Preprocessing")
+        self.preprocess_enabled = self._create_styled_checkbox("Enable Image Preprocessing")
         self.preprocess_enabled.setChecked(self.settings['preprocessing']['enabled'])
         self.preprocess_enabled.toggled.connect(self._toggle_preprocessing)
         enable_layout.addWidget(self.preprocess_enabled)
@@ -843,7 +907,7 @@ class MangaSettingsDialog(QDialog):
         self.preprocessing_controls = []
         
         # Auto quality detection
-        self.auto_detect = QCheckBox("Auto-detect image quality issues")
+        self.auto_detect = self._create_styled_checkbox("Auto-detect image quality issues")
         self.auto_detect.setChecked(self.settings['preprocessing']['auto_detect_quality'])
         enable_layout.addWidget(self.auto_detect)
         self.preprocessing_controls.append(self.auto_detect)
@@ -1019,7 +1083,7 @@ class MangaSettingsDialog(QDialog):
         # Do NOT add compression controls to preprocessing_controls; keep independent of preprocessing toggle
         
         # Enable compression toggle
-        self.compression_enabled = QCheckBox("Enable compression for OCR uploads")
+        self.compression_enabled = self._create_styled_checkbox("Enable compression for OCR uploads")
         self.compression_enabled.setChecked(self.settings.get('compression', {}).get('enabled', False))
         self.compression_enabled.toggled.connect(self._toggle_compression_enabled)
         compression_layout.addWidget(self.compression_enabled)
@@ -1267,7 +1331,7 @@ class MangaSettingsDialog(QDialog):
         if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'enabled' in self.settings['tiling']:
             tiling_enabled_value = self.settings['tiling']['enabled']
             
-        self.inpaint_tiling_enabled = QCheckBox("Enable automatic tiling for inpainting (processes large images in tiles)")
+        self.inpaint_tiling_enabled = self._create_styled_checkbox("Enable automatic tiling for inpainting (processes large images in tiles)")
         self.inpaint_tiling_enabled.setChecked(tiling_enabled_value)
         self.inpaint_tiling_enabled.toggled.connect(self._toggle_tiling_controls)
         tiling_layout.addWidget(self.inpaint_tiling_enabled)
@@ -1344,7 +1408,7 @@ class MangaSettingsDialog(QDialog):
         mask_layout.setSpacing(4)
         
         # Auto toggle (affects iterations only, NOT mask dilation)
-        self.auto_iterations_checkbox = QCheckBox("Auto (Set by image: B&W vs Color)")
+        self.auto_iterations_checkbox = self._create_styled_checkbox("Auto (Set by image: B&W vs Color)")
         self.auto_iterations_checkbox.setChecked(self.settings.get('auto_iterations', True))
         self.auto_iterations_checkbox.toggled.connect(self._toggle_iteration_controls)
         mask_layout.addWidget(self.auto_iterations_checkbox)
@@ -1401,7 +1465,7 @@ class MangaSettingsDialog(QDialog):
         iterations_layout.addWidget(all_iter_widget)
         
         # Auto-iterations toggle (secondary control reflects the same setting)
-        self.auto_iter_secondary_checkbox = QCheckBox("Auto (set by image: B&W vs Color)")
+        self.auto_iter_secondary_checkbox = self._create_styled_checkbox("Auto (set by image: B&W vs Color)")
         self.auto_iter_secondary_checkbox.setChecked(self.settings.get('auto_iterations', True))
         self.auto_iter_secondary_checkbox.toggled.connect(self._toggle_iteration_controls)
         all_iter_layout.addWidget(self.auto_iter_secondary_checkbox)
@@ -1409,7 +1473,7 @@ class MangaSettingsDialog(QDialog):
         all_iter_layout.addSpacing(10)
         
         # Checkbox to enable/disable uniform iterations
-        self.use_all_iterations_checkbox = QCheckBox("Use Same For All:")
+        self.use_all_iterations_checkbox = self._create_styled_checkbox("Use Same For All:")
         self.use_all_iterations_checkbox.setChecked(self.settings.get('use_all_iterations', True))
         self.use_all_iterations_checkbox.toggled.connect(self._toggle_iteration_controls)
         all_iter_layout.addWidget(self.use_all_iterations_checkbox)
@@ -2071,7 +2135,7 @@ class MangaSettingsDialog(QDialog):
         lang_layout.addWidget(lang_grid_widget)
         
         for i, (code, name) in enumerate(languages):
-            checkbox = QCheckBox(name)
+            checkbox = self._create_styled_checkbox(name)
             checkbox.setChecked(code in self.settings['ocr']['language_hints'])
             self.lang_checkboxes[code] = checkbox
             lang_grid_layout.addWidget(checkbox, i//2, i%2)
@@ -2183,7 +2247,7 @@ class MangaSettingsDialog(QDialog):
         min_length_layout.addStretch()
         
         # Exclude English text checkbox
-        self.exclude_english_checkbox = QCheckBox("Exclude primarily English text (tunable threshold)")
+        self.exclude_english_checkbox = self._create_styled_checkbox("Exclude primarily English text (tunable threshold)")
         self.exclude_english_checkbox.setChecked(self.settings['ocr'].get('exclude_english_text', False))
         filter_layout.addWidget(self.exclude_english_checkbox)
         
@@ -2231,7 +2295,7 @@ class MangaSettingsDialog(QDialog):
         min_chars_layout.addStretch()
         
         # Legacy aggressive short-token filter
-        self.english_exclude_short_tokens_checkbox = QCheckBox("Aggressively drop very short ASCII tokens (legacy)")
+        self.english_exclude_short_tokens_checkbox = self._create_styled_checkbox("Aggressively drop very short ASCII tokens (legacy)")
         self.english_exclude_short_tokens_checkbox.setChecked(self.settings['ocr'].get('english_exclude_short_tokens', False))
         filter_layout.addWidget(self.english_exclude_short_tokens_checkbox)
         
@@ -2390,7 +2454,7 @@ class MangaSettingsDialog(QDialog):
         azure_ocr_layout.addWidget(azure_help)
         
         # Rotation correction
-        self.enable_rotation_checkbox = QCheckBox("Enable automatic rotation correction for tilted text")
+        self.enable_rotation_checkbox = self._create_styled_checkbox("Enable automatic rotation correction for tilted text")
         self.enable_rotation_checkbox.setChecked(self.settings['ocr']['enable_rotation_correction'])
         merge_layout.addWidget(self.enable_rotation_checkbox)
 
@@ -2400,7 +2464,7 @@ class MangaSettingsDialog(QDialog):
         content_layout.addWidget(ocr_batch_group)
 
         # Enable OCR batching
-        self.ocr_batch_enabled_checkbox = QCheckBox("Enable OCR batching (independent of translation batching)")
+        self.ocr_batch_enabled_checkbox = self._create_styled_checkbox("Enable OCR batching (independent of translation batching)")
         self.ocr_batch_enabled_checkbox.setChecked(self.settings['ocr'].get('ocr_batch_enabled', True))
         self.ocr_batch_enabled_checkbox.stateChanged.connect(self._toggle_ocr_batching_controls)
         ocr_batch_layout.addWidget(self.ocr_batch_enabled_checkbox)
@@ -2463,7 +2527,7 @@ class MangaSettingsDialog(QDialog):
         content_layout.addWidget(roi_group)
 
         # ROI locality toggle (now inside this section)
-        self.roi_locality_checkbox = QCheckBox("Enable ROI-based OCR locality and batching (uses bubble detection)")
+        self.roi_locality_checkbox = self._create_styled_checkbox("Enable ROI-based OCR locality and batching (uses bubble detection)")
         self.roi_locality_checkbox.setChecked(self.settings['ocr'].get('roi_locality_enabled', False))
         self.roi_locality_checkbox.stateChanged.connect(self._toggle_roi_locality_controls)
         roi_layout.addWidget(self.roi_locality_checkbox)
@@ -2558,7 +2622,7 @@ class MangaSettingsDialog(QDialog):
         content_layout.addWidget(bubble_group)
 
         # Enable bubble detection
-        self.bubble_detection_enabled_checkbox = QCheckBox("Enable AI-powered bubble detection (overrides traditional merging)")
+        self.bubble_detection_enabled_checkbox = self._create_styled_checkbox("Enable AI-powered bubble detection (overrides traditional merging)")
         self.bubble_detection_enabled_checkbox.setChecked(self.settings['ocr'].get('bubble_detection_enabled', False))
         self.bubble_detection_enabled_checkbox.stateChanged.connect(self._toggle_bubble_controls)
         bubble_layout.addWidget(self.bubble_detection_enabled_checkbox)
@@ -2708,15 +2772,15 @@ class MangaSettingsDialog(QDialog):
         classes_label.setMinimumWidth(100)
         rtdetr_classes_layout.addWidget(classes_label)
 
-        self.detect_empty_bubbles_checkbox = QCheckBox("Empty Bubbles")
+        self.detect_empty_bubbles_checkbox = self._create_styled_checkbox("Empty Bubbles")
         self.detect_empty_bubbles_checkbox.setChecked(self.settings['ocr'].get('detect_empty_bubbles', True))
         rtdetr_classes_layout.addWidget(self.detect_empty_bubbles_checkbox)
 
-        self.detect_text_bubbles_checkbox = QCheckBox("Text Bubbles")
+        self.detect_text_bubbles_checkbox = self._create_styled_checkbox("Text Bubbles")
         self.detect_text_bubbles_checkbox.setChecked(self.settings['ocr'].get('detect_text_bubbles', True))
         rtdetr_classes_layout.addWidget(self.detect_text_bubbles_checkbox)
 
-        self.detect_free_text_checkbox = QCheckBox("Free Text")
+        self.detect_free_text_checkbox = self._create_styled_checkbox("Free Text")
         self.detect_free_text_checkbox.setChecked(self.settings['ocr'].get('detect_free_text', True))
         rtdetr_classes_layout.addWidget(self.detect_free_text_checkbox)
         rtdetr_classes_layout.addStretch()
@@ -3179,7 +3243,7 @@ class MangaSettingsDialog(QDialog):
         detect_layout.setContentsMargins(8, 8, 8, 6)
         detect_layout.setSpacing(4)
         
-        self.format_detection_checkbox = QCheckBox("Enable automatic manga format detection (reading direction)")
+        self.format_detection_checkbox = self._create_styled_checkbox("Enable automatic manga format detection (reading direction)")
         self.format_detection_checkbox.setChecked(self.settings['advanced']['format_detection'])
         detect_layout.addWidget(self.format_detection_checkbox)
         
@@ -3206,12 +3270,12 @@ class MangaSettingsDialog(QDialog):
         debug_layout.setContentsMargins(8, 8, 8, 6)
         debug_layout.setSpacing(4)
         
-        self.debug_mode_checkbox = QCheckBox("Enable debug mode (verbose logging)")
+        self.debug_mode_checkbox = self._create_styled_checkbox("Enable debug mode (verbose logging)")
         self.debug_mode_checkbox.setChecked(self.settings['advanced']['debug_mode'])
         debug_layout.addWidget(self.debug_mode_checkbox)
         
         # New: Concise pipeline logs (reduce noise)
-        self.concise_logs_checkbox = QCheckBox("Concise pipeline logs (reduce noise)")
+        self.concise_logs_checkbox = self._create_styled_checkbox("Concise pipeline logs (reduce noise)")
         self.concise_logs_checkbox.setChecked(bool(self.settings.get('advanced', {}).get('concise_logs', True)))
         def _save_concise():
             try:
@@ -3227,7 +3291,7 @@ class MangaSettingsDialog(QDialog):
         self.concise_logs_checkbox.toggled.connect(_save_concise)
         debug_layout.addWidget(self.concise_logs_checkbox)
         
-        self.save_intermediate_checkbox = QCheckBox("Save intermediate images (preprocessed, detection overlays)")
+        self.save_intermediate_checkbox = self._create_styled_checkbox("Save intermediate images (preprocessed, detection overlays)")
         self.save_intermediate_checkbox.setChecked(self.settings['advanced']['save_intermediate'])
         debug_layout.addWidget(self.save_intermediate_checkbox)
         
@@ -3239,11 +3303,11 @@ class MangaSettingsDialog(QDialog):
         perf_layout.setSpacing(4)
         
         # New: Parallel rendering (per-region overlays)
-        self.render_parallel_checkbox = QCheckBox("Enable parallel rendering (per-region overlays)")
+        self.render_parallel_checkbox = self._create_styled_checkbox("Enable parallel rendering (per-region overlays)")
         self.render_parallel_checkbox.setChecked(self.settings.get('advanced', {}).get('render_parallel', True))
         perf_layout.addWidget(self.render_parallel_checkbox)
         
-        self.parallel_processing_checkbox = QCheckBox("Enable parallel processing (experimental)")
+        self.parallel_processing_checkbox = self._create_styled_checkbox("Enable parallel processing (experimental)")
         self.parallel_processing_checkbox.setChecked(self.settings['advanced']['parallel_processing'])
         self.parallel_processing_checkbox.toggled.connect(self._toggle_workers)
         perf_layout.addWidget(self.parallel_processing_checkbox)
@@ -3277,7 +3341,7 @@ class MangaSettingsDialog(QDialog):
         memory_layout.setSpacing(4)
         
         # Singleton mode checkbox - will connect handler later after panel widgets created
-        self.use_singleton_models_checkbox = QCheckBox("Use single model instances (saves RAM, only affects local models)")
+        self.use_singleton_models_checkbox = self._create_styled_checkbox("Use single model instances (saves RAM, only affects local models)")
         self.use_singleton_models_checkbox.setChecked(self.settings.get('advanced', {}).get('use_singleton_models', True))
         self.use_singleton_models_checkbox.toggled.connect(self._toggle_singleton_controls)
         memory_layout.addWidget(self.use_singleton_models_checkbox)
@@ -3294,12 +3358,12 @@ class MangaSettingsDialog(QDialog):
         singleton_note.setWordWrap(True)
         memory_layout.addWidget(singleton_note)
         
-        self.auto_cleanup_models_checkbox = QCheckBox("Automatically cleanup models after translation to free RAM")
+        self.auto_cleanup_models_checkbox = self._create_styled_checkbox("Automatically cleanup models after translation to free RAM")
         self.auto_cleanup_models_checkbox.setChecked(self.settings.get('advanced', {}).get('auto_cleanup_models', False))
         memory_layout.addWidget(self.auto_cleanup_models_checkbox)
         
         # Unload models after translation (disabled by default)
-        self.unload_models_checkbox = QCheckBox("Unload models after translation (reset translator instance)")
+        self.unload_models_checkbox = self._create_styled_checkbox("Unload models after translation (reset translator instance)")
         self.unload_models_checkbox.setChecked(self.settings.get('advanced', {}).get('unload_models_after_translation', False))
         memory_layout.addWidget(self.unload_models_checkbox)
         
@@ -3319,11 +3383,11 @@ class MangaSettingsDialog(QDialog):
         panel_layout.setSpacing(4)
 
         # New: Preload local inpainting for panels (default ON)
-        self.preload_local_panels_checkbox = QCheckBox("Preload local inpainting instances for panel-parallel runs")
+        self.preload_local_panels_checkbox = self._create_styled_checkbox("Preload local inpainting instances for panel-parallel runs")
         self.preload_local_panels_checkbox.setChecked(self.settings.get('advanced', {}).get('preload_local_inpainting_for_panels', True))
         panel_layout.addWidget(self.preload_local_panels_checkbox)
 
-        self.parallel_panel_checkbox = QCheckBox("Enable parallel panel translation (process multiple images concurrently)")
+        self.parallel_panel_checkbox = self._create_styled_checkbox("Enable parallel panel translation (process multiple images concurrently)")
         self.parallel_panel_checkbox.setChecked(self.settings.get('advanced', {}).get('parallel_panel_translation', False))
         self.parallel_panel_checkbox.toggled.connect(self._toggle_panel_controls)
         panel_layout.addWidget(self.parallel_panel_checkbox)
@@ -3357,7 +3421,7 @@ class MangaSettingsDialog(QDialog):
         inpaint_bs_layout.addWidget(inpaint_bs_help)
         inpaint_bs_layout.addStretch()
         
-        self.enable_cache_checkbox = QCheckBox("Enable inpainting cache (speeds up repeated processing)")
+        self.enable_cache_checkbox = self._create_styled_checkbox("Enable inpainting cache (speeds up repeated processing)")
         self.enable_cache_checkbox.setChecked(self.settings.get('inpainting', {}).get('enable_cache', True))
         inpaint_perf_layout.addWidget(self.enable_cache_checkbox)
 
@@ -3407,11 +3471,11 @@ class MangaSettingsDialog(QDialog):
         onnx_layout.setContentsMargins(8, 8, 8, 6)
         onnx_layout.setSpacing(4)
         
-        self.auto_convert_onnx_checkbox = QCheckBox("Auto-convert local models to ONNX for faster inference (recommended)")
+        self.auto_convert_onnx_checkbox = self._create_styled_checkbox("Auto-convert local models to ONNX for faster inference (recommended)")
         self.auto_convert_onnx_checkbox.setChecked(self.settings['advanced'].get('auto_convert_to_onnx', False))
         onnx_layout.addWidget(self.auto_convert_onnx_checkbox)
         
-        self.auto_convert_onnx_bg_checkbox = QCheckBox("Convert in background (non-blocking; switches to ONNX when ready)")
+        self.auto_convert_onnx_bg_checkbox = self._create_styled_checkbox("Convert in background (non-blocking; switches to ONNX when ready)")
         self.auto_convert_onnx_bg_checkbox.setChecked(self.settings['advanced'].get('auto_convert_to_onnx_background', True))
         onnx_layout.addWidget(self.auto_convert_onnx_bg_checkbox)
         
@@ -3428,7 +3492,7 @@ class MangaSettingsDialog(QDialog):
         quant_layout.setContentsMargins(8, 8, 8, 6)
         quant_layout.setSpacing(4)
         
-        self.quantize_models_checkbox = QCheckBox("Reduce RAM with quantized models (global switch)")
+        self.quantize_models_checkbox = self._create_styled_checkbox("Reduce RAM with quantized models (global switch)")
         self.quantize_models_checkbox.setChecked(self.settings['advanced'].get('quantize_models', False))
         quant_layout.addWidget(self.quantize_models_checkbox)
         
@@ -3438,7 +3502,7 @@ class MangaSettingsDialog(QDialog):
         onnx_quant_layout.setContentsMargins(0, 0, 0, 0)
         quant_layout.addWidget(onnx_quant_frame)
         
-        self.onnx_quantize_checkbox = QCheckBox("Quantize ONNX models to INT8 (dynamic)")
+        self.onnx_quantize_checkbox = self._create_styled_checkbox("Quantize ONNX models to INT8 (dynamic)")
         self.onnx_quantize_checkbox.setChecked(self.settings['advanced'].get('onnx_quantize', False))
         onnx_quant_layout.addWidget(self.onnx_quantize_checkbox)
         
@@ -3478,7 +3542,7 @@ class MangaSettingsDialog(QDialog):
         cleanup_layout.setContentsMargins(8, 8, 8, 6)
         cleanup_layout.setSpacing(4)
         
-        self.force_deep_cleanup_checkbox = QCheckBox("Force deep model cleanup after every image (slowest, lowest RAM)")
+        self.force_deep_cleanup_checkbox = self._create_styled_checkbox("Force deep model cleanup after every image (slowest, lowest RAM)")
         self.force_deep_cleanup_checkbox.setChecked(self.settings.get('advanced', {}).get('force_deep_cleanup_each_image', False))
         cleanup_layout.addWidget(self.force_deep_cleanup_checkbox)
         
@@ -3489,7 +3553,7 @@ class MangaSettingsDialog(QDialog):
         cleanup_layout.addWidget(cleanup_help)
         
         # RAM cap controls
-        self.ram_cap_enabled_checkbox = QCheckBox("Enable RAM cap")
+        self.ram_cap_enabled_checkbox = self._create_styled_checkbox("Enable RAM cap")
         self.ram_cap_enabled_checkbox.setChecked(self.settings.get('advanced', {}).get('ram_cap_enabled', False))
         cleanup_layout.addWidget(self.ram_cap_enabled_checkbox)
         
