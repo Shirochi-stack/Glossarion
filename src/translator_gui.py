@@ -2102,9 +2102,17 @@ Text to analyze:
                 pass
             app = QApplication(sys.argv)
         
-        # Create PySide6 dialog
+        # Create PySide6 dialog with standard window controls
         dialog = QDialog()
         dialog.setWindowTitle("🎌 Manga Panel Translator")
+        
+        # Enable maximize button and standard window controls (minimize, maximize, close)
+        dialog.setWindowFlags(
+            Qt.Window | 
+            Qt.WindowMinimizeButtonHint | 
+            Qt.WindowMaximizeButtonHint | 
+            Qt.WindowCloseButtonHint
+        )
         
         # Set icon if available
         try:
@@ -2116,14 +2124,15 @@ Text to analyze:
             pass
         
         # Size and position the dialog
-        screen = app.primaryScreen().geometry()
+        # Use availableGeometry to exclude taskbar and other system UI
+        screen = app.primaryScreen().availableGeometry()
         dialog_width = min(1400, int(screen.width() * 0.95))  # Increased from 900 to 1400 for 2-column layout
-        dialog_height = min(900, int(screen.height() * 0.95))  # Increased from 700 to 900
+        dialog_height = int(screen.height() * 0.90)  # Use 90% of available screen height for safety margin
         dialog.resize(dialog_width, dialog_height)
         
-        # Center the dialog
-        dialog_x = (screen.width() - dialog_width) // 2
-        dialog_y = max(20, (screen.height() - dialog_height) // 2)
+        # Center the dialog within available screen space
+        dialog_x = screen.x() + (screen.width() - dialog_width) // 2
+        dialog_y = screen.y() + (screen.height() - dialog_height) // 2
         dialog.move(dialog_x, dialog_y)
         
         # Create scrollable content area
