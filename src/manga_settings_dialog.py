@@ -1407,10 +1407,11 @@ class MangaSettingsDialog(QDialog):
         mask_layout.setContentsMargins(8, 8, 8, 6)
         mask_layout.setSpacing(4)
         
-        # Auto toggle (affects iterations only, NOT mask dilation)
-        self.auto_iterations_checkbox = self._create_styled_checkbox("Auto (Set by image: B&W vs Color)")
+        # Auto toggle (affects both mask dilation AND iterations)
+        self.auto_iterations_checkbox = self._create_styled_checkbox("Auto Iterations (automatically set values based on OCR provider and B&W vs Color)")
         self.auto_iterations_checkbox.setChecked(self.settings.get('auto_iterations', True))
         self.auto_iterations_checkbox.toggled.connect(self._toggle_iteration_controls)
+        self.auto_iterations_checkbox.toggled.connect(self._on_primary_auto_toggle)  # Sync with "Use Same For All"
         mask_layout.addWidget(self.auto_iterations_checkbox)
 
         # Mask Dilation frame (affected by auto setting)
@@ -1464,14 +1465,6 @@ class MangaSettingsDialog(QDialog):
         all_iter_layout.setContentsMargins(0, 0, 0, 0)
         iterations_layout.addWidget(all_iter_widget)
         
-        # Auto-iterations toggle (secondary control reflects the same setting)
-        self.auto_iter_secondary_checkbox = self._create_styled_checkbox("Auto (set by image: B&W vs Color)")
-        self.auto_iter_secondary_checkbox.setChecked(self.settings.get('auto_iterations', True))
-        self.auto_iter_secondary_checkbox.toggled.connect(self._toggle_iteration_controls)
-        all_iter_layout.addWidget(self.auto_iter_secondary_checkbox)
-        
-        all_iter_layout.addSpacing(10)
-        
         # Checkbox to enable/disable uniform iterations
         self.use_all_iterations_checkbox = self._create_styled_checkbox("Use Same For All:")
         self.use_all_iterations_checkbox.setChecked(self.settings.get('use_all_iterations', True))
@@ -1486,8 +1479,8 @@ class MangaSettingsDialog(QDialog):
         self.all_iterations_spinbox.setEnabled(self.use_all_iterations_checkbox.isChecked())
         all_iter_layout.addWidget(self.all_iterations_spinbox)
         
-        all_iter_label = QLabel("iterations (applies to all text types)")
-        all_iter_layout.addWidget(all_iter_label)
+        self.all_iter_label = QLabel("iterations (applies to all text types)")
+        all_iter_layout.addWidget(self.all_iter_label)
         all_iter_layout.addStretch()
         
         # Separator
@@ -1497,11 +1490,11 @@ class MangaSettingsDialog(QDialog):
         iterations_layout.addWidget(separator1)
         
         # Individual Controls Label
-        individual_label = QLabel("Individual Text Type Controls:")
+        self.individual_controls_header_label = QLabel("Individual Text Type Controls:")
         individual_label_font = QFont('Arial', 9)
         individual_label_font.setBold(True)
-        individual_label.setFont(individual_label_font)
-        iterations_layout.addWidget(individual_label)
+        self.individual_controls_header_label.setFont(individual_label_font)
+        iterations_layout.addWidget(self.individual_controls_header_label)
         
         # Text Bubble iterations (modified from original bubble iterations)
         text_bubble_iter_widget = QWidget()
@@ -1519,8 +1512,8 @@ class MangaSettingsDialog(QDialog):
                                                                   self.settings.get('bubble_dilation_iterations', 2)))
         text_bubble_iter_layout.addWidget(self.text_bubble_iter_spinbox)
         
-        text_bubble_desc = QLabel("iterations (speech/dialogue bubbles)")
-        text_bubble_iter_layout.addWidget(text_bubble_desc)
+        self.text_bubble_desc = QLabel("iterations (speech/dialogue bubbles)")
+        text_bubble_iter_layout.addWidget(self.text_bubble_desc)
         text_bubble_iter_layout.addStretch()
         
         # Empty Bubble iterations (NEW)
@@ -1538,8 +1531,8 @@ class MangaSettingsDialog(QDialog):
         self.empty_bubble_iter_spinbox.setValue(self.settings.get('empty_bubble_dilation_iterations', 3))
         empty_bubble_iter_layout.addWidget(self.empty_bubble_iter_spinbox)
         
-        empty_bubble_desc = QLabel("iterations (empty speech bubbles)")
-        empty_bubble_iter_layout.addWidget(empty_bubble_desc)
+        self.empty_bubble_desc = QLabel("iterations (empty speech bubbles)")
+        empty_bubble_iter_layout.addWidget(self.empty_bubble_desc)
         empty_bubble_iter_layout.addStretch()
         
         # Free text iterations
@@ -1557,15 +1550,15 @@ class MangaSettingsDialog(QDialog):
         self.free_text_iter_spinbox.setValue(self.settings.get('free_text_dilation_iterations', 0))
         free_text_iter_layout.addWidget(self.free_text_iter_spinbox)
         
-        free_text_desc = QLabel("iterations (0 = perfect for B&W panels)")
-        free_text_iter_layout.addWidget(free_text_desc)
+        self.free_text_desc = QLabel("iterations (0 = perfect for B&W panels)")
+        free_text_iter_layout.addWidget(self.free_text_desc)
         free_text_iter_layout.addStretch()
         
-        # Store individual control widgets for enable/disable
+        # Store individual control widgets for enable/disable (includes descriptive labels)
         self.individual_iteration_controls = [
-            (self.text_bubble_label, self.text_bubble_iter_spinbox),
-            (self.empty_bubble_label, self.empty_bubble_iter_spinbox),
-            (self.free_text_label, self.free_text_iter_spinbox)
+            (self.text_bubble_label, self.text_bubble_iter_spinbox, self.text_bubble_desc),
+            (self.empty_bubble_label, self.empty_bubble_iter_spinbox, self.empty_bubble_desc),
+            (self.free_text_label, self.free_text_iter_spinbox, self.free_text_desc)
         ]
         
         # Apply initial state
@@ -1582,14 +1575,62 @@ class MangaSettingsDialog(QDialog):
         preset_layout.addSpacing(10)
         
         bw_manga_btn = QPushButton("B&W Manga")
+        bw_manga_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a7ca5;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4a8cb5;
+            }
+            QPushButton:pressed {
+                background-color: #2a6c95;
+            }
+        """)
         bw_manga_btn.clicked.connect(lambda: self._set_mask_preset(15, False, 2, 2, 3, 0))
         preset_layout.addWidget(bw_manga_btn)
         
         colored_btn = QPushButton("Colored")
+        colored_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a7ca5;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4a8cb5;
+            }
+            QPushButton:pressed {
+                background-color: #2a6c95;
+            }
+        """)
         colored_btn.clicked.connect(lambda: self._set_mask_preset(15, False, 2, 2, 3, 3))
         preset_layout.addWidget(colored_btn)
         
         uniform_btn = QPushButton("Uniform")
+        uniform_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a7ca5;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4a8cb5;
+            }
+            QPushButton:pressed {
+                background-color: #2a6c95;
+            }
+        """)
         uniform_btn.clicked.connect(lambda: self._set_mask_preset(0, True, 2, 2, 2, 0))
         preset_layout.addWidget(uniform_btn)
         
@@ -1611,32 +1652,13 @@ class MangaSettingsDialog(QDialog):
         mask_dilation_layout.addWidget(help_text)
         
         main_layout.addStretch()
-        
-        # Note about method selection
-        info_widget = QWidget()
-        info_layout = QHBoxLayout(info_widget)
-        info_layout.setContentsMargins(20, 0, 20, 0)
-        main_layout.addWidget(info_widget)
-        
-        info_label = QLabel(
-            "ℹ️ Note: Inpainting method (Cloud/Local) and model selection are configured\n"
-            "     in the Manga tab when you select images for translation."
-        )
-        info_font = QFont('Arial', 10)
-        info_label.setFont(info_font)
-        info_label.setStyleSheet("color: #4a9eff;")
-        info_label.setWordWrap(True)
-        info_layout.addWidget(info_label)
-        info_layout.addStretch()
 
     def _toggle_iteration_controls(self):
         """Enable/disable iteration controls based on Auto and 'Use Same For All' toggles"""
-        # Get auto checkbox state - check BOTH auto checkboxes
+        # Get auto checkbox state
         auto_on = False
         if hasattr(self, 'auto_iterations_checkbox'):
-            auto_on = auto_on or self.auto_iterations_checkbox.isChecked()
-        if hasattr(self, 'auto_iter_secondary_checkbox'):
-            auto_on = auto_on or self.auto_iter_secondary_checkbox.isChecked()
+            auto_on = self.auto_iterations_checkbox.isChecked()
         
         # Get use_all checkbox state
         use_all = False
@@ -1647,10 +1669,31 @@ class MangaSettingsDialog(QDialog):
         self.auto_iterations_enabled = auto_on
         
         if auto_on:
-            # Disable iterations controls when auto is on, INCLUDING the "Use Same For All" checkbox
-            # BUT DO NOT touch mask dilation - it should always stay enabled
+            # Disable ALL mask dilation and iteration controls when auto is on
+            # Mask dilation controls
+            try:
+                if hasattr(self, 'mask_dilation_spinbox'):
+                    self.mask_dilation_spinbox.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'dilation_label'):
+                    self.dilation_label.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'dilation_unit_label'):
+                    self.dilation_unit_label.setEnabled(False)
+            except Exception:
+                pass
+            # Iteration controls
             try:
                 self.all_iterations_spinbox.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'all_iter_label'):
+                    self.all_iter_label.setEnabled(False)
             except Exception:
                 pass
             try:
@@ -1658,16 +1701,45 @@ class MangaSettingsDialog(QDialog):
                     self.use_all_iterations_checkbox.setEnabled(False)
             except Exception:
                 pass
-            # DO NOT disable mask_dilation_spinbox or dilation_label - leave them enabled
-            for label, spinbox in getattr(self, 'individual_iteration_controls', []):
+            try:
+                if hasattr(self, 'individual_controls_header_label'):
+                    self.individual_controls_header_label.setEnabled(False)
+            except Exception:
+                pass
+            # Disable individual controls and their description labels
+            for control_tuple in getattr(self, 'individual_iteration_controls', []):
                 try:
-                    spinbox.setEnabled(False)
-                    label.setEnabled(False)  # Use setEnabled() instead of stylesheet
+                    if len(control_tuple) == 3:
+                        label, spinbox, desc_label = control_tuple
+                        spinbox.setEnabled(False)
+                        label.setEnabled(False)
+                        desc_label.setEnabled(False)
+                    elif len(control_tuple) == 2:
+                        label, spinbox = control_tuple
+                        spinbox.setEnabled(False)
+                        label.setEnabled(False)
                 except Exception:
                     pass
             return
         
-        # Auto off -> enable "Use Same For All" and respect its state
+        # Auto off -> enable mask dilation (always) and "Use Same For All" (respect its state)
+        # Mask dilation is always enabled when auto is off
+        try:
+            if hasattr(self, 'mask_dilation_spinbox'):
+                self.mask_dilation_spinbox.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'dilation_label'):
+                self.dilation_label.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'dilation_unit_label'):
+                self.dilation_unit_label.setEnabled(True)
+        except Exception:
+            pass
+        
         try:
             if hasattr(self, 'use_all_iterations_checkbox'):
                 self.use_all_iterations_checkbox.setEnabled(True)
@@ -1678,14 +1750,37 @@ class MangaSettingsDialog(QDialog):
             self.all_iterations_spinbox.setEnabled(use_all)
         except Exception:
             pass
-        # Mask dilation always stays enabled regardless of auto state
-        for label, spinbox in getattr(self, 'individual_iteration_controls', []):
+        try:
+            if hasattr(self, 'all_iter_label'):
+                self.all_iter_label.setEnabled(use_all)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'individual_controls_header_label'):
+                self.individual_controls_header_label.setEnabled(not use_all)
+        except Exception:
+            pass
+        
+        # Individual controls respect the "Use Same For All" state
+        for control_tuple in getattr(self, 'individual_iteration_controls', []):
             enabled = not use_all
             try:
-                spinbox.setEnabled(enabled)
-                label.setEnabled(enabled)  # Use setEnabled() instead of stylesheet
+                if len(control_tuple) == 3:
+                    label, spinbox, desc_label = control_tuple
+                    spinbox.setEnabled(enabled)
+                    label.setEnabled(enabled)
+                    desc_label.setEnabled(enabled)
+                elif len(control_tuple) == 2:
+                    label, spinbox = control_tuple
+                    spinbox.setEnabled(enabled)
+                    label.setEnabled(enabled)
             except Exception:
                 pass
+    
+    def _on_primary_auto_toggle(self, checked):
+        """When primary Auto toggle changes, disable/enable 'Use Same For All' checkbox"""
+        if hasattr(self, 'use_all_iterations_checkbox'):
+            self.use_all_iterations_checkbox.setEnabled(not checked)
 
     def _set_mask_preset(self, dilation, use_all, all_iter, text_bubble_iter, empty_bubble_iter, free_text_iter):
         """Set mask dilation preset values with comprehensive iteration controls"""
