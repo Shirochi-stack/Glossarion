@@ -1863,9 +1863,9 @@ class MangaSettingsDialog(QDialog):
         
     def _toggle_preprocessing(self):
         """Enable/disable preprocessing controls based on main toggle"""
-        enabled = self.preprocess_enabled.get()
+        enabled = self.preprocess_checkbox.isChecked()
         
-        # Widgets that must remain enabled regardless of toggle (widgets only, not Tk variables)
+        # Widgets that must remain enabled regardless of toggle (widgets only, not Qt variables)
         always_on = []
         for name in [
             'tiling_frame',
@@ -1883,43 +1883,43 @@ class MangaSettingsDialog(QDialog):
             try:
                 if control in always_on:
                     # Ensure enabled
-                    if isinstance(control, (tk.Scale, tb.Spinbox, tb.Checkbutton)):
-                        control.config(state='normal')
-                    elif isinstance(control, tk.LabelFrame):
-                        control.config(fg='white')
+                    if isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox)):
+                        control.setEnabled(True)
+                    elif isinstance(control, QGroupBox):
+                        control.setStyleSheet("")
                         self._toggle_frame_children(control, True)
-                    elif isinstance(control, tk.Label):
-                        control.config(fg='white')
-                    elif isinstance(control, tk.Frame):
+                    elif isinstance(control, QLabel):
+                        control.setStyleSheet("")
+                    elif isinstance(control, QWidget):
                         self._toggle_frame_children(control, True)
                     continue
             except Exception:
                 pass
             
             # Normal enable/disable logic for other controls
-            if isinstance(control, (tk.Scale, tb.Spinbox, tb.Checkbutton)):
-                control.config(state='normal' if enabled else 'disabled')
-            elif isinstance(control, tk.LabelFrame):
-                control.config(fg='white' if enabled else 'gray')
-            elif isinstance(control, tk.Label):
-                control.config(fg='white' if enabled else 'gray')
-            elif isinstance(control, tk.Frame):
+            if isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox)):
+                control.setEnabled(enabled)
+            elif isinstance(control, QGroupBox):
+                control.setStyleSheet("" if enabled else "color: gray;")
+            elif isinstance(control, QLabel):
+                control.setStyleSheet("" if enabled else "color: gray;")
+            elif isinstance(control, QWidget):
                 self._toggle_frame_children(control, enabled)
         
         # Final enforcement for always-on widgets (in case they were not in list)
         try:
             if hasattr(self, 'chunk_height_spinbox'):
-                self.chunk_height_spinbox.config(state='normal')
+                self.chunk_height_spinbox.setEnabled(True)
             if hasattr(self, 'chunk_overlap_spinbox'):
-                self.chunk_overlap_spinbox.config(state='normal')
+                self.chunk_overlap_spinbox.setEnabled(True)
             if hasattr(self, 'chunk_height_label'):
-                self.chunk_height_label.config(fg='white')
+                self.chunk_height_label.setStyleSheet("")
             if hasattr(self, 'chunk_overlap_label'):
-                self.chunk_overlap_label.config(fg='white')
+                self.chunk_overlap_label.setStyleSheet("")
             if hasattr(self, 'chunk_height_unit_label'):
-                self.chunk_height_unit_label.config(fg='white')
+                self.chunk_height_unit_label.setStyleSheet("")
             if hasattr(self, 'chunk_overlap_unit_label'):
-                self.chunk_overlap_unit_label.config(fg='white')
+                self.chunk_overlap_unit_label.setStyleSheet("")
         except Exception:
             pass
         # Ensure tiling fields respect their own toggle regardless of preprocessing state
@@ -1928,23 +1928,22 @@ class MangaSettingsDialog(QDialog):
                 self._toggle_tiling_controls()
         except Exception:
             pass
-    def _toggle_frame_children(self, frame, enabled):
-        """Recursively enable/disable all children of a frame"""
-        for child in frame.winfo_children():
-            if isinstance(child, (tk.Scale, tb.Spinbox, tb.Checkbutton, ttk.Combobox)):
+    
+    def _toggle_frame_children(self, widget, enabled):
+        """Recursively enable/disable all children of a widget"""
+        for child in widget.findChildren(QWidget):
+            if isinstance(child, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox)):
                 try:
-                    child.config(state='readonly' if (enabled and isinstance(child, ttk.Combobox)) else ('normal' if enabled else 'disabled'))
+                    child.setEnabled(enabled)
                 except Exception:
-                    child.config(state='normal' if enabled else 'disabled')
-            elif isinstance(child, tk.Label):
-                child.config(fg='white' if enabled else 'gray')
-            elif isinstance(child, tk.Frame):
-                self._toggle_frame_children(child, enabled)
+                    pass
+            elif isinstance(child, QLabel):
+                child.setStyleSheet("" if enabled else "color: gray;")
 
     def _toggle_roi_locality_controls(self):
         """Show/hide ROI locality controls based on toggle."""
         try:
-            enabled = self.roi_locality_var.get()
+            enabled = self.roi_locality_checkbox.isChecked()
         except Exception:
             enabled = False
         # Rows to manage
@@ -1957,92 +1956,98 @@ class MangaSettingsDialog(QDialog):
         for row in rows:
             try:
                 if row is None: continue
-                if enabled:
-                    # Only pack if not already managed
-                    row.pack(fill='x', pady=5)
-                else:
-                    row.pack_forget()
+                row.setVisible(enabled)
             except Exception:
                 pass
 
     def _toggle_tiling_controls(self):
         """Enable/disable tiling size/overlap fields based on tiling toggle."""
         try:
-            enabled = bool(self.inpaint_tiling_enabled.get())
+            enabled = bool(self.inpaint_tiling_checkbox.isChecked())
         except Exception:
             enabled = False
-        state = 'normal' if enabled else 'disabled'
         try:
-            self.tile_size_spinbox.config(state=state)
+            self.tile_size_spinbox.setEnabled(enabled)
         except Exception:
             pass
         try:
-            self.tile_overlap_spinbox.config(state=state)
+            self.tile_overlap_spinbox.setEnabled(enabled)
         except Exception:
             pass
 
     def _toggle_compression_format(self):
         """Show only the controls relevant to the selected format (hide others)."""
-        fmt = getattr(self, 'compression_format_var', tk.StringVar(value='jpeg')).get()
+        fmt = self.compression_format_combo.currentText().lower() if hasattr(self, 'compression_format_combo') else 'jpeg'
         try:
             # Hide all rows first
             for row in [getattr(self, 'jpeg_row', None), getattr(self, 'png_row', None), getattr(self, 'webp_row', None)]:
                 try:
                     if row is not None:
-                        row.pack_forget()
+                        row.setVisible(False)
                 except Exception:
                     pass
             # Show the selected one
             if fmt == 'jpeg':
                 if hasattr(self, 'jpeg_row') and self.jpeg_row is not None:
-                    self.jpeg_row.pack(fill='x', pady=5)
+                    self.jpeg_row.setVisible(True)
             elif fmt == 'png':
                 if hasattr(self, 'png_row') and self.png_row is not None:
-                    self.png_row.pack(fill='x', pady=5)
+                    self.png_row.setVisible(True)
             else:  # webp
                 if hasattr(self, 'webp_row') and self.webp_row is not None:
-                    self.webp_row.pack(fill='x', pady=5)
+                    self.webp_row.setVisible(True)
         except Exception:
             pass
     
     def _toggle_ocr_batching_controls(self):
         """Show/hide OCR batching rows based on enable toggle."""
         try:
-            enabled = bool(self.ocr_batch_enabled_var.get())
+            enabled = bool(self.ocr_batch_enabled_checkbox.isChecked())
         except Exception:
             enabled = False
         try:
             if hasattr(self, 'ocr_bs_row') and self.ocr_bs_row:
-                (self.ocr_bs_row.pack if enabled else self.ocr_bs_row.pack_forget)()
+                self.ocr_bs_row.setVisible(enabled)
         except Exception:
             pass
         try:
             if hasattr(self, 'ocr_cc_row') and self.ocr_cc_row:
-                (self.ocr_cc_row.pack if enabled else self.ocr_cc_row.pack_forget)()
+                self.ocr_cc_row.setVisible(enabled)
         except Exception:
             pass
 
-    def _create_ocr_tab(self, notebook):
+    def _create_ocr_tab(self, parent):
         """Create OCR settings tab with all options"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="OCR Settings")
+        # Create scroll area for OCR settings
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         
-        # Main content
-        content_frame = tk.Frame(frame)
-        content_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        
+        scroll_area.setWidget(content_widget)
+        
+        # Add scroll area to parent layout
+        parent_layout = QVBoxLayout(parent)
+        parent_layout.setContentsMargins(0, 0, 0, 0)
+        parent_layout.addWidget(scroll_area)
         
         # Language hints
-        lang_frame = tk.LabelFrame(content_frame, text="Language Detection", padx=15, pady=10)
-        lang_frame.pack(fill='x', padx=20, pady=20)
+        lang_group = QGroupBox("Language Detection")
+        lang_layout = QVBoxLayout(lang_group)
+        content_layout.addWidget(lang_group)
         
-        tk.Label(
-            lang_frame,
-            text="Select languages to prioritize during OCR:",
-            font=('Arial', 10)
-        ).pack(anchor='w', pady=(0, 10))
+        lang_desc = QLabel("Select languages to prioritize during OCR:")
+        lang_desc_font = QFont('Arial', 10)
+        lang_desc.setFont(lang_desc_font)
+        lang_layout.addWidget(lang_desc)
+        lang_layout.addSpacing(10)
         
         # Language checkboxes
-        self.lang_vars = {}
+        self.lang_checkboxes = {}
         languages = [
             ('ja', 'Japanese'),
             ('ko', 'Korean'),
@@ -2051,384 +2056,390 @@ class MangaSettingsDialog(QDialog):
             ('en', 'English')
         ]
         
-        lang_grid = tk.Frame(lang_frame)
-        lang_grid.pack(fill='x')
+        lang_grid_widget = QWidget()
+        lang_grid_layout = QGridLayout(lang_grid_widget)
+        lang_layout.addWidget(lang_grid_widget)
         
         for i, (code, name) in enumerate(languages):
-            var = tk.BooleanVar(value=code in self.settings['ocr']['language_hints'])
-            self.lang_vars[code] = var
-            tb.Checkbutton(
-                lang_grid,
-                text=name,
-                variable=var,
-                bootstyle="round-toggle"
-            ).grid(row=i//2, column=i%2, sticky='w', padx=10, pady=5)
+            checkbox = QCheckBox(name)
+            checkbox.setChecked(code in self.settings['ocr']['language_hints'])
+            self.lang_checkboxes[code] = checkbox
+            lang_grid_layout.addWidget(checkbox, i//2, i%2)
         
         # OCR parameters
-        ocr_frame = tk.LabelFrame(content_frame, text="OCR Parameters", padx=15, pady=10)
-        ocr_frame.pack(fill='x', padx=20)
+        ocr_group = QGroupBox("OCR Parameters")
+        ocr_layout = QVBoxLayout(ocr_group)
+        content_layout.addWidget(ocr_group)
         
         # Confidence threshold
-        conf_frame = tk.Frame(ocr_frame)
-        conf_frame.pack(fill='x', pady=5)
-        tk.Label(conf_frame, text="Confidence Threshold:", width=20, anchor='w').pack(side='left')
-        self.confidence_threshold = tk.DoubleVar(value=self.settings['ocr']['confidence_threshold'])
-        conf_scale = tk.Scale(
-            conf_frame,
-            from_=0.0, to=1.0,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.confidence_threshold,
-            length=250
+        conf_widget = QWidget()
+        conf_layout = QHBoxLayout(conf_widget)
+        conf_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_layout.addWidget(conf_widget)
+        
+        conf_label = QLabel("Confidence Threshold:")
+        conf_label.setMinimumWidth(180)
+        conf_layout.addWidget(conf_label)
+        
+        self.confidence_threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.confidence_threshold_slider.setRange(0, 100)
+        self.confidence_threshold_slider.setValue(int(self.settings['ocr']['confidence_threshold'] * 100))
+        self.confidence_threshold_slider.setMinimumWidth(250)
+        conf_layout.addWidget(self.confidence_threshold_slider)
+        
+        self.confidence_threshold_label = QLabel(f"{self.settings['ocr']['confidence_threshold']:.2f}")
+        self.confidence_threshold_label.setMinimumWidth(50)
+        self.confidence_threshold_slider.valueChanged.connect(
+            lambda v: self.confidence_threshold_label.setText(f"{v/100:.2f}")
         )
-        conf_scale.pack(side='left', padx=10)
-        tk.Label(conf_frame, textvariable=self.confidence_threshold, width=5).pack(side='left')
+        conf_layout.addWidget(self.confidence_threshold_label)
+        conf_layout.addStretch()
         
         # Detection mode
-        mode_frame = tk.Frame(ocr_frame)
-        mode_frame.pack(fill='x', pady=5)
-        tk.Label(mode_frame, text="Detection Mode:", width=20, anchor='w').pack(side='left')
-        self.detection_mode = tk.StringVar(value=self.settings['ocr']['text_detection_mode'])
-        mode_combo = ttk.Combobox(
-            mode_frame,
-            textvariable=self.detection_mode,
-            values=['document', 'text'],
-            state='readonly',
-            width=15
-        )
-        mode_combo.pack(side='left', padx=10)
+        mode_widget = QWidget()
+        mode_layout = QHBoxLayout(mode_widget)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_layout.addWidget(mode_widget)
         
-        tk.Label(
-            mode_frame, 
-            text="(document = better for manga, text = simple layouts)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side='left', padx=5)
+        mode_label = QLabel("Detection Mode:")
+        mode_label.setMinimumWidth(180)
+        mode_layout.addWidget(mode_label)
+        
+        self.detection_mode_combo = QComboBox()
+        self.detection_mode_combo.addItems(['document', 'text'])
+        self.detection_mode_combo.setCurrentText(self.settings['ocr']['text_detection_mode'])
+        mode_layout.addWidget(self.detection_mode_combo)
+        
+        mode_desc = QLabel("(document = better for manga, text = simple layouts)")
+        mode_desc_font = QFont('Arial', 9)
+        mode_desc.setFont(mode_desc_font)
+        mode_desc.setStyleSheet("color: gray;")
+        mode_layout.addWidget(mode_desc)
+        mode_layout.addStretch()
         
         # Text merging settings
-        merge_frame = tk.LabelFrame(content_frame, text="Text Region Merging", padx=15, pady=10)
-        merge_frame.pack(fill='x', padx=20, pady=(10, 0))
-
+        merge_group = QGroupBox("Text Region Merging")
+        merge_layout = QVBoxLayout(merge_group)
+        content_layout.addWidget(merge_group)
         
         # Merge nearby threshold
-        nearby_frame = tk.Frame(merge_frame)
-        nearby_frame.pack(fill='x', pady=5)
-        tk.Label(nearby_frame, text="Merge Distance:", width=20, anchor='w').pack(side='left')
-        self.merge_nearby_threshold = tk.IntVar(value=self.settings['ocr']['merge_nearby_threshold'])
-        nearby_spinbox = tb.Spinbox(
-            nearby_frame,
-            from_=0,
-            to=200,
-            textvariable=self.merge_nearby_threshold,
-            increment=10,
-            width=10
-        )
-        nearby_spinbox.pack(side='left', padx=10)
-        tk.Label(nearby_frame, text="pixels").pack(side='left')
+        nearby_widget = QWidget()
+        nearby_layout = QHBoxLayout(nearby_widget)
+        nearby_layout.setContentsMargins(0, 0, 0, 0)
+        merge_layout.addWidget(nearby_widget)
+        
+        nearby_label = QLabel("Merge Distance:")
+        nearby_label.setMinimumWidth(180)
+        nearby_layout.addWidget(nearby_label)
+        
+        self.merge_nearby_threshold_spinbox = QSpinBox()
+        self.merge_nearby_threshold_spinbox.setRange(0, 200)
+        self.merge_nearby_threshold_spinbox.setSingleStep(10)
+        self.merge_nearby_threshold_spinbox.setValue(self.settings['ocr']['merge_nearby_threshold'])
+        nearby_layout.addWidget(self.merge_nearby_threshold_spinbox)
+        
+        nearby_unit = QLabel("pixels")
+        nearby_layout.addWidget(nearby_unit)
+        nearby_layout.addStretch()
 
         # Text Filtering Setting
-        filter_frame = tk.LabelFrame(content_frame, text="Text Filtering", padx=15, pady=10)
-        filter_frame.pack(fill='x', padx=20, pady=(10, 0))
+        filter_group = QGroupBox("Text Filtering")
+        filter_layout = QVBoxLayout(filter_group)
+        content_layout.addWidget(filter_group)
         
         # Minimum text length
-        min_length_frame = tk.Frame(filter_frame)
-        min_length_frame.pack(fill='x', pady=5)
+        min_length_widget = QWidget()
+        min_length_layout = QHBoxLayout(min_length_widget)
+        min_length_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.addWidget(min_length_widget)
         
-        tk.Label(min_length_frame, text="Min Text Length:", width=20, anchor='w').pack(side='left')
-        self.min_text_length_var = tk.IntVar(
-            value=self.settings['ocr'].get('min_text_length', 0)
-        )
-        min_length_spinbox = tb.Spinbox(
-            min_length_frame,
-            from_=1,
-            to=10,
-            textvariable=self.min_text_length_var,
-            increment=1,
-            width=10
-        )
-        min_length_spinbox.pack(side='left', padx=10)
-        tk.Label(min_length_frame, text="characters").pack(side='left')
+        min_length_label = QLabel("Min Text Length:")
+        min_length_label.setMinimumWidth(180)
+        min_length_layout.addWidget(min_length_label)
         
-        tk.Label(
-            min_length_frame,
-            text="(skip text shorter than this)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side='left', padx=10)
+        self.min_text_length_spinbox = QSpinBox()
+        self.min_text_length_spinbox.setRange(1, 10)
+        self.min_text_length_spinbox.setValue(self.settings['ocr'].get('min_text_length', 0))
+        min_length_layout.addWidget(self.min_text_length_spinbox)
+        
+        min_length_unit = QLabel("characters")
+        min_length_layout.addWidget(min_length_unit)
+        
+        min_length_desc = QLabel("(skip text shorter than this)")
+        min_length_desc_font = QFont('Arial', 9)
+        min_length_desc.setFont(min_length_desc_font)
+        min_length_desc.setStyleSheet("color: gray;")
+        min_length_layout.addWidget(min_length_desc)
+        min_length_layout.addStretch()
         
         # Exclude English text checkbox
-        exclude_english_frame = tk.Frame(filter_frame)
-        exclude_english_frame.pack(fill='x', pady=(5, 0))
-        
-        self.exclude_english_var = tk.BooleanVar(
-            value=self.settings['ocr'].get('exclude_english_text', False)
-        )
-        
-        tb.Checkbutton(
-            exclude_english_frame,
-            text="Exclude primarily English text (tunable threshold)",
-            variable=self.exclude_english_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.exclude_english_checkbox = QCheckBox("Exclude primarily English text (tunable threshold)")
+        self.exclude_english_checkbox.setChecked(self.settings['ocr'].get('exclude_english_text', False))
+        filter_layout.addWidget(self.exclude_english_checkbox)
         
         # Threshold slider
-        english_threshold_frame = tk.Frame(filter_frame)
-        english_threshold_frame.pack(fill='x', pady=5)
-        tk.Label(english_threshold_frame, text="English Exclude Threshold:", width=28, anchor='w').pack(side='left')
-        self.english_exclude_threshold = tk.DoubleVar(
-            value=self.settings['ocr'].get('english_exclude_threshold', 0.7)
+        english_threshold_widget = QWidget()
+        english_threshold_layout = QHBoxLayout(english_threshold_widget)
+        english_threshold_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.addWidget(english_threshold_widget)
+        
+        threshold_label = QLabel("English Exclude Threshold:")
+        threshold_label.setMinimumWidth(240)
+        english_threshold_layout.addWidget(threshold_label)
+        
+        self.english_exclude_threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.english_exclude_threshold_slider.setRange(60, 99)
+        self.english_exclude_threshold_slider.setValue(int(self.settings['ocr'].get('english_exclude_threshold', 0.7) * 100))
+        self.english_exclude_threshold_slider.setMinimumWidth(250)
+        english_threshold_layout.addWidget(self.english_exclude_threshold_slider)
+        
+        self.english_threshold_label = QLabel(f"{int(self.settings['ocr'].get('english_exclude_threshold', 0.7)*100)}%")
+        self.english_threshold_label.setMinimumWidth(50)
+        self.english_exclude_threshold_slider.valueChanged.connect(
+            lambda v: self.english_threshold_label.setText(f"{v}%")
         )
-        threshold_scale = tk.Scale(
-            english_threshold_frame,
-            from_=0.6, to=0.99,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.english_exclude_threshold,
-            length=250,
-            command=lambda v: self.english_threshold_label.config(text=f"{float(v)*100:.0f}%")
-        )
-        threshold_scale.pack(side='left', padx=10)
-        self.english_threshold_label = tk.Label(english_threshold_frame, text=f"{int(self.english_exclude_threshold.get()*100)}%", width=5)
-        self.english_threshold_label.pack(side='left')
+        english_threshold_layout.addWidget(self.english_threshold_label)
+        english_threshold_layout.addStretch()
         
         # Minimum character count
-        min_chars_frame = tk.Frame(filter_frame)
-        min_chars_frame.pack(fill='x', pady=5)
-        tk.Label(min_chars_frame, text="Min chars to exclude as English:", width=28, anchor='w').pack(side='left')
-        self.english_exclude_min_chars = tk.IntVar(
-            value=self.settings['ocr'].get('english_exclude_min_chars', 4)
-        )
-        min_chars_spinbox = tb.Spinbox(
-            min_chars_frame,
-            from_=1,
-            to=10,
-            textvariable=self.english_exclude_min_chars,
-            increment=1,
-            width=10
-        )
-        min_chars_spinbox.pack(side='left', padx=10)
-        tk.Label(min_chars_frame, text="characters").pack(side='left')
+        min_chars_widget = QWidget()
+        min_chars_layout = QHBoxLayout(min_chars_widget)
+        min_chars_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.addWidget(min_chars_widget)
+        
+        min_chars_label = QLabel("Min chars to exclude as English:")
+        min_chars_label.setMinimumWidth(240)
+        min_chars_layout.addWidget(min_chars_label)
+        
+        self.english_exclude_min_chars_spinbox = QSpinBox()
+        self.english_exclude_min_chars_spinbox.setRange(1, 10)
+        self.english_exclude_min_chars_spinbox.setValue(self.settings['ocr'].get('english_exclude_min_chars', 4))
+        min_chars_layout.addWidget(self.english_exclude_min_chars_spinbox)
+        
+        min_chars_unit = QLabel("characters")
+        min_chars_layout.addWidget(min_chars_unit)
+        min_chars_layout.addStretch()
         
         # Legacy aggressive short-token filter
-        exclude_short_frame = tk.Frame(filter_frame)
-        exclude_short_frame.pack(fill='x', pady=(5, 0))
-        self.english_exclude_short_tokens = tk.BooleanVar(
-            value=self.settings['ocr'].get('english_exclude_short_tokens', False)
-        )
-        tb.Checkbutton(
-            exclude_short_frame,
-            text="Aggressively drop very short ASCII tokens (legacy)",
-            variable=self.english_exclude_short_tokens,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.english_exclude_short_tokens_checkbox = QCheckBox("Aggressively drop very short ASCII tokens (legacy)")
+        self.english_exclude_short_tokens_checkbox.setChecked(self.settings['ocr'].get('english_exclude_short_tokens', False))
+        filter_layout.addWidget(self.english_exclude_short_tokens_checkbox)
         
         # Help text
-        tk.Label(
-            filter_frame,
-            text="💡 Text filtering helps skip:\n"
-                 "   • UI elements and watermarks\n"
-                 "   • Page numbers and copyright text\n"
-                 "   • Single characters or symbols\n"
-                 "   • Non-target language text",
-            font=('Arial', 9),
-            fg='gray',
-            justify='left'
-        ).pack(anchor='w', pady=(10, 0))
-        
-        # Azure-specific OCR settings (existing code continues here)
-        azure_ocr_frame = tk.LabelFrame(content_frame, text="Azure OCR Settings", padx=15, pady=10)
+        filter_help = QLabel(
+            "💡 Text filtering helps skip:\n"
+            "   • UI elements and watermarks\n"
+            "   • Page numbers and copyright text\n"
+            "   • Single characters or symbols\n"
+            "   • Non-target language text"
+        )
+        filter_help_font = QFont('Arial', 9)
+        filter_help.setFont(filter_help_font)
+        filter_help.setStyleSheet("color: gray;")
+        filter_help.setWordWrap(True)
+        filter_help.setContentsMargins(0, 10, 0, 0)
+        filter_layout.addWidget(filter_help)
 
         # Azure-specific OCR settings
-        azure_ocr_frame = tk.LabelFrame(content_frame, text="Azure OCR Settings", padx=15, pady=10)
-        azure_ocr_frame.pack(fill='x', padx=20, pady=(10, 0))
+        azure_ocr_group = QGroupBox("Azure OCR Settings")
+        azure_ocr_layout = QVBoxLayout(azure_ocr_group)
+        content_layout.addWidget(azure_ocr_group)
 
         # Azure merge multiplier
-        merge_mult_frame = tk.Frame(azure_ocr_frame)
-        merge_mult_frame.pack(fill='x', pady=5)
-        tk.Label(merge_mult_frame, text="Merge Multiplier:", width=20, anchor='w').pack(side='left')
+        merge_mult_widget = QWidget()
+        merge_mult_layout = QHBoxLayout(merge_mult_widget)
+        merge_mult_layout.setContentsMargins(0, 0, 0, 0)
+        azure_ocr_layout.addWidget(merge_mult_widget)
+        
+        merge_mult_label = QLabel("Merge Multiplier:")
+        merge_mult_label.setMinimumWidth(180)
+        merge_mult_layout.addWidget(merge_mult_label)
+        
+        self.azure_merge_multiplier_slider = QSlider(Qt.Orientation.Horizontal)
+        self.azure_merge_multiplier_slider.setRange(100, 500)
+        self.azure_merge_multiplier_slider.setValue(int(self.settings['ocr'].get('azure_merge_multiplier', 2.0) * 100))
+        self.azure_merge_multiplier_slider.setMinimumWidth(200)
+        merge_mult_layout.addWidget(self.azure_merge_multiplier_slider)
 
-        self.azure_merge_multiplier = tk.DoubleVar(
-            value=self.settings['ocr'].get('azure_merge_multiplier', 2.0)
+        self.azure_label = QLabel(f"{self.settings['ocr'].get('azure_merge_multiplier', 2.0):.2f}x")
+        self.azure_label.setMinimumWidth(50)
+        self.azure_merge_multiplier_slider.valueChanged.connect(
+            lambda v: self.azure_label.setText(f"{v/100:.2f}x")
         )
-        azure_scale = tk.Scale(
-            merge_mult_frame,
-            from_=1.0,
-            to=5.0,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.azure_merge_multiplier,
-            length=200,
-            command=lambda v: self._update_azure_label()
-        )
-        azure_scale.pack(side='left', padx=10)
+        merge_mult_layout.addWidget(self.azure_label)
 
-        self.azure_label = tk.Label(merge_mult_frame, text="2.0x", width=5)
-        self.azure_label.pack(side='left')
-        self._update_azure_label()
-
-        tk.Label(
-            merge_mult_frame,
-            text="(multiplies merge distance for Azure lines)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side='left', padx=5)
+        merge_mult_desc = QLabel("(multiplies merge distance for Azure lines)")
+        merge_mult_desc_font = QFont('Arial', 9)
+        merge_mult_desc.setFont(merge_mult_desc_font)
+        merge_mult_desc.setStyleSheet("color: gray;")
+        merge_mult_layout.addWidget(merge_mult_desc)
+        merge_mult_layout.addStretch()
 
         # Reading order
-        reading_order_frame = tk.Frame(azure_ocr_frame)
-        reading_order_frame.pack(fill='x', pady=5)
-        tk.Label(reading_order_frame, text="Reading Order:", width=20, anchor='w').pack(side='left')
+        reading_order_widget = QWidget()
+        reading_order_layout = QHBoxLayout(reading_order_widget)
+        reading_order_layout.setContentsMargins(0, 0, 0, 0)
+        azure_ocr_layout.addWidget(reading_order_widget)
+        
+        reading_order_label = QLabel("Reading Order:")
+        reading_order_label.setMinimumWidth(180)
+        reading_order_layout.addWidget(reading_order_label)
 
-        self.azure_reading_order = tk.StringVar(
-            value=self.settings['ocr'].get('azure_reading_order', 'natural')
-        )
-        order_combo = ttk.Combobox(
-            reading_order_frame,
-            textvariable=self.azure_reading_order,
-            values=['basic', 'natural'],
-            state='readonly',
-            width=15
-        )
-        order_combo.pack(side='left', padx=10)
+        self.azure_reading_order_combo = QComboBox()
+        self.azure_reading_order_combo.addItems(['basic', 'natural'])
+        self.azure_reading_order_combo.setCurrentText(self.settings['ocr'].get('azure_reading_order', 'natural'))
+        reading_order_layout.addWidget(self.azure_reading_order_combo)
 
-        tk.Label(
-            reading_order_frame,
-            text="(natural = better for complex layouts)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side='left', padx=5)
+        reading_order_desc = QLabel("(natural = better for complex layouts)")
+        reading_order_desc_font = QFont('Arial', 9)
+        reading_order_desc.setFont(reading_order_desc_font)
+        reading_order_desc.setStyleSheet("color: gray;")
+        reading_order_layout.addWidget(reading_order_desc)
+        reading_order_layout.addStretch()
 
         # Model version
-        model_version_frame = tk.Frame(azure_ocr_frame)
-        model_version_frame.pack(fill='x', pady=5)
-        tk.Label(model_version_frame, text="Model Version:", width=20, anchor='w').pack(side='left')
+        model_version_widget = QWidget()
+        model_version_layout = QHBoxLayout(model_version_widget)
+        model_version_layout.setContentsMargins(0, 0, 0, 0)
+        azure_ocr_layout.addWidget(model_version_widget)
+        
+        model_version_label = QLabel("Model Version:")
+        model_version_label.setMinimumWidth(180)
+        model_version_layout.addWidget(model_version_label)
 
-        self.azure_model_version = tk.StringVar(
-            value=self.settings['ocr'].get('azure_model_version', 'latest')
-        )
-        version_combo = ttk.Combobox(
-            model_version_frame,
-            textvariable=self.azure_model_version,
-            values=['latest', '2022-04-30', '2022-01-30', '2021-09-30'],
-            width=15
-        )
-        version_combo.pack(side='left', padx=10)
+        self.azure_model_version_combo = QComboBox()
+        self.azure_model_version_combo.addItems(['latest', '2022-04-30', '2022-01-30', '2021-09-30'])
+        self.azure_model_version_combo.setCurrentText(self.settings['ocr'].get('azure_model_version', 'latest'))
+        self.azure_model_version_combo.setEditable(True)
+        model_version_layout.addWidget(self.azure_model_version_combo)
 
-        tk.Label(
-            model_version_frame,
-            text="(use 'latest' for newest features)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side='left', padx=5)
+        model_version_desc = QLabel("(use 'latest' for newest features)")
+        model_version_desc_font = QFont('Arial', 9)
+        model_version_desc.setFont(model_version_desc_font)
+        model_version_desc.setStyleSheet("color: gray;")
+        model_version_layout.addWidget(model_version_desc)
+        model_version_layout.addStretch()
 
         # Timeout settings
-        timeout_frame = tk.Frame(azure_ocr_frame)
-        timeout_frame.pack(fill='x', pady=5)
+        timeout_widget = QWidget()
+        timeout_layout = QHBoxLayout(timeout_widget)
+        timeout_layout.setContentsMargins(0, 0, 0, 0)
+        azure_ocr_layout.addWidget(timeout_widget)
 
-        tk.Label(timeout_frame, text="Max Wait Time:", width=20, anchor='w').pack(side='left')
+        timeout_label = QLabel("Max Wait Time:")
+        timeout_label.setMinimumWidth(180)
+        timeout_layout.addWidget(timeout_label)
 
-        self.azure_max_wait = tk.IntVar(
-            value=self.settings['ocr'].get('azure_max_wait', 60)
-        )
-        wait_spinbox = tb.Spinbox(
-            timeout_frame,
-            from_=10,
-            to=120,
-            textvariable=self.azure_max_wait,
-            increment=5,
-            width=10
-        )
-        wait_spinbox.pack(side='left', padx=10)
-        tk.Label(timeout_frame, text="seconds").pack(side='left')
+        self.azure_max_wait_spinbox = QSpinBox()
+        self.azure_max_wait_spinbox.setRange(10, 120)
+        self.azure_max_wait_spinbox.setSingleStep(5)
+        self.azure_max_wait_spinbox.setValue(self.settings['ocr'].get('azure_max_wait', 60))
+        timeout_layout.addWidget(self.azure_max_wait_spinbox)
+        
+        timeout_unit = QLabel("seconds")
+        timeout_layout.addWidget(timeout_unit)
+        timeout_layout.addStretch()
 
         # Poll interval
-        poll_frame = tk.Frame(azure_ocr_frame)
-        poll_frame.pack(fill='x', pady=5)
+        poll_widget = QWidget()
+        poll_layout = QHBoxLayout(poll_widget)
+        poll_layout.setContentsMargins(0, 0, 0, 0)
+        azure_ocr_layout.addWidget(poll_widget)
 
-        tk.Label(poll_frame, text="Poll Interval:", width=20, anchor='w').pack(side='left')
+        poll_label = QLabel("Poll Interval:")
+        poll_label.setMinimumWidth(180)
+        poll_layout.addWidget(poll_label)
 
-        self.azure_poll_interval = tk.DoubleVar(
-            value=self.settings['ocr'].get('azure_poll_interval', 0.5)
+        self.azure_poll_interval_slider = QSlider(Qt.Orientation.Horizontal)
+        self.azure_poll_interval_slider.setRange(0, 200)
+        self.azure_poll_interval_slider.setValue(int(self.settings['ocr'].get('azure_poll_interval', 0.5) * 100))
+        self.azure_poll_interval_slider.setMinimumWidth(200)
+        poll_layout.addWidget(self.azure_poll_interval_slider)
+
+        self.azure_poll_interval_label = QLabel(f"{self.settings['ocr'].get('azure_poll_interval', 0.5):.2f}")
+        self.azure_poll_interval_label.setMinimumWidth(50)
+        self.azure_poll_interval_slider.valueChanged.connect(
+            lambda v: self.azure_poll_interval_label.setText(f"{v/100:.2f}")
         )
-        poll_scale = tk.Scale(
-            poll_frame,
-            from_=0.0,
-            to=2.0,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.azure_poll_interval,
-            length=200
-        )
-        poll_scale.pack(side='left', padx=10)
-
-        tk.Label(poll_frame, textvariable=self.azure_poll_interval, width=5).pack(side='left')
-        tk.Label(poll_frame, text="sec").pack(side='left')
+        poll_layout.addWidget(self.azure_poll_interval_label)
+        
+        poll_unit = QLabel("sec")
+        poll_layout.addWidget(poll_unit)
+        poll_layout.addStretch()
 
         # Help text
-        tk.Label(
-            azure_ocr_frame,
-            text="💡 Azure Read API auto-detects language well\n"
-                 "💡 Natural reading order works better for manga panels",
-            font=('Arial', 9),
-            fg='gray',
-            justify='left'
-        ).pack(anchor='w', pady=(10, 0))
+        azure_help = QLabel(
+            "💡 Azure Read API auto-detects language well\n"
+            "💡 Natural reading order works better for manga panels"
+        )
+        azure_help_font = QFont('Arial', 9)
+        azure_help.setFont(azure_help_font)
+        azure_help.setStyleSheet("color: gray;")
+        azure_help.setWordWrap(True)
+        azure_help.setContentsMargins(0, 10, 0, 0)
+        azure_ocr_layout.addWidget(azure_help)
         
         # Rotation correction
-        rotation_frame = tk.Frame(merge_frame)
-        rotation_frame.pack(fill='x', pady=5)
-        self.enable_rotation = tk.BooleanVar(value=self.settings['ocr']['enable_rotation_correction'])
-        tb.Checkbutton(
-            rotation_frame,
-            text="Enable automatic rotation correction for tilted text",
-            variable=self.enable_rotation,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.enable_rotation_checkbox = QCheckBox("Enable automatic rotation correction for tilted text")
+        self.enable_rotation_checkbox.setChecked(self.settings['ocr']['enable_rotation_correction'])
+        merge_layout.addWidget(self.enable_rotation_checkbox)
 
         # OCR batching and locality settings
-        ocr_batch_frame = tk.LabelFrame(content_frame, text="OCR Batching & Concurrency", padx=15, pady=10)
-        ocr_batch_frame.pack(fill='x', padx=20, pady=(10, 0))
+        ocr_batch_group = QGroupBox("OCR Batching & Concurrency")
+        ocr_batch_layout = QVBoxLayout(ocr_batch_group)
+        content_layout.addWidget(ocr_batch_group)
 
         # Enable OCR batching
-        self.ocr_batch_enabled_var = tk.BooleanVar(value=self.settings['ocr'].get('ocr_batch_enabled', True))
-        tb.Checkbutton(
-            ocr_batch_frame,
-            text="Enable OCR batching (independent of translation batching)",
-            variable=self.ocr_batch_enabled_var,
-            command=lambda: self._toggle_ocr_batching_controls(),
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.ocr_batch_enabled_checkbox = QCheckBox("Enable OCR batching (independent of translation batching)")
+        self.ocr_batch_enabled_checkbox.setChecked(self.settings['ocr'].get('ocr_batch_enabled', True))
+        self.ocr_batch_enabled_checkbox.stateChanged.connect(self._toggle_ocr_batching_controls)
+        ocr_batch_layout.addWidget(self.ocr_batch_enabled_checkbox)
         
         # OCR batch size
-        ocr_bs_row = tk.Frame(ocr_batch_frame)
-        self.ocr_bs_row = ocr_bs_row
-        ocr_bs_row.pack(fill='x', pady=5)
-        tk.Label(ocr_bs_row, text="OCR Batch Size:", width=20, anchor='w').pack(side='left')
-        self.ocr_batch_size_var = tk.IntVar(value=int(self.settings['ocr'].get('ocr_batch_size', 8)))
-        self.ocr_batch_size_spin = tb.Spinbox(
-            ocr_bs_row,
-            from_=1,
-            to=32,
-            textvariable=self.ocr_batch_size_var,
-            width=10
-        )
-        self.ocr_batch_size_spin.pack(side='left', padx=10)
-        tk.Label(ocr_bs_row, text="(Google: items/request; Azure: drives concurrency)", font=('Arial', 9), fg='gray').pack(side='left')
+        ocr_bs_widget = QWidget()
+        ocr_bs_layout = QHBoxLayout(ocr_bs_widget)
+        ocr_bs_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_batch_layout.addWidget(ocr_bs_widget)
+        self.ocr_bs_row = ocr_bs_widget
+        
+        ocr_bs_label = QLabel("OCR Batch Size:")
+        ocr_bs_label.setMinimumWidth(180)
+        ocr_bs_layout.addWidget(ocr_bs_label)
+        
+        self.ocr_batch_size_spinbox = QSpinBox()
+        self.ocr_batch_size_spinbox.setRange(1, 32)
+        self.ocr_batch_size_spinbox.setValue(int(self.settings['ocr'].get('ocr_batch_size', 8)))
+        ocr_bs_layout.addWidget(self.ocr_batch_size_spinbox)
+        
+        ocr_bs_desc = QLabel("(Google: items/request; Azure: drives concurrency)")
+        ocr_bs_desc_font = QFont('Arial', 9)
+        ocr_bs_desc.setFont(ocr_bs_desc_font)
+        ocr_bs_desc.setStyleSheet("color: gray;")
+        ocr_bs_layout.addWidget(ocr_bs_desc)
+        ocr_bs_layout.addStretch()
 
         # OCR Max Concurrency
-        ocr_cc_row = tk.Frame(ocr_batch_frame)
-        self.ocr_cc_row = ocr_cc_row
-        ocr_cc_row.pack(fill='x', pady=5)
-        tk.Label(ocr_cc_row, text="OCR Max Concurrency:", width=20, anchor='w').pack(side='left')
-        self.ocr_max_conc_var = tk.IntVar(value=int(self.settings['ocr'].get('ocr_max_concurrency', 2)))
-        self.ocr_max_conc_spin = tb.Spinbox(
-            ocr_cc_row,
-            from_=1,
-            to=8,
-            textvariable=self.ocr_max_conc_var,
-            width=10
-        )
-        self.ocr_max_conc_spin.pack(side='left', padx=10)
-        tk.Label(ocr_cc_row, text="(Google: concurrent requests; Azure: workers, capped at 4)", font=('Arial', 9), fg='gray').pack(side='left')
+        ocr_cc_widget = QWidget()
+        ocr_cc_layout = QHBoxLayout(ocr_cc_widget)
+        ocr_cc_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_batch_layout.addWidget(ocr_cc_widget)
+        self.ocr_cc_row = ocr_cc_widget
+        
+        ocr_cc_label = QLabel("OCR Max Concurrency:")
+        ocr_cc_label.setMinimumWidth(180)
+        ocr_cc_layout.addWidget(ocr_cc_label)
+        
+        self.ocr_max_conc_spinbox = QSpinBox()
+        self.ocr_max_conc_spinbox.setRange(1, 8)
+        self.ocr_max_conc_spinbox.setValue(int(self.settings['ocr'].get('ocr_max_concurrency', 2)))
+        ocr_cc_layout.addWidget(self.ocr_max_conc_spinbox)
+        
+        ocr_cc_desc = QLabel("(Google: concurrent requests; Azure: workers, capped at 4)")
+        ocr_cc_desc_font = QFont('Arial', 9)
+        ocr_cc_desc.setFont(ocr_cc_desc_font)
+        ocr_cc_desc.setStyleSheet("color: gray;")
+        ocr_cc_layout.addWidget(ocr_cc_desc)
+        ocr_cc_layout.addStretch()
         
         # Apply initial visibility for OCR batching controls
         try:
@@ -2437,110 +2448,120 @@ class MangaSettingsDialog(QDialog):
             pass
 
         # ROI sizing
-        roi_frame_local = tk.LabelFrame(content_frame, text="ROI Locality Controls", padx=15, pady=10)
-        roi_frame_local.pack(fill='x', padx=20, pady=(10, 0))
+        roi_group = QGroupBox("ROI Locality Controls")
+        roi_layout = QVBoxLayout(roi_group)
+        content_layout.addWidget(roi_group)
 
         # ROI locality toggle (now inside this section)
-        self.roi_locality_var = tk.BooleanVar(value=self.settings['ocr'].get('roi_locality_enabled', False))
-        tb.Checkbutton(
-            roi_frame_local,
-            text="Enable ROI-based OCR locality and batching (uses bubble detection)",
-            variable=self.roi_locality_var,
-            command=self._toggle_roi_locality_controls,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=(0,5))
+        self.roi_locality_checkbox = QCheckBox("Enable ROI-based OCR locality and batching (uses bubble detection)")
+        self.roi_locality_checkbox.setChecked(self.settings['ocr'].get('roi_locality_enabled', False))
+        self.roi_locality_checkbox.stateChanged.connect(self._toggle_roi_locality_controls)
+        roi_layout.addWidget(self.roi_locality_checkbox)
 
         # ROI padding ratio
-        roi_pad_row = tk.Frame(roi_frame_local)
-        roi_pad_row.pack(fill='x', pady=5)
-        self.roi_pad_row = roi_pad_row
-        tk.Label(roi_pad_row, text="ROI Padding Ratio:", width=20, anchor='w').pack(side='left')
-        self.roi_padding_ratio_var = tk.DoubleVar(value=float(self.settings['ocr'].get('roi_padding_ratio', 0.08)))
-        roi_pad_scale = tk.Scale(
-            roi_pad_row,
-            from_=0.0,
-            to=0.30,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.roi_padding_ratio_var,
-            length=200
+        roi_pad_widget = QWidget()
+        roi_pad_layout = QHBoxLayout(roi_pad_widget)
+        roi_pad_layout.setContentsMargins(0, 0, 0, 0)
+        roi_layout.addWidget(roi_pad_widget)
+        self.roi_pad_row = roi_pad_widget
+        
+        roi_pad_label = QLabel("ROI Padding Ratio:")
+        roi_pad_label.setMinimumWidth(180)
+        roi_pad_layout.addWidget(roi_pad_label)
+        
+        self.roi_padding_ratio_slider = QSlider(Qt.Orientation.Horizontal)
+        self.roi_padding_ratio_slider.setRange(0, 30)
+        self.roi_padding_ratio_slider.setValue(int(float(self.settings['ocr'].get('roi_padding_ratio', 0.08)) * 100))
+        self.roi_padding_ratio_slider.setMinimumWidth(200)
+        roi_pad_layout.addWidget(self.roi_padding_ratio_slider)
+        
+        self.roi_padding_ratio_label = QLabel(f"{float(self.settings['ocr'].get('roi_padding_ratio', 0.08)):.2f}")
+        self.roi_padding_ratio_label.setMinimumWidth(50)
+        self.roi_padding_ratio_slider.valueChanged.connect(
+            lambda v: self.roi_padding_ratio_label.setText(f"{v/100:.2f}")
         )
-        roi_pad_scale.pack(side='left', padx=10)
-        tk.Label(roi_pad_row, textvariable=self.roi_padding_ratio_var, width=5).pack(side='left')
+        roi_pad_layout.addWidget(self.roi_padding_ratio_label)
+        roi_pad_layout.addStretch()
 
         # ROI min side / area
-        roi_min_row = tk.Frame(roi_frame_local)
-        roi_min_row.pack(fill='x', pady=5)
-        self.roi_min_row = roi_min_row
-        tk.Label(roi_min_row, text="Min ROI Side:", width=20, anchor='w').pack(side='left')
-        self.roi_min_side_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_min_side_px', 12)))
-        self.roi_min_side_spin = tb.Spinbox(
-            roi_min_row,
-            from_=1,
-            to=64,
-            textvariable=self.roi_min_side_var,
-            width=10
-        )
-        self.roi_min_side_spin.pack(side='left', padx=10)
-        tk.Label(roi_min_row, text="px").pack(side='left')
+        roi_min_widget = QWidget()
+        roi_min_layout = QHBoxLayout(roi_min_widget)
+        roi_min_layout.setContentsMargins(0, 0, 0, 0)
+        roi_layout.addWidget(roi_min_widget)
+        self.roi_min_row = roi_min_widget
+        
+        roi_min_label = QLabel("Min ROI Side:")
+        roi_min_label.setMinimumWidth(180)
+        roi_min_layout.addWidget(roi_min_label)
+        
+        self.roi_min_side_spinbox = QSpinBox()
+        self.roi_min_side_spinbox.setRange(1, 64)
+        self.roi_min_side_spinbox.setValue(int(self.settings['ocr'].get('roi_min_side_px', 12)))
+        roi_min_layout.addWidget(self.roi_min_side_spinbox)
+        
+        roi_min_unit = QLabel("px")
+        roi_min_layout.addWidget(roi_min_unit)
+        roi_min_layout.addStretch()
 
-        roi_area_row = tk.Frame(roi_frame_local)
-        roi_area_row.pack(fill='x', pady=5)
-        self.roi_area_row = roi_area_row
-        tk.Label(roi_area_row, text="Min ROI Area:", width=20, anchor='w').pack(side='left')
-        self.roi_min_area_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_min_area_px', 100)))
-        self.roi_min_area_spin = tb.Spinbox(
-            roi_area_row,
-            from_=1,
-            to=5000,
-            textvariable=self.roi_min_area_var,
-            width=10
-        )
-        self.roi_min_area_spin.pack(side='left', padx=10)
-        tk.Label(roi_area_row, text="px^2").pack(side='left')
+        roi_area_widget = QWidget()
+        roi_area_layout = QHBoxLayout(roi_area_widget)
+        roi_area_layout.setContentsMargins(0, 0, 0, 0)
+        roi_layout.addWidget(roi_area_widget)
+        self.roi_area_row = roi_area_widget
+        
+        roi_area_label = QLabel("Min ROI Area:")
+        roi_area_label.setMinimumWidth(180)
+        roi_area_layout.addWidget(roi_area_label)
+        
+        self.roi_min_area_spinbox = QSpinBox()
+        self.roi_min_area_spinbox.setRange(1, 5000)
+        self.roi_min_area_spinbox.setValue(int(self.settings['ocr'].get('roi_min_area_px', 100)))
+        roi_area_layout.addWidget(self.roi_min_area_spinbox)
+        
+        roi_area_unit = QLabel("px^2")
+        roi_area_layout.addWidget(roi_area_unit)
+        roi_area_layout.addStretch()
 
         # ROI max side (0 disables)
-        roi_max_row = tk.Frame(roi_frame_local)
-        roi_max_row.pack(fill='x', pady=5)
-        self.roi_max_row = roi_max_row
-        tk.Label(roi_max_row, text="ROI Max Side (0=off):", width=20, anchor='w').pack(side='left')
-        self.roi_max_side_var = tk.IntVar(value=int(self.settings['ocr'].get('roi_max_side', 0)))
-        self.roi_max_side_spin = tb.Spinbox(
-            roi_max_row,
-            from_=0,
-            to=2048,
-            textvariable=self.roi_max_side_var,
-            width=10
-        )
-        self.roi_max_side_spin.pack(side='left', padx=10)
+        roi_max_widget = QWidget()
+        roi_max_layout = QHBoxLayout(roi_max_widget)
+        roi_max_layout.setContentsMargins(0, 0, 0, 0)
+        roi_layout.addWidget(roi_max_widget)
+        self.roi_max_row = roi_max_widget
+        
+        roi_max_label = QLabel("ROI Max Side (0=off):")
+        roi_max_label.setMinimumWidth(180)
+        roi_max_layout.addWidget(roi_max_label)
+        
+        self.roi_max_side_spinbox = QSpinBox()
+        self.roi_max_side_spinbox.setRange(0, 2048)
+        self.roi_max_side_spinbox.setValue(int(self.settings['ocr'].get('roi_max_side', 0)))
+        roi_max_layout.addWidget(self.roi_max_side_spinbox)
+        roi_max_layout.addStretch()
 
         # Apply initial visibility based on toggle
         self._toggle_roi_locality_controls()
 
         # AI Bubble Detection Settings
-        bubble_frame = tk.LabelFrame(content_frame, text="AI Bubble Detection", padx=15, pady=10)
-        bubble_frame.pack(fill='x', padx=20, pady=(10, 0))
+        bubble_group = QGroupBox("AI Bubble Detection")
+        bubble_layout = QVBoxLayout(bubble_group)
+        content_layout.addWidget(bubble_group)
 
         # Enable bubble detection
-        self.bubble_detection_enabled = tk.BooleanVar(
-            value=self.settings['ocr'].get('bubble_detection_enabled', False)
-        )
+        self.bubble_detection_enabled_checkbox = QCheckBox("Enable AI-powered bubble detection (overrides traditional merging)")
+        self.bubble_detection_enabled_checkbox.setChecked(self.settings['ocr'].get('bubble_detection_enabled', False))
+        self.bubble_detection_enabled_checkbox.stateChanged.connect(self._toggle_bubble_controls)
+        bubble_layout.addWidget(self.bubble_detection_enabled_checkbox)
 
-        bubble_enable_cb = tb.Checkbutton(
-            bubble_frame,
-            text="Enable AI-powered bubble detection (overrides traditional merging)",
-            variable=self.bubble_detection_enabled,
-            bootstyle="round-toggle",
-            command=self._toggle_bubble_controls
-        )
-        bubble_enable_cb.pack(anchor='w')
+        # Detector type dropdown
+        detector_type_widget = QWidget()
+        detector_type_layout = QHBoxLayout(detector_type_widget)
+        detector_type_layout.setContentsMargins(0, 10, 0, 0)
+        bubble_layout.addWidget(detector_type_widget)
 
-
-        # Detector type dropdown - PUT THIS DIRECTLY IN bubble_frame
-        detector_type_frame = tk.Frame(bubble_frame)
-        detector_type_frame.pack(fill='x', pady=(10, 0))
-
-        tk.Label(detector_type_frame, text="Detector:", width=15, anchor='w').pack(side='left')
+        detector_type_label = QLabel("Detector:")
+        detector_type_label.setMinimumWidth(120)
+        detector_type_layout.addWidget(detector_type_label)
 
         # Model mapping
         self.detector_models = {
@@ -2565,247 +2586,193 @@ class MangaSettingsDialog(QDialog):
         else:
             initial_selection = 'RTEDR_onnx'
 
-        self.detector_type = tk.StringVar(value=initial_selection)
-
-        detector_combo = ttk.Combobox(
-            detector_type_frame,
-            textvariable=self.detector_type,
-            values=list(self.detector_models.keys()),
-            state='readonly',
-            width=20
-        )
-        detector_combo.pack(side='left', padx=(10, 0))
-        detector_combo.bind('<<ComboboxSelected>>', lambda e: self._on_detector_type_changed())
+        self.detector_type_combo = QComboBox()
+        self.detector_type_combo.addItems(list(self.detector_models.keys()))
+        self.detector_type_combo.setCurrentText(initial_selection)
+        self.detector_type_combo.currentTextChanged.connect(self._on_detector_type_changed)
+        detector_type_layout.addWidget(self.detector_type_combo)
+        detector_type_layout.addStretch()
 
         # NOW create the settings frame
-        self.yolo_settings_frame = tk.LabelFrame(bubble_frame, text="Model Settings", padx=10, pady=5)
-        self.rtdetr_settings_frame = self.yolo_settings_frame  # Alias
+        self.yolo_settings_group = QGroupBox("Model Settings")
+        yolo_settings_layout = QVBoxLayout(self.yolo_settings_group)
+        bubble_layout.addWidget(self.yolo_settings_group)
+        self.rtdetr_settings_frame = self.yolo_settings_group  # Alias for compatibility
 
-        # NOW you can create model_frame inside yolo_settings_frame
-        model_frame = tk.Frame(self.yolo_settings_frame)
-        model_frame.pack(fill='x', pady=(5, 0))
+        # Model path/URL row
+        model_widget = QWidget()
+        model_layout = QHBoxLayout(model_widget)
+        model_layout.setContentsMargins(0, 5, 0, 0)
+        yolo_settings_layout.addWidget(model_widget)
 
-        tk.Label(model_frame, text="Model:", width=12, anchor='w').pack(side='left')
+        model_label = QLabel("Model:")
+        model_label.setMinimumWidth(100)
+        model_layout.addWidget(model_label)
 
-        self.bubble_model_path = tk.StringVar(
-            value=self.settings['ocr'].get('bubble_model_path', '')
+        self.bubble_model_entry = QLineEdit()
+        self.bubble_model_entry.setText(self.settings['ocr'].get('bubble_model_path', ''))
+        self.bubble_model_entry.setReadOnly(True)
+        self.bubble_model_entry.setStyleSheet(
+            "QLineEdit { background-color: #1e1e1e; color: #ffffff; border: 1px solid #3a3a3a; }"
         )
-        self.rtdetr_model_url = self.bubble_model_path  # Alias
-
-        # Style the entry to match GUI theme
-        self.bubble_model_entry = tk.Entry(
-            model_frame,
-            textvariable=self.bubble_model_path,
-            width=35,
-            state='readonly',
-            bg='#2b2b2b',  # Dark background
-            fg='#ffffff',  # White text
-            insertbackground='#ffffff',  # White cursor
-            readonlybackground='#1e1e1e',  # Even darker when readonly
-            relief='flat',
-            bd=1
-        )
-        self.bubble_model_entry.pack(side='left', padx=(0, 10))
+        model_layout.addWidget(self.bubble_model_entry)
         self.rtdetr_url_entry = self.bubble_model_entry  # Alias
         
         # Store for compatibility
-        self.detector_radio_widgets = [detector_combo]
+        self.detector_radio_widgets = [self.detector_type_combo]
 
-        # Settings frames
-        self.yolo_settings_frame = tk.LabelFrame(bubble_frame, text="Model Settings", padx=10, pady=5)
-        self.rtdetr_settings_frame = self.yolo_settings_frame  # Alias
+        # Browse and Clear buttons (initially hidden for HuggingFace models)
+        self.bubble_browse_btn = QPushButton("Browse")
+        self.bubble_browse_btn.clicked.connect(self._browse_bubble_model)
+        model_layout.addWidget(self.bubble_browse_btn)
 
-        # Model path/URL
-        model_frame = tk.Frame(self.yolo_settings_frame)
-        model_frame.pack(fill='x', pady=(5, 0))
-
-        tk.Label(model_frame, text="Model:", width=12, anchor='w').pack(side='left')
-
-        self.bubble_model_path = tk.StringVar(
-            value=self.settings['ocr'].get('bubble_model_path', '')
-        )
-        self.rtdetr_model_url = self.bubble_model_path  # Alias
-
-        self.bubble_model_entry = tk.Entry(
-            model_frame,
-            textvariable=self.bubble_model_path,
-            width=35,
-            state='readonly'
-        )
-        self.bubble_model_entry.pack(side='left', padx=(0, 10))
-        self.rtdetr_url_entry = self.bubble_model_entry  # Alias
-
-        self.bubble_browse_btn = tb.Button(
-            model_frame,
-            text="Browse",
-            command=self._browse_bubble_model,
-            bootstyle="primary"
-        )
-        self.bubble_browse_btn.pack(side='left')
-
-        self.bubble_clear_btn = tb.Button(
-            model_frame,
-            text="Clear",
-            command=self._clear_bubble_model,
-            bootstyle="secondary"
-        )
-        self.bubble_clear_btn.pack(side='left', padx=(5, 0))
+        self.bubble_clear_btn = QPushButton("Clear")
+        self.bubble_clear_btn.clicked.connect(self._clear_bubble_model)
+        model_layout.addWidget(self.bubble_clear_btn)
+        model_layout.addStretch()
 
         # Download and Load buttons
-        button_frame = tk.Frame(self.yolo_settings_frame)
-        button_frame.pack(fill='x', pady=(10, 0))
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(0, 10, 0, 0)
+        yolo_settings_layout.addWidget(button_widget)
 
-        tk.Label(button_frame, text="Actions:", width=12, anchor='w').pack(side='left')
+        button_label = QLabel("Actions:")
+        button_label.setMinimumWidth(100)
+        button_layout.addWidget(button_label)
 
-        self.rtdetr_download_btn = tb.Button(
-            button_frame,
-            text="Download",
-            command=self._download_rtdetr_model,
-            bootstyle="success"
-        )
-        self.rtdetr_download_btn.pack(side='left', padx=(0, 5))
+        self.rtdetr_download_btn = QPushButton("Download")
+        self.rtdetr_download_btn.clicked.connect(self._download_rtdetr_model)
+        button_layout.addWidget(self.rtdetr_download_btn)
 
-        self.rtdetr_load_btn = tb.Button(
-            button_frame,
-            text="Load Model",
-            command=self._load_rtdetr_model,
-            bootstyle="primary"
-        )
-        self.rtdetr_load_btn.pack(side='left')
+        self.rtdetr_load_btn = QPushButton("Load Model")
+        self.rtdetr_load_btn.clicked.connect(self._load_rtdetr_model)
+        button_layout.addWidget(self.rtdetr_load_btn)
 
-        self.rtdetr_status_label = tk.Label(
-            button_frame,
-            text="",
-            font=('Arial', 9)
-        )
-        self.rtdetr_status_label.pack(side='left', padx=(15, 0))
+        self.rtdetr_status_label = QLabel("")
+        rtdetr_status_font = QFont('Arial', 9)
+        self.rtdetr_status_label.setFont(rtdetr_status_font)
+        button_layout.addWidget(self.rtdetr_status_label)
+        button_layout.addStretch()
 
         # RT-DETR Detection classes
-        rtdetr_classes_frame = tk.Frame(self.yolo_settings_frame)
-        rtdetr_classes_frame.pack(fill='x', pady=(10, 0))
+        rtdetr_classes_widget = QWidget()
+        rtdetr_classes_layout = QHBoxLayout(rtdetr_classes_widget)
+        rtdetr_classes_layout.setContentsMargins(0, 10, 0, 0)
+        yolo_settings_layout.addWidget(rtdetr_classes_widget)
+        self.rtdetr_classes_frame = rtdetr_classes_widget
 
-        tk.Label(rtdetr_classes_frame, text="Detect:", width=12, anchor='w').pack(side='left')
+        classes_label = QLabel("Detect:")
+        classes_label.setMinimumWidth(100)
+        rtdetr_classes_layout.addWidget(classes_label)
 
-        self.detect_empty_bubbles = tk.BooleanVar(
-            value=self.settings['ocr'].get('detect_empty_bubbles', True)
-        )
-        empty_cb = tk.Checkbutton(
-            rtdetr_classes_frame,
-            text="Empty Bubbles",
-            variable=self.detect_empty_bubbles
-        )
-        empty_cb.pack(side='left', padx=(0, 10))
+        self.detect_empty_bubbles_checkbox = QCheckBox("Empty Bubbles")
+        self.detect_empty_bubbles_checkbox.setChecked(self.settings['ocr'].get('detect_empty_bubbles', True))
+        rtdetr_classes_layout.addWidget(self.detect_empty_bubbles_checkbox)
 
-        self.detect_text_bubbles = tk.BooleanVar(
-            value=self.settings['ocr'].get('detect_text_bubbles', True)
-        )
-        text_cb = tk.Checkbutton(
-            rtdetr_classes_frame,
-            text="Text Bubbles",
-            variable=self.detect_text_bubbles
-        )
-        text_cb.pack(side='left', padx=(0, 10))
+        self.detect_text_bubbles_checkbox = QCheckBox("Text Bubbles")
+        self.detect_text_bubbles_checkbox.setChecked(self.settings['ocr'].get('detect_text_bubbles', True))
+        rtdetr_classes_layout.addWidget(self.detect_text_bubbles_checkbox)
 
-        self.detect_free_text = tk.BooleanVar(
-            value=self.settings['ocr'].get('detect_free_text', True)
-        )
-        free_cb = tk.Checkbutton(
-            rtdetr_classes_frame,
-            text="Free Text",
-            variable=self.detect_free_text
-        )
-        free_cb.pack(side='left')
-        
-        self.rtdetr_classes_frame = rtdetr_classes_frame
+        self.detect_free_text_checkbox = QCheckBox("Free Text")
+        self.detect_free_text_checkbox.setChecked(self.settings['ocr'].get('detect_free_text', True))
+        rtdetr_classes_layout.addWidget(self.detect_free_text_checkbox)
+        rtdetr_classes_layout.addStretch()
 
         # Confidence
-        conf_frame = tk.Frame(self.yolo_settings_frame)
-        conf_frame.pack(fill='x', pady=(10, 0))
+        conf_widget = QWidget()
+        conf_layout = QHBoxLayout(conf_widget)
+        conf_layout.setContentsMargins(0, 10, 0, 0)
+        yolo_settings_layout.addWidget(conf_widget)
 
-        tk.Label(conf_frame, text="Confidence:", width=12, anchor='w').pack(side='left')
+        conf_label = QLabel("Confidence:")
+        conf_label.setMinimumWidth(100)
+        conf_layout.addWidget(conf_label)
 
-        detector_label = self.detector_type.get()
+        detector_label = self.detector_type_combo.currentText()
         default_conf = 0.3 if ('RT-DETR' in detector_label or 'RTEDR_onnx' in detector_label or 'onnx' in detector_label.lower()) else 0.5
         
-        self.bubble_confidence = tk.DoubleVar(
-            value=self.settings['ocr'].get('bubble_confidence', default_conf)
+        self.bubble_conf_slider = QSlider(Qt.Orientation.Horizontal)
+        self.bubble_conf_slider.setRange(0, 99)
+        self.bubble_conf_slider.setValue(int(self.settings['ocr'].get('bubble_confidence', default_conf) * 100))
+        self.bubble_conf_slider.setMinimumWidth(200)
+        conf_layout.addWidget(self.bubble_conf_slider)
+        self.rtdetr_conf_scale = self.bubble_conf_slider  # Alias
+
+        self.bubble_conf_label = QLabel(f"{self.settings['ocr'].get('bubble_confidence', default_conf):.2f}")
+        self.bubble_conf_label.setMinimumWidth(50)
+        self.bubble_conf_slider.valueChanged.connect(
+            lambda v: self.bubble_conf_label.setText(f"{v/100:.2f}")
         )
-        self.rtdetr_confidence = self.bubble_confidence
+        conf_layout.addWidget(self.bubble_conf_label)
+        self.rtdetr_conf_label = self.bubble_conf_label  # Alias
+        conf_layout.addStretch()
 
-        self.bubble_conf_scale = tk.Scale(
-            conf_frame,
-            from_=0.0,
-            to=0.99,
-            resolution=0.01,
-            orient='horizontal',
-            variable=self.bubble_confidence,
-            length=200,
-            command=lambda v: self.bubble_conf_label.config(text=f"{float(v):.2f}")
-        )
-        self.bubble_conf_scale.pack(side='left', padx=(0, 10))
-        self.rtdetr_conf_scale = self.bubble_conf_scale
-
-        self.bubble_conf_label = tk.Label(conf_frame, text=f"{self.bubble_confidence.get():.2f}", width=5)
-        self.bubble_conf_label.pack(side='left')
-        self.rtdetr_conf_label = self.bubble_conf_label
-
-        # Status label
         # YOLO-specific: Max detections (only visible for YOLO)
-        self.yolo_maxdet_row = tk.Frame(self.yolo_settings_frame)
-        self.yolo_maxdet_row.pack_forget()
-        tk.Label(self.yolo_maxdet_row, text="Max detections:", width=12, anchor='w').pack(side='left')
-        self.bubble_max_det_yolo_var = tk.IntVar(
-            value=self.settings['ocr'].get('bubble_max_detections_yolo', 100)
-        )
-        tb.Spinbox(
-            self.yolo_maxdet_row,
-            from_=1,
-            to=2000,
-            textvariable=self.bubble_max_det_yolo_var,
-            width=10
-        ).pack(side='left', padx=(0,10))
+        self.yolo_maxdet_widget = QWidget()
+        yolo_maxdet_layout = QHBoxLayout(self.yolo_maxdet_widget)
+        yolo_maxdet_layout.setContentsMargins(0, 6, 0, 0)
+        yolo_settings_layout.addWidget(self.yolo_maxdet_widget)
+        self.yolo_maxdet_row = self.yolo_maxdet_widget  # Alias
+        self.yolo_maxdet_widget.setVisible(False)  # Hidden initially
+        
+        maxdet_label = QLabel("Max detections:")
+        maxdet_label.setMinimumWidth(100)
+        yolo_maxdet_layout.addWidget(maxdet_label)
+        
+        self.bubble_max_det_yolo_spinbox = QSpinBox()
+        self.bubble_max_det_yolo_spinbox.setRange(1, 2000)
+        self.bubble_max_det_yolo_spinbox.setValue(self.settings['ocr'].get('bubble_max_detections_yolo', 100))
+        yolo_maxdet_layout.addWidget(self.bubble_max_det_yolo_spinbox)
+        yolo_maxdet_layout.addStretch()
 
-        self.bubble_status_label = tk.Label(
-            bubble_frame,
-            text="",
-            font=('Arial', 9)
-        )
-        self.bubble_status_label.pack(anchor='w', pady=(10, 0))
+        # Status label at the bottom of bubble group
+        self.bubble_status_label = QLabel("")
+        bubble_status_font = QFont('Arial', 9)
+        self.bubble_status_label.setFont(bubble_status_font)
+        bubble_status_label_container = QWidget()
+        bubble_status_label_layout = QVBoxLayout(bubble_status_label_container)
+        bubble_status_label_layout.setContentsMargins(0, 10, 0, 0)
+        bubble_status_label_layout.addWidget(self.bubble_status_label)
+        bubble_layout.addWidget(bubble_status_label_container)
 
-        # Store controls
+        # Store controls for enable/disable
         self.bubble_controls = [
-            detector_combo,
+            self.detector_type_combo,
             self.bubble_model_entry,
             self.bubble_browse_btn,
             self.bubble_clear_btn,
-            self.bubble_conf_scale,
+            self.bubble_conf_slider,
             self.rtdetr_download_btn,
             self.rtdetr_load_btn
         ]
 
         self.rtdetr_controls = [
-            self.rtdetr_url_entry,
+            self.bubble_model_entry,
             self.rtdetr_load_btn,
             self.rtdetr_download_btn,
-            self.rtdetr_conf_scale,
-            empty_cb,
-            text_cb,
-            free_cb
+            self.bubble_conf_slider,
+            self.detect_empty_bubbles_checkbox,
+            self.detect_text_bubbles_checkbox,
+            self.detect_free_text_checkbox
         ]
 
         self.yolo_controls = [
             self.bubble_model_entry,
             self.bubble_browse_btn,
             self.bubble_clear_btn,
-            self.bubble_conf_scale,
-            self.yolo_maxdet_row
+            self.bubble_conf_slider,
+            self.yolo_maxdet_widget
         ]
+
+        # Add stretch to end of OCR tab content
+        content_layout.addStretch()
 
         # Initialize control states
         self._toggle_bubble_controls()
 
         # Only call detector change after everything is initialized
-        if self.bubble_detection_enabled.get():
+        if self.bubble_detection_enabled_checkbox.isChecked():
             try:
                 self._on_detector_type_changed()
                 self._update_bubble_status()
@@ -2814,63 +2781,63 @@ class MangaSettingsDialog(QDialog):
                 pass
 
         # Check status after dialog ready
-        self.dialog.after(500, self._check_rtdetr_status)
+        QTimer.singleShot(500, self._check_rtdetr_status)
     
-    def _on_detector_type_changed(self):
+    def _on_detector_type_changed(self, detector=None):
         """Handle detector type change"""
-        if not hasattr(self, 'bubble_detection_enabled'):
+        if not hasattr(self, 'bubble_detection_enabled_checkbox'):
             return
             
-        if not self.bubble_detection_enabled.get():
-            self.yolo_settings_frame.pack_forget()
+        if not self.bubble_detection_enabled_checkbox.isChecked():
+            self.yolo_settings_group.setVisible(False)
             return
         
-        detector = self.detector_type.get()
+        if detector is None:
+            detector = self.detector_type_combo.currentText()
         
         # Handle different detector types
         if detector == 'Custom Model':
             # Custom model - enable manual entry
-            self.bubble_model_path.set(self.settings['ocr'].get('custom_model_path', ''))
-            self.bubble_model_entry.config(
-                state='normal',
-                bg='#2b2b2b',
-                readonlybackground='#2b2b2b'
+            self.bubble_model_entry.setText(self.settings['ocr'].get('custom_model_path', ''))
+            self.bubble_model_entry.setReadOnly(False)
+            self.bubble_model_entry.setStyleSheet(
+                "QLineEdit { background-color: #2b2b2b; color: #ffffff; border: 1px solid #3a3a3a; }"
             )
             # Show browse/clear buttons for custom
-            self.bubble_browse_btn.pack(side='left')
-            self.bubble_clear_btn.pack(side='left', padx=(5, 0))
+            self.bubble_browse_btn.setVisible(True)
+            self.bubble_clear_btn.setVisible(True)
             # Hide download button
-            self.rtdetr_download_btn.pack_forget()
+            self.rtdetr_download_btn.setVisible(False)
         elif detector in self.detector_models:
             # HuggingFace model
             url = self.detector_models[detector]
-            self.bubble_model_path.set(url)
+            self.bubble_model_entry.setText(url)
             # Make entry read-only for HuggingFace models
-            self.bubble_model_entry.config(
-                state='readonly',
-                readonlybackground='#1e1e1e'
+            self.bubble_model_entry.setReadOnly(True)
+            self.bubble_model_entry.setStyleSheet(
+                "QLineEdit { background-color: #1e1e1e; color: #ffffff; border: 1px solid #3a3a3a; }"
             )
             # Hide browse/clear buttons for HuggingFace models
-            self.bubble_browse_btn.pack_forget()
-            self.bubble_clear_btn.pack_forget()
+            self.bubble_browse_btn.setVisible(False)
+            self.bubble_clear_btn.setVisible(False)
             # Show download button
-            self.rtdetr_download_btn.pack(side='left', padx=(0, 5))
+            self.rtdetr_download_btn.setVisible(True)
         
         # Show/hide RT-DETR specific controls
         if 'RT-DETR' in detector or 'RTEDR_onnx' in detector:
-            self.rtdetr_classes_frame.pack(fill='x', pady=(10, 0), after=self.rtdetr_load_btn.master)
+            self.rtdetr_classes_frame.setVisible(True)
             # Hide YOLO-only max det row
-            self.yolo_maxdet_row.pack_forget()
+            self.yolo_maxdet_widget.setVisible(False)
         else:
-            self.rtdetr_classes_frame.pack_forget()
+            self.rtdetr_classes_frame.setVisible(False)
             # Show YOLO-only max det row for YOLO models
             if 'YOLO' in detector or 'Yolo' in detector or 'yolo' in detector or detector == 'Custom Model':
-                self.yolo_maxdet_row.pack(fill='x', pady=(6,0))
+                self.yolo_maxdet_widget.setVisible(True)
             else:
-                self.yolo_maxdet_row.pack_forget()
+                self.yolo_maxdet_widget.setVisible(False)
         
         # Always show settings frame
-        self.yolo_settings_frame.pack(fill='x', pady=(10, 0))
+        self.yolo_settings_group.setVisible(True)
         
         # Update status
         self._update_bubble_status()
@@ -2878,32 +2845,37 @@ class MangaSettingsDialog(QDialog):
     def _download_rtdetr_model(self):
         """Download selected model"""
         try:
-            detector = self.detector_type.get()
-            model_url = self.bubble_model_path.get()
+            detector = self.detector_type_combo.currentText()
+            model_url = self.bubble_model_entry.text()
             
-            self.rtdetr_status_label.config(text="Downloading...", fg='orange')
-            self.dialog.update_idletasks()
+            self.rtdetr_status_label.setText("Downloading...")
+            self.rtdetr_status_label.setStyleSheet("color: orange;")
+            QApplication.processEvents()
             
             if 'RTEDR_onnx' in detector:
                 from bubble_detector import BubbleDetector
                 bd = BubbleDetector()
                 if bd.load_rtdetr_onnx_model(model_id=model_url):
-                    self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
-                    messagebox.showinfo("Success", f"RTEDR_onnx model downloaded successfully!")
+                    self.rtdetr_status_label.setText("✅ Downloaded")
+                    self.rtdetr_status_label.setStyleSheet("color: green;")
+                    QMessageBox.information(self, "Success", f"RTEDR_onnx model downloaded successfully!")
                 else:
-                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
-                    messagebox.showerror("Error", f"Failed to download RTEDR_onnx model")
+                    self.rtdetr_status_label.setText("❌ Failed")
+                    self.rtdetr_status_label.setStyleSheet("color: red;")
+                    QMessageBox.critical(self, "Error", f"Failed to download RTEDR_onnx model")
             elif 'RT-DETR' in detector:
                 # RT-DETR handling (works fine)
                 from bubble_detector import BubbleDetector
                 bd = BubbleDetector()
                 
                 if bd.load_rtdetr_model(model_id=model_url):
-                    self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
-                    messagebox.showinfo("Success", f"RT-DETR model downloaded successfully!")
+                    self.rtdetr_status_label.setText("✅ Downloaded")
+                    self.rtdetr_status_label.setStyleSheet("color: green;")
+                    QMessageBox.information(self, "Success", f"RT-DETR model downloaded successfully!")
                 else:
-                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
-                    messagebox.showerror("Error", f"Failed to download RT-DETR model")
+                    self.rtdetr_status_label.setText("❌ Failed")
+                    self.rtdetr_status_label.setStyleSheet("color: red;")
+                    QMessageBox.critical(self, "Error", f"Failed to download RT-DETR model")
             else:
                 # FIX FOR YOLO: Download to a simpler local path
                 from huggingface_hub import hf_hub_download
@@ -2931,16 +2903,19 @@ class MangaSettingsDialog(QDialog):
                 shutil.copy2(cached_path, local_path)
                 
                 # Set the simple local path instead of the cache path
-                self.bubble_model_path.set(local_path)
-                self.rtdetr_status_label.config(text="✅ Downloaded", fg='green')
-                messagebox.showinfo("Success", f"Model downloaded to:\n{local_path}")
+                self.bubble_model_entry.setText(local_path)
+                self.rtdetr_status_label.setText("✅ Downloaded")
+                self.rtdetr_status_label.setStyleSheet("color: green;")
+                QMessageBox.information(self, "Success", f"Model downloaded to:\n{local_path}")
         
         except ImportError:
-            self.rtdetr_status_label.config(text="❌ Missing deps", fg='red')
-            messagebox.showerror("Error", "Install: pip install huggingface-hub transformers")
+            self.rtdetr_status_label.setText("❌ Missing deps")
+            self.rtdetr_status_label.setStyleSheet("color: red;")
+            QMessageBox.critical(self, "Error", "Install: pip install huggingface-hub transformers")
         except Exception as e:
-            self.rtdetr_status_label.config(text="❌ Error", fg='red')
-            messagebox.showerror("Error", f"Download failed: {e}")
+            self.rtdetr_status_label.setText("❌ Error")
+            self.rtdetr_status_label.setStyleSheet("color: red;")
+            QMessageBox.critical(self, "Error", f"Download failed: {e}")
 
     def _check_rtdetr_status(self):
         """Check if model is already loaded"""
@@ -2951,23 +2926,29 @@ class MangaSettingsDialog(QDialog):
                 translator = self.main_gui.manga_tab.translator
                 if hasattr(translator, 'bubble_detector') and translator.bubble_detector:
                     if getattr(translator.bubble_detector, 'rtdetr_onnx_loaded', False):
-                        self.rtdetr_status_label.config(text="✅ Loaded", fg='green')
+                        self.rtdetr_status_label.setText("✅ Loaded")
+                        self.rtdetr_status_label.setStyleSheet("color: green;")
                         return True
                     if getattr(translator.bubble_detector, 'rtdetr_loaded', False):
-                        self.rtdetr_status_label.config(text="✅ Loaded", fg='green')
+                        self.rtdetr_status_label.setText("✅ Loaded")
+                        self.rtdetr_status_label.setStyleSheet("color: green;")
                         return True
                     elif getattr(translator.bubble_detector, 'model_loaded', False):
-                        self.rtdetr_status_label.config(text="✅ Loaded", fg='green')
+                        self.rtdetr_status_label.setText("✅ Loaded")
+                        self.rtdetr_status_label.setStyleSheet("color: green;")
                         return True
             
-            self.rtdetr_status_label.config(text="Not loaded", fg='gray')
+            self.rtdetr_status_label.setText("Not loaded")
+            self.rtdetr_status_label.setStyleSheet("color: gray;")
             return False
             
         except ImportError:
-            self.rtdetr_status_label.config(text="❌ Missing deps", fg='red')
+            self.rtdetr_status_label.setText("❌ Missing deps")
+            self.rtdetr_status_label.setStyleSheet("color: red;")
             return False
         except Exception:
-            self.rtdetr_status_label.config(text="Not loaded", fg='gray')
+            self.rtdetr_status_label.setText("Not loaded")
+            self.rtdetr_status_label.setStyleSheet("color: gray;")
             return False
 
     def _load_rtdetr_model(self):
