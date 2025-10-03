@@ -6,13 +6,9 @@ Properly integrated with TranslatorGUI's WindowManager and UIHelper
 
 import os
 import json
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, 
-                                QLabel, QPushButton, QCheckBox, QSpinBox, QDoubleSpinBox,
-                                QSlider, QComboBox, QLineEdit, QGroupBox, QTabWidget,
-                                QWidget, QScrollArea, QFrame, QRadioButton, QButtonGroup,
-                                QMessageBox, QFileDialog, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject
-from PySide6.QtGui import QFont, QIcon
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import ttkbootstrap as tb
 from typing import Dict, Any, Optional, Callable
 from bubble_detector import BubbleDetector
 import logging
@@ -22,27 +18,23 @@ import copy
 # Use the same logging infrastructure initialized by translator_gui
 logger = logging.getLogger(__name__)
 
-class MangaSettingsDialog(QDialog):
+class MangaSettingsDialog:
     """Settings dialog for manga translation"""
     
     def __init__(self, parent, main_gui, config: Dict[str, Any], callback: Optional[Callable] = None):
         """Initialize settings dialog
         
         Args:
-            parent: Parent window (should be QWidget or None)
+            parent: Parent window
             main_gui: Reference to TranslatorGUI instance
             config: Configuration dictionary
             callback: Function to call after saving
         """
-        # Ensure parent is a QWidget or None for proper PySide6 initialization
-        if parent is not None and not hasattr(parent, 'windowTitle'):
-            # If parent is not a QWidget, use None
-            parent = None
-        super().__init__(parent)
         self.parent = parent
         self.main_gui = main_gui
         self.config = config
         self.callback = callback
+        self.dialog = None
         
         # Enhanced default settings structure with all options
         self.default_settings = {
@@ -166,55 +158,44 @@ class MangaSettingsDialog(QDialog):
         self.show_dialog()
             
     def _disable_spinbox_scroll(self, widget):
-        """Disable mouse wheel scrolling on a spinbox, combobox, or slider (PySide6 version)"""
-        # Install event filter to block wheel events
-        class WheelEventFilter(QObject):
-            def eventFilter(self, obj, event):
-                if event.type() == QEvent.Wheel:
-                    event.ignore()
-                    return True
-                return False
+        """Disable mouse wheel scrolling on a spinbox or combobox"""
+        def dummy_scroll(event):
+            # Return "break" to prevent the default scroll behavior
+            return "break"
         
-        filter_obj = WheelEventFilter(widget)  # Parent it to the widget
-        widget.installEventFilter(filter_obj)
-        # Store the filter so it doesn't get garbage collected
-        if not hasattr(widget, '_wheel_filter'):
-            widget._wheel_filter = filter_obj
+        # Bind mouse wheel events to the dummy handler
+        widget.bind("<MouseWheel>", dummy_scroll)  # Windows
+        widget.bind("<Button-4>", dummy_scroll)    # Linux scroll up
+        widget.bind("<Button-5>", dummy_scroll)    # Linux scroll down
 
     def _disable_all_spinbox_scrolling(self, parent):
-        """Recursively find and disable scrolling on all spinboxes, comboboxes, and sliders (PySide6 version)"""
-        # Check if the parent itself is a spinbox, combobox, or slider
-        if isinstance(parent, (QSpinBox, QDoubleSpinBox, QComboBox, QSlider)):
-            self._disable_spinbox_scroll(parent)
-        
-        # Check all children recursively
-        if hasattr(parent, 'children'):
-            for child in parent.children():
-                if isinstance(child, QWidget):
-                    self._disable_all_spinbox_scrolling(child)
+        """Recursively find and disable scrolling on all spinboxes and comboboxes"""
+        for widget in parent.winfo_children():
+            # Check if it's a Spinbox (both ttk and tk versions)
+            if isinstance(widget, (tb.Spinbox, tk.Spinbox, ttk.Spinbox)):
+                self._disable_spinbox_scroll(widget)
+            # Check if it's a Combobox (ttk and ttkbootstrap versions)
+            elif isinstance(widget, (ttk.Combobox, tb.Combobox)):
+                self._disable_spinbox_scroll(widget)
+            # Recursively check frames and other containers
+            elif hasattr(widget, 'winfo_children'):
+                self._disable_all_spinbox_scrolling(widget)
             
-    def _create_font_size_controls(self, parent_layout):
+    def _create_font_size_controls(self, parent_frame):
         """Create improved font size controls with presets"""
         
         # Font size frame
-        font_frame = QWidget()
-        font_layout = QHBoxLayout(font_frame)
-        font_layout.setContentsMargins(0, 0, 0, 0)
-        parent_layout.addWidget(font_frame)
+        font_frame = tk.Frame(parent_frame)
+        font_frame.pack(fill=tk.X, pady=5)
         
-        label = QLabel("Font Size:")
-        label.setMinimumWidth(150)
-        font_layout.addWidget(label)
+        tk.Label(font_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
         
         # Font size mode selection
-        mode_frame = QWidget()
-        mode_layout = QHBoxLayout(mode_frame)
-        mode_layout.setContentsMargins(0, 0, 0, 0)
-        font_layout.addWidget(mode_frame)
+        mode_frame = tk.Frame(font_frame)
+        mode_frame.pack(side=tk.LEFT, padx=10)
         
-        # Radio buttons for mode - using QButtonGroup
-        self.font_size_mode_group = QButtonGroup()
-        self.font_size_mode = 'auto'  # Store mode as string attribute
+        # Radio buttons for mode
+        self.font_size_mode_var = tk.StringVar(value='auto')
         
         modes = [
             ("Auto", "auto", "Automatically fit text to bubble size"),
@@ -223,33 +204,39 @@ class MangaSettingsDialog(QDialog):
         ]
         
         for text, value, tooltip in modes:
-            rb = QRadioButton(text)
-            rb.setChecked(value == 'auto')
-            rb.setToolTip(tooltip)
-            rb.toggled.connect(lambda checked, v=value: self._on_font_mode_change(v) if checked else None)
-            mode_layout.addWidget(rb)
-            self.font_size_mode_group.addButton(rb)
+            rb = ttk.Radiobutton(
+                mode_frame,
+                text=text,
+                variable=self.font_size_mode_var,
+                value=value,
+                command=self._on_font_mode_change
+            )
+            rb.pack(side=tk.LEFT, padx=5)
+            
+            # Add tooltip
+            self._create_tooltip(rb, tooltip)
         
         # Controls frame (changes based on mode)
-        self.font_controls_frame = QWidget()
-        self.font_controls_layout = QVBoxLayout(self.font_controls_frame)
-        self.font_controls_layout.setContentsMargins(20, 5, 0, 5)
-        parent_layout.addWidget(self.font_controls_frame)
+        self.font_controls_frame = tk.Frame(parent_frame)
+        self.font_controls_frame.pack(fill=tk.X, pady=5, padx=(20, 0))
         
         # Fixed size controls
-        self.fixed_size_frame = QWidget()
-        fixed_layout = QHBoxLayout(self.fixed_size_frame)
-        fixed_layout.setContentsMargins(0, 0, 0, 0)
-        fixed_layout.addWidget(QLabel("Size:"))
+        self.fixed_size_frame = tk.Frame(self.font_controls_frame)
+        tk.Label(self.fixed_size_frame, text="Size:").pack(side=tk.LEFT)
         
-        self.fixed_font_size_spin = QSpinBox()
-        self.fixed_font_size_spin.setRange(8, 72)
-        self.fixed_font_size_spin.setValue(16)
-        self.fixed_font_size_spin.valueChanged.connect(self._save_rendering_settings)
-        fixed_layout.addWidget(self.fixed_font_size_spin)
+        self.fixed_font_size_var = tk.IntVar(value=16)
+        fixed_spin = tb.Spinbox(
+            self.fixed_size_frame,
+            from_=8,
+            to=72,
+            textvariable=self.fixed_font_size_var,
+            width=10,
+            command=self._save_rendering_settings
+        )
+        fixed_spin.pack(side=tk.LEFT, padx=5)
         
         # Quick presets for fixed size
-        fixed_layout.addWidget(QLabel("Presets:"))
+        tk.Label(self.fixed_size_frame, text="Presets:").pack(side=tk.LEFT, padx=(10, 5))
         
         presets = [
             ("Small", 12),
@@ -259,33 +246,35 @@ class MangaSettingsDialog(QDialog):
         ]
         
         for text, size in presets:
-            btn = QPushButton(text)
-            btn.setMaximumWidth(60)
-            btn.clicked.connect(lambda checked, s=size: self._set_fixed_size(s))
-            fixed_layout.addWidget(btn)
-        
-        fixed_layout.addStretch()
+            ttk.Button(
+                self.fixed_size_frame,
+                text=text,
+                command=lambda s=size: self._set_fixed_size(s),
+                width=6
+            ).pack(side=tk.LEFT, padx=2)
         
         # Scale controls
-        self.scale_frame = QWidget()
-        scale_layout = QHBoxLayout(self.scale_frame)
-        scale_layout.setContentsMargins(0, 0, 0, 0)
-        scale_layout.addWidget(QLabel("Scale:"))
+        self.scale_frame = tk.Frame(self.font_controls_frame)
+        tk.Label(self.scale_frame, text="Scale:").pack(side=tk.LEFT)
         
-        # QSlider uses integers, so we'll use 50-200 to represent 0.5-2.0
-        self.font_scale_slider = QSlider(Qt.Horizontal)
-        self.font_scale_slider.setRange(50, 200)
-        self.font_scale_slider.setValue(100)
-        self.font_scale_slider.setMinimumWidth(200)
-        self.font_scale_slider.valueChanged.connect(self._update_scale_label)
-        scale_layout.addWidget(self.font_scale_slider)
+        self.font_scale_var = tk.DoubleVar(value=1.0)
+        scale_slider = tk.Scale(
+            self.scale_frame,
+            from_=0.5,
+            to=2.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            variable=self.font_scale_var,
+            length=200,
+            command=lambda v: self._update_scale_label()
+        )
+        scale_slider.pack(side=tk.LEFT, padx=5)
         
-        self.scale_label = QLabel("100%")
-        self.scale_label.setMinimumWidth(50)
-        scale_layout.addWidget(self.scale_label)
+        self.scale_label = tk.Label(self.scale_frame, text="100%", width=5)
+        self.scale_label.pack(side=tk.LEFT)
         
         # Quick scale presets
-        scale_layout.addWidget(QLabel("Quick:"))
+        tk.Label(self.scale_frame, text="Quick:").pack(side=tk.LEFT, padx=(10, 5))
         
         scale_presets = [
             ("75%", 0.75),
@@ -295,52 +284,51 @@ class MangaSettingsDialog(QDialog):
         ]
         
         for text, scale in scale_presets:
-            btn = QPushButton(text)
-            btn.setMaximumWidth(50)
-            btn.clicked.connect(lambda checked, s=scale: self._set_scale(s))
-            scale_layout.addWidget(btn)
-        
-        scale_layout.addStretch()
+            ttk.Button(
+                self.scale_frame,
+                text=text,
+                command=lambda s=scale: self._set_scale(s),
+                width=5
+            ).pack(side=tk.LEFT, padx=2)
         
         # Auto size settings
-        self.auto_frame = QWidget()
-        auto_layout = QVBoxLayout(self.auto_frame)
-        auto_layout.setContentsMargins(0, 0, 0, 0)
+        self.auto_frame = tk.Frame(self.font_controls_frame)
         
         # Min/Max size constraints for auto mode
-        constraints_frame = QWidget()
-        constraints_layout = QHBoxLayout(constraints_frame)
-        constraints_layout.setContentsMargins(0, 0, 0, 0)
-        auto_layout.addWidget(constraints_frame)
+        constraints_frame = tk.Frame(self.auto_frame)
+        constraints_frame.pack(fill=tk.X)
         
-        constraints_layout.addWidget(QLabel("Size Range:"))
+        tk.Label(constraints_frame, text="Size Range:").pack(side=tk.LEFT)
         
-        constraints_layout.addWidget(QLabel("Min:"))
-        self.min_font_size_spin = QSpinBox()
-        self.min_font_size_spin.setRange(6, 20)
-        self.min_font_size_spin.setValue(10)
-        self.min_font_size_spin.valueChanged.connect(self._save_rendering_settings)
-        constraints_layout.addWidget(self.min_font_size_spin)
+        tk.Label(constraints_frame, text="Min:").pack(side=tk.LEFT, padx=(10, 2))
+        self.min_font_size_var = tk.IntVar(value=10)
+        tb.Spinbox(
+            constraints_frame,
+            from_=6,
+            to=20,
+            textvariable=self.min_font_size_var,
+            width=8,
+            command=self._save_rendering_settings
+        ).pack(side=tk.LEFT)
         
-        constraints_layout.addWidget(QLabel("Max:"))
-        self.max_font_size_spin = QSpinBox()
-        self.max_font_size_spin.setRange(16, 48)
-        self.max_font_size_spin.setValue(28)
-        self.max_font_size_spin.valueChanged.connect(self._save_rendering_settings)
-        constraints_layout.addWidget(self.max_font_size_spin)
-        
-        constraints_layout.addStretch()
+        tk.Label(constraints_frame, text="Max:").pack(side=tk.LEFT, padx=(10, 2))
+        self.max_font_size_var = tk.IntVar(value=28)
+        tb.Spinbox(
+            constraints_frame,
+            from_=16,
+            to=48,
+            textvariable=self.max_font_size_var,
+            width=8,
+            command=self._save_rendering_settings
+        ).pack(side=tk.LEFT)
         
         # Auto fit quality
-        quality_frame = QWidget()
-        quality_layout = QHBoxLayout(quality_frame)
-        quality_layout.setContentsMargins(0, 0, 0, 0)
-        auto_layout.addWidget(quality_frame)
+        quality_frame = tk.Frame(self.auto_frame)
+        quality_frame.pack(fill=tk.X, pady=(5, 0))
         
-        quality_layout.addWidget(QLabel("Fit Style:"))
+        tk.Label(quality_frame, text="Fit Style:").pack(side=tk.LEFT)
         
-        self.auto_fit_style_group = QButtonGroup()
-        self.auto_fit_style = 'balanced'  # Store as string attribute
+        self.auto_fit_style_var = tk.StringVar(value='balanced')
         
         fit_styles = [
             ("Compact", "compact", "Fit more text, smaller size"),
@@ -349,72 +337,79 @@ class MangaSettingsDialog(QDialog):
         ]
         
         for text, value, tooltip in fit_styles:
-            rb = QRadioButton(text)
-            rb.setChecked(value == 'balanced')
-            rb.setToolTip(tooltip)
-            rb.toggled.connect(lambda checked, v=value: self._on_fit_style_change(v) if checked else None)
-            quality_layout.addWidget(rb)
-            self.auto_fit_style_group.addButton(rb)
-        
-        quality_layout.addStretch()
+            rb = ttk.Radiobutton(
+                quality_frame,
+                text=text,
+                variable=self.auto_fit_style_var,
+                value=value,
+                command=self._save_rendering_settings
+            )
+            rb.pack(side=tk.LEFT, padx=5)
+            self._create_tooltip(rb, tooltip)
         
         # Initialize the correct frame
-        self._on_font_mode_change('auto')
+        self._on_font_mode_change()
 
-    def _on_font_mode_change(self, mode):
+    def _on_font_mode_change(self):
         """Show/hide appropriate font controls based on mode"""
-        # Update the stored mode
-        self.font_size_mode = mode
-        
-        # Remove all frames from layout
-        self.font_controls_layout.removeWidget(self.fixed_size_frame)
-        self.font_controls_layout.removeWidget(self.scale_frame)
-        self.font_controls_layout.removeWidget(self.auto_frame)
-        self.fixed_size_frame.hide()
-        self.scale_frame.hide()
-        self.auto_frame.hide()
+        # Hide all frames
+        for frame in [self.fixed_size_frame, self.scale_frame, self.auto_frame]:
+            frame.pack_forget()
         
         # Show the appropriate frame
+        mode = self.font_size_mode_var.get()
         if mode == 'fixed':
-            self.font_controls_layout.addWidget(self.fixed_size_frame)
-            self.fixed_size_frame.show()
+            self.fixed_size_frame.pack(fill=tk.X)
         elif mode == 'scale':
-            self.font_controls_layout.addWidget(self.scale_frame)
-            self.scale_frame.show()
+            self.scale_frame.pack(fill=tk.X)
         else:  # auto
-            self.font_controls_layout.addWidget(self.auto_frame)
-            self.auto_frame.show()
+            self.auto_frame.pack(fill=tk.X)
         
         self._save_rendering_settings()
 
     def _set_fixed_size(self, size):
         """Set fixed font size from preset"""
-        self.fixed_font_size_spin.setValue(size)
+        self.fixed_font_size_var.set(size)
         self._save_rendering_settings()
 
     def _set_scale(self, scale):
         """Set font scale from preset"""
-        # Scale is 0.5-2.0, slider uses 50-200
-        self.font_scale_slider.setValue(int(scale * 100))
+        self.font_scale_var.set(scale)
         self._update_scale_label()
         self._save_rendering_settings()
 
     def _update_scale_label(self):
         """Update the scale percentage label"""
-        # Get value from slider (50-200) and convert to percentage
-        scale_value = self.font_scale_slider.value()
-        self.scale_label.setText(f"{scale_value}%")
-        self._save_rendering_settings()
-    
-    def _on_fit_style_change(self, style):
-        """Handle fit style change"""
-        self.auto_fit_style = style
+        scale = self.font_scale_var.get()
+        self.scale_label.config(text=f"{int(scale * 100)}%")
         self._save_rendering_settings()
 
     def _create_tooltip(self, widget, text):
-        """Create a tooltip for a widget - PySide6 version"""
-        # In PySide6, tooltips are much simpler - just set the toolTip property
-        widget.setToolTip(text)
+        """Create a tooltip for a widget"""
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            
+            label = tk.Label(
+                tooltip,
+                text=text,
+                background="#ffffe0",
+                relief=tk.SOLID,
+                borderwidth=1,
+                font=('Arial', 9)
+            )
+            label.pack()
+            
+            widget.tooltip = tooltip
+        
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                del widget.tooltip
+        
+        widget.bind('<Enter>', on_enter)
+        widget.bind('<Leave>', on_leave)
     
     def _merge_settings(self, existing: Dict) -> Dict:
         """Merge existing settings with defaults"""
@@ -431,679 +426,393 @@ class MangaSettingsDialog(QDialog):
         return deep_merge(result, existing)
     
     def show_dialog(self):
-        """Display the settings dialog using PySide6"""
+        """Display the settings dialog using WindowManager"""
         # Set initialization flag to prevent auto-saves during setup
         self._initializing = True
         
-        # Set dialog properties
-        self.setWindowTitle("Manga Translation Settings")
-        self.setModal(True)
-        
-        # Set the halgakos.ico icon
-        try:
-            icon_path = os.path.join(os.path.dirname(__file__), 'Halgakos.ico')
-            if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass  # Fail silently if icon can't be loaded
+        # Use WindowManager to create scrollable dialog
+        if self.main_gui.wm._force_safe_ratios:
+            max_width_ratio = 0.5
+            max_height_ratio = 0.85
+        else:
+            max_width_ratio = 0.5
+            max_height_ratio = 1.05
             
-        # Apply overall dark theme styling
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #1e1e1e;
-                color: white;
-                font-family: Arial;
-            }
-            QGroupBox {
-                font-family: Arial;
-                font-size: 10pt;
-                font-weight: bold;
-                color: white;
-                border: 1px solid #555;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 5px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-            QLabel {
-                color: white;
-                font-family: Arial;
-                font-size: 9pt;
-            }
-            QLineEdit {
-                background-color: #2d2d2d;
-                color: white;
-                border: 1px solid #555;
-                border-radius: 3px;
-                padding: 3px;
-                font-family: Arial;
-                font-size: 9pt;
-            }
-            QSpinBox, QDoubleSpinBox {
-                background-color: #2d2d2d;
-                color: white;
-                border: 1px solid #555;
-                border-radius: 3px;
-                padding: 3px;
-                font-family: Arial;
-                font-size: 9pt;
-            }
-            QComboBox {
-                background-color: #2d2d2d;
-                color: white;
-                border: 1px solid #555;
-                border-radius: 3px;
-                padding: 3px 5px;
-                padding-right: 25px;
-                font-family: Arial;
-                font-size: 9pt;
-                min-height: 20px;
-            }
-            QComboBox:hover {
-                border: 1px solid #7bb3e0;
-            }
-            QComboBox:focus {
-                border: 1px solid #5a9fd4;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: right center;
-                width: 20px;
-                border-left: 1px solid #555;
-                background-color: #3c3c3c;
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
-            }
-            QComboBox::drop-down:hover {
-                background-color: #4a4a4a;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #aaa;
-                width: 0;
-                height: 0;
-                margin-right: 5px;
-            }
-            QComboBox::down-arrow:hover {
-                border-top: 5px solid #fff;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2d2d2d;
-                color: white;
-                selection-background-color: #5a9fd4;
-                selection-color: white;
-                border: 1px solid #555;
-                outline: none;
-            }
-            QPushButton {
-                font-family: Arial;
-                font-size: 9pt;
-                padding: 5px 15px;
-                border-radius: 3px;
-                border: none;
-            }
-            QSlider::groove:horizontal {
-                border: 1px solid #555;
-                height: 6px;
-                background: #2d2d2d;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #5a9fd4;
-                border: 1px solid #5a9fd4;
-                width: 18px;
-                border-radius: 9px;
-                margin: -6px 0;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #7bb3e0;
-                border: 1px solid #7bb3e0;
-            }
-            QRadioButton {
-                color: white;
-                spacing: 6px;
-                font-family: Arial;
-                font-size: 9pt;
-            }
-            QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                border: 2px solid #5a9fd4;
-                border-radius: 8px;
-                background-color: #2d2d2d;
-            }
-            QRadioButton::indicator:checked {
-                background-color: #5a9fd4;
-                border: 2px solid #5a9fd4;
-            }
-            QRadioButton::indicator:hover {
-                border-color: #7bb3e0;
-            }
-            QRadioButton:disabled {
-                color: #666666;
-            }
-            QRadioButton::indicator:disabled {
-                background-color: #1a1a1a;
-                border-color: #3a3a3a;
-            }
-            QCheckBox {
-                color: white;
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #5a9fd4;
-                border-radius: 2px;
-                background-color: #2d2d2d;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #5a9fd4;
-                border-color: #5a9fd4;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #7bb3e0;
-            }
-            QCheckBox:disabled {
-                color: #666666;
-            }
-            QCheckBox::indicator:disabled {
-                background-color: #1a1a1a;
-                border-color: #3a3a3a;
-            }
-            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
-                background-color: #1a1a1a;
-                color: #666666;
-                border: 1px solid #3a3a3a;
-            }
-            QLabel:disabled {
-                color: #666666;
-            }
-            QScrollArea {
-                background-color: #1e1e1e;
-                border: none;
-            }
-            QWidget {
-                background-color: #1e1e1e;
-                color: white;
-            }
-        """)
-        
-        # Calculate size based on screen dimensions
-        screen = self.parent.screen() if self.parent else self.screen()
-        screen_size = screen.availableGeometry()
-        dialog_width = min(800, int(screen_size.width() * 0.5))
-        dialog_height = min(900, int(screen_size.height() * 0.85))
-        self.resize(dialog_width, dialog_height)
-        
-        # Center the dialog
-        self.move(
-            screen_size.center().x() - dialog_width // 2,
-            screen_size.center().y() - dialog_height // 2
+        self.dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+            self.parent,
+            "Manga Translation Settings",
+            width=None,
+            height=None,
+            max_width_ratio=max_width_ratio,
+            max_height_ratio=max_height_ratio 
         )
         
-        # Create main layout
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
+        # Store canvas reference for potential cleanup
+        self.canvas = canvas
         
-        # Create scroll area for the content
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Create main content frame (that will scroll)
+        content_frame = tk.Frame(scrollable_frame)
+        content_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Create content widget that will go inside scroll area
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Create tab widget with enhanced styling
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #555;
-                background-color: #2b2b2b;
-            }
-            QTabBar::tab {
-                background-color: #3c3c3c;
-                color: #cccccc;
-                border: 1px solid #555;
-                border-bottom: none;
-                padding: 8px 16px;
-                margin-right: 2px;
-                font-family: Arial;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QTabBar::tab:selected {
-                background-color: #5a9fd4;
-                color: white;
-                border-color: #7bb3e0;
-                margin-bottom: -1px;
-            }
-            QTabBar::tab:hover:!selected {
-                background-color: #4a4a4a;
-                color: white;
-                border-color: #7bb3e0;
-            }
-            QTabBar::tab:first {
-                margin-left: 0;
-            }
-        """)
-        content_layout.addWidget(self.tab_widget)
+        # Create notebook for tabs inside the content frame
+        notebook = ttk.Notebook(content_frame)
+        notebook.pack(fill='both', expand=True)
         
         # Create all tabs
-        self._create_preprocessing_tab()
-        self._create_ocr_tab()
-        self._create_inpainting_tab()
-        self._create_advanced_tab()
-        self._create_cloud_api_tab()
+        self._create_preprocessing_tab(notebook)
+        self._create_ocr_tab(notebook)
+        self._create_inpainting_tab(notebook)
+        self._create_advanced_tab(notebook)
         # NOTE: Font Sizing tab removed; controls are now in Manga Integration UI
         
-        # Set content widget in scroll area
-        scroll_area.setWidget(content_widget)
-        main_layout.addWidget(scroll_area)
+        # Cloud API tab
+        self.cloud_tab = ttk.Frame(notebook)
+        notebook.add(self.cloud_tab, text="Cloud API")
+        self._create_cloud_api_tab(self.cloud_tab)
         
-        # Create button frame at bottom
-        button_frame = QWidget()
-        button_layout = QHBoxLayout(button_frame)
-        button_layout.setContentsMargins(0, 5, 0, 0)
-        
-        # Reset button on left
-        reset_button = QPushButton("Reset to Defaults")
-        reset_button.clicked.connect(self._reset_defaults)
-        reset_button.setMinimumWidth(120)
-        reset_button.setMinimumHeight(32)
-        reset_button.setStyleSheet("""
-            QPushButton {
-                background-color: #ffc107;
-                color: #1a1a1a;
-                font-weight: bold;
-                font-size: 10pt;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #ffcd38;
-            }
-            QPushButton:pressed {
-                background-color: #e0a800;
-            }
-        """)
-        button_layout.addWidget(reset_button)
-        
-        button_layout.addStretch()  # Push other buttons to the right
-        
-        # Cancel and Save buttons on right
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self._cancel)
-        cancel_button.setMinimumWidth(90)
-        cancel_button.setMinimumHeight(32)
-        cancel_button.setStyleSheet("""
-            QPushButton {
-                background-color: #6c757d;
-                color: white;
-                font-weight: bold;
-                font-size: 10pt;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #7d8a96;
-            }
-            QPushButton:pressed {
-                background-color: #5a6268;
-            }
-        """)
-        button_layout.addWidget(cancel_button)
-        
-        save_button = QPushButton("Save")
-        save_button.clicked.connect(self._save_settings)
-        save_button.setDefault(True)  # Make it the default button
-        save_button.setMinimumWidth(90)
-        save_button.setMinimumHeight(32)
-        save_button.setStyleSheet("""
-            QPushButton {
-                background-color: #28a745;
-                color: white;
-                font-weight: bold;
-                font-size: 10pt;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #34c759;
-            }
-            QPushButton:pressed {
-                background-color: #218838;
-            }
-        """)
-        button_layout.addWidget(save_button)
-        
-        main_layout.addWidget(button_frame)
+        # DISABLE SCROLL WHEEL ON ALL SPINBOXES
+        self.dialog.after(10, lambda: self._disable_all_spinbox_scrolling(self.dialog))
         
         # Clear initialization flag after setup is complete
         self._initializing = False
         
+        # Create fixed button frame at bottom of dialog (not inside scrollable content)
+        button_frame = tk.Frame(self.dialog)
+        button_frame.pack(fill='x', padx=10, pady=(5, 10), side='bottom')
+        
+        # Buttons
+        tb.Button(
+            button_frame,
+            text="Save",
+            command=self._save_settings,
+            bootstyle="success"
+        ).pack(side='right', padx=(5, 0))
+        
+        tb.Button(
+            button_frame,
+            text="Cancel",
+            command=self._cancel,
+            bootstyle="secondary"
+        ).pack(side='right', padx=(5, 0))
+        
+        tb.Button(
+            button_frame,
+            text="Reset to Defaults",
+            command=self._reset_defaults,
+            bootstyle="warning"
+        ).pack(side='left')
+        
         # Initialize preprocessing state
         self._toggle_preprocessing()
         
-        # Initialize tiling controls state (must be after widgets are created)
-        try:
-            self._toggle_tiling_controls()
-        except Exception as e:
-            print(f"Warning: Failed to initialize tiling controls: {e}")
-        
-        # Initialize iteration controls state
-        try:
-            self._toggle_iteration_controls()
-        except Exception:
-            pass
-        
-        # Disable mouse wheel scrolling on all spinboxes and comboboxes
-        self._disable_all_spinbox_scrolling(self)
-        
-        # Show the dialog
-        self.show()
+        # Handle window close protocol
+        self.dialog.protocol("WM_DELETE_WINDOW", self._cancel)
     
-    def _create_preprocessing_tab(self):
+    def _create_preprocessing_tab(self, notebook):
         """Create preprocessing settings tab with all options"""
-        # Create tab widget and add to tab widget
-        tab_widget = QWidget()
-        self.tab_widget.addTab(tab_widget, "Preprocessing")
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="Preprocessing")
         
         # Main scrollable content
-        main_layout = QVBoxLayout(tab_widget)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(6)
+        content_frame = tk.Frame(frame)
+        content_frame.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Enable preprocessing group
-        enable_group = QGroupBox("Image Preprocessing")
-        main_layout.addWidget(enable_group)
-        enable_layout = QVBoxLayout(enable_group)
-        enable_layout.setContentsMargins(8, 8, 8, 6)
-        enable_layout.setSpacing(4)
+        # Enable preprocessing with command
+        enable_frame = tk.Frame(content_frame)
+        enable_frame.pack(fill='x', padx=20, pady=(20, 10))
         
-        self.preprocess_enabled = QCheckBox("Enable Image Preprocessing")
-        self.preprocess_enabled.setChecked(self.settings['preprocessing']['enabled'])
-        self.preprocess_enabled.toggled.connect(self._toggle_preprocessing)
-        enable_layout.addWidget(self.preprocess_enabled)
+        self.preprocess_enabled = tk.BooleanVar(value=self.settings['preprocessing']['enabled'])
+        tb.Checkbutton(
+            enable_frame,
+            text="Enable Image Preprocessing",
+            variable=self.preprocess_enabled,
+            bootstyle="round-toggle",
+            command=self._toggle_preprocessing 
+        ).pack(anchor='w')
         
         # Store all preprocessing controls for enable/disable
         self.preprocessing_controls = []
         
         # Auto quality detection
-        self.auto_detect = QCheckBox("Auto-detect image quality issues")
-        self.auto_detect.setChecked(self.settings['preprocessing']['auto_detect_quality'])
-        enable_layout.addWidget(self.auto_detect)
-        self.preprocessing_controls.append(self.auto_detect)
+        self.auto_detect = tk.BooleanVar(value=self.settings['preprocessing']['auto_detect_quality'])
+        auto_cb = tb.Checkbutton(
+            enable_frame,
+            text="Auto-detect image quality issues",
+            variable=self.auto_detect,
+            bootstyle="round-toggle"
+        )
+        auto_cb.pack(anchor='w', pady=(10, 0))
+        self.preprocessing_controls.append(auto_cb)
         
         # Quality thresholds section
-        threshold_group = QGroupBox("Image Enhancement")
-        main_layout.addWidget(threshold_group)
-        threshold_layout = QVBoxLayout(threshold_group)
-        threshold_layout.setContentsMargins(8, 8, 8, 6)
-        threshold_layout.setSpacing(4)
-        self.preprocessing_controls.append(threshold_group)
+        threshold_frame = tk.LabelFrame(content_frame, text="Image Enhancement", padx=15, pady=10)
+        threshold_frame.pack(fill='x', padx=20, pady=(10, 0))
+        self.preprocessing_controls.append(threshold_frame)
         
         # Contrast threshold
-        contrast_frame = QWidget()
-        contrast_layout = QHBoxLayout(contrast_frame)
-        contrast_layout.setContentsMargins(0, 0, 0, 0)
-        threshold_layout.addWidget(contrast_frame)
-        
-        contrast_label = QLabel("Contrast Adjustment:")
-        contrast_label.setMinimumWidth(150)
-        contrast_layout.addWidget(contrast_label)
+        contrast_frame = tk.Frame(threshold_frame)
+        contrast_frame.pack(fill='x', pady=5)
+        contrast_label = tk.Label(contrast_frame, text="Contrast Adjustment:", width=20, anchor='w')
+        contrast_label.pack(side='left')
         self.preprocessing_controls.append(contrast_label)
         
-        self.contrast_threshold = QDoubleSpinBox()
-        self.contrast_threshold.setRange(0.0, 1.0)
-        self.contrast_threshold.setSingleStep(0.01)
-        self.contrast_threshold.setDecimals(2)
-        self.contrast_threshold.setValue(self.settings['preprocessing']['contrast_threshold'])
-        contrast_layout.addWidget(self.contrast_threshold)
-        self.preprocessing_controls.append(self.contrast_threshold)
-        contrast_layout.addStretch()
+        self.contrast_threshold = tk.DoubleVar(value=self.settings['preprocessing']['contrast_threshold'])
+        contrast_scale = tk.Scale(
+            contrast_frame,
+            from_=0.0, to=1.0,
+            resolution=0.01,
+            orient='horizontal',
+            variable=self.contrast_threshold,
+            length=250
+        )
+        contrast_scale.pack(side='left', padx=10)
+        self.preprocessing_controls.append(contrast_scale)
+        
+        contrast_value = tk.Label(contrast_frame, textvariable=self.contrast_threshold, width=5)
+        contrast_value.pack(side='left')
+        self.preprocessing_controls.append(contrast_value)
         
         # Sharpness threshold
-        sharpness_frame = QWidget()
-        sharpness_layout = QHBoxLayout(sharpness_frame)
-        sharpness_layout.setContentsMargins(0, 0, 0, 0)
-        threshold_layout.addWidget(sharpness_frame)
-        
-        sharpness_label = QLabel("Sharpness Enhancement:")
-        sharpness_label.setMinimumWidth(150)
-        sharpness_layout.addWidget(sharpness_label)
+        sharpness_frame = tk.Frame(threshold_frame)
+        sharpness_frame.pack(fill='x', pady=5)
+        sharpness_label = tk.Label(sharpness_frame, text="Sharpness Enhancement:", width=20, anchor='w')
+        sharpness_label.pack(side='left')
         self.preprocessing_controls.append(sharpness_label)
         
-        self.sharpness_threshold = QDoubleSpinBox()
-        self.sharpness_threshold.setRange(0.0, 1.0)
-        self.sharpness_threshold.setSingleStep(0.01)
-        self.sharpness_threshold.setDecimals(2)
-        self.sharpness_threshold.setValue(self.settings['preprocessing']['sharpness_threshold'])
-        sharpness_layout.addWidget(self.sharpness_threshold)
-        self.preprocessing_controls.append(self.sharpness_threshold)
-        sharpness_layout.addStretch()
+        self.sharpness_threshold = tk.DoubleVar(value=self.settings['preprocessing']['sharpness_threshold'])
+        sharpness_scale = tk.Scale(
+            sharpness_frame,
+            from_=0.0, to=1.0,
+            resolution=0.01,
+            orient='horizontal',
+            variable=self.sharpness_threshold,
+            length=250
+        )
+        sharpness_scale.pack(side='left', padx=10)
+        self.preprocessing_controls.append(sharpness_scale)
+        
+        sharpness_value = tk.Label(sharpness_frame, textvariable=self.sharpness_threshold, width=5)
+        sharpness_value.pack(side='left')
+        self.preprocessing_controls.append(sharpness_value)
         
         # Enhancement strength
-        enhance_frame = QWidget()
-        enhance_layout = QHBoxLayout(enhance_frame)
-        enhance_layout.setContentsMargins(0, 0, 0, 0)
-        threshold_layout.addWidget(enhance_frame)
-        
-        enhance_label = QLabel("Overall Enhancement:")
-        enhance_label.setMinimumWidth(150)
-        enhance_layout.addWidget(enhance_label)
+        enhance_frame = tk.Frame(threshold_frame)
+        enhance_frame.pack(fill='x', pady=5)
+        enhance_label = tk.Label(enhance_frame, text="Overall Enhancement:", width=20, anchor='w')
+        enhance_label.pack(side='left')
         self.preprocessing_controls.append(enhance_label)
         
-        self.enhancement_strength = QDoubleSpinBox()
-        self.enhancement_strength.setRange(0.0, 3.0)
-        self.enhancement_strength.setSingleStep(0.01)
-        self.enhancement_strength.setDecimals(2)
-        self.enhancement_strength.setValue(self.settings['preprocessing']['enhancement_strength'])
-        enhance_layout.addWidget(self.enhancement_strength)
-        self.preprocessing_controls.append(self.enhancement_strength)
-        enhance_layout.addStretch()
+        self.enhancement_strength = tk.DoubleVar(value=self.settings['preprocessing']['enhancement_strength'])
+        enhance_scale = tk.Scale(
+            enhance_frame,
+            from_=0.0, to=3.0,
+            resolution=0.01,
+            orient='horizontal',
+            variable=self.enhancement_strength,
+            length=250
+        )
+        enhance_scale.pack(side='left', padx=10)
+        self.preprocessing_controls.append(enhance_scale)
+        
+        enhance_value = tk.Label(enhance_frame, textvariable=self.enhancement_strength, width=5)
+        enhance_value.pack(side='left')
+        self.preprocessing_controls.append(enhance_value)
         
         # Noise reduction section
-        noise_group = QGroupBox("Noise Reduction")
-        main_layout.addWidget(noise_group)
-        noise_layout = QVBoxLayout(noise_group)
-        noise_layout.setContentsMargins(8, 8, 8, 6)
-        noise_layout.setSpacing(4)
-        self.preprocessing_controls.append(noise_group)
+        noise_frame = tk.LabelFrame(content_frame, text="Noise Reduction", padx=15, pady=10)
+        noise_frame.pack(fill='x', padx=20, pady=(10, 0))
+        self.preprocessing_controls.append(noise_frame)
         
         # Noise threshold
-        noise_threshold_frame = QWidget()
-        noise_threshold_layout = QHBoxLayout(noise_threshold_frame)
-        noise_threshold_layout.setContentsMargins(0, 0, 0, 0)
-        noise_layout.addWidget(noise_threshold_frame)
-        
-        noise_label = QLabel("Noise Threshold:")
-        noise_label.setMinimumWidth(150)
-        noise_threshold_layout.addWidget(noise_label)
+        noise_threshold_frame = tk.Frame(noise_frame)
+        noise_threshold_frame.pack(fill='x', pady=5)
+        noise_label = tk.Label(noise_threshold_frame, text="Noise Threshold:", width=20, anchor='w')
+        noise_label.pack(side='left')
         self.preprocessing_controls.append(noise_label)
         
-        self.noise_threshold = QSpinBox()
-        self.noise_threshold.setRange(0, 50)
-        self.noise_threshold.setValue(self.settings['preprocessing']['noise_threshold'])
-        noise_threshold_layout.addWidget(self.noise_threshold)
-        self.preprocessing_controls.append(self.noise_threshold)
-        noise_threshold_layout.addStretch()
+        self.noise_threshold = tk.IntVar(value=self.settings['preprocessing']['noise_threshold'])
+        noise_scale = tk.Scale(
+            noise_threshold_frame,
+            from_=0, to=50,
+            orient='horizontal',
+            variable=self.noise_threshold,
+            length=250
+        )
+        noise_scale.pack(side='left', padx=10)
+        self.preprocessing_controls.append(noise_scale)
+        
+        noise_value = tk.Label(noise_threshold_frame, textvariable=self.noise_threshold, width=5)
+        noise_value.pack(side='left')
+        self.preprocessing_controls.append(noise_value)
         
         # Denoise strength
-        denoise_frame = QWidget()
-        denoise_layout = QHBoxLayout(denoise_frame)
-        denoise_layout.setContentsMargins(0, 0, 0, 0)
-        noise_layout.addWidget(denoise_frame)
-        
-        denoise_label = QLabel("Denoise Strength:")
-        denoise_label.setMinimumWidth(150)
-        denoise_layout.addWidget(denoise_label)
+        denoise_frame = tk.Frame(noise_frame)
+        denoise_frame.pack(fill='x', pady=5)
+        denoise_label = tk.Label(denoise_frame, text="Denoise Strength:", width=20, anchor='w')
+        denoise_label.pack(side='left')
         self.preprocessing_controls.append(denoise_label)
         
-        self.denoise_strength = QSpinBox()
-        self.denoise_strength.setRange(0, 30)
-        self.denoise_strength.setValue(self.settings['preprocessing']['denoise_strength'])
-        denoise_layout.addWidget(self.denoise_strength)
-        self.preprocessing_controls.append(self.denoise_strength)
-        denoise_layout.addStretch()
+        self.denoise_strength = tk.IntVar(value=self.settings['preprocessing']['denoise_strength'])
+        denoise_scale = tk.Scale(
+            denoise_frame,
+            from_=0, to=30,
+            orient='horizontal',
+            variable=self.denoise_strength,
+            length=250
+        )
+        denoise_scale.pack(side='left', padx=10)
+        self.preprocessing_controls.append(denoise_scale)
+        
+        denoise_value = tk.Label(denoise_frame, textvariable=self.denoise_strength, width=5)
+        denoise_value.pack(side='left')
+        self.preprocessing_controls.append(denoise_value)
         
         # Size limits section
-        size_group = QGroupBox("Image Size Limits")
-        main_layout.addWidget(size_group)
-        size_layout = QVBoxLayout(size_group)
-        size_layout.setContentsMargins(8, 8, 8, 6)
-        size_layout.setSpacing(4)
-        self.preprocessing_controls.append(size_group)
+        size_frame = tk.LabelFrame(content_frame, text="Image Size Limits", padx=15, pady=10)
+        size_frame.pack(fill='x', padx=20, pady=(10, 0))
+        self.preprocessing_controls.append(size_frame)
         
         # Max dimension
-        dimension_frame = QWidget()
-        dimension_layout = QHBoxLayout(dimension_frame)
-        dimension_layout.setContentsMargins(0, 0, 0, 0)
-        size_layout.addWidget(dimension_frame)
-        
-        dimension_label = QLabel("Max Dimension:")
-        dimension_label.setMinimumWidth(150)
-        dimension_layout.addWidget(dimension_label)
+        dimension_frame = tk.Frame(size_frame)
+        dimension_frame.pack(fill='x', pady=5)
+        dimension_label = tk.Label(dimension_frame, text="Max Dimension:", width=20, anchor='w')
+        dimension_label.pack(side='left')
         self.preprocessing_controls.append(dimension_label)
         
-        self.dimension_spinbox = QSpinBox()
-        self.dimension_spinbox.setRange(500, 4000)
-        self.dimension_spinbox.setSingleStep(100)
-        self.dimension_spinbox.setValue(self.settings['preprocessing']['max_image_dimension'])
-        dimension_layout.addWidget(self.dimension_spinbox)
+        self.max_dimension = tk.IntVar(value=self.settings['preprocessing']['max_image_dimension'])
+        self.dimension_spinbox = tb.Spinbox(
+            dimension_frame,
+            from_=500,
+            to=4000,
+            textvariable=self.max_dimension,
+            increment=100,
+            width=10
+        )
+        self.dimension_spinbox.pack(side='left', padx=10)
         self.preprocessing_controls.append(self.dimension_spinbox)
         
-        dimension_layout.addWidget(QLabel("pixels"))
-        dimension_layout.addStretch()
+        tk.Label(dimension_frame, text="pixels").pack(side='left')
         
         # Max pixels
-        pixels_frame = QWidget()
-        pixels_layout = QHBoxLayout(pixels_frame)
-        pixels_layout.setContentsMargins(0, 0, 0, 0)
-        size_layout.addWidget(pixels_frame)
-        
-        pixels_label = QLabel("Max Total Pixels:")
-        pixels_label.setMinimumWidth(150)
-        pixels_layout.addWidget(pixels_label)
+        pixels_frame = tk.Frame(size_frame)
+        pixels_frame.pack(fill='x', pady=5)
+        pixels_label = tk.Label(pixels_frame, text="Max Total Pixels:", width=20, anchor='w')
+        pixels_label.pack(side='left')
         self.preprocessing_controls.append(pixels_label)
         
-        self.pixels_spinbox = QSpinBox()
-        self.pixels_spinbox.setRange(1000000, 10000000)
-        self.pixels_spinbox.setSingleStep(100000)
-        self.pixels_spinbox.setValue(self.settings['preprocessing']['max_image_pixels'])
-        pixels_layout.addWidget(self.pixels_spinbox)
+        self.max_pixels = tk.IntVar(value=self.settings['preprocessing']['max_image_pixels'])
+        self.pixels_spinbox = tb.Spinbox(
+            pixels_frame,
+            from_=1000000,
+            to=10000000,
+            textvariable=self.max_pixels,
+            increment=100000,
+            width=10
+        )
+        self.pixels_spinbox.pack(side='left', padx=10)
         self.preprocessing_controls.append(self.pixels_spinbox)
         
-        pixels_layout.addWidget(QLabel("pixels"))
-        pixels_layout.addStretch()
+        tk.Label(pixels_frame, text="pixels").pack(side='left')
         
         # Compression section
-        compression_group = QGroupBox("Image Compression (applies to OCR uploads)")
-        main_layout.addWidget(compression_group)
-        compression_layout = QVBoxLayout(compression_group)
-        compression_layout.setContentsMargins(8, 8, 8, 6)
-        compression_layout.setSpacing(4)
+        compression_frame = tk.LabelFrame(content_frame, text="Image Compression (applies to OCR uploads)", padx=15, pady=10)
+        compression_frame.pack(fill='x', padx=20, pady=(10, 0))
         # Do NOT add compression controls to preprocessing_controls; keep independent of preprocessing toggle
         
         # Enable compression toggle
-        self.compression_enabled = QCheckBox("Enable compression for OCR uploads")
-        self.compression_enabled.setChecked(self.settings.get('compression', {}).get('enabled', False))
-        self.compression_enabled.toggled.connect(self._toggle_compression_enabled)
-        compression_layout.addWidget(self.compression_enabled)
+        self.compression_enabled_var = tk.BooleanVar(value=self.settings.get('compression', {}).get('enabled', False))
+        compression_toggle = tb.Checkbutton(
+            compression_frame,
+            text="Enable compression for OCR uploads",
+            variable=self.compression_enabled_var,
+            bootstyle="round-toggle",
+        )
+        compression_toggle.pack(anchor='w')
+        self.compression_toggle = compression_toggle
+        
+        # Hook toggle to enable/disable compression fields
+        def _toggle_compression_enabled():
+            enabled = bool(self.compression_enabled_var.get())
+            state = 'normal' if enabled else 'disabled'
+            try:
+                self.compression_format_combo.config(state='readonly' if enabled else 'disabled')
+            except Exception:
+                pass
+            for w in [getattr(self, 'jpeg_quality_spin', None), getattr(self, 'png_level_spin', None), getattr(self, 'webp_quality_spin', None)]:
+                try:
+                    if w is not None:
+                        w.config(state=state)
+                except Exception:
+                    pass
+        compression_toggle.config(command=_toggle_compression_enabled)
         
         # Format selection
-        format_frame = QWidget()
-        format_layout = QHBoxLayout(format_frame)
-        format_layout.setContentsMargins(0, 0, 0, 0)
-        compression_layout.addWidget(format_frame)
-        
-        self.format_label = QLabel("Format:")
-        self.format_label.setMinimumWidth(150)
-        format_layout.addWidget(self.format_label)
-        
-        self.compression_format_combo = QComboBox()
-        self.compression_format_combo.addItems(['jpeg', 'png', 'webp'])
-        self.compression_format_combo.setCurrentText(self.settings.get('compression', {}).get('format', 'jpeg'))
-        self.compression_format_combo.currentTextChanged.connect(self._toggle_compression_format)
-        format_layout.addWidget(self.compression_format_combo)
-        format_layout.addStretch()
+        format_row = tk.Frame(compression_frame)
+        format_row.pack(fill='x', pady=5)
+        tk.Label(format_row, text="Format:", width=20, anchor='w').pack(side='left')
+        self.compression_format_var = tk.StringVar(value=self.settings.get('compression', {}).get('format', 'jpeg'))
+        self.compression_format_combo = ttk.Combobox(
+            format_row,
+            textvariable=self.compression_format_var,
+            values=['jpeg', 'png', 'webp'],
+            state='readonly',
+            width=10
+        )
+        self.compression_format_combo.pack(side='left', padx=10)
         
         # JPEG quality
-        self.jpeg_frame = QWidget()
-        jpeg_layout = QHBoxLayout(self.jpeg_frame)
-        jpeg_layout.setContentsMargins(0, 0, 0, 0)
-        compression_layout.addWidget(self.jpeg_frame)
-        
-        self.jpeg_label = QLabel("JPEG Quality:")
-        self.jpeg_label.setMinimumWidth(150)
-        jpeg_layout.addWidget(self.jpeg_label)
-        
-        self.jpeg_quality_spin = QSpinBox()
-        self.jpeg_quality_spin.setRange(1, 95)
-        self.jpeg_quality_spin.setValue(self.settings.get('compression', {}).get('jpeg_quality', 85))
-        jpeg_layout.addWidget(self.jpeg_quality_spin)
-        
-        self.jpeg_help = QLabel("(higher = better quality, larger size)")
-        self.jpeg_help.setStyleSheet("color: gray; font-size: 9pt;")
-        jpeg_layout.addWidget(self.jpeg_help)
-        jpeg_layout.addStretch()
+        self.jpeg_row = tk.Frame(compression_frame)
+        self.jpeg_row.pack(fill='x', pady=5)
+        tk.Label(self.jpeg_row, text="JPEG Quality:", width=20, anchor='w').pack(side='left')
+        self.jpeg_quality_var = tk.IntVar(value=self.settings.get('compression', {}).get('jpeg_quality', 85))
+        self.jpeg_quality_spin = tb.Spinbox(
+            self.jpeg_row,
+            from_=1,
+            to=95,
+            textvariable=self.jpeg_quality_var,
+            width=10
+        )
+        self.jpeg_quality_spin.pack(side='left', padx=10)
+        tk.Label(self.jpeg_row, text="(higher = better quality, larger size)", font=('Arial', 9), fg='gray').pack(side='left')
         
         # PNG compression level
-        self.png_frame = QWidget()
-        png_layout = QHBoxLayout(self.png_frame)
-        png_layout.setContentsMargins(0, 0, 0, 0)
-        compression_layout.addWidget(self.png_frame)
-        
-        self.png_label = QLabel("PNG Compression:")
-        self.png_label.setMinimumWidth(150)
-        png_layout.addWidget(self.png_label)
-        
-        self.png_level_spin = QSpinBox()
-        self.png_level_spin.setRange(0, 9)
-        self.png_level_spin.setValue(self.settings.get('compression', {}).get('png_compress_level', 6))
-        png_layout.addWidget(self.png_level_spin)
-        
-        self.png_help = QLabel("(0 = fastest, 9 = smallest)")
-        self.png_help.setStyleSheet("color: gray; font-size: 9pt;")
-        png_layout.addWidget(self.png_help)
-        png_layout.addStretch()
+        self.png_row = tk.Frame(compression_frame)
+        self.png_row.pack(fill='x', pady=5)
+        tk.Label(self.png_row, text="PNG Compression:", width=20, anchor='w').pack(side='left')
+        self.png_level_var = tk.IntVar(value=self.settings.get('compression', {}).get('png_compress_level', 6))
+        self.png_level_spin = tb.Spinbox(
+            self.png_row,
+            from_=0,
+            to=9,
+            textvariable=self.png_level_var,
+            width=10
+        )
+        self.png_level_spin.pack(side='left', padx=10)
+        tk.Label(self.png_row, text="(0 = fastest, 9 = smallest)", font=('Arial', 9), fg='gray').pack(side='left')
         
         # WEBP quality
-        self.webp_frame = QWidget()
-        webp_layout = QHBoxLayout(self.webp_frame)
-        webp_layout.setContentsMargins(0, 0, 0, 0)
-        compression_layout.addWidget(self.webp_frame)
+        self.webp_row = tk.Frame(compression_frame)
+        self.webp_row.pack(fill='x', pady=5)
+        tk.Label(self.webp_row, text="WEBP Quality:", width=20, anchor='w').pack(side='left')
+        self.webp_quality_var = tk.IntVar(value=self.settings.get('compression', {}).get('webp_quality', 85))
+        self.webp_quality_spin = tb.Spinbox(
+            self.webp_row,
+            from_=1,
+            to=100,
+            textvariable=self.webp_quality_var,
+            width=10
+        )
+        self.webp_quality_spin.pack(side='left', padx=10)
+        tk.Label(self.webp_row, text="(higher = better quality, larger size)", font=('Arial', 9), fg='gray').pack(side='left')
         
-        self.webp_label = QLabel("WEBP Quality:")
-        self.webp_label.setMinimumWidth(150)
-        webp_layout.addWidget(self.webp_label)
-        
-        self.webp_quality_spin = QSpinBox()
-        self.webp_quality_spin.setRange(1, 100)
-        self.webp_quality_spin.setValue(self.settings.get('compression', {}).get('webp_quality', 85))
-        webp_layout.addWidget(self.webp_quality_spin)
-        
-        self.webp_help = QLabel("(higher = better quality, larger size)")
-        self.webp_help.setStyleSheet("color: gray; font-size: 9pt;")
-        webp_layout.addWidget(self.webp_help)
-        webp_layout.addStretch()
-        
-        # Initialize format-specific visibility and enabled state
+        # Hook to toggle visibility based on format
+        self.compression_format_combo.bind('<<ComboboxSelected>>', lambda e: self._toggle_compression_format())
         self._toggle_compression_format()
-        self._toggle_compression_enabled()
+        # Apply enabled/disabled state for compression fields initially
+        try:
+            _toggle_compression_enabled()
+        except Exception:
+            pass
         
         # Chunk settings for large images (moved above compression)
         chunk_frame = tk.LabelFrame(content_frame, text="Large Image Processing", padx=15, pady=10)
