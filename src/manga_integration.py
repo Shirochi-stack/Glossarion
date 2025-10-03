@@ -1098,39 +1098,57 @@ class MangaTranslationTab:
             
             try:
                 if provider == 'manga-ocr':
-                    progress_label.config(text="Loading manga-ocr model...")
-                    add_log("Initializing manga-ocr...")
+                    progress_label.config(text="Downloading manga-ocr model...")
+                    add_log("Downloading manga-ocr model from Hugging Face...")
+                    add_log("This will download ~450MB of model files")
                     progress_var.set(10)
                     
-                    from manga_ocr import MangaOcr
-                    
-                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-                    initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                    
-                    def init_model_with_progress():
+                    try:
+                        from huggingface_hub import snapshot_download
+                        
+                        # Download the model files directly without importing manga_ocr
+                        model_repo = "kha-white/manga-ocr-base"
+                        add_log(f"Repository: {model_repo}")
+                        
+                        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+                        initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
                         start_time = time.time()
                         
+                        add_log("Starting download...")
+                        progress_var.set(20)
+                        
+                        # Download with progress tracking
                         import threading
-                        model_ready = threading.Event()
-                        model_instance = [None]
+                        download_complete = threading.Event()
+                        download_error = [None]
                         
-                        def init_model():
-                            model_instance[0] = MangaOcr()
-                            model_ready.set()
+                        def download_model():
+                            try:
+                                snapshot_download(
+                                    repo_id=model_repo,
+                                    repo_type="model",
+                                    resume_download=True,
+                                    local_files_only=False
+                                )
+                                download_complete.set()
+                            except Exception as e:
+                                download_error[0] = e
+                                download_complete.set()
                         
-                        init_thread = threading.Thread(target=init_model)
-                        init_thread.start()
+                        download_thread = threading.Thread(target=download_model, daemon=True)
+                        download_thread.start()
                         
-                        while not model_ready.is_set() and download_active['value']:
+                        # Show progress while downloading
+                        while not download_complete.is_set() and download_active['value']:
                             current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
                             downloaded = current_size - initial_size
                             
                             if downloaded > 0:
-                                progress = min((downloaded / total_size) * 100, 99)
+                                progress = min(20 + (downloaded / total_size) * 70, 95)
                                 progress_var.set(progress)
                                 
                                 elapsed = time.time() - start_time
-                                if elapsed > 0:
+                                if elapsed > 1:
                                     speed = downloaded / elapsed
                                     speed_mb = speed / (1024 * 1024)
                                     speed_label.config(text=f"Speed: {speed_mb:.1f} MB/s")
@@ -1142,22 +1160,30 @@ class MangaTranslationTab:
                             
                             time.sleep(0.5)
                         
-                        init_thread.join(timeout=1)
-                        return model_instance[0]
-                    
-                    model = init_model_with_progress()
-                    
-                    if model:
-                        progress_var.set(100)
-                        size_label.config(text=f"{total_size_mb} MB / {total_size_mb} MB")
-                        progress_label.config(text="✅ Download complete!")
-                        status_label.config(text="Model ready to use!")
+                        download_thread.join(timeout=5)
                         
-                        self.ocr_manager.get_provider('manga-ocr').model = model
-                        self.ocr_manager.get_provider('manga-ocr').is_loaded = True
-                        self.ocr_manager.get_provider('manga-ocr').is_installed = True
+                        if download_error[0]:
+                            raise download_error[0]
                         
-                        self.dialog.after(0, self._check_provider_status)
+                        if download_complete.is_set() and not download_error[0]:
+                            progress_var.set(100)
+                            progress_label.config(text="✅ Download complete!")
+                            status_label.config(text="Model files downloaded")
+                            add_log("✅ Model files downloaded successfully")
+                            add_log("")
+                            add_log("Next step: Click 'Load Model' to initialize manga-ocr")
+                            # Schedule status check on main thread
+                            self.update_queue.put(('call_method', self._check_provider_status, ()))
+                        else:
+                            raise Exception("Download was cancelled")
+                            
+                    except ImportError:
+                        progress_label.config(text="❌ Missing huggingface_hub")
+                        status_label.config(text="Install huggingface_hub first")
+                        add_log("ERROR: huggingface_hub not installed")
+                        add_log("Run: pip install huggingface_hub")
+                    except Exception as e:
+                        raise  # Re-raise to be caught by outer exception handler
                         
                 elif provider == 'Qwen2-VL':
                     try:
@@ -1230,7 +1256,8 @@ class MangaTranslationTab:
                     status_label.config(text="Model ready for Korean OCR!")
                     add_log("✓ Model ready to use!")
                     
-                    self.dialog.after(0, self._check_provider_status)
+                    # Schedule status check on main thread
+                    self.update_queue.put(('call_method', self._check_provider_status, ()))
                     
                 elif provider == 'rapidocr':
                     progress_label.config(text="📦 RapidOCR Installation Instructions")
@@ -1519,7 +1546,8 @@ class MangaTranslationTab:
                     self.main_gui.save_config
                 )
                 # After dialog closes, refresh status
-                self.dialog.after(100, self._check_provider_status)
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(100, self._check_provider_status)
             except ImportError:
                 # If dialog not available, show message
                 from PySide6.QtWidgets import QMessageBox
@@ -1712,30 +1740,48 @@ class MangaTranslationTab:
         progress_layout.addWidget(progress_section)
         
         def update_progress(message, percent=None):
-            """Update progress display"""
-            progress_label.setText(message)
-            if percent is not None:
-                progress_bar.setMaximum(100)  # Switch to determinate mode
-                progress_bar.setValue(int(percent))
+            """Update progress display (thread-safe)"""
+            # Use lambda to ensure we capture the correct widget references
+            def update_ui():
+                progress_label.setText(message)
+                if percent is not None:
+                    progress_bar.setMaximum(100)  # Switch to determinate mode
+                    progress_bar.setValue(int(percent))
+            
+            # Schedule on main thread
+            self.update_queue.put(('call_method', update_ui, ()))
         
         def setup_thread():
             """Run setup in background thread"""
             nonlocal model_size
+            print(f"\n=== SETUP THREAD STARTED for {provider} ===")
+            print(f"Status: {status}")
+            print(f"Model size: {model_size}")
+            
             try:
-                success = False
-                
+                # Check if we need to install
                 if not status['installed']:
                     # Install provider
+                    print(f"Installing {provider}...")
                     update_progress(f"Installing {provider}...")
                     success = self.ocr_manager.install_provider(provider, update_progress)
+                    print(f"Install result: {success}")
                     
                     if not success:
+                        print("Installation FAILED")
                         update_progress("❌ Installation failed!", 0)
                         self._log(f"Failed to install {provider}", "error")
                         return
+                else:
+                    # Already installed, skip installation
+                    print(f"{provider} dependencies already installed")
+                    self._log(f"DEBUG: {provider} dependencies already installed")
+                    success = True  # Mark as success since deps are ready
                 
                 # Load model
+                print(f"About to load {provider} model...")
                 update_progress(f"Loading {provider} model...")
+                self._log(f"DEBUG: Loading provider {provider}, status['installed']={status.get('installed', False)}")
                 
                 # Special handling for Qwen2-VL - pass model_size
                 if provider == 'Qwen2-VL':
@@ -1764,26 +1810,50 @@ class MangaTranslationTab:
                         self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
                         success = self.ocr_manager.load_provider(provider, model_size="1")
                 else:
+                    print(f"Loading {provider} without model_size parameter")
+                    self._log(f"DEBUG: Loading {provider} without model_size parameter")
                     success = self.ocr_manager.load_provider(provider)
+                    print(f"load_provider returned: {success}")
+                    self._log(f"DEBUG: load_provider returned success={success}")
                 
+                print(f"\nFinal success value: {success}")
                 if success:
+                    print("SUCCESS! Model loaded successfully")
                     update_progress(f"✅ {provider} ready!", 100)
                     self._log(f"✅ {provider} is ready to use", "success")
-                    # Use QTimer to call status check on main thread
-                    QTimer.singleShot(0, self._check_provider_status)
+                    # Schedule status check on main thread
+                    self.update_queue.put(('call_method', self._check_provider_status, ()))
                 else:
+                    print("FAILED! Model did not load")
                     update_progress("❌ Failed to load model!", 0)
                     self._log(f"Failed to load {provider} model", "error")
                 
             except Exception as e:
-                update_progress(f"❌ Error: {str(e)}", 0)
-                self._log(f"Setup error: {str(e)}", "error")
+                print(f"\n!!! EXCEPTION CAUGHT !!!")
+                print(f"Exception type: {type(e).__name__}")
+                print(f"Exception message: {str(e)}")
                 import traceback
-                self._log(traceback.format_exc(), "debug")
+                traceback_str = traceback.format_exc()
+                print(f"Traceback:\n{traceback_str}")
+                
+                error_msg = f"❌ Error: {str(e)}"
+                update_progress(error_msg, 0)
+                self._log(f"Setup error: {str(e)}", "error")
+                self._log(traceback_str, "debug")
+                # Don't close dialog on error - let user read the error
+                return
             
-            finally:
-                # Use QTimer to close dialog after 2 seconds
-                QTimer.singleShot(2000, progress_dialog.close)
+            # Only close dialog on success
+            if success:
+                # Schedule dialog close on main thread after 2 seconds
+                import time
+                time.sleep(2)
+                self.update_queue.put(('call_method', progress_dialog.close, ()))
+            else:
+                # On failure, keep dialog open so user can see the error
+                import time
+                time.sleep(5)
+                self.update_queue.put(('call_method', progress_dialog.close, ()))
         
         # Show progress dialog (non-blocking)
         progress_dialog.show()
@@ -6403,6 +6473,16 @@ class MangaTranslationTab:
                                 self.file_listbox.setEnabled(False)
                         except Exception:
                             pass
+                
+                elif update[0] == 'call_method':
+                    # Call a method on the main thread
+                    _, method, args = update
+                    try:
+                        method(*args)
+                    except Exception as e:
+                        import traceback
+                        print(f"Error calling method {method}: {e}")
+                        print(traceback.format_exc())
                     
         except Exception:
             # Queue is empty or some other exception

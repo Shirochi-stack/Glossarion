@@ -642,8 +642,10 @@ class MangaOCRProvider(OCRProvider):
     
     def load_model(self, **kwargs) -> bool:
         """Load the manga-ocr model, preferring a local directory to avoid re-downloading"""
+        print("\n>>> MangaOCRProvider.load_model() called")
         try:
             if not self.is_installed and not self.check_installation():
+                print("ERROR: Transformers not installed")
                 self._log("❌ Transformers not installed", "error")
                 return False
 
@@ -720,8 +722,8 @@ class MangaOCRProvider(OCRProvider):
                     source,
                     local_files_only=local_flag,
                     low_cpu_mem_usage=False,
-                    dtype=torch.float32,
-                    device_map=None
+                    device_map=None,
+                    torch_dtype=torch.float32  # Use torch_dtype instead of dtype
                 )
                 return tok, proc, mdl
 
@@ -766,14 +768,18 @@ class MangaOCRProvider(OCRProvider):
                 self._log(f"❌ Manga-OCR model load sanity check failed: {sanity_err}", "error")
                 return False
 
+            print(f"SUCCESS: Model loaded on {target_device.upper()}")
             self._log(f"   ✅ Model loaded on {target_device.upper()}")
             self.is_loaded = True
             self._log("✅ Manga OCR model ready")
+            print(">>> Returning True from load_model()")
             return True
 
         except Exception as e:
-            self._log(f"❌ Failed to load manga-ocr model: {str(e)}", "error")
+            print(f"\nEXCEPTION in load_model: {e}")
             import traceback
+            print(traceback.format_exc())
+            self._log(f"❌ Failed to load manga-ocr model: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
             try:
                 if 'local_only' in locals() and local_only:
