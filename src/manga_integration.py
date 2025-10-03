@@ -762,7 +762,14 @@ class MangaTranslationTab:
         return checkbox
 
     def _download_hf_model(self):
-        """Download HuggingFace models with progress tracking"""
+        """Download HuggingFace models with progress tracking - PySide6 version"""
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+                                        QRadioButton, QButtonGroup, QLineEdit, QPushButton,
+                                        QGroupBox, QTextEdit, QProgressBar, QFrame,
+                                        QScrollArea, QWidget, QSizePolicy)
+        from PySide6.QtCore import Qt, QThread, Signal, QTimer
+        from PySide6.QtGui import QFont
+        
         provider = self.ocr_provider_value
         
         # Model sizes (approximate in MB)
@@ -778,31 +785,26 @@ class MangaTranslationTab:
         
         # For Qwen2-VL, show model selection dialog first
         if provider == 'Qwen2-VL':
-            # Use window manager from main_gui - pass Tkinter root instead of PySide6 dialog
-            selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.main_gui.master,
-                "Select Qwen2-VL Model Size",
-                width=None,
-                height=None,
-                max_width_ratio=0.6,
-                max_height_ratio=0.3
-            )
+            # Create PySide6 dialog
+            selection_dialog = QDialog(self.dialog)
+            selection_dialog.setWindowTitle("Select Qwen2-VL Model Size")
+            selection_dialog.setMinimumSize(600, 500)
+            main_layout = QVBoxLayout(selection_dialog)
             
             # Title
-            title_frame = tk.Frame(scrollable_frame)
-            title_frame.pack(fill=tk.X, pady=(10, 20))
-            tk.Label(title_frame, text="Select Qwen2-VL Model Size", 
-                    font=('Arial', 14, 'bold')).pack()
+            title_label = QLabel("Select Qwen2-VL Model Size")
+            title_font = QFont("Arial", 14, QFont.Weight.Bold)
+            title_label.setFont(title_font)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            main_layout.addWidget(title_label)
             
             # Model selection frame
-            model_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Model Options",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            model_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+            model_frame = QGroupBox("Model Options")
+            model_frame_font = QFont("Arial", 11, QFont.Weight.Bold)
+            model_frame.setFont(model_frame_font)
+            model_frame_layout = QVBoxLayout(model_frame)
+            model_frame_layout.setContentsMargins(15, 15, 15, 15)
+            model_frame_layout.setSpacing(10)
             
             model_options = {
                 "2B": {
@@ -823,57 +825,77 @@ class MangaTranslationTab:
                 }
             }
             
-            selected_model = tk.StringVar(value="2B")
-            custom_model_id = tk.StringVar()
+            # Store selected model
+            selected_model_key = {"value": "2B"}
+            custom_model_id_text = {"value": ""}
             
-            for key, info in model_options.items():
-                option_frame = tk.Frame(model_frame)
-                option_frame.pack(fill=tk.X, pady=5)
+            # Radio button group
+            button_group = QButtonGroup(selection_dialog)
+            
+            for idx, (key, info) in enumerate(model_options.items()):
+                # Radio button
+                rb = QRadioButton(info["title"])
+                rb_font = QFont("Arial", 11, QFont.Weight.Bold)
+                rb.setFont(rb_font)
+                if idx == 0:
+                    rb.setChecked(True)
+                rb.clicked.connect(lambda checked, k=key: selected_model_key.update({"value": k}))
+                button_group.addButton(rb)
+                model_frame_layout.addWidget(rb)
                 
-                rb = tk.Radiobutton(option_frame, text=info["title"], 
-                                   variable=selected_model, value=key, 
-                                   font=('Arial', 11, 'bold'))
-                rb.pack(anchor='w')
+                # Description
+                desc_label = QLabel(info["desc"])
+                desc_font = QFont("Arial", 9)
+                desc_label.setFont(desc_font)
+                desc_label.setStyleSheet("color: #666666; margin-left: 20px;")
+                model_frame_layout.addWidget(desc_label)
                 
-                desc_label = tk.Label(option_frame, text=info["desc"], 
-                                     font=('Arial', 9), justify=tk.LEFT, fg='#666666')
-                desc_label.pack(anchor='w', padx=(20, 0))
-                
+                # Separator
                 if key != "custom":
-                    ttk.Separator(option_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 0))
+                    separator = QFrame()
+                    separator.setFrameShape(QFrame.Shape.HLine)
+                    separator.setFrameShadow(QFrame.Shadow.Sunken)
+                    model_frame_layout.addWidget(separator)
             
-            # Custom model ID frame
-            custom_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Custom Model ID",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
+            main_layout.addWidget(model_frame)
             
-            entry_frame = tk.Frame(custom_frame)
-            entry_frame.pack(fill=tk.X, pady=5)
-            tk.Label(entry_frame, text="Model ID:", font=('Arial', 10)).pack(side=tk.LEFT, padx=(0, 10))
-            custom_entry = tk.Entry(entry_frame, textvariable=custom_model_id, width=40, font=('Arial', 10))
-            custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            # Custom model ID frame (initially hidden)
+            custom_frame = QGroupBox("Custom Model ID")
+            custom_frame_font = QFont("Arial", 11, QFont.Weight.Bold)
+            custom_frame.setFont(custom_frame_font)
+            custom_frame_layout = QHBoxLayout(custom_frame)
+            custom_frame_layout.setContentsMargins(15, 15, 15, 15)
             
-            def toggle_custom_frame(*args):
-                if selected_model.get() == "custom":
-                    custom_frame.pack(fill=tk.X, padx=20, pady=10, after=model_frame)
+            custom_label = QLabel("Model ID:")
+            custom_label_font = QFont("Arial", 10)
+            custom_label.setFont(custom_label_font)
+            custom_frame_layout.addWidget(custom_label)
+            
+            custom_entry = QLineEdit()
+            custom_entry.setPlaceholderText("e.g., Qwen/Qwen2-VL-2B-Instruct")
+            custom_entry.setFont(custom_label_font)
+            custom_entry.textChanged.connect(lambda text: custom_model_id_text.update({"value": text}))
+            custom_frame_layout.addWidget(custom_entry)
+            
+            custom_frame.hide()  # Hidden by default
+            main_layout.addWidget(custom_frame)
+            
+            # Toggle custom frame visibility
+            def toggle_custom_frame():
+                if selected_model_key["value"] == "custom":
+                    custom_frame.show()
                 else:
-                    custom_frame.pack_forget()
+                    custom_frame.hide()
             
-            selected_model.trace('w', toggle_custom_frame)
+            for rb in button_group.buttons():
+                rb.clicked.connect(toggle_custom_frame)
             
             # GPU status frame
-            gpu_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="System Status",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            gpu_frame.pack(fill=tk.X, padx=20, pady=10)
+            gpu_frame = QGroupBox("System Status")
+            gpu_frame_font = QFont("Arial", 11, QFont.Weight.Bold)
+            gpu_frame.setFont(gpu_frame_font)
+            gpu_frame_layout = QVBoxLayout(gpu_frame)
+            gpu_frame_layout.setContentsMargins(15, 15, 15, 15)
             
             try:
                 import torch
@@ -888,52 +910,52 @@ class MangaTranslationTab:
                 gpu_text = "? GPU status unknown - install torch with CUDA"
                 gpu_color = '#FF9800'
             
-            tk.Label(gpu_frame, text=gpu_text, font=('Arial', 10), fg=gpu_color).pack(anchor='w')
+            gpu_label = QLabel(gpu_text)
+            gpu_label_font = QFont("Arial", 10)
+            gpu_label.setFont(gpu_label_font)
+            gpu_label.setStyleSheet(f"color: {gpu_color};")
+            gpu_frame_layout.addWidget(gpu_label)
+            
+            main_layout.addWidget(gpu_frame)
             
             # Buttons
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill=tk.X, pady=20)
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
             
             model_confirmed = {'value': False, 'model_key': None, 'model_id': None}
             
             def confirm_selection():
-                selected = selected_model.get()
+                selected = selected_model_key["value"]
                 if selected == "custom":
-                    if not custom_model_id.get().strip():
+                    if not custom_model_id_text["value"].strip():
                         from PySide6.QtWidgets import QMessageBox
                         QMessageBox.critical(selection_dialog, "Error", "Please enter a model ID")
                         return
                     model_confirmed['model_key'] = selected
-                    model_confirmed['model_id'] = custom_model_id.get().strip()
+                    model_confirmed['model_id'] = custom_model_id_text["value"].strip()
                 else:
                     model_confirmed['model_key'] = selected
                     model_confirmed['model_id'] = f"Qwen/Qwen2-VL-{selected}-Instruct"
                 model_confirmed['value'] = True
-                selection_dialog.destroy()
+                selection_dialog.accept()
             
-            # Center the buttons by creating an inner frame
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()
-
-            proceed_btn = tk.Button(
-                button_inner_frame, text="Continue", command=confirm_selection,
-                bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
-                padx=20, pady=8, cursor='hand2'
-            )
-            proceed_btn.pack(side=tk.LEFT, padx=5)
-
-            cancel_btn = tk.Button(
-                button_inner_frame, text="Cancel", command=selection_dialog.destroy,
-                bg='#9E9E9E', fg='white', font=('Arial', 10),
-                padx=20, pady=8, cursor='hand2'
-            )
-            cancel_btn.pack(side=tk.LEFT, padx=5)
+            proceed_btn = QPushButton("Continue")
+            proceed_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 8px 20px; font-weight: bold; }")
+            proceed_btn.clicked.connect(confirm_selection)
+            button_layout.addWidget(proceed_btn)
             
-            # Auto-resize and wait
-            self.main_gui.wm.auto_resize_dialog(selection_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.6)
-            self.dialog.wait_window(selection_dialog)
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; padding: 8px 20px; }")
+            cancel_btn.clicked.connect(selection_dialog.reject)
+            button_layout.addWidget(cancel_btn)
             
-            if not model_confirmed['value']:
+            button_layout.addStretch()
+            main_layout.addLayout(button_layout)
+            
+            # Show dialog and wait for result
+            result = selection_dialog.exec()
+            
+            if not model_confirmed['value'] or result == QDialog.DialogCode.Rejected:
                 return
             
             selected_model_key = model_confirmed['model_key']
@@ -1518,31 +1540,32 @@ class MangaTranslationTab:
         # For Qwen2-VL, check if we need to select model size first
         model_size = None
         if provider == 'Qwen2-VL' and status['installed'] and not status['loaded']:
-            # Use window manager for dialog - pass Tkinter root instead of PySide6 dialog
-            selection_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-                self.main_gui.master,
-                "Select Qwen2-VL Model Size",
-                width=None,
-                height=None,
-                max_width_ratio=0.5,
-                max_height_ratio=0.3
-            )
+            # Create PySide6 dialog for model selection
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+                                            QRadioButton, QButtonGroup, QLineEdit, QPushButton,
+                                            QGroupBox, QFrame, QMessageBox)
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QFont
+            
+            selection_dialog = QDialog(self.dialog)
+            selection_dialog.setWindowTitle("Select Qwen2-VL Model Size")
+            selection_dialog.setMinimumSize(600, 450)
+            main_layout = QVBoxLayout(selection_dialog)
             
             # Title
-            title_frame = tk.Frame(scrollable_frame)
-            title_frame.pack(fill=tk.X, pady=(10, 20))
-            tk.Label(title_frame, text="Select Model Size to Load", 
-                    font=('Arial', 12, 'bold')).pack()
+            title_label = QLabel("Select Model Size to Load")
+            title_font = QFont("Arial", 12, QFont.Weight.Bold)
+            title_label.setFont(title_font)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            main_layout.addWidget(title_label)
             
             # Model selection frame
-            model_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Available Models",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
-            model_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+            model_frame = QGroupBox("Available Models")
+            model_frame_font = QFont("Arial", 11, QFont.Weight.Bold)
+            model_frame.setFont(model_frame_font)
+            model_frame_layout = QVBoxLayout(model_frame)
+            model_frame_layout.setContentsMargins(15, 15, 15, 15)
+            model_frame_layout.setSpacing(10)
             
             # Model options
             model_options = {
@@ -1552,146 +1575,148 @@ class MangaTranslationTab:
                 "4": {"name": "Custom Model", "desc": "Enter any HF model ID"},
             }
             
-            selected_model = tk.StringVar(value="1")
-            custom_model_id = tk.StringVar()
+            # Store selected model
+            selected_model_key = {"value": "1"}
+            custom_model_id_text = {"value": ""}
             
-            for key, info in model_options.items():
-                option_frame = tk.Frame(model_frame)
-                option_frame.pack(fill=tk.X, pady=5)
+            # Radio button group
+            button_group = QButtonGroup(selection_dialog)
+            
+            for idx, (key, info) in enumerate(model_options.items()):
+                # Radio button
+                rb = QRadioButton(f"{info['name']} - {info['desc']}")
+                rb_font = QFont("Arial", 10)
+                rb.setFont(rb_font)
+                if idx == 0:
+                    rb.setChecked(True)
+                rb.clicked.connect(lambda checked, k=key: selected_model_key.update({"value": k}))
+                button_group.addButton(rb)
+                model_frame_layout.addWidget(rb)
                 
-                rb = tk.Radiobutton(
-                    option_frame, 
-                    text=f"{info['name']} - {info['desc']}", 
-                    variable=selected_model, 
-                    value=key,
-                    font=('Arial', 10),
-                    anchor='w'
-                )
-                rb.pack(anchor='w')
-                
+                # Separator
                 if key != "4":
-                    ttk.Separator(option_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 0))
+                    separator = QFrame()
+                    separator.setFrameShape(QFrame.Shape.HLine)
+                    separator.setFrameShadow(QFrame.Shadow.Sunken)
+                    model_frame_layout.addWidget(separator)
             
-            # Custom model ID frame
-            custom_frame = tk.LabelFrame(
-                scrollable_frame,
-                text="Custom Model Configuration",
-                font=('Arial', 11, 'bold'),
-                padx=15,
-                pady=10
-            )
+            main_layout.addWidget(model_frame)
             
-            entry_frame = tk.Frame(custom_frame)
-            entry_frame.pack(fill=tk.X, pady=5)
-            tk.Label(entry_frame, text="Model ID:", font=('Arial', 10)).pack(side=tk.LEFT, padx=(0, 10))
-            custom_entry = tk.Entry(entry_frame, textvariable=custom_model_id, width=35, font=('Arial', 10))
-            custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            # Custom model ID frame (initially hidden)
+            custom_frame = QGroupBox("Custom Model Configuration")
+            custom_frame_font = QFont("Arial", 11, QFont.Weight.Bold)
+            custom_frame.setFont(custom_frame_font)
+            custom_frame_layout = QHBoxLayout(custom_frame)
+            custom_frame_layout.setContentsMargins(15, 15, 15, 15)
             
-            def toggle_custom_frame(*args):
-                if selected_model.get() == "4":
-                    custom_frame.pack(fill=tk.X, padx=20, pady=10, after=model_frame)
+            custom_label = QLabel("Model ID:")
+            custom_label_font = QFont("Arial", 10)
+            custom_label.setFont(custom_label_font)
+            custom_frame_layout.addWidget(custom_label)
+            
+            custom_entry = QLineEdit()
+            custom_entry.setPlaceholderText("e.g., Qwen/Qwen2-VL-2B-Instruct")
+            custom_entry.setFont(custom_label_font)
+            custom_entry.textChanged.connect(lambda text: custom_model_id_text.update({"value": text}))
+            custom_frame_layout.addWidget(custom_entry)
+            
+            custom_frame.hide()  # Hidden by default
+            main_layout.addWidget(custom_frame)
+            
+            # Toggle custom frame visibility
+            def toggle_custom_frame():
+                if selected_model_key["value"] == "4":
+                    custom_frame.show()
                 else:
-                    custom_frame.pack_forget()
+                    custom_frame.hide()
             
-            selected_model.trace('w', toggle_custom_frame)
+            for rb in button_group.buttons():
+                rb.clicked.connect(toggle_custom_frame)
             
             # Buttons with centering
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill=tk.X, pady=20)
-            
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
             
             model_confirmed = {'value': False, 'size': None}
             
             def confirm_selection():
-                selected = selected_model.get()
+                selected = selected_model_key["value"]
                 self._log(f"DEBUG: Radio button selection = {selected}")
                 if selected == "4":
-                    if not custom_model_id.get().strip():
-                        from PySide6.QtWidgets import QMessageBox
+                    if not custom_model_id_text["value"].strip():
                         QMessageBox.critical(selection_dialog, "Error", "Please enter a model ID")
                         return
-                    model_confirmed['size'] = f"custom:{custom_model_id.get().strip()}"
+                    model_confirmed['size'] = f"custom:{custom_model_id_text['value'].strip()}"
                 else:
                     model_confirmed['size'] = selected
                 model_confirmed['value'] = True
-                selection_dialog.destroy()
+                selection_dialog.accept()
             
-            load_btn = tk.Button(
-                button_inner_frame, text="Load", command=confirm_selection,
-                bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
-                padx=20, pady=8, cursor='hand2', width=12
-            )
-            load_btn.pack(side=tk.LEFT, padx=5)
+            load_btn = QPushButton("Load")
+            load_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; padding: 8px 20px; font-weight: bold; }")
+            load_btn.clicked.connect(confirm_selection)
+            button_layout.addWidget(load_btn)
             
-            cancel_btn = tk.Button(
-                button_inner_frame, text="Cancel", command=selection_dialog.destroy,
-                bg='#9E9E9E', fg='white', font=('Arial', 10),
-                padx=20, pady=8, cursor='hand2', width=12
-            )
-            cancel_btn.pack(side=tk.LEFT, padx=5)
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; padding: 8px 20px; }")
+            cancel_btn.clicked.connect(selection_dialog.reject)
+            button_layout.addWidget(cancel_btn)
             
-            # Auto-resize and wait
-            self.main_gui.wm.auto_resize_dialog(selection_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.35)
-            self.dialog.wait_window(selection_dialog)
+            button_layout.addStretch()
+            main_layout.addLayout(button_layout)
             
-            if not model_confirmed['value']:
+            # Show dialog and wait for result (PySide6 modal dialog)
+            result = selection_dialog.exec()
+            
+            if result != QDialog.DialogCode.Accepted or not model_confirmed['value']:
                 return
             
             model_size = model_confirmed['size']
             self._log(f"DEBUG: Dialog closed, model_size set to: {model_size}")
         
-        # Create progress dialog with window manager - pass Tkinter root instead of PySide6 dialog
-        progress_dialog, progress_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.main_gui.master,
-            f"Setting up {provider}",
-            width=400,
-            height=200,
-            max_width_ratio=0.4,
-            max_height_ratio=0.3
-        )
+        # Create PySide6 progress dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QGroupBox
+        from PySide6.QtCore import QTimer
+        from PySide6.QtGui import QFont
+        
+        progress_dialog = QDialog(self.dialog)
+        progress_dialog.setWindowTitle(f"Setting up {provider}")
+        progress_dialog.setMinimumSize(400, 200)
+        progress_layout = QVBoxLayout(progress_dialog)
         
         # Progress section
-        progress_section = tk.LabelFrame(
-            progress_frame,
-            text="Setup Progress",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        progress_section.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        progress_section = QGroupBox("Setup Progress")
+        progress_section_font = QFont("Arial", 11, QFont.Weight.Bold)
+        progress_section.setFont(progress_section_font)
+        progress_section_layout = QVBoxLayout(progress_section)
+        progress_section_layout.setContentsMargins(15, 15, 15, 15)
+        progress_section_layout.setSpacing(10)
         
-        progress_label = tk.Label(progress_section, text="Initializing...", font=('Arial', 10))
-        progress_label.pack(pady=(10, 15))
+        progress_label = QLabel("Initializing...")
+        progress_label_font = QFont("Arial", 10)
+        progress_label.setFont(progress_label_font)
+        progress_section_layout.addWidget(progress_label)
         
-        try:
-            # Try to use our custom progress bar style
-            progress_bar = ttk.Progressbar(
-                progress_section,
-                length=350,
-                mode='indeterminate',
-                style="MangaProgress.Horizontal.TProgressbar"
-            )
-        except Exception:
-            # Fallback to default if style not available yet
-            progress_bar = ttk.Progressbar(
-                progress_section,
-                length=350,
-                mode='indeterminate'
-            )
-        progress_bar.pack(pady=(0, 10))
-        progress_bar.start(10)
+        progress_bar = QProgressBar()
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(0)  # Indeterminate mode
+        progress_bar.setMinimumWidth(350)
+        progress_section_layout.addWidget(progress_bar)
         
-        status_label = tk.Label(progress_section, text="", font=('Arial', 9), fg='#666666')
-        status_label.pack(pady=(0, 10))
+        status_label = QLabel("")
+        status_label_font = QFont("Arial", 9)
+        status_label.setFont(status_label_font)
+        status_label.setStyleSheet("color: #666666;")
+        progress_section_layout.addWidget(status_label)
+        
+        progress_layout.addWidget(progress_section)
         
         def update_progress(message, percent=None):
             """Update progress display"""
-            progress_label.config(text=message)
+            progress_label.setText(message)
             if percent is not None:
-                progress_bar.stop()
-                progress_bar.config(mode='determinate', value=percent)
+                progress_bar.setMaximum(100)  # Switch to determinate mode
+                progress_bar.setValue(int(percent))
         
         def setup_thread():
             """Run setup in background thread"""
@@ -1744,7 +1769,8 @@ class MangaTranslationTab:
                 if success:
                     update_progress(f"✅ {provider} ready!", 100)
                     self._log(f"✅ {provider} is ready to use", "success")
-                    self.dialog.after(0, self._check_provider_status)
+                    # Use QTimer to call status check on main thread
+                    QTimer.singleShot(0, self._check_provider_status)
                 else:
                     update_progress("❌ Failed to load model!", 0)
                     self._log(f"Failed to load {provider} model", "error")
@@ -1756,10 +1782,11 @@ class MangaTranslationTab:
                 self._log(traceback.format_exc(), "debug")
             
             finally:
-                self.dialog.after(2000, progress_dialog.destroy)
+                # Use QTimer to close dialog after 2 seconds
+                QTimer.singleShot(2000, progress_dialog.close)
         
-        # Auto-resize
-        self.main_gui.wm.auto_resize_dialog(progress_dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.3)
+        # Show progress dialog (non-blocking)
+        progress_dialog.show()
         
         # Start setup in background via executor if available
         try:
@@ -2559,6 +2586,8 @@ class MangaTranslationTab:
 
         # Cloud settings frame
         self.cloud_inpaint_frame = QWidget()
+        # Ensure this widget doesn't become a window
+        self.cloud_inpaint_frame.setWindowFlags(Qt.WindowType.Widget)
         cloud_inpaint_layout = QVBoxLayout(self.cloud_inpaint_frame)
         cloud_inpaint_layout.setContentsMargins(0, 0, 0, 0)
         cloud_inpaint_layout.setSpacing(5)
@@ -2635,6 +2664,8 @@ class MangaTranslationTab:
 
         # Local inpainting settings frame
         self.local_inpaint_frame = QWidget()
+        # Ensure this widget doesn't become a window
+        self.local_inpaint_frame.setWindowFlags(Qt.WindowType.Widget)
         local_inpaint_layout = QVBoxLayout(self.local_inpaint_frame)
         local_inpaint_layout.setContentsMargins(0, 0, 0, 0)
         local_inpaint_layout.setSpacing(5)
@@ -2746,6 +2777,10 @@ class MangaTranslationTab:
         
         # Add local_inpaint_frame to inpaint_group
         inpaint_group_layout.addWidget(self.local_inpaint_frame)
+        
+        # Hide both frames by default to prevent window popup
+        self.cloud_inpaint_frame.hide()
+        self.local_inpaint_frame.hide()
 
         # Try to load saved model for current type on dialog open
         initial_model_type = self.local_model_type_value
@@ -4362,9 +4397,11 @@ class MangaTranslationTab:
             if hasattr(self, 'rapidocr_language_value'):
                 self.main_gui.config['rapidocr_language'] = self.rapidocr_language_value
 
-            # Call main GUI's save_config to persist to file
-            if hasattr(self.main_gui, 'save_config'):
-                self.main_gui.save_config(show_message=False)
+            # Don't call save_config here - it causes Tkinter black window to appear
+            # Settings are already stored in self.main_gui.config
+            # They will be persisted to disk when the main dialog closes
+            # if hasattr(self.main_gui, 'save_config'):
+            #     self.main_gui.save_config(show_message=False)
                 
         except Exception as e:
             # Log error but don't crash
@@ -5111,19 +5148,16 @@ class MangaTranslationTab:
         if selected == "Default":
             self.selected_font_path = None
         elif selected == "Browse Custom Font...":
-            # Open file dialog to select custom font
-            font_path = filedialog.askopenfilename(
-                title="Select Font File",
-                filetypes=[
-                    ("Font files", "*.ttf *.ttc *.otf"),
-                    ("TrueType fonts", "*.ttf"),
-                    ("TrueType collections", "*.ttc"),
-                    ("OpenType fonts", "*.otf"),
-                    ("All files", "*.*")
-                ]
+            # Open file dialog to select custom font using PySide6
+            font_path, _ = QFileDialog.getOpenFileName(
+                self.dialog if hasattr(self, 'dialog') else None,
+                "Select Font File",
+                "",
+                "Font files (*.ttf *.ttc *.otf);;TrueType fonts (*.ttf);;TrueType collections (*.ttc);;OpenType fonts (*.otf);;All files (*.*)"
             )
             
-            if font_path:
+            # Check if user selected a file (not cancelled)
+            if font_path and font_path.strip():
                 # Add to combo box
                 font_name = os.path.basename(font_path)
                 
@@ -5198,10 +5232,10 @@ class MangaTranslationTab:
         if hasattr(self, 'inpaint_quality_frame'):
             if self.skip_inpainting_value:
                 # Hide quality options when inpainting is skipped
-                self.inpaint_quality_frame.pack_forget()
+                self.inpaint_quality_frame.hide()
             else:
                 # Show quality options when inpainting is enabled
-                self.inpaint_quality_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
+                self.inpaint_quality_frame.show()
 
     def _toggle_inpaint_visibility(self):
         """Show/hide inpainting options based on skip toggle"""
@@ -5220,7 +5254,9 @@ class MangaTranslationTab:
             self.inpaint_separator.show()  # Show separator
             self._on_inpaint_method_change()
         
-        self._save_rendering_settings()
+        # Don't save during initialization
+        if not (hasattr(self, '_initializing') and self._initializing):
+            self._save_rendering_settings()
 
     def _on_inpaint_method_change(self):
         """Show appropriate inpainting settings based on method"""
@@ -5248,7 +5284,9 @@ class MangaTranslationTab:
             self.local_inpaint_frame.show()
             self.cloud_inpaint_frame.show()
         
-        self._save_rendering_settings()
+        # Don't save during initialization
+        if not (hasattr(self, '_initializing') and self._initializing):
+            self._save_rendering_settings()
 
     def _on_local_model_change(self, new_model_type=None):
         """Handle model type change and auto-load if model exists"""
