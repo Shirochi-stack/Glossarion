@@ -3514,12 +3514,12 @@ class MangaTranslationTab:
         self.start_button = QPushButton("▶ Start Translation")
         self.start_button.clicked.connect(self._start_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setMinimumHeight(80)
+        self.start_button.setMinimumHeight(90)  # Increased from 80 to 90
         self.start_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #28a745; "
             "  color: white; "
-            "  padding: 20px 30px; "
+            "  padding: 22px 30px; "
             "  font-size: 14pt; "
             "  font-weight: bold; "
             "  border-radius: 8px; "
@@ -3547,12 +3547,12 @@ class MangaTranslationTab:
         self.stop_button = QPushButton("⏹ Stop")
         self.stop_button.clicked.connect(self._stop_translation)
         self.stop_button.setEnabled(False)
-        self.stop_button.setMinimumHeight(80)
+        self.stop_button.setMinimumHeight(90)  # Increased from 80 to 90
         self.stop_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #dc3545; "
             "  color: white; "
-            "  padding: 20px 30px; "
+            "  padding: 22px 30px; "
             "  font-size: 14pt; "
             "  font-weight: bold; "
             "  border-radius: 8px; "
@@ -3637,7 +3637,7 @@ class MangaTranslationTab:
         # Log text widget (QTextEdit handles scrolling automatically)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(400)
+        self.log_text.setMinimumHeight(600)  # Increased from 400 to 600 for better visibility
         self.log_text.setStyleSheet("""
             QTextEdit {
                 background-color: #1e1e1e;

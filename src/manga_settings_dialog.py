@@ -44,6 +44,9 @@ class MangaSettingsDialog(QDialog):
         self.config = config
         self.callback = callback
         
+        # Make dialog non-modal so it doesn't block the manga integration GUI
+        self.setModal(False)
+        
         # Enhanced default settings structure with all options
         self.default_settings = {
             'preprocessing': {
@@ -501,7 +504,7 @@ class MangaSettingsDialog(QDialog):
         
         # Set dialog properties
         self.setWindowTitle("Manga Translation Settings")
-        self.setModal(True)
+        # Dialog is already non-modal from __init__, don't override it
         
         # Set the halgakos.ico icon
         try:
@@ -700,17 +703,21 @@ class MangaSettingsDialog(QDialog):
         """)
         
         # Calculate size based on screen dimensions
-        screen = self.parent.screen() if self.parent else self.screen()
-        screen_size = screen.availableGeometry()
-        dialog_width = min(800, int(screen_size.width() * 0.5))
-        dialog_height = min(900, int(screen_size.height() * 0.85))
+        # Use availableGeometry to exclude taskbar and other system UI
+        app = QApplication.instance()
+        if app:
+            screen = app.primaryScreen().availableGeometry()
+        else:
+            screen = self.parent.screen().availableGeometry() if self.parent else self.screen().availableGeometry()
+        
+        dialog_width = min(800, int(screen.width() * 0.5))
+        dialog_height = int(screen.height() * 0.90)  # Use 90% of available height for more screen space with safety margin
         self.resize(dialog_width, dialog_height)
         
-        # Center the dialog
-        self.move(
-            screen_size.center().x() - dialog_width // 2,
-            screen_size.center().y() - dialog_height // 2
-        )
+        # Center the dialog within available screen space
+        dialog_x = screen.x() + (screen.width() - dialog_width) // 2
+        dialog_y = screen.y() + (screen.height() - dialog_height) // 2
+        self.move(dialog_x, dialog_y)
         
         # Create main layout
         main_layout = QVBoxLayout(self)
