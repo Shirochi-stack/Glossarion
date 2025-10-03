@@ -2955,28 +2955,34 @@ class MangaSettingsDialog(QDialog):
         """Load selected model"""
         try:
             from bubble_detector import BubbleDetector
+            from PySide6.QtWidgets import QApplication
             
-            self.rtdetr_status_label.config(text="Loading...", fg='orange')
-            self.dialog.update_idletasks()
+            self.rtdetr_status_label.setText("Loading...")
+            self.rtdetr_status_label.setStyleSheet("color: orange;")
+            QApplication.processEvents()
             
             bd = BubbleDetector()
-            detector = self.detector_type.get()
-            model_path = self.bubble_model_path.get()
+            detector = self.detector_type_combo.currentText()
+            model_path = self.bubble_model_entry.text()
             
             if 'RTEDR_onnx' in detector:
                 # RT-DETR (ONNX) uses repo id directly
                 if bd.load_rtdetr_onnx_model(model_id=model_path):
-                    self.rtdetr_status_label.config(text="✅ Ready", fg='green')
-                    messagebox.showinfo("Success", f"RTEDR_onnx model loaded successfully!")
+                    self.rtdetr_status_label.setText("✅ Ready")
+                    self.rtdetr_status_label.setStyleSheet("color: green;")
+                    QMessageBox.information(self, "Success", f"RTEDR_onnx model loaded successfully!")
                 else:
-                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                    self.rtdetr_status_label.setText("❌ Failed")
+                    self.rtdetr_status_label.setStyleSheet("color: red;")
             elif 'RT-DETR' in detector:
                 # RT-DETR uses model_id directly
                 if bd.load_rtdetr_model(model_id=model_path):
-                    self.rtdetr_status_label.config(text="✅ Ready", fg='green')
-                    messagebox.showinfo("Success", f"RT-DETR model loaded successfully!")
+                    self.rtdetr_status_label.setText("✅ Ready")
+                    self.rtdetr_status_label.setStyleSheet("color: green;")
+                    QMessageBox.information(self, "Success", f"RT-DETR model loaded successfully!")
                 else:
-                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                    self.rtdetr_status_label.setText("❌ Failed")
+                    self.rtdetr_status_label.setStyleSheet("color: red;")
             else:
                 # YOLOv8 - CHECK LOCAL MODELS FOLDER FIRST
                 if model_path.startswith('ogkalu/'):
@@ -2994,24 +3000,27 @@ class MangaSettingsDialog(QDialog):
                     if os.path.exists(local_path):
                         # Use the local file
                         model_path = local_path
-                        self.bubble_model_path.set(local_path)  # Update the field
+                        self.bubble_model_entry.setText(local_path)  # Update the field
                     else:
                         # Not downloaded yet
-                        messagebox.showwarning("Download Required", 
+                        QMessageBox.warning(self, "Download Required", 
                             f"Model not found locally.\nPlease download it first using the Download button.")
-                        self.rtdetr_status_label.config(text="❌ Not downloaded", fg='orange')
+                        self.rtdetr_status_label.setText("❌ Not downloaded")
+                        self.rtdetr_status_label.setStyleSheet("color: orange;")
                         return
                 
                 # Now model_path should be a local file
                 if not os.path.exists(model_path):
-                    messagebox.showerror("Error", f"Model file not found: {model_path}")
-                    self.rtdetr_status_label.config(text="❌ File not found", fg='red')
+                    QMessageBox.critical(self, "Error", f"Model file not found: {model_path}")
+                    self.rtdetr_status_label.setText("❌ File not found")
+                    self.rtdetr_status_label.setStyleSheet("color: red;")
                     return
                 
                 # Load the YOLOv8 model from local file
                 if bd.load_model(model_path):
-                    self.rtdetr_status_label.config(text="✅ Ready", fg='green')
-                    messagebox.showinfo("Success", f"YOLOv8 model loaded successfully!")
+                    self.rtdetr_status_label.setText("✅ Ready")
+                    self.rtdetr_status_label.setStyleSheet("color: green;")
+                    QMessageBox.information(self, "Success", f"YOLOv8 model loaded successfully!")
                     
                     # Auto-convert to ONNX if enabled
                     if os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true':
@@ -3020,24 +3029,27 @@ class MangaSettingsDialog(QDialog):
                             if bd.convert_to_onnx(model_path, onnx_path):
                                 logger.info(f"✅ Converted to ONNX: {onnx_path}")
                 else:
-                    self.rtdetr_status_label.config(text="❌ Failed", fg='red')
+                    self.rtdetr_status_label.setText("❌ Failed")
+                    self.rtdetr_status_label.setStyleSheet("color: red;")
                 
         except ImportError:
-            self.rtdetr_status_label.config(text="❌ Missing deps", fg='red')
-            messagebox.showerror("Error", "Install transformers: pip install transformers")
+            self.rtdetr_status_label.setText("❌ Missing deps")
+            self.rtdetr_status_label.setStyleSheet("color: red;")
+            QMessageBox.critical(self, "Error", "Install transformers: pip install transformers")
         except Exception as e:
-            self.rtdetr_status_label.config(text="❌ Error", fg='red')
-            messagebox.showerror("Error", f"Failed to load: {e}")
+            self.rtdetr_status_label.setText("❌ Error")
+            self.rtdetr_status_label.setStyleSheet("color: red;")
+            QMessageBox.critical(self, "Error", f"Failed to load: {e}")
         
     def _toggle_bubble_controls(self):
         """Enable/disable bubble detection controls"""
-        enabled = self.bubble_detection_enabled.get()
+        enabled = self.bubble_detection_enabled_checkbox.isChecked()
         
         if enabled:
             # Enable controls
             for widget in self.bubble_controls:
                 try:
-                    widget.config(state='normal')
+                    widget.setEnabled(True)
                 except:
                     pass
             
@@ -3047,54 +3059,55 @@ class MangaSettingsDialog(QDialog):
             # Disable controls
             for widget in self.bubble_controls:
                 try:
-                    widget.config(state='disabled')
+                    widget.setEnabled(False)
                 except:
                     pass
             
             # Hide frames
-            self.yolo_settings_frame.pack_forget()
-            self.bubble_status_label.config(text="")
+            self.yolo_settings_group.setVisible(False)
+            self.bubble_status_label.setText("")
 
     def _browse_bubble_model(self):
         """Browse for model file"""
-        from tkinter import filedialog
-        
-        path = filedialog.askopenfilename(
-            title="Select Model File",
-            filetypes=[
-                ("Model files", "*.pt;*.pth;*.bin;*.safetensors"),
-                ("All files", "*.*")
-            ]
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Model File",
+            "",
+            "Model files (*.pt *.pth *.bin *.safetensors);;All files (*.*)"
         )
         
         if path:
-            self.bubble_model_path.set(path)
+            self.bubble_model_entry.setText(path)
             self._update_bubble_status()
 
     def _clear_bubble_model(self):
         """Clear selected model"""
-        self.bubble_model_path.set("")
+        self.bubble_model_entry.setText("")
         self._update_bubble_status()
 
     def _update_bubble_status(self):
         """Update bubble model status label"""
-        if not self.bubble_detection_enabled.get():
-            self.bubble_status_label.config(text="")
+        if not self.bubble_detection_enabled_checkbox.isChecked():
+            self.bubble_status_label.setText("")
             return
         
-        detector = self.detector_type.get()
-        model_path = self.bubble_model_path.get()
+        detector = self.detector_type_combo.currentText()
+        model_path = self.bubble_model_entry.text()
         
         if not model_path:
-            self.bubble_status_label.config(text="⚠️ No model selected", fg='orange')
+            self.bubble_status_label.setText("⚠️ No model selected")
+            self.bubble_status_label.setStyleSheet("color: orange;")
             return
         
         if model_path.startswith("ogkalu/"):
-            self.bubble_status_label.config(text=f"📥 {detector} ready to download", fg='blue')
+            self.bubble_status_label.setText(f"📥 {detector} ready to download")
+            self.bubble_status_label.setStyleSheet("color: blue;")
         elif os.path.exists(model_path):
-            self.bubble_status_label.config(text="✅ Model file ready", fg='green')
+            self.bubble_status_label.setText("✅ Model file ready")
+            self.bubble_status_label.setStyleSheet("color: green;")
         else:
-            self.bubble_status_label.config(text="❌ Model file not found", fg='red')
+            self.bubble_status_label.setText("❌ Model file not found")
+            self.bubble_status_label.setStyleSheet("color: red;")
 
     def _update_azure_label(self):
         """Update Azure multiplier label"""
@@ -3106,483 +3119,407 @@ class MangaSettingsDialog(QDialog):
         self.azure_merge_multiplier.set(value)
         self._update_azure_label()
     
-    def _create_advanced_tab(self, notebook):
+    def _create_advanced_tab(self):
         """Create advanced settings tab with all options"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Advanced")
+        # Create tab widget and add to tab widget
+        tab_widget = QWidget()
+        self.tab_widget.addTab(tab_widget, "Advanced")
         
-        # Main content
-        content_frame = tk.Frame(frame)
-        content_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        # Main scrollable content
+        main_layout = QVBoxLayout(tab_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(6)
         
         # Format detection
-        detect_frame = tk.LabelFrame(content_frame, text="Format Detection", padx=15, pady=10)
-        detect_frame.pack(fill='x', padx=20, pady=20)
+        detect_group = QGroupBox("Format Detection")
+        main_layout.addWidget(detect_group)
+        detect_layout = QVBoxLayout(detect_group)
+        detect_layout.setContentsMargins(8, 8, 8, 6)
+        detect_layout.setSpacing(4)
         
-        self.format_detection = tk.IntVar(value=1 if self.settings['advanced']['format_detection'] else 0)
-        tb.Checkbutton(
-            detect_frame,
-            text="Enable automatic manga format detection (reading direction)",
-            variable=self.format_detection,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.format_detection_checkbox = QCheckBox("Enable automatic manga format detection (reading direction)")
+        self.format_detection_checkbox.setChecked(self.settings['advanced']['format_detection'])
+        detect_layout.addWidget(self.format_detection_checkbox)
         
         # Webtoon mode
-        webtoon_frame = tk.Frame(detect_frame)
-        webtoon_frame.pack(fill='x', pady=(10, 0))
-        tk.Label(webtoon_frame, text="Webtoon Mode:", width=20, anchor='w').pack(side='left')
-        self.webtoon_mode = tk.StringVar(value=self.settings['advanced']['webtoon_mode'])
-        webtoon_combo = ttk.Combobox(
-            webtoon_frame,
-            textvariable=self.webtoon_mode,
-            values=['auto', 'enabled', 'disabled'],
-            state='readonly',
-            width=15
-        )
-        webtoon_combo.pack(side='left', padx=10)
+        webtoon_frame = QWidget()
+        webtoon_layout = QHBoxLayout(webtoon_frame)
+        webtoon_layout.setContentsMargins(0, 0, 0, 0)
+        detect_layout.addWidget(webtoon_frame)
+        
+        webtoon_label = QLabel("Webtoon Mode:")
+        webtoon_label.setMinimumWidth(150)
+        webtoon_layout.addWidget(webtoon_label)
+        
+        self.webtoon_mode_combo = QComboBox()
+        self.webtoon_mode_combo.addItems(['auto', 'enabled', 'disabled'])
+        self.webtoon_mode_combo.setCurrentText(self.settings['advanced']['webtoon_mode'])
+        webtoon_layout.addWidget(self.webtoon_mode_combo)
+        webtoon_layout.addStretch()
         
         # Debug settings
-        debug_frame = tk.LabelFrame(content_frame, text="Debug Options", padx=15, pady=10)
-        debug_frame.pack(fill='x', padx=20, pady=(0, 20))
+        debug_group = QGroupBox("Debug Options")
+        main_layout.addWidget(debug_group)
+        debug_layout = QVBoxLayout(debug_group)
+        debug_layout.setContentsMargins(8, 8, 8, 6)
+        debug_layout.setSpacing(4)
         
-        self.debug_mode = tk.IntVar(value=1 if self.settings['advanced']['debug_mode'] else 0)
-        tb.Checkbutton(
-            debug_frame,
-            text="Enable debug mode (verbose logging)",
-            variable=self.debug_mode,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.debug_mode_checkbox = QCheckBox("Enable debug mode (verbose logging)")
+        self.debug_mode_checkbox.setChecked(self.settings['advanced']['debug_mode'])
+        debug_layout.addWidget(self.debug_mode_checkbox)
         
         # New: Concise pipeline logs (reduce noise)
-        self.concise_logs_var = tk.BooleanVar(value=bool(self.settings.get('advanced', {}).get('concise_logs', True)))
+        self.concise_logs_checkbox = QCheckBox("Concise pipeline logs (reduce noise)")
+        self.concise_logs_checkbox.setChecked(bool(self.settings.get('advanced', {}).get('concise_logs', True)))
         def _save_concise():
             try:
-                self.settings.setdefault('advanced', {})['concise_logs'] = bool(self.concise_logs_var.get())
+                if 'advanced' not in self.settings:
+                    self.settings['advanced'] = {}
+                self.settings['advanced']['concise_logs'] = bool(self.concise_logs_checkbox.isChecked())
                 if hasattr(self, 'config'):
                     self.config['manga_settings'] = self.settings
                 if hasattr(self.main_gui, 'save_config'):
                     self.main_gui.save_config(show_message=False)
             except Exception:
                 pass
-        tb.Checkbutton(
-            debug_frame,
-            text="Concise pipeline logs (reduce noise)",
-            variable=self.concise_logs_var,
-            command=_save_concise,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=(5, 0))
+        self.concise_logs_checkbox.toggled.connect(_save_concise)
+        debug_layout.addWidget(self.concise_logs_checkbox)
         
-        self.save_intermediate = tk.IntVar(value=1 if self.settings['advanced']['save_intermediate'] else 0)
-        tb.Checkbutton(
-            debug_frame,
-            text="Save intermediate images (preprocessed, detection overlays)",
-            variable=self.save_intermediate,
-            bootstyle="round-toggle"
-        ).pack(anchor='w', pady=(5, 0))
+        self.save_intermediate_checkbox = QCheckBox("Save intermediate images (preprocessed, detection overlays)")
+        self.save_intermediate_checkbox.setChecked(self.settings['advanced']['save_intermediate'])
+        debug_layout.addWidget(self.save_intermediate_checkbox)
         
-        # Performance settings
-        perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
-        # Defer packing until after memory_frame so this section appears below it
+        # Performance settings  
+        perf_group = QGroupBox("Performance")
+        main_layout.addWidget(perf_group)
+        perf_layout = QVBoxLayout(perf_group)
+        perf_layout.setContentsMargins(8, 8, 8, 6)
+        perf_layout.setSpacing(4)
         
         # New: Parallel rendering (per-region overlays)
-        self.render_parallel_var = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('render_parallel', True)
-        )
-        tb.Checkbutton(
-            perf_frame,
-            text="Enable parallel rendering (per-region overlays)",
-            variable=self.render_parallel_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.render_parallel_checkbox = QCheckBox("Enable parallel rendering (per-region overlays)")
+        self.render_parallel_checkbox.setChecked(self.settings.get('advanced', {}).get('render_parallel', True))
+        perf_layout.addWidget(self.render_parallel_checkbox)
         
-        self.parallel_processing = tk.IntVar(value=1 if self.settings['advanced']['parallel_processing'] else 0)
-        parallel_cb = tb.Checkbutton(
-            perf_frame,
-            text="Enable parallel processing (experimental)",
-            variable=self.parallel_processing,
-            bootstyle="round-toggle",
-            command=self._toggle_workers
-        )
-        parallel_cb.pack(anchor='w')
-        
+        self.parallel_processing_checkbox = QCheckBox("Enable parallel processing (experimental)")
+        self.parallel_processing_checkbox.setChecked(self.settings['advanced']['parallel_processing'])
+        self.parallel_processing_checkbox.toggled.connect(self._toggle_workers)
+        perf_layout.addWidget(self.parallel_processing_checkbox)
         
         # Max workers
-        workers_frame = tk.Frame(perf_frame)
-        workers_frame.pack(fill='x', pady=(10, 0))
-        self.workers_label = tk.Label(workers_frame, text="Max Workers:", width=20, anchor='w')
-        self.workers_label.pack(side='left')
+        workers_frame = QWidget()
+        workers_layout = QHBoxLayout(workers_frame)
+        workers_layout.setContentsMargins(0, 0, 0, 0)
+        perf_layout.addWidget(workers_frame)
         
-        self.max_workers = tk.IntVar(value=self.settings['advanced']['max_workers'])
-        self.workers_spinbox = tb.Spinbox(
-            workers_frame,
-            from_=1,
-            to=8,
-            textvariable=self.max_workers,
-            increment=1,
-            width=10
-        )
-        self.workers_spinbox.pack(side='left', padx=10)
+        self.workers_label = QLabel("Max Workers:")
+        self.workers_label.setMinimumWidth(150)
+        workers_layout.addWidget(self.workers_label)
         
-        tk.Label(workers_frame, text="(threads for parallel processing)").pack(side='left')
+        self.max_workers_spinbox = QSpinBox()
+        self.max_workers_spinbox.setRange(1, 8)
+        self.max_workers_spinbox.setValue(self.settings['advanced']['max_workers'])
+        workers_layout.addWidget(self.max_workers_spinbox)
+        
+        workers_layout.addWidget(QLabel("(threads for parallel processing)"))
+        workers_layout.addStretch()
         
         # Initialize workers state
         self._toggle_workers()
         
         # Memory management section
-        memory_frame = tk.LabelFrame(content_frame, text="Memory Management", padx=15, pady=10)
-        memory_frame.pack(fill='x', padx=20, pady=(10, 0))
+        memory_group = QGroupBox("Memory Management")
+        main_layout.addWidget(memory_group)
+        memory_layout = QVBoxLayout(memory_group)
+        memory_layout.setContentsMargins(8, 8, 8, 6)
+        memory_layout.setSpacing(4)
         
-        # Now pack performance BELOW memory management
-        perf_frame.pack(fill='x', padx=20)
+        # Singleton mode checkbox - will connect handler later after panel widgets created
+        self.use_singleton_models_checkbox = QCheckBox("Use single model instances (saves RAM, only affects local models)")
+        self.use_singleton_models_checkbox.setChecked(self.settings.get('advanced', {}).get('use_singleton_models', True))
+        memory_layout.addWidget(self.use_singleton_models_checkbox)
         
-        # Singleton mode for model instances
-        self.use_singleton_models = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('use_singleton_models', True)
+        # Singleton note
+        singleton_note = QLabel(
+            "When enabled: One bubble detector & one inpainter shared across all images.\n"
+            "When disabled: Each thread/image can have its own models (uses more RAM).\n"
+            "✅ Batch API translation remains fully functional with singleton mode enabled."
         )
+        singleton_note_font = QFont('Arial', 9)
+        singleton_note.setFont(singleton_note_font)
+        singleton_note.setStyleSheet("color: gray;")
+        singleton_note.setWordWrap(True)
+        memory_layout.addWidget(singleton_note)
         
-        def _toggle_singleton_mode():
-            """Disable LOCAL parallel processing options when singleton mode is enabled.
-            Note: This does NOT affect parallel API calls (batch translation).
-            """
-            # Update settings immediately to avoid background preloads
-            try:
-                if 'advanced' not in self.settings:
-                    self.settings['advanced'] = {}
-                if self.use_singleton_models.get():
-                    # Turn off local parallelism and panel preloads
-                    self.settings['advanced']['parallel_processing'] = False
-                    self.settings['advanced']['parallel_panel_translation'] = False
-                    self.settings['advanced']['preload_local_inpainting_for_panels'] = False
-                # Persist to config if available
-                if hasattr(self, 'config'):
-                    self.config['manga_settings'] = self.settings
-                if hasattr(self.main_gui, 'save_config'):
-                    self.main_gui.save_config(show_message=False)
-            except Exception:
-                pass
-            
-            if self.use_singleton_models.get():
-                # Disable LOCAL parallel processing toggles (but NOT API batch translation)
-                self.parallel_processing.set(0)
-                self.parallel_panel_var.set(False)
-                # Disable the UI elements for LOCAL parallel processing
-                parallel_cb.config(state='disabled')
-                panel_cb.config(state='disabled')
-                # Also disable the spinboxes
-                self.workers_spinbox.config(state='disabled')
-                panel_workers_spinbox.config(state='disabled')
-                panel_stagger_spinbox.config(state='disabled')
-            else:
-                # Re-enable the UI elements
-                parallel_cb.config(state='normal')
-                panel_cb.config(state='normal')
-                # Re-enable spinboxes based on their toggle states
-                self._toggle_workers()
-                _toggle_panel_controls()
-        
-        singleton_cb = tb.Checkbutton(
-            memory_frame,
-            text="Use single model instances (saves RAM, only affects local models)",
-            variable=self.use_singleton_models,
-            bootstyle="round-toggle",
-            command=_toggle_singleton_mode
-        )
-        singleton_cb.pack(anchor='w')
-        
-        singleton_note = tk.Label(
-            memory_frame,
-            text="When enabled: One bubble detector & one inpainter shared across all images.\n"
-                 "When disabled: Each thread/image can have its own models (uses more RAM).\n"
-                 "✅ Batch API translation remains fully functional with singleton mode enabled.",
-            font=('Arial', 9),
-            fg='gray',
-            justify='left'
-        )
-        singleton_note.pack(anchor='w', pady=(2, 10), padx=(20, 0))
-        
-        self.auto_cleanup_models = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('auto_cleanup_models', False)
-        )
-        cleanup_cb = tb.Checkbutton(
-            memory_frame,
-            text="Automatically cleanup models after translation to free RAM",
-            variable=self.auto_cleanup_models,
-            bootstyle="round-toggle"
-        )
-        cleanup_cb.pack(anchor='w')
+        self.auto_cleanup_models_checkbox = QCheckBox("Automatically cleanup models after translation to free RAM")
+        self.auto_cleanup_models_checkbox.setChecked(self.settings.get('advanced', {}).get('auto_cleanup_models', False))
+        memory_layout.addWidget(self.auto_cleanup_models_checkbox)
         
         # Unload models after translation (disabled by default)
-        self.unload_models_var = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('unload_models_after_translation', False)
-        )
-        unload_cb = tb.Checkbutton(
-            memory_frame,
-            text="Unload models after translation (reset translator instance)",
-            variable=self.unload_models_var,
-            bootstyle="round-toggle"
-        )
-        unload_cb.pack(anchor='w', pady=(4,0))
+        self.unload_models_checkbox = QCheckBox("Unload models after translation (reset translator instance)")
+        self.unload_models_checkbox.setChecked(self.settings.get('advanced', {}).get('unload_models_after_translation', False))
+        memory_layout.addWidget(self.unload_models_checkbox)
         
         # Add a note about parallel processing
-        note_label = tk.Label(
-            memory_frame,
-            text="Note: When parallel panel translation is enabled, cleanup happens after ALL panels complete.",
-            font=('Arial', 9),
-            fg='gray',
-            wraplength=450
-        )
-        note_label.pack(anchor='w', pady=(5, 0), padx=(20, 0))
+        note_label = QLabel("Note: When parallel panel translation is enabled, cleanup happens after ALL panels complete.")
+        note_font = QFont('Arial', 9)
+        note_label.setFont(note_font)
+        note_label.setStyleSheet("color: gray;")
+        note_label.setWordWrap(True)
+        memory_layout.addWidget(note_label)
 
         # Panel-level parallel translation
-        panel_frame = tk.LabelFrame(content_frame, text="Parallel Panel Translation", padx=15, pady=10)
-        panel_frame.pack(fill='x', padx=20, pady=(10, 0))
+        panel_group = QGroupBox("Parallel Panel Translation")
+        main_layout.addWidget(panel_group)
+        panel_layout = QVBoxLayout(panel_group)
+        panel_layout.setContentsMargins(8, 8, 8, 6)
+        panel_layout.setSpacing(4)
 
         # New: Preload local inpainting for panels (default ON)
-        preload_row = tk.Frame(panel_frame)
-        preload_row.pack(fill='x', pady=5)
-        self.preload_local_panels_var = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('preload_local_inpainting_for_panels', True)
-        )
-        tb.Checkbutton(
-            preload_row,
-            text="Preload local inpainting instances for panel-parallel runs",
-            variable=self.preload_local_panels_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.preload_local_panels_checkbox = QCheckBox("Preload local inpainting instances for panel-parallel runs")
+        self.preload_local_panels_checkbox.setChecked(self.settings.get('advanced', {}).get('preload_local_inpainting_for_panels', True))
+        panel_layout.addWidget(self.preload_local_panels_checkbox)
 
-        self.parallel_panel_var = tk.BooleanVar(
-            value=self.settings.get('advanced', {}).get('parallel_panel_translation', False)
-        )
+        self.parallel_panel_checkbox = QCheckBox("Enable parallel panel translation (process multiple images concurrently)")
+        self.parallel_panel_checkbox.setChecked(self.settings.get('advanced', {}).get('parallel_panel_translation', False))
+        panel_layout.addWidget(self.parallel_panel_checkbox)
         
-        def _toggle_panel_controls():
-            """Enable/disable panel spinboxes based on panel parallel toggle"""
-            if self.parallel_panel_var.get() and not self.use_singleton_models.get():
-                panel_workers_spinbox.config(state='normal')
-                panel_stagger_spinbox.config(state='normal')
-            else:
-                panel_workers_spinbox.config(state='disabled')
-                panel_stagger_spinbox.config(state='disabled')
+        # Inpainting Performance (add to performance group)
+        inpaint_perf_group = QGroupBox("Inpainting Performance")
+        perf_layout.addWidget(inpaint_perf_group)
+        inpaint_perf_layout = QVBoxLayout(inpaint_perf_group)
+        inpaint_perf_layout.setContentsMargins(8, 8, 8, 6)
+        inpaint_perf_layout.setSpacing(4)
         
-        panel_cb = tb.Checkbutton(
-            panel_frame,
-            text="Enable parallel panel translation (process multiple images concurrently)",
-            variable=self.parallel_panel_var,
-            bootstyle="round-toggle",
-            command=_toggle_panel_controls
-        )
-        panel_cb.pack(anchor='w')
+        # Batch size
+        inpaint_bs_frame = QWidget()
+        inpaint_bs_layout = QHBoxLayout(inpaint_bs_frame)
+        inpaint_bs_layout.setContentsMargins(0, 0, 0, 0)
+        inpaint_perf_layout.addWidget(inpaint_bs_frame)
         
-        # Inpainting Performance (moved from Inpainting tab)
-        inpaint_perf = tk.LabelFrame(perf_frame, text="Inpainting Performance", padx=15, pady=10)
-        inpaint_perf.pack(fill='x', padx=0, pady=(10,0))
-        inpaint_bs_row = tk.Frame(inpaint_perf)
-        inpaint_bs_row.pack(fill='x', pady=5)
-        tk.Label(inpaint_bs_row, text="Batch Size:", width=20, anchor='w').pack(side='left')
-        self.inpaint_batch_size = getattr(self, 'inpaint_batch_size', tk.IntVar(value=self.settings.get('inpainting', {}).get('batch_size', 10)))
-        tb.Spinbox(
-            inpaint_bs_row,
-            from_=1,
-            to=32,
-            textvariable=self.inpaint_batch_size,
-            width=10
-        ).pack(side='left', padx=10)
-        tk.Label(inpaint_bs_row, text="(process multiple regions at once)", font=('Arial',9), fg='gray').pack(side='left')
+        inpaint_bs_label = QLabel("Batch Size:")
+        inpaint_bs_label.setMinimumWidth(150)
+        inpaint_bs_layout.addWidget(inpaint_bs_label)
         
-        cache_row = tk.Frame(inpaint_perf)
-        cache_row.pack(fill='x', pady=5)
-        self.enable_cache_var = getattr(self, 'enable_cache_var', tk.BooleanVar(value=self.settings.get('inpainting', {}).get('enable_cache', True)))
-        tb.Checkbutton(
-            cache_row,
-            text="Enable inpainting cache (speeds up repeated processing)",
-            variable=self.enable_cache_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.inpaint_batch_size_spinbox = QSpinBox()
+        self.inpaint_batch_size_spinbox.setRange(1, 32)
+        self.inpaint_batch_size_spinbox.setValue(self.settings.get('inpainting', {}).get('batch_size', 10))
+        inpaint_bs_layout.addWidget(self.inpaint_batch_size_spinbox)
+        
+        inpaint_bs_help = QLabel("(process multiple regions at once)")
+        inpaint_bs_help_font = QFont('Arial', 9)
+        inpaint_bs_help.setFont(inpaint_bs_help_font)
+        inpaint_bs_help.setStyleSheet("color: gray;")
+        inpaint_bs_layout.addWidget(inpaint_bs_help)
+        inpaint_bs_layout.addStretch()
+        
+        self.enable_cache_checkbox = QCheckBox("Enable inpainting cache (speeds up repeated processing)")
+        self.enable_cache_checkbox.setChecked(self.settings.get('inpainting', {}).get('enable_cache', True))
+        inpaint_perf_layout.addWidget(self.enable_cache_checkbox)
 
-        panels_row = tk.Frame(panel_frame)
-        panels_row.pack(fill='x', pady=5)
-        tk.Label(panels_row, text="Max concurrent panels:", width=20, anchor='w').pack(side='left')
-        self.panel_max_workers_var = tk.IntVar(
-            value=self.settings.get('advanced', {}).get('panel_max_workers', 2)
-        )
-        panel_workers_spinbox = tb.Spinbox(
-            panels_row,
-            from_=1,
-            to=12,
-            textvariable=self.panel_max_workers_var,
-            width=10
-        )
-        panel_workers_spinbox.pack(side='left', padx=10)
+        # Max concurrent panels
+        panels_frame = QWidget()
+        panels_layout = QHBoxLayout(panels_frame)
+        panels_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(panels_frame)
+        
+        panels_label = QLabel("Max concurrent panels:")
+        panels_label.setMinimumWidth(150)
+        panels_layout.addWidget(panels_label)
+        
+        self.panel_max_workers_spinbox = QSpinBox()
+        self.panel_max_workers_spinbox.setRange(1, 12)
+        self.panel_max_workers_spinbox.setValue(self.settings.get('advanced', {}).get('panel_max_workers', 2))
+        panels_layout.addWidget(self.panel_max_workers_spinbox)
+        panels_layout.addStretch()
         
         # Panel start stagger (ms)
-        stagger_row = tk.Frame(panel_frame)
-        stagger_row.pack(fill='x', pady=5)
-        tk.Label(stagger_row, text="Panel start stagger:", width=20, anchor='w').pack(side='left')
-        self.panel_stagger_ms_var = tk.IntVar(
-            value=self.settings.get('advanced', {}).get('panel_start_stagger_ms', 30)
-        )
-        panel_stagger_spinbox = tb.Spinbox(
-            stagger_row,
-            from_=0,
-            to=1000,
-            textvariable=self.panel_stagger_ms_var,
-            width=10
-        )
-        panel_stagger_spinbox.pack(side='left', padx=10)
-        tk.Label(stagger_row, text="ms").pack(side='left')
+        stagger_frame = QWidget()
+        stagger_layout = QHBoxLayout(stagger_frame)
+        stagger_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(stagger_frame)
         
-        # Initialize control states
-        _toggle_panel_controls()  # Initialize panel spinbox states
-        _toggle_singleton_mode()  # Initialize singleton mode state (may override above)
+        stagger_label = QLabel("Panel start stagger:")
+        stagger_label.setMinimumWidth(150)
+        stagger_layout.addWidget(stagger_label)
+        
+        self.panel_stagger_ms_spinbox = QSpinBox()
+        self.panel_stagger_ms_spinbox.setRange(0, 1000)
+        self.panel_stagger_ms_spinbox.setValue(self.settings.get('advanced', {}).get('panel_start_stagger_ms', 30))
+        stagger_layout.addWidget(self.panel_stagger_ms_spinbox)
+        
+        stagger_layout.addWidget(QLabel("ms"))
+        stagger_layout.addStretch()
 
         # ONNX conversion settings
-        onnx_frame = tk.LabelFrame(content_frame, text="ONNX Conversion", padx=15, pady=10)
-        onnx_frame.pack(fill='x', padx=20, pady=(10, 0))
+        onnx_group = QGroupBox("ONNX Conversion")
+        main_layout.addWidget(onnx_group)
+        onnx_layout = QVBoxLayout(onnx_group)
+        onnx_layout.setContentsMargins(8, 8, 8, 6)
+        onnx_layout.setSpacing(4)
         
-        self.auto_convert_onnx_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx', False))
-        self.auto_convert_onnx_bg_var = tk.BooleanVar(value=self.settings['advanced'].get('auto_convert_to_onnx_background', True))
+        self.auto_convert_onnx_checkbox = QCheckBox("Auto-convert local models to ONNX for faster inference (recommended)")
+        self.auto_convert_onnx_checkbox.setChecked(self.settings['advanced'].get('auto_convert_to_onnx', False))
+        onnx_layout.addWidget(self.auto_convert_onnx_checkbox)
         
+        self.auto_convert_onnx_bg_checkbox = QCheckBox("Convert in background (non-blocking; switches to ONNX when ready)")
+        self.auto_convert_onnx_bg_checkbox.setChecked(self.settings['advanced'].get('auto_convert_to_onnx_background', True))
+        onnx_layout.addWidget(self.auto_convert_onnx_bg_checkbox)
+        
+        # Connect toggle handler
         def _toggle_onnx_controls():
-            # If auto-convert is off, background toggle should be disabled
-            state = 'normal' if self.auto_convert_onnx_var.get() else 'disabled'
-            try:
-                bg_cb.config(state=state)
-            except Exception:
-                pass
-        
-        auto_cb = tb.Checkbutton(
-            onnx_frame,
-            text="Auto-convert local models to ONNX for faster inference (recommended)",
-            variable=self.auto_convert_onnx_var,
-            bootstyle="round-toggle",
-            command=_toggle_onnx_controls
-        )
-        auto_cb.pack(anchor='w')
-        
-        bg_cb = tb.Checkbutton(
-            onnx_frame,
-            text="Convert in background (non-blocking; switches to ONNX when ready)",
-            variable=self.auto_convert_onnx_bg_var,
-            bootstyle="round-toggle"
-        )
-        bg_cb.pack(anchor='w', pady=(5, 0))
-        
+            self.auto_convert_onnx_bg_checkbox.setEnabled(self.auto_convert_onnx_checkbox.isChecked())
+        self.auto_convert_onnx_checkbox.toggled.connect(_toggle_onnx_controls)
         _toggle_onnx_controls()
         
         # Model memory optimization (quantization)
-        quant_frame = tk.LabelFrame(content_frame, text="Model Memory Optimization", padx=15, pady=10)
-        quant_frame.pack(fill='x', padx=20, pady=(10, 0))
+        quant_group = QGroupBox("Model Memory Optimization")
+        main_layout.addWidget(quant_group)
+        quant_layout = QVBoxLayout(quant_group)
+        quant_layout.setContentsMargins(8, 8, 8, 6)
+        quant_layout.setSpacing(4)
         
-        self.quantize_models_var = tk.BooleanVar(value=self.settings['advanced'].get('quantize_models', False))
-        tb.Checkbutton(
-            quant_frame,
-            text="Reduce RAM with quantized models (global switch)",
-            variable=self.quantize_models_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.quantize_models_checkbox = QCheckBox("Reduce RAM with quantized models (global switch)")
+        self.quantize_models_checkbox.setChecked(self.settings['advanced'].get('quantize_models', False))
+        quant_layout.addWidget(self.quantize_models_checkbox)
         
         # ONNX quantize sub-toggle
-        onnx_row = tk.Frame(quant_frame)
-        onnx_row.pack(fill='x', pady=(6, 0))
-        self.onnx_quantize_var = tk.BooleanVar(value=self.settings['advanced'].get('onnx_quantize', False))
-        tb.Checkbutton(
-            onnx_row,
-            text="Quantize ONNX models to INT8 (dynamic)",
-            variable=self.onnx_quantize_var,
-            bootstyle="round-toggle"
-        ).pack(side='left')
-        tk.Label(onnx_row, text="(lower RAM/CPU; slight accuracy trade-off)", font=('Arial', 9), fg='gray').pack(side='left', padx=8)
+        onnx_quant_frame = QWidget()
+        onnx_quant_layout = QHBoxLayout(onnx_quant_frame)
+        onnx_quant_layout.setContentsMargins(0, 0, 0, 0)
+        quant_layout.addWidget(onnx_quant_frame)
+        
+        self.onnx_quantize_checkbox = QCheckBox("Quantize ONNX models to INT8 (dynamic)")
+        self.onnx_quantize_checkbox.setChecked(self.settings['advanced'].get('onnx_quantize', False))
+        onnx_quant_layout.addWidget(self.onnx_quantize_checkbox)
+        
+        onnx_quant_help = QLabel("(lower RAM/CPU; slight accuracy trade-off)")
+        onnx_quant_help_font = QFont('Arial', 9)
+        onnx_quant_help.setFont(onnx_quant_help_font)
+        onnx_quant_help.setStyleSheet("color: gray;")
+        onnx_quant_layout.addWidget(onnx_quant_help)
+        onnx_quant_layout.addStretch()
         
         # Torch precision dropdown
-        precision_row = tk.Frame(quant_frame)
-        precision_row.pack(fill='x', pady=(6, 0))
-        tk.Label(precision_row, text="Torch precision:", width=20, anchor='w').pack(side='left')
-        self.torch_precision_var = tk.StringVar(value=self.settings['advanced'].get('torch_precision', 'fp16'))
-        ttk.Combobox(
-            precision_row,
-            textvariable=self.torch_precision_var,
-            values=['fp16', 'fp32', 'auto'],
-            state='readonly',
-            width=10
-        ).pack(side='left', padx=10)
-        tk.Label(precision_row, text="(fp16 only, since fp32 is currently bugged)", font=('Arial', 9), fg='gray').pack(side='left')
+        precision_frame = QWidget()
+        precision_layout = QHBoxLayout(precision_frame)
+        precision_layout.setContentsMargins(0, 0, 0, 0)
+        quant_layout.addWidget(precision_frame)
+        
+        precision_label = QLabel("Torch precision:")
+        precision_label.setMinimumWidth(150)
+        precision_layout.addWidget(precision_label)
+        
+        self.torch_precision_combo = QComboBox()
+        self.torch_precision_combo.addItems(['fp16', 'fp32', 'auto'])
+        self.torch_precision_combo.setCurrentText(self.settings['advanced'].get('torch_precision', 'fp16'))
+        precision_layout.addWidget(self.torch_precision_combo)
+        
+        precision_help = QLabel("(fp16 only, since fp32 is currently bugged)")
+        precision_help_font = QFont('Arial', 9)
+        precision_help.setFont(precision_help_font)
+        precision_help.setStyleSheet("color: gray;")
+        precision_layout.addWidget(precision_help)
+        precision_layout.addStretch()
         
         # Aggressive memory cleanup
-        cleanup_frame = tk.LabelFrame(content_frame, text="Memory & Cleanup", padx=15, pady=10)
-        cleanup_frame.pack(fill='x', padx=20, pady=(10, 0))
+        cleanup_group = QGroupBox("Memory & Cleanup")
+        main_layout.addWidget(cleanup_group)
+        cleanup_layout = QVBoxLayout(cleanup_group)
+        cleanup_layout.setContentsMargins(8, 8, 8, 6)
+        cleanup_layout.setSpacing(4)
         
-        self.force_deep_cleanup_var = tk.BooleanVar(value=self.settings.get('advanced', {}).get('force_deep_cleanup_each_image', False))
-        tb.Checkbutton(
-            cleanup_frame,
-            text="Force deep model cleanup after every image (slowest, lowest RAM)",
-            variable=self.force_deep_cleanup_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
-        tk.Label(cleanup_frame, text="Also clears shared caches at batch end.", font=('Arial', 9), fg='gray').pack(anchor='w', padx=(0,0), pady=(2,0))
+        self.force_deep_cleanup_checkbox = QCheckBox("Force deep model cleanup after every image (slowest, lowest RAM)")
+        self.force_deep_cleanup_checkbox.setChecked(self.settings.get('advanced', {}).get('force_deep_cleanup_each_image', False))
+        cleanup_layout.addWidget(self.force_deep_cleanup_checkbox)
+        
+        cleanup_help = QLabel("Also clears shared caches at batch end.")
+        cleanup_help_font = QFont('Arial', 9)
+        cleanup_help.setFont(cleanup_help_font)
+        cleanup_help.setStyleSheet("color: gray;")
+        cleanup_layout.addWidget(cleanup_help)
         
         # RAM cap controls
-        ramcap_frame = tk.Frame(cleanup_frame)
-        ramcap_frame.pack(fill='x', pady=(10, 0))
-        self.ram_cap_enabled_var = tk.BooleanVar(value=self.settings.get('advanced', {}).get('ram_cap_enabled', False))
-        tb.Checkbutton(
-            ramcap_frame,
-            text="Enable RAM cap",
-            variable=self.ram_cap_enabled_var,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        self.ram_cap_enabled_checkbox = QCheckBox("Enable RAM cap")
+        self.ram_cap_enabled_checkbox.setChecked(self.settings.get('advanced', {}).get('ram_cap_enabled', False))
+        cleanup_layout.addWidget(self.ram_cap_enabled_checkbox)
         
         # RAM cap value
-        ramcap_value_row = tk.Frame(cleanup_frame)
-        ramcap_value_row.pack(fill='x', pady=5)
-        tk.Label(ramcap_value_row, text="Max RAM (MB):", width=20, anchor='w').pack(side='left')
-        self.ram_cap_mb_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('ram_cap_mb', 0) or 0))
-        tb.Spinbox(
-            ramcap_value_row,
-            from_=512,
-            to=131072,
-            textvariable=self.ram_cap_mb_var,
-            width=12
-        ).pack(side='left', padx=10)
-        tk.Label(ramcap_value_row, text="(0 = disabled)", font=('Arial', 9), fg='gray').pack(side='left')
+        ramcap_value_frame = QWidget()
+        ramcap_value_layout = QHBoxLayout(ramcap_value_frame)
+        ramcap_value_layout.setContentsMargins(0, 0, 0, 0)
+        cleanup_layout.addWidget(ramcap_value_frame)
+        
+        ramcap_value_label = QLabel("Max RAM (MB):")
+        ramcap_value_label.setMinimumWidth(150)
+        ramcap_value_layout.addWidget(ramcap_value_label)
+        
+        self.ram_cap_mb_spinbox = QSpinBox()
+        self.ram_cap_mb_spinbox.setRange(512, 131072)
+        self.ram_cap_mb_spinbox.setValue(int(self.settings.get('advanced', {}).get('ram_cap_mb', 0) or 0))
+        ramcap_value_layout.addWidget(self.ram_cap_mb_spinbox)
+        
+        ramcap_value_help = QLabel("(0 = disabled)")
+        ramcap_value_help_font = QFont('Arial', 9)
+        ramcap_value_help.setFont(ramcap_value_help_font)
+        ramcap_value_help.setStyleSheet("color: gray;")
+        ramcap_value_layout.addWidget(ramcap_value_help)
+        ramcap_value_layout.addStretch()
         
         # RAM cap mode
-        ramcap_mode_row = tk.Frame(cleanup_frame)
-        ramcap_mode_row.pack(fill='x', pady=(5, 0))
-        tk.Label(ramcap_mode_row, text="Cap mode:", width=20, anchor='w').pack(side='left')
-        self.ram_cap_mode_var = tk.StringVar(value=self.settings.get('advanced', {}).get('ram_cap_mode', 'soft'))
-        ttk.Combobox(
-            ramcap_mode_row,
-            textvariable=self.ram_cap_mode_var,
-            values=['soft', 'hard (Windows only)'],
-            state='readonly',
-            width=20
-        ).pack(side='left', padx=10)
-        tk.Label(ramcap_mode_row, text="Soft = clean/trim, Hard = OS-enforced (may OOM)", font=('Arial', 9), fg='gray').pack(side='left')
+        ramcap_mode_frame = QWidget()
+        ramcap_mode_layout = QHBoxLayout(ramcap_mode_frame)
+        ramcap_mode_layout.setContentsMargins(0, 0, 0, 0)
+        cleanup_layout.addWidget(ramcap_mode_frame)
+        
+        ramcap_mode_label = QLabel("Cap mode:")
+        ramcap_mode_label.setMinimumWidth(150)
+        ramcap_mode_layout.addWidget(ramcap_mode_label)
+        
+        self.ram_cap_mode_combo = QComboBox()
+        self.ram_cap_mode_combo.addItems(['soft', 'hard (Windows only)'])
+        self.ram_cap_mode_combo.setCurrentText(self.settings.get('advanced', {}).get('ram_cap_mode', 'soft'))
+        ramcap_mode_layout.addWidget(self.ram_cap_mode_combo)
+        
+        ramcap_mode_help = QLabel("Soft = clean/trim, Hard = OS-enforced (may OOM)")
+        ramcap_mode_help_font = QFont('Arial', 9)
+        ramcap_mode_help.setFont(ramcap_mode_help_font)
+        ramcap_mode_help.setStyleSheet("color: gray;")
+        ramcap_mode_layout.addWidget(ramcap_mode_help)
+        ramcap_mode_layout.addStretch()
         
         # Advanced RAM gate tuning
-        gate_row = tk.Frame(cleanup_frame)
-        gate_row.pack(fill='x', pady=(5, 0))
-        tk.Label(gate_row, text="Gate timeout (sec):", width=20, anchor='w').pack(side='left')
-        self.ram_gate_timeout_var = tk.DoubleVar(value=float(self.settings.get('advanced', {}).get('ram_gate_timeout_sec', 10.0)))
-        tb.Spinbox(
-            gate_row,
-            from_=2.0,
-            to=60.0,
-            increment=0.5,
-            textvariable=self.ram_gate_timeout_var,
-            width=12
-        ).pack(side='left', padx=10)
+        gate_frame = QWidget()
+        gate_layout = QHBoxLayout(gate_frame)
+        gate_layout.setContentsMargins(0, 0, 0, 0)
+        cleanup_layout.addWidget(gate_frame)
         
-        floor_row = tk.Frame(cleanup_frame)
-        floor_row.pack(fill='x', pady=(5, 0))
-        tk.Label(floor_row, text="Gate floor over baseline (MB):", width=25, anchor='w').pack(side='left')
-        self.ram_gate_floor_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('ram_min_floor_over_baseline_mb', 128)))
-        tb.Spinbox(
-            floor_row,
-            from_=64,
-            to=2048,
-            textvariable=self.ram_gate_floor_var,
-            width=12
-        ).pack(side='left', padx=10)
+        gate_label = QLabel("Gate timeout (sec):")
+        gate_label.setMinimumWidth(150)
+        gate_layout.addWidget(gate_label)
+        
+        self.ram_gate_timeout_spinbox = QDoubleSpinBox()
+        self.ram_gate_timeout_spinbox.setRange(2.0, 60.0)
+        self.ram_gate_timeout_spinbox.setSingleStep(0.5)
+        self.ram_gate_timeout_spinbox.setValue(float(self.settings.get('advanced', {}).get('ram_gate_timeout_sec', 10.0)))
+        gate_layout.addWidget(self.ram_gate_timeout_spinbox)
+        gate_layout.addStretch()
+        
+        # Gate floor
+        floor_frame = QWidget()
+        floor_layout = QHBoxLayout(floor_frame)
+        floor_layout.setContentsMargins(0, 0, 0, 0)
+        cleanup_layout.addWidget(floor_frame)
+        
+        floor_label = QLabel("Gate floor over baseline (MB):")
+        floor_label.setMinimumWidth(180)
+        floor_layout.addWidget(floor_label)
+        
+        self.ram_gate_floor_spinbox = QSpinBox()
+        self.ram_gate_floor_spinbox.setRange(64, 2048)
+        self.ram_gate_floor_spinbox.setValue(int(self.settings.get('advanced', {}).get('ram_min_floor_over_baseline_mb', 128)))
+        floor_layout.addWidget(self.ram_gate_floor_spinbox)
+        floor_layout.addStretch()
 
     def _toggle_workers(self):
         """Enable/disable worker settings based on parallel processing toggle"""
@@ -4012,56 +3949,56 @@ class MangaSettingsDialog(QDialog):
                 self.settings['advanced']['preload_local_inpainting_for_panels'] = bool(self.preload_local_panels_var.get())
             
             # Memory management settings
-            self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models.get())
-            self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_models.get())
-            self.settings['advanced']['unload_models_after_translation'] = bool(getattr(self, 'unload_models_var', tk.BooleanVar(value=False)).get())
+            self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models_checkbox.isChecked())
+            self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_checkbox.isChecked())
+            self.settings['advanced']['unload_models_after_translation'] = bool(self.unload_models_checkbox.isChecked() if hasattr(self, 'unload_models_checkbox') else False)
             
             # ONNX auto-convert settings (persist and apply to environment)
-            if hasattr(self, 'auto_convert_onnx_var'):
-                self.settings['advanced']['auto_convert_to_onnx'] = bool(self.auto_convert_onnx_var.get())
-                os.environ['AUTO_CONVERT_TO_ONNX'] = 'true' if self.auto_convert_onnx_var.get() else 'false'
-            if hasattr(self, 'auto_convert_onnx_bg_var'):
-                self.settings['advanced']['auto_convert_to_onnx_background'] = bool(self.auto_convert_onnx_bg_var.get())
-                os.environ['AUTO_CONVERT_TO_ONNX_BACKGROUND'] = 'true' if self.auto_convert_onnx_bg_var.get() else 'false'
+            if hasattr(self, 'auto_convert_onnx_checkbox'):
+                self.settings['advanced']['auto_convert_to_onnx'] = bool(self.auto_convert_onnx_checkbox.isChecked())
+                os.environ['AUTO_CONVERT_TO_ONNX'] = 'true' if self.auto_convert_onnx_checkbox.isChecked() else 'false'
+            if hasattr(self, 'auto_convert_onnx_bg_checkbox'):
+                self.settings['advanced']['auto_convert_to_onnx_background'] = bool(self.auto_convert_onnx_bg_checkbox.isChecked())
+                os.environ['AUTO_CONVERT_TO_ONNX_BACKGROUND'] = 'true' if self.auto_convert_onnx_bg_checkbox.isChecked() else 'false'
             
             # Quantization toggles and precision
-            if hasattr(self, 'quantize_models_var'):
-                self.settings['advanced']['quantize_models'] = bool(self.quantize_models_var.get())
-                os.environ['MODEL_QUANTIZE'] = 'true' if self.quantize_models_var.get() else 'false'
-            if hasattr(self, 'onnx_quantize_var'):
-                self.settings['advanced']['onnx_quantize'] = bool(self.onnx_quantize_var.get())
-                os.environ['ONNX_QUANTIZE'] = 'true' if self.onnx_quantize_var.get() else 'false'
-            if hasattr(self, 'torch_precision_var'):
-                self.settings['advanced']['torch_precision'] = str(self.torch_precision_var.get())
+            if hasattr(self, 'quantize_models_checkbox'):
+                self.settings['advanced']['quantize_models'] = bool(self.quantize_models_checkbox.isChecked())
+                os.environ['MODEL_QUANTIZE'] = 'true' if self.quantize_models_checkbox.isChecked() else 'false'
+            if hasattr(self, 'onnx_quantize_checkbox'):
+                self.settings['advanced']['onnx_quantize'] = bool(self.onnx_quantize_checkbox.isChecked())
+                os.environ['ONNX_QUANTIZE'] = 'true' if self.onnx_quantize_checkbox.isChecked() else 'false'
+            if hasattr(self, 'torch_precision_combo'):
+                self.settings['advanced']['torch_precision'] = str(self.torch_precision_combo.currentText())
                 os.environ['TORCH_PRECISION'] = self.settings['advanced']['torch_precision']
             
             # Memory cleanup toggle
-            if hasattr(self, 'force_deep_cleanup_var'):
+            if hasattr(self, 'force_deep_cleanup_checkbox'):
                 if 'advanced' not in self.settings:
                     self.settings['advanced'] = {}
-                self.settings['advanced']['force_deep_cleanup_each_image'] = bool(self.force_deep_cleanup_var.get())
+                self.settings['advanced']['force_deep_cleanup_each_image'] = bool(self.force_deep_cleanup_checkbox.isChecked())
             # RAM cap settings
-            if hasattr(self, 'ram_cap_enabled_var'):
-                self.settings['advanced']['ram_cap_enabled'] = bool(self.ram_cap_enabled_var.get())
-            if hasattr(self, 'ram_cap_mb_var'):
+            if hasattr(self, 'ram_cap_enabled_checkbox'):
+                self.settings['advanced']['ram_cap_enabled'] = bool(self.ram_cap_enabled_checkbox.isChecked())
+            if hasattr(self, 'ram_cap_mb_spinbox'):
                 try:
-                    self.settings['advanced']['ram_cap_mb'] = int(self.ram_cap_mb_var.get())
+                    self.settings['advanced']['ram_cap_mb'] = int(self.ram_cap_mb_spinbox.value())
                 except Exception:
                     self.settings['advanced']['ram_cap_mb'] = 0
-            if hasattr(self, 'ram_cap_mode_var'):
-                mode = self.ram_cap_mode_var.get()
+            if hasattr(self, 'ram_cap_mode_combo'):
+                mode = self.ram_cap_mode_combo.currentText()
                 if mode not in ['soft', 'hard (Windows only)']:
                     mode = 'soft'
                 # Normalize to 'soft' or 'hard'
                 self.settings['advanced']['ram_cap_mode'] = 'hard' if mode.startswith('hard') else 'soft'
-            if hasattr(self, 'ram_gate_timeout_var'):
+            if hasattr(self, 'ram_gate_timeout_spinbox'):
                 try:
-                    self.settings['advanced']['ram_gate_timeout_sec'] = float(self.ram_gate_timeout_var.get())
+                    self.settings['advanced']['ram_gate_timeout_sec'] = float(self.ram_gate_timeout_spinbox.value())
                 except Exception:
                     self.settings['advanced']['ram_gate_timeout_sec'] = 10.0
-            if hasattr(self, 'ram_gate_floor_var'):
+            if hasattr(self, 'ram_gate_floor_spinbox'):
                 try:
-                    self.settings['advanced']['ram_min_floor_over_baseline_mb'] = int(self.ram_gate_floor_var.get())
+                    self.settings['advanced']['ram_min_floor_over_baseline_mb'] = int(self.ram_gate_floor_spinbox.value())
                 except Exception:
                     self.settings['advanced']['ram_min_floor_over_baseline_mb'] = 128
             
@@ -4127,8 +4064,7 @@ class MangaSettingsDialog(QDialog):
                         print("Settings saved directly to config file")
             except Exception as e:
                 print(f"Error saving configuration: {e}")
-                from tkinter import messagebox
-                messagebox.showerror("Save Error", f"Failed to save settings: {e}")
+                QMessageBox.critical(self, "Save Error", f"Failed to save settings: {e}")
             
             # Call callback if provided
             if self.callback:
@@ -4137,24 +4073,20 @@ class MangaSettingsDialog(QDialog):
                 except Exception as e:
                     print(f"Error in callback: {e}")
             
-            # Close dialog with cleanup
-            try:
-                if hasattr(self.dialog, '_cleanup_scrolling'):
-                    self.dialog._cleanup_scrolling()
-                self.dialog.destroy()
-            except Exception as e:
-                print(f"Error closing dialog: {e}")
-                self.dialog.destroy()
+            # Close dialog
+            self.accept()
                 
         except Exception as e:
             print(f"Critical error in _save_settings: {e}")
-            from tkinter import messagebox
-            messagebox.showerror("Save Error", f"Failed to save settings: {e}")
+            QMessageBox.critical(self, "Save Error", f"Failed to save settings: {e}")
 
     def _reset_defaults(self):
         """Reset by removing manga_settings from config and reinitializing the dialog."""
-        from tkinter import messagebox
-        if not messagebox.askyesno("Reset Settings", "Reset all manga settings to defaults?\nThis will remove custom manga settings from config.json."):
+        reply = QMessageBox.question(self, "Reset Settings", 
+                                      "Reset all manga settings to defaults?\nThis will remove custom manga settings from config.json.",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
             return
         # Remove manga_settings key to force defaults
         try:
@@ -4181,26 +4113,16 @@ class MangaSettingsDialog(QDialog):
             except Exception:
                 pass
         # Close and reopen dialog so defaults apply
-        try:
-            if hasattr(self.dialog, '_cleanup_scrolling'):
-                self.dialog._cleanup_scrolling()
-        except Exception:
-            pass
-        try:
-            self.dialog.destroy()
-        except Exception:
-            pass
+        self.close()
         try:
             MangaSettingsDialog(parent=self.parent, main_gui=self.main_gui, config=self.config, callback=self.callback)
         except Exception:
             try:
-                messagebox.showinfo("Reset", "Settings reset. Please reopen the dialog.")
+                QMessageBox.information(self, "Reset", "Settings reset. Please reopen the dialog.")
             except Exception:
                 pass
 
     def _cancel(self):
         """Cancel without saving"""
-        if hasattr(self.dialog, '_cleanup_scrolling'):
-            self.dialog._cleanup_scrolling()
-        self.dialog.destroy()
+        self.reject()
 
