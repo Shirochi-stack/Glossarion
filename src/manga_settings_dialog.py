@@ -1598,7 +1598,7 @@ class MangaSettingsDialog(QDialog):
             for label, spinbox in getattr(self, 'individual_iteration_controls', []):
                 try:
                     spinbox.setEnabled(False)
-                    label.setStyleSheet("color: gray;")
+                    label.setEnabled(False)  # Use setEnabled() instead of stylesheet
                 except Exception:
                     pass
             return
@@ -1619,7 +1619,7 @@ class MangaSettingsDialog(QDialog):
             enabled = not use_all
             try:
                 spinbox.setEnabled(enabled)
-                label.setStyleSheet("color: gray;" if use_all else "")
+                label.setEnabled(enabled)  # Use setEnabled() instead of stylesheet
             except Exception:
                 pass
 
@@ -1866,14 +1866,9 @@ class MangaSettingsDialog(QDialog):
                 if isinstance(control, QGroupBox):
                     # Enable/disable entire group box children
                     self._toggle_frame_children(control, enabled)
-                elif isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox)):
+                elif isinstance(control, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox, QLabel)):
+                    # Just use setEnabled() - the global stylesheet handles the visual state
                     control.setEnabled(enabled)
-                elif isinstance(control, QLabel):
-                    # For labels: clear stylesheet when enabled to use default theme styling
-                    if enabled:
-                        control.setStyleSheet("")  # Clear any styling to use default
-                    else:
-                        control.setStyleSheet("color: #666666;")  # Grey when disabled
             except Exception as e:
                 pass
         
@@ -1886,22 +1881,13 @@ class MangaSettingsDialog(QDialog):
     
     def _toggle_frame_children(self, widget, enabled):
         """Recursively enable/disable all children of a widget"""
-        # Handle input controls
+        # Handle all controls including labels - just use setEnabled()
         for child in widget.findChildren(QWidget):
-            if isinstance(child, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox, QLineEdit)):
+            if isinstance(child, (QSlider, QSpinBox, QCheckBox, QDoubleSpinBox, QComboBox, QLineEdit, QLabel)):
                 try:
                     child.setEnabled(enabled)
                 except Exception:
                     pass
-        # Handle labels separately - clear stylesheet when enabled
-        for child in widget.findChildren(QLabel):
-            try:
-                if enabled:
-                    child.setStyleSheet("")  # Clear to use default theme styling
-                else:
-                    child.setStyleSheet("color: #666666;")  # Grey when disabled
-            except Exception:
-                pass
 
     def _toggle_roi_locality_controls(self):
         """Show/hide ROI locality controls based on toggle."""
@@ -1941,11 +1927,8 @@ class MangaSettingsDialog(QDialog):
                 try:
                     widget = getattr(self, widget_name, None)
                     if widget is not None:
-                        if isinstance(widget, QLabel):
-                            widget.setEnabled(enabled)
-                            widget.setStyleSheet("" if enabled else "color: gray;")
-                        else:
-                            widget.setEnabled(enabled)
+                        # Just use setEnabled() for everything - stylesheet handles visuals
+                        widget.setEnabled(enabled)
                 except Exception:
                     pass
 
@@ -2670,10 +2653,42 @@ class MangaSettingsDialog(QDialog):
 
         self.rtdetr_download_btn = QPushButton("Download")
         self.rtdetr_download_btn.clicked.connect(self._download_rtdetr_model)
+        self.rtdetr_download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+                padding: 5px 15px;
+            }
+            QPushButton:hover {
+                background-color: #7bb3e0;
+            }
+            QPushButton:pressed {
+                background-color: #4a8fc4;
+            }
+        """)
         button_layout.addWidget(self.rtdetr_download_btn)
 
         self.rtdetr_load_btn = QPushButton("Load Model")
         self.rtdetr_load_btn.clicked.connect(self._load_rtdetr_model)
+        self.rtdetr_load_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+                padding: 5px 15px;
+            }
+            QPushButton:hover {
+                background-color: #7bb3e0;
+            }
+            QPushButton:pressed {
+                background-color: #4a8fc4;
+            }
+        """)
         button_layout.addWidget(self.rtdetr_load_btn)
 
         self.rtdetr_status_label = QLabel("")
@@ -3598,11 +3613,8 @@ class MangaSettingsDialog(QDialog):
                 try:
                     widget = getattr(self, widget_name, None)
                     if widget is not None:
-                        if isinstance(widget, QLabel):
-                            widget.setEnabled(enabled)
-                            widget.setStyleSheet("" if enabled else "color: gray;")
-                        else:
-                            widget.setEnabled(enabled)
+                        # Just use setEnabled() - stylesheet handles visuals
+                        widget.setEnabled(enabled)
                 except Exception:
                     pass
 
