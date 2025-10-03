@@ -3648,9 +3648,14 @@ class MangaTranslationTab:
         left_column_layout.addStretch()
         right_column_layout.addStretch()
         
-        # Add columns to container
-        columns_layout.addWidget(left_column)
-        columns_layout.addWidget(right_column)
+        # Set size policies to make columns expand properly
+        from PySide6.QtWidgets import QSizePolicy
+        left_column.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        right_column.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        
+        # Add columns to container with equal stretch factors
+        columns_layout.addWidget(left_column, stretch=1)
+        columns_layout.addWidget(right_column, stretch=1)
         
         # Add columns container to main layout
         main_layout.addWidget(columns_container)
