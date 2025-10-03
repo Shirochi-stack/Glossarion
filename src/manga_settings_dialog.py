@@ -1105,522 +1105,574 @@ class MangaSettingsDialog(QDialog):
         self._toggle_compression_format()
         self._toggle_compression_enabled()
         
-        # Chunk settings for large images (moved above compression)
-        chunk_frame = tk.LabelFrame(content_frame, text="Large Image Processing", padx=15, pady=10)
-        chunk_frame.pack(fill='x', padx=20, pady=(10, 0), before=compression_frame)
-        self.preprocessing_controls.append(chunk_frame)
+        # HD Strategy (Inpainting acceleration) - Independent of preprocessing toggle
+        hd_group = QGroupBox("Inpainting HD Strategy")
+        main_layout.addWidget(hd_group)
+        hd_layout = QVBoxLayout(hd_group)
+        hd_layout.setContentsMargins(8, 8, 8, 6)
+        hd_layout.setSpacing(4)
+        # Do NOT add to preprocessing_controls - HD Strategy should be independent
         
-        # HD Strategy (Inpainting acceleration)
-        hd_frame = tk.LabelFrame(chunk_frame, text="Inpainting HD Strategy", padx=10, pady=8)
-        hd_frame.pack(fill='x', pady=(5, 10))
+        # Chunk settings for large images - Independent of preprocessing toggle
+        chunk_group = QGroupBox("Large Image Processing")
+        main_layout.addWidget(chunk_group)
+        chunk_layout = QVBoxLayout(chunk_group)
+        chunk_layout.setContentsMargins(8, 8, 8, 6)
+        chunk_layout.setSpacing(4)
+        # Do NOT add to preprocessing_controls - Large Image Processing should be independent
         
         # Strategy selector
-        strat_row = tk.Frame(hd_frame)
-        strat_row.pack(fill='x', pady=4)
-        tk.Label(strat_row, text="Strategy:", width=20, anchor='w').pack(side='left')
-        self.hd_strategy_var = tk.StringVar(value=self.settings.get('advanced', {}).get('hd_strategy', 'resize'))
-        self.hd_strategy_combo = ttk.Combobox(
-            strat_row,
-            textvariable=self.hd_strategy_var,
-            values=['original', 'resize', 'crop'],
-            state='readonly',
-            width=12
-        )
-        self.hd_strategy_combo.pack(side='left', padx=10)
-        tk.Label(strat_row, text="(original = legacy full-image; resize/crop = faster)", font=('Arial', 9), fg='gray').pack(side='left')
+        strat_frame = QWidget()
+        strat_layout = QHBoxLayout(strat_frame)
+        strat_layout.setContentsMargins(0, 0, 0, 0)
+        hd_layout.addWidget(strat_frame)
+        
+        strat_label = QLabel("Strategy:")
+        strat_label.setMinimumWidth(150)
+        strat_layout.addWidget(strat_label)
+        
+        self.hd_strategy_combo = QComboBox()
+        self.hd_strategy_combo.addItems(['original', 'resize', 'crop'])
+        self.hd_strategy_combo.setCurrentText(self.settings.get('advanced', {}).get('hd_strategy', 'resize'))
+        self.hd_strategy_combo.currentTextChanged.connect(self._on_hd_strategy_change)
+        strat_layout.addWidget(self.hd_strategy_combo)
+        
+        strat_help = QLabel("(original = legacy full-image; resize/crop = faster)")
+        strat_help.setStyleSheet("color: gray; font-size: 9pt;")
+        strat_layout.addWidget(strat_help)
+        strat_layout.addStretch()
         
         # Resize limit row
-        self.hd_resize_row = tk.Frame(hd_frame)
-        self.hd_resize_row.pack(fill='x', pady=4)
-        tk.Label(self.hd_resize_row, text="Resize limit (long edge):", width=20, anchor='w').pack(side='left')
-        self.hd_resize_limit_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('hd_strategy_resize_limit', 1536)))
-        self.hd_resize_limit_spin = tb.Spinbox(
-            self.hd_resize_row,
-            from_=512,
-            to=4096,
-            textvariable=self.hd_resize_limit_var,
-            increment=64,
-            width=10
-        )
-        self.hd_resize_limit_spin.pack(side='left', padx=10)
-        tk.Label(self.hd_resize_row, text="px").pack(side='left')
+        self.hd_resize_frame = QWidget()
+        resize_layout = QHBoxLayout(self.hd_resize_frame)
+        resize_layout.setContentsMargins(0, 0, 0, 0)
+        hd_layout.addWidget(self.hd_resize_frame)
+        
+        resize_label = QLabel("Resize limit (long edge):")
+        resize_label.setMinimumWidth(150)
+        resize_layout.addWidget(resize_label)
+        
+        self.hd_resize_limit_spin = QSpinBox()
+        self.hd_resize_limit_spin.setRange(512, 4096)
+        self.hd_resize_limit_spin.setSingleStep(64)
+        self.hd_resize_limit_spin.setValue(int(self.settings.get('advanced', {}).get('hd_strategy_resize_limit', 1536)))
+        resize_layout.addWidget(self.hd_resize_limit_spin)
+        
+        resize_layout.addWidget(QLabel("px"))
+        resize_layout.addStretch()
         
         # Crop params rows
-        self.hd_crop_margin_row = tk.Frame(hd_frame)
-        self.hd_crop_margin_row.pack(fill='x', pady=4)
-        tk.Label(self.hd_crop_margin_row, text="Crop margin:", width=20, anchor='w').pack(side='left')
-        self.hd_crop_margin_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('hd_strategy_crop_margin', 16)))
-        self.hd_crop_margin_spin = tb.Spinbox(
-            self.hd_crop_margin_row,
-            from_=0,
-            to=256,
-            textvariable=self.hd_crop_margin_var,
-            increment=2,
-            width=10
-        )
-        self.hd_crop_margin_spin.pack(side='left', padx=10)
-        tk.Label(self.hd_crop_margin_row, text="px").pack(side='left')
+        self.hd_crop_margin_frame = QWidget()
+        margin_layout = QHBoxLayout(self.hd_crop_margin_frame)
+        margin_layout.setContentsMargins(0, 0, 0, 0)
+        hd_layout.addWidget(self.hd_crop_margin_frame)
         
-        self.hd_crop_trigger_row = tk.Frame(hd_frame)
-        self.hd_crop_trigger_row.pack(fill='x', pady=4)
-        tk.Label(self.hd_crop_trigger_row, text="Crop trigger size:", width=20, anchor='w').pack(side='left')
-        self.hd_crop_trigger_var = tk.IntVar(value=int(self.settings.get('advanced', {}).get('hd_strategy_crop_trigger_size', 1024)))
-        self.hd_crop_trigger_spin = tb.Spinbox(
-            self.hd_crop_trigger_row,
-            from_=256,
-            to=4096,
-            textvariable=self.hd_crop_trigger_var,
-            increment=64,
-            width=10
-        )
-        self.hd_crop_trigger_spin.pack(side='left', padx=10)
-        tk.Label(self.hd_crop_trigger_row, text="px (apply crop only if long edge > trigger)").pack(side='left')
+        margin_label = QLabel("Crop margin:")
+        margin_label.setMinimumWidth(150)
+        margin_layout.addWidget(margin_label)
         
-        # Toggle rows based on current selection
-        def _on_hd_strategy_change(*_):
-            strat = self.hd_strategy_var.get()
-            try:
-                if strat == 'resize':
-                    self.hd_resize_row.pack(fill='x', pady=4)
-                    self.hd_crop_margin_row.pack_forget()
-                    self.hd_crop_trigger_row.pack_forget()
-                elif strat == 'crop':
-                    self.hd_resize_row.pack_forget()
-                    self.hd_crop_margin_row.pack(fill='x', pady=4)
-                    self.hd_crop_trigger_row.pack(fill='x', pady=4)
-                else:  # original
-                    self.hd_resize_row.pack_forget()
-                    self.hd_crop_margin_row.pack_forget()
-                    self.hd_crop_trigger_row.pack_forget()
-            except Exception:
-                pass
+        self.hd_crop_margin_spin = QSpinBox()
+        self.hd_crop_margin_spin.setRange(0, 256)
+        self.hd_crop_margin_spin.setSingleStep(2)
+        self.hd_crop_margin_spin.setValue(int(self.settings.get('advanced', {}).get('hd_strategy_crop_margin', 16)))
+        margin_layout.addWidget(self.hd_crop_margin_spin)
         
-        self.hd_strategy_combo.bind('<<ComboboxSelected>>', _on_hd_strategy_change)
-        _on_hd_strategy_change()
+        margin_layout.addWidget(QLabel("px"))
+        margin_layout.addStretch()
+        
+        self.hd_crop_trigger_frame = QWidget()
+        trigger_layout = QHBoxLayout(self.hd_crop_trigger_frame)
+        trigger_layout.setContentsMargins(0, 0, 0, 0)
+        hd_layout.addWidget(self.hd_crop_trigger_frame)
+        
+        trigger_label = QLabel("Crop trigger size:")
+        trigger_label.setMinimumWidth(150)
+        trigger_layout.addWidget(trigger_label)
+        
+        self.hd_crop_trigger_spin = QSpinBox()
+        self.hd_crop_trigger_spin.setRange(256, 4096)
+        self.hd_crop_trigger_spin.setSingleStep(64)
+        self.hd_crop_trigger_spin.setValue(int(self.settings.get('advanced', {}).get('hd_strategy_crop_trigger_size', 1024)))
+        trigger_layout.addWidget(self.hd_crop_trigger_spin)
+        
+        trigger_help = QLabel("px (apply crop only if long edge > trigger)")
+        trigger_layout.addWidget(trigger_help)
+        trigger_layout.addStretch()
+        
+        # Initialize strategy-specific visibility
+        self._on_hd_strategy_change()
         
         # Clarifying note about precedence with tiling
-        try:
-            tk.Label(
-                hd_frame,
-                text="Note: HD Strategy (resize/crop) takes precedence over Inpainting Tiling when it triggers.\nSet strategy to 'original' if you want tiling to control large-image behavior.",
-                font=('Arial', 9),
-                fg='gray',
-                justify='left'
-            ).pack(anchor='w', pady=(2, 2))
-        except Exception:
-            pass
+        note_label = QLabel(
+            "Note: HD Strategy (resize/crop) takes precedence over Inpainting Tiling when it triggers.\n"
+            "Set strategy to 'original' if you want tiling to control large-image behavior."
+        )
+        note_label.setStyleSheet("color: gray; font-size: 9pt;")
+        note_label.setWordWrap(True)
+        hd_layout.addWidget(note_label)
         
         # Chunk height
-        self.chunk_frame = chunk_frame
-        chunk_height_frame = tk.Frame(chunk_frame)
-        chunk_height_frame.pack(fill='x', pady=5)
-        self.chunk_height_label = tk.Label(chunk_height_frame, text="Chunk Height:", width=20, anchor='w')
-        self.chunk_height_label.pack(side='left')
-        self.preprocessing_controls.append(self.chunk_height_label)
+        chunk_height_frame = QWidget()
+        chunk_height_layout = QHBoxLayout(chunk_height_frame)
+        chunk_height_layout.setContentsMargins(0, 0, 0, 0)
+        chunk_layout.addWidget(chunk_height_frame)
         
-        self.chunk_height = tk.IntVar(value=self.settings['preprocessing']['chunk_height'])
-        self.chunk_height_spinbox = tb.Spinbox(
-            chunk_height_frame,
-            from_=500,
-            to=2000,
-            textvariable=self.chunk_height,
-            increment=100,
-            width=10
-        )
-        self.chunk_height_spinbox.pack(side='left', padx=10)
-        self.preprocessing_controls.append(self.chunk_height_spinbox)
+        chunk_height_label = QLabel("Chunk Height:")
+        chunk_height_label.setMinimumWidth(150)
+        chunk_height_layout.addWidget(chunk_height_label)
+        # Do NOT add to preprocessing_controls - chunk settings should be independent
         
-        self.chunk_height_unit_label = tk.Label(chunk_height_frame, text="pixels")
-        self.chunk_height_unit_label.pack(side='left')
-        self.preprocessing_controls.append(self.chunk_height_unit_label)
+        self.chunk_height_spinbox = QSpinBox()
+        self.chunk_height_spinbox.setRange(500, 2000)
+        self.chunk_height_spinbox.setSingleStep(100)
+        self.chunk_height_spinbox.setValue(self.settings['preprocessing']['chunk_height'])
+        chunk_height_layout.addWidget(self.chunk_height_spinbox)
+        # Do NOT add to preprocessing_controls - chunk settings should be independent
+        
+        chunk_height_layout.addWidget(QLabel("pixels"))
+        chunk_height_layout.addStretch()
         
         # Chunk overlap
-        chunk_overlap_frame = tk.Frame(chunk_frame)
-        chunk_overlap_frame.pack(fill='x', pady=5)
-        self.chunk_overlap_label = tk.Label(chunk_overlap_frame, text="Chunk Overlap:", width=20, anchor='w')
-        self.chunk_overlap_label.pack(side='left')
-        self.preprocessing_controls.append(self.chunk_overlap_label)
+        chunk_overlap_frame = QWidget()
+        chunk_overlap_layout = QHBoxLayout(chunk_overlap_frame)
+        chunk_overlap_layout.setContentsMargins(0, 0, 0, 0)
+        chunk_layout.addWidget(chunk_overlap_frame)
         
-        self.chunk_overlap = tk.IntVar(value=self.settings['preprocessing']['chunk_overlap'])
-        self.chunk_overlap_spinbox = tb.Spinbox(
-            chunk_overlap_frame,
-            from_=0,
-            to=200,
-            textvariable=self.chunk_overlap,
-            increment=10,
-            width=10
-        )
-        self.chunk_overlap_spinbox.pack(side='left', padx=10)
-        self.preprocessing_controls.append(self.chunk_overlap_spinbox)
+        chunk_overlap_label = QLabel("Chunk Overlap:")
+        chunk_overlap_label.setMinimumWidth(150)
+        chunk_overlap_layout.addWidget(chunk_overlap_label)
+        # Do NOT add to preprocessing_controls - chunk settings should be independent
         
-        self.chunk_overlap_unit_label = tk.Label(chunk_overlap_frame, text="pixels")
-        self.chunk_overlap_unit_label.pack(side='left')
-        self.preprocessing_controls.append(self.chunk_overlap_unit_label)
+        self.chunk_overlap_spinbox = QSpinBox()
+        self.chunk_overlap_spinbox.setRange(0, 200)
+        self.chunk_overlap_spinbox.setSingleStep(10)
+        self.chunk_overlap_spinbox.setValue(self.settings['preprocessing']['chunk_overlap'])
+        chunk_overlap_layout.addWidget(self.chunk_overlap_spinbox)
+        # Do NOT add to preprocessing_controls - chunk settings should be independent
+        
+        chunk_overlap_layout.addWidget(QLabel("pixels"))
+        chunk_overlap_layout.addStretch()
 
-        # Inpainting Tiling section (add after the "Large Image Processing" section)
-        self.tiling_frame = tk.LabelFrame(content_frame, text="Inpainting Tiling", padx=15, pady=10)
-        self.tiling_frame.pack(fill='x', padx=20, pady=(10, 0))
-        tiling_frame = self.tiling_frame
-        self.preprocessing_controls.append(self.tiling_frame)
+        # Inpainting Tiling section
+        tiling_group = QGroupBox("Inpainting Tiling")
+        main_layout.addWidget(tiling_group)
+        tiling_layout = QVBoxLayout(tiling_group)
+        tiling_layout.setContentsMargins(8, 8, 8, 6)
+        tiling_layout.setSpacing(4)
+        # Do NOT add to preprocessing_controls - tiling should be independent
 
         # Enable tiling
         # Prefer values from legacy 'tiling' section if present, otherwise use 'preprocessing'
         tiling_enabled_value = self.settings['preprocessing'].get('inpaint_tiling_enabled', False)
         if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'enabled' in self.settings['tiling']:
             tiling_enabled_value = self.settings['tiling']['enabled']
-        self.inpaint_tiling_enabled = tk.BooleanVar(value=tiling_enabled_value)
-        tiling_enable_cb = tb.Checkbutton(
-            tiling_frame,
-            text="Enable automatic tiling for inpainting (processes large images in tiles)",
-            variable=self.inpaint_tiling_enabled,
-            command=lambda: self._toggle_tiling_controls(),
-            bootstyle="round-toggle"
-        )
-        tiling_enable_cb.pack(anchor='w', pady=(5, 10))
+            
+        self.inpaint_tiling_enabled = QCheckBox("Enable automatic tiling for inpainting (processes large images in tiles)")
+        self.inpaint_tiling_enabled.setChecked(tiling_enabled_value)
+        self.inpaint_tiling_enabled.toggled.connect(self._toggle_tiling_controls)
+        tiling_layout.addWidget(self.inpaint_tiling_enabled)
 
         # Tile size
-        tile_size_frame = tk.Frame(tiling_frame)
-        tile_size_frame.pack(fill='x', pady=5)
-        tile_size_label = tk.Label(tile_size_frame, text="Tile Size:", width=20, anchor='w')
-        tile_size_label.pack(side='left')
+        tile_size_frame = QWidget()
+        tile_size_layout = QHBoxLayout(tile_size_frame)
+        tile_size_layout.setContentsMargins(0, 0, 0, 0)
+        tiling_layout.addWidget(tile_size_frame)
+        
+        self.tile_size_label = QLabel("Tile Size:")
+        self.tile_size_label.setMinimumWidth(150)
+        tile_size_layout.addWidget(self.tile_size_label)
 
         tile_size_value = self.settings['preprocessing'].get('inpaint_tile_size', 512)
         if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'tile_size' in self.settings['tiling']:
             tile_size_value = self.settings['tiling']['tile_size']
-        self.inpaint_tile_size = tk.IntVar(value=tile_size_value)
-        self.tile_size_spinbox = tb.Spinbox(
-            tile_size_frame,
-            from_=256,
-            to=2048,
-            textvariable=self.inpaint_tile_size,
-            increment=128,
-            width=10
-        )
-        self.tile_size_spinbox.pack(side='left', padx=10)
+            
+        self.tile_size_spinbox = QSpinBox()
+        self.tile_size_spinbox.setRange(256, 2048)
+        self.tile_size_spinbox.setSingleStep(128)
+        self.tile_size_spinbox.setValue(tile_size_value)
+        tile_size_layout.addWidget(self.tile_size_spinbox)
 
-        tk.Label(tile_size_frame, text="pixels").pack(side='left')
-        # Initial tiling fields state
-        try:
-            self._toggle_tiling_controls()
-        except Exception:
-            pass
+        self.tile_size_unit_label = QLabel("pixels")
+        tile_size_layout.addWidget(self.tile_size_unit_label)
+        tile_size_layout.addStretch()
 
         # Tile overlap
-        tile_overlap_frame = tk.Frame(tiling_frame)
-        tile_overlap_frame.pack(fill='x', pady=5)
-        tile_overlap_label = tk.Label(tile_overlap_frame, text="Tile Overlap:", width=20, anchor='w')
-        tile_overlap_label.pack(side='left')
+        tile_overlap_frame = QWidget()
+        tile_overlap_layout = QHBoxLayout(tile_overlap_frame)
+        tile_overlap_layout.setContentsMargins(0, 0, 0, 0)
+        tiling_layout.addWidget(tile_overlap_frame)
+        
+        self.tile_overlap_label = QLabel("Tile Overlap:")
+        self.tile_overlap_label.setMinimumWidth(150)
+        tile_overlap_layout.addWidget(self.tile_overlap_label)
 
         tile_overlap_value = self.settings['preprocessing'].get('inpaint_tile_overlap', 64)
         if 'tiling' in self.settings and isinstance(self.settings['tiling'], dict) and 'tile_overlap' in self.settings['tiling']:
             tile_overlap_value = self.settings['tiling']['tile_overlap']
-        self.inpaint_tile_overlap = tk.IntVar(value=tile_overlap_value)
-        self.tile_overlap_spinbox = tb.Spinbox(
-            tile_overlap_frame,
-            from_=0,
-            to=256,
-            textvariable=self.inpaint_tile_overlap,
-            increment=16,
-            width=10
-        )
-        self.tile_overlap_spinbox.pack(side='left', padx=10)
+            
+        self.tile_overlap_spinbox = QSpinBox()
+        self.tile_overlap_spinbox.setRange(0, 256)
+        self.tile_overlap_spinbox.setSingleStep(16)
+        self.tile_overlap_spinbox.setValue(tile_overlap_value)
+        tile_overlap_layout.addWidget(self.tile_overlap_spinbox)
 
-        tk.Label(tile_overlap_frame, text="pixels").pack(side='left')
-
-    def _create_inpainting_tab(self, notebook):
-        """Create inpainting settings tab with comprehensive per-text-type dilation controls"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Inpainting")
+        self.tile_overlap_unit_label = QLabel("pixels")
+        tile_overlap_layout.addWidget(self.tile_overlap_unit_label)
+        tile_overlap_layout.addStretch()
         
-        content_frame = tk.Frame(frame)
-        content_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        # Don't initialize here - will be done after dialog is shown
+        
+        # ELIMINATE ALL EMPTY SPACE - Add stretch at the end
+        main_layout.addStretch()
+
+    def _create_inpainting_tab(self):
+        """Create inpainting settings tab with comprehensive per-text-type dilation controls"""
+        # Create tab widget and add to tab widget
+        tab_widget = QWidget()
+        self.tab_widget.addTab(tab_widget, "Inpainting")
+        
+        # Main scrollable content
+        main_layout = QVBoxLayout(tab_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(6)
         
         # General Mask Settings (applies to all inpainting methods)
-        mask_frame = tk.LabelFrame(content_frame, text="Mask Settings", padx=15, pady=10)
-        mask_frame.pack(fill='x', padx=20, pady=(20, 10))
+        mask_group = QGroupBox("Mask Settings")
+        main_layout.addWidget(mask_group)
+        mask_layout = QVBoxLayout(mask_group)
+        mask_layout.setContentsMargins(8, 8, 8, 6)
+        mask_layout.setSpacing(4)
         
         # Auto toggle (affects both mask dilation and iterations)
-        auto_global_frame = tk.Frame(mask_frame)
-        auto_global_frame.pack(fill='x', pady=(0, 5))
-        if not hasattr(self, 'auto_iterations_var'):
-            self.auto_iterations_var = tk.BooleanVar(value=self.settings.get('auto_iterations', True))
-        tb.Checkbutton(
-            auto_global_frame,
-            text="Auto (affects mask dilation and iterations)",
-            variable=self.auto_iterations_var,
-            command=self._toggle_iteration_controls,
-            bootstyle="round-toggle"
-        ).pack(anchor='w')
+        if not hasattr(self, 'auto_iterations_enabled'):
+            self.auto_iterations_enabled = QCheckBox("Auto (affects mask dilation and iterations)")
+            self.auto_iterations_enabled.setChecked(self.settings.get('auto_iterations', True))
+            self.auto_iterations_enabled.toggled.connect(self._toggle_iteration_controls)
+        mask_layout.addWidget(self.auto_iterations_enabled)
 
-        # Mask dilation size
-        dilation_frame = tk.Frame(mask_frame)
-        dilation_frame.pack(fill='x', pady=5)
+        # Mask Dilation frame (affected by auto setting)
+        mask_dilation_group = QGroupBox("Mask Dilation")
+        mask_layout.addWidget(mask_dilation_group)
+        mask_dilation_layout = QVBoxLayout(mask_dilation_group)
+        mask_dilation_layout.setContentsMargins(8, 8, 8, 6)
+        mask_dilation_layout.setSpacing(4)
         
-        tk.Label(dilation_frame, text="Mask Dilation:", width=15, anchor='w').pack(side='left')
-        self.mask_dilation_var = tk.IntVar(value=self.settings.get('mask_dilation', 15))
-        self.mask_dilation_spinbox = tb.Spinbox(
-            dilation_frame,
-            from_=0,
-            to=50,
-            textvariable=self.mask_dilation_var,
-            increment=5,
-            width=10
+        # Note about dilation importance
+        note_label = QLabel(
+            "Mask dilation is critical for avoiding white spots in final images.\n"
+            "Adjust per text type for optimal results."
         )
-        self.mask_dilation_spinbox.pack(side='left', padx=10)
-        tk.Label(dilation_frame, text="pixels (expand mask beyond text)").pack(side='left')
+        note_label.setStyleSheet("color: gray; font-style: italic;")
+        note_label.setWordWrap(True)
+        mask_dilation_layout.addWidget(note_label)
+        
+        # Keep all three dilation controls in a list for easy access
+        if not hasattr(self, 'mask_dilation_controls'):
+            self.mask_dilation_controls = []
+        
+        # Mask dilation size
+        dilation_frame = QWidget()
+        dilation_layout = QHBoxLayout(dilation_frame)
+        dilation_layout.setContentsMargins(0, 0, 0, 0)
+        mask_dilation_layout.addWidget(dilation_frame)
+        
+        self.dilation_label = QLabel("Mask Dilation:")
+        self.dilation_label.setMinimumWidth(150)
+        dilation_layout.addWidget(self.dilation_label)
+        
+        self.mask_dilation_spinbox = QSpinBox()
+        self.mask_dilation_spinbox.setRange(0, 50)
+        self.mask_dilation_spinbox.setSingleStep(5)
+        self.mask_dilation_spinbox.setValue(self.settings.get('mask_dilation', 15))
+        dilation_layout.addWidget(self.mask_dilation_spinbox)
+        
+        self.dilation_unit_label = QLabel("pixels (expand mask beyond text)")
+        dilation_layout.addWidget(self.dilation_unit_label)
+        dilation_layout.addStretch()
         
         # Per-Text-Type Iterations - EXPANDED SECTION
-        iterations_label_frame = tk.LabelFrame(mask_frame, text="Dilation Iterations Control", padx=10, pady=5)
-        iterations_label_frame.pack(fill='x', pady=(10, 5))
+        iterations_group = QGroupBox("Dilation Iterations Control")
+        iterations_layout = QVBoxLayout(iterations_group)
+        mask_dilation_layout.addWidget(iterations_group)
         
         # All Iterations Master Control (NEW)
-        all_iter_frame = tk.Frame(iterations_label_frame)
-        all_iter_frame.pack(fill='x', pady=5)
+        all_iter_widget = QWidget()
+        all_iter_layout = QHBoxLayout(all_iter_widget)
+        all_iter_layout.setContentsMargins(0, 0, 0, 0)
+        iterations_layout.addWidget(all_iter_widget)
         
         # Auto-iterations toggle (secondary control reflects the same setting)
-        if not hasattr(self, 'auto_iterations_var'):
-            self.auto_iterations_var = tk.BooleanVar(value=self.settings.get('auto_iterations', True))
-        auto_iter_checkbox = tb.Checkbutton(
-            all_iter_frame,
-            text="Auto (set by image: B&W vs Color)",
-            variable=self.auto_iterations_var,
-            command=self._toggle_iteration_controls,
-            bootstyle="round-toggle"
-        )
-        auto_iter_checkbox.pack(side='left', padx=(0, 10))
+        if not hasattr(self, 'auto_iterations_enabled'):
+            self.auto_iterations_enabled = self.settings.get('auto_iterations', True)
+        self.auto_iter_secondary_checkbox = QCheckBox("Auto (set by image: B&W vs Color)")
+        self.auto_iter_secondary_checkbox.setChecked(self.auto_iterations_enabled)
+        self.auto_iter_secondary_checkbox.stateChanged.connect(self._toggle_iteration_controls)
+        all_iter_layout.addWidget(self.auto_iter_secondary_checkbox)
+        
+        all_iter_layout.addSpacing(10)
         
         # Checkbox to enable/disable uniform iterations
-        self.use_all_iterations_var = tk.BooleanVar(value=self.settings.get('use_all_iterations', True))
-        all_iter_checkbox = tb.Checkbutton(
-            all_iter_frame,
-            text="Use Same For All:",
-            variable=self.use_all_iterations_var,
-            command=self._toggle_iteration_controls,
-            bootstyle="round-toggle"
-        )
-        all_iter_checkbox.pack(side='left', padx=(0, 10))
-        self.use_all_iterations_checkbox = all_iter_checkbox
+        self.use_all_iterations_checkbox = QCheckBox("Use Same For All:")
+        self.use_all_iterations_checkbox.setChecked(self.settings.get('use_all_iterations', True))
+        self.use_all_iterations_checkbox.stateChanged.connect(self._toggle_iteration_controls)
+        all_iter_layout.addWidget(self.use_all_iterations_checkbox)
         
-        self.all_iterations_var = tk.IntVar(value=self.settings.get('all_iterations', 2))
-        self.all_iterations_spinbox = tb.Spinbox(
-            all_iter_frame,
-            from_=0,
-            to=5,
-            textvariable=self.all_iterations_var,
-            width=10,
-            state='disabled' if not self.use_all_iterations_var.get() else 'normal'
-        )
-        self.all_iterations_spinbox.pack(side='left', padx=10)
-        tk.Label(all_iter_frame, text="iterations (applies to all text types)").pack(side='left')
+        all_iter_layout.addSpacing(10)
+        
+        self.all_iterations_spinbox = QSpinBox()
+        self.all_iterations_spinbox.setRange(0, 5)
+        self.all_iterations_spinbox.setValue(self.settings.get('all_iterations', 2))
+        self.all_iterations_spinbox.setEnabled(self.use_all_iterations_checkbox.isChecked())
+        all_iter_layout.addWidget(self.all_iterations_spinbox)
+        
+        all_iter_label = QLabel("iterations (applies to all text types)")
+        all_iter_layout.addWidget(all_iter_label)
+        all_iter_layout.addStretch()
         
         # Separator
-        ttk.Separator(iterations_label_frame, orient='horizontal').pack(fill='x', pady=(10, 5))
+        separator1 = QFrame()
+        separator1.setFrameShape(QFrame.Shape.HLine)
+        separator1.setFrameShadow(QFrame.Shadow.Sunken)
+        iterations_layout.addWidget(separator1)
         
         # Individual Controls Label
-        tk.Label(
-            iterations_label_frame, 
-            text="Individual Text Type Controls:",
-            font=('Arial', 9, 'bold')
-        ).pack(anchor='w', pady=(5, 5))
+        individual_label = QLabel("Individual Text Type Controls:")
+        individual_label_font = QFont('Arial', 9)
+        individual_label_font.setBold(True)
+        individual_label.setFont(individual_label_font)
+        iterations_layout.addWidget(individual_label)
         
         # Text Bubble iterations (modified from original bubble iterations)
-        text_bubble_iter_frame = tk.Frame(iterations_label_frame)
-        text_bubble_iter_frame.pack(fill='x', pady=5)
+        text_bubble_iter_widget = QWidget()
+        text_bubble_iter_layout = QHBoxLayout(text_bubble_iter_widget)
+        text_bubble_iter_layout.setContentsMargins(0, 0, 0, 0)
+        iterations_layout.addWidget(text_bubble_iter_widget)
         
-        text_bubble_label = tk.Label(text_bubble_iter_frame, text="Text Bubbles:", width=15, anchor='w')
-        text_bubble_label.pack(side='left')
-        self.text_bubble_iterations_var = tk.IntVar(value=self.settings.get('text_bubble_dilation_iterations', 
-                                                                            self.settings.get('bubble_dilation_iterations', 2)))
-        self.text_bubble_iter_spinbox = tb.Spinbox(
-            text_bubble_iter_frame,
-            from_=0,
-            to=5,
-            textvariable=self.text_bubble_iterations_var,
-            width=10
-        )
-        self.text_bubble_iter_spinbox.pack(side='left', padx=10)
-        tk.Label(text_bubble_iter_frame, text="iterations (speech/dialogue bubbles)").pack(side='left')
+        self.text_bubble_label = QLabel("Text Bubbles:")
+        self.text_bubble_label.setMinimumWidth(120)
+        text_bubble_iter_layout.addWidget(self.text_bubble_label)
+        
+        self.text_bubble_iter_spinbox = QSpinBox()
+        self.text_bubble_iter_spinbox.setRange(0, 5)
+        self.text_bubble_iter_spinbox.setValue(self.settings.get('text_bubble_dilation_iterations', 
+                                                                  self.settings.get('bubble_dilation_iterations', 2)))
+        text_bubble_iter_layout.addWidget(self.text_bubble_iter_spinbox)
+        
+        text_bubble_desc = QLabel("iterations (speech/dialogue bubbles)")
+        text_bubble_iter_layout.addWidget(text_bubble_desc)
+        text_bubble_iter_layout.addStretch()
         
         # Empty Bubble iterations (NEW)
-        empty_bubble_iter_frame = tk.Frame(iterations_label_frame)
-        empty_bubble_iter_frame.pack(fill='x', pady=5)
+        empty_bubble_iter_widget = QWidget()
+        empty_bubble_iter_layout = QHBoxLayout(empty_bubble_iter_widget)
+        empty_bubble_iter_layout.setContentsMargins(0, 0, 0, 0)
+        iterations_layout.addWidget(empty_bubble_iter_widget)
         
-        empty_bubble_label = tk.Label(empty_bubble_iter_frame, text="Empty Bubbles:", width=15, anchor='w')
-        empty_bubble_label.pack(side='left')
-        self.empty_bubble_iterations_var = tk.IntVar(value=self.settings.get('empty_bubble_dilation_iterations', 3))
-        self.empty_bubble_iter_spinbox = tb.Spinbox(
-            empty_bubble_iter_frame,
-            from_=0,
-            to=5,
-            textvariable=self.empty_bubble_iterations_var,
-            width=10
-        )
-        self.empty_bubble_iter_spinbox.pack(side='left', padx=10)
-        tk.Label(empty_bubble_iter_frame, text="iterations (empty speech bubbles)").pack(side='left')
+        self.empty_bubble_label = QLabel("Empty Bubbles:")
+        self.empty_bubble_label.setMinimumWidth(120)
+        empty_bubble_iter_layout.addWidget(self.empty_bubble_label)
+        
+        self.empty_bubble_iter_spinbox = QSpinBox()
+        self.empty_bubble_iter_spinbox.setRange(0, 5)
+        self.empty_bubble_iter_spinbox.setValue(self.settings.get('empty_bubble_dilation_iterations', 3))
+        empty_bubble_iter_layout.addWidget(self.empty_bubble_iter_spinbox)
+        
+        empty_bubble_desc = QLabel("iterations (empty speech bubbles)")
+        empty_bubble_iter_layout.addWidget(empty_bubble_desc)
+        empty_bubble_iter_layout.addStretch()
         
         # Free text iterations
-        free_text_iter_frame = tk.Frame(iterations_label_frame)
-        free_text_iter_frame.pack(fill='x', pady=5)
+        free_text_iter_widget = QWidget()
+        free_text_iter_layout = QHBoxLayout(free_text_iter_widget)
+        free_text_iter_layout.setContentsMargins(0, 0, 0, 0)
+        iterations_layout.addWidget(free_text_iter_widget)
         
-        free_text_label = tk.Label(free_text_iter_frame, text="Free Text:", width=15, anchor='w')
-        free_text_label.pack(side='left')
-        self.free_text_iterations_var = tk.IntVar(value=self.settings.get('free_text_dilation_iterations', 0))
-        self.free_text_iter_spinbox = tb.Spinbox(
-            free_text_iter_frame,
-            from_=0,
-            to=5,
-            textvariable=self.free_text_iterations_var,
-            width=10
-        )
-        self.free_text_iter_spinbox.pack(side='left', padx=10)
-        tk.Label(free_text_iter_frame, text="iterations (0 = perfect for B&W panels)").pack(side='left')
+        self.free_text_label = QLabel("Free Text:")
+        self.free_text_label.setMinimumWidth(120)
+        free_text_iter_layout.addWidget(self.free_text_label)
+        
+        self.free_text_iter_spinbox = QSpinBox()
+        self.free_text_iter_spinbox.setRange(0, 5)
+        self.free_text_iter_spinbox.setValue(self.settings.get('free_text_dilation_iterations', 0))
+        free_text_iter_layout.addWidget(self.free_text_iter_spinbox)
+        
+        free_text_desc = QLabel("iterations (0 = perfect for B&W panels)")
+        free_text_iter_layout.addWidget(free_text_desc)
+        free_text_iter_layout.addStretch()
         
         # Store individual control widgets for enable/disable
         self.individual_iteration_controls = [
-            (text_bubble_label, self.text_bubble_iter_spinbox),
-            (empty_bubble_label, self.empty_bubble_iter_spinbox),
-            (free_text_label, self.free_text_iter_spinbox)
+            (self.text_bubble_label, self.text_bubble_iter_spinbox),
+            (self.empty_bubble_label, self.empty_bubble_iter_spinbox),
+            (self.free_text_label, self.free_text_iter_spinbox)
         ]
         
         # Apply initial state
         self._toggle_iteration_controls()
         
-        # Legacy iterations (backwards compatibility)
-        self.bubble_iterations_var = self.text_bubble_iterations_var  # Link to text bubble for legacy
-        self.dilation_iterations_var = self.text_bubble_iterations_var  # Legacy support
-        
         # Quick presets - UPDATED VERSION
-        preset_frame = tk.Frame(mask_frame)
-        preset_frame.pack(fill='x', pady=(10, 5))
+        preset_widget = QWidget()
+        preset_layout = QHBoxLayout(preset_widget)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        mask_dilation_layout.addWidget(preset_widget)
         
-        tk.Label(preset_frame, text="Quick Presets:").pack(side='left', padx=(0, 10))
+        preset_label = QLabel("Quick Presets:")
+        preset_layout.addWidget(preset_label)
+        preset_layout.addSpacing(10)
         
-        tb.Button(
-            preset_frame,
-            text="B&W Manga",
-            command=lambda: self._set_mask_preset(15, False, 2, 2, 3, 0),
-            bootstyle="secondary",
-            width=12
-        ).pack(side='left', padx=2)
+        bw_manga_btn = QPushButton("B&W Manga")
+        bw_manga_btn.clicked.connect(lambda: self._set_mask_preset(15, False, 2, 2, 3, 0))
+        preset_layout.addWidget(bw_manga_btn)
         
-        tb.Button(
-            preset_frame,
-            text="Colored",
-            command=lambda: self._set_mask_preset(15, False, 2, 2, 3, 3),
-            bootstyle="secondary",
-            width=12
-        ).pack(side='left', padx=2)
+        colored_btn = QPushButton("Colored")
+        colored_btn.clicked.connect(lambda: self._set_mask_preset(15, False, 2, 2, 3, 3))
+        preset_layout.addWidget(colored_btn)
         
-        tb.Button(
-            preset_frame,
-            text="Uniform",
-            command=lambda: self._set_mask_preset(0, True, 2, 2, 2, 0),
-            bootstyle="secondary",
-            width=12
-        ).pack(side='left', padx=2)
+        uniform_btn = QPushButton("Uniform")
+        uniform_btn.clicked.connect(lambda: self._set_mask_preset(0, True, 2, 2, 2, 0))
+        preset_layout.addWidget(uniform_btn)
+        
+        preset_layout.addStretch()
         
         # Help text - UPDATED
-        tk.Label(
-            mask_frame,
-            text="💡 B&W Manga: Optimized for black & white panels with clean bubbles\n"
-                 "💡 Colored: For colored manga with complex backgrounds\n"
-                 "💡 Aggressive: For difficult text removal cases\n"
-                 "💡 Uniform: Good for Manga-OCR\n"
-                 "ℹ️ Empty bubbles often need more iterations than text bubbles\n"
-                 "ℹ️ Set Free Text to 0 for crisp B&W panels without bleeding",
-            font=('Arial', 9),
-            fg='gray',
-            justify='left'
-        ).pack(anchor='w', pady=(10, 0))
+        help_text = QLabel(
+            "💡 B&W Manga: Optimized for black & white panels with clean bubbles\n"
+            "💡 Colored: For colored manga with complex backgrounds\n"
+            "💡 Aggressive: For difficult text removal cases\n"
+            "💡 Uniform: Good for Manga-OCR\n"
+            "ℹ️ Empty bubbles often need more iterations than text bubbles\n"
+            "ℹ️ Set Free Text to 0 for crisp B&W panels without bleeding"
+        )
+        help_text_font = QFont('Arial', 9)
+        help_text.setFont(help_text_font)
+        help_text.setStyleSheet("color: gray;")
+        help_text.setWordWrap(True)
+        mask_dilation_layout.addWidget(help_text)
+        
+        content_layout.addStretch()
         
         # Note about method selection
-        info_frame = tk.Frame(content_frame)
-        info_frame.pack(fill='x', padx=20, pady=(20, 0))
+        info_widget = QWidget()
+        info_layout = QHBoxLayout(info_widget)
+        info_layout.setContentsMargins(20, 0, 20, 0)
+        content_layout.addWidget(info_widget)
         
-        tk.Label(
-            info_frame,
-            text="ℹ️ Note: Inpainting method (Cloud/Local) and model selection are configured\n"
-                 "     in the Manga tab when you select images for translation.",
-            font=('Arial', 10),
-            fg='#4a9eff',
-            justify='left'
-        ).pack(anchor='w')
+        info_label = QLabel(
+            "ℹ️ Note: Inpainting method (Cloud/Local) and model selection are configured\n"
+            "     in the Manga tab when you select images for translation."
+        )
+        info_font = QFont('Arial', 10)
+        info_label.setFont(info_font)
+        info_label.setStyleSheet("color: #4a9eff;")
+        info_label.setWordWrap(True)
+        info_layout.addWidget(info_label)
+        info_layout.addStretch()
 
     def _toggle_iteration_controls(self):
         """Enable/disable iteration controls based on Auto and 'Use Same For All' toggles"""
-        auto_on = getattr(self, 'auto_iterations_var', tk.BooleanVar(value=True)).get()
-        use_all = self.use_all_iterations_var.get()
+        # Get auto checkbox state
+        auto_on = False
+        if hasattr(self, 'auto_iterations_checkbox'):
+            auto_on = self.auto_iterations_checkbox.isChecked()
+        elif hasattr(self, 'auto_iter_secondary_checkbox'):
+            auto_on = self.auto_iter_secondary_checkbox.isChecked()
+        
+        # Get use_all checkbox state
+        use_all = False
+        if hasattr(self, 'use_all_iterations_checkbox'):
+            use_all = self.use_all_iterations_checkbox.isChecked()
+        
+        # Also update the auto_iterations_enabled attribute
+        self.auto_iterations_enabled = auto_on
         
         if auto_on:
             # Disable everything when auto is on
             try:
-                self.all_iterations_spinbox.config(state='disabled')
+                self.all_iterations_spinbox.setEnabled(False)
             except Exception:
                 pass
             try:
                 if hasattr(self, 'use_all_iterations_checkbox'):
-                    self.use_all_iterations_checkbox.config(state='disabled')
+                    self.use_all_iterations_checkbox.setEnabled(False)
             except Exception:
                 pass
             try:
                 if hasattr(self, 'mask_dilation_spinbox'):
-                    self.mask_dilation_spinbox.config(state='disabled')
+                    self.mask_dilation_spinbox.setEnabled(False)
             except Exception:
                 pass
             for label, spinbox in getattr(self, 'individual_iteration_controls', []):
                 try:
-                    spinbox.config(state='disabled')
-                    label.config(fg='gray')
+                    spinbox.setEnabled(False)
+                    label.setStyleSheet("color: gray;")
                 except Exception:
                     pass
             return
         
         # Auto off -> respect 'use all'
         try:
-            self.all_iterations_spinbox.config(state='normal' if use_all else 'disabled')
+            self.all_iterations_spinbox.setEnabled(use_all)
         except Exception:
             pass
         try:
             if hasattr(self, 'use_all_iterations_checkbox'):
-                self.use_all_iterations_checkbox.config(state='normal')
+                self.use_all_iterations_checkbox.setEnabled(True)
         except Exception:
             pass
         try:
             if hasattr(self, 'mask_dilation_spinbox'):
-                self.mask_dilation_spinbox.config(state='normal')
+                self.mask_dilation_spinbox.setEnabled(True)
         except Exception:
             pass
         for label, spinbox in getattr(self, 'individual_iteration_controls', []):
-            state = 'disabled' if use_all else 'normal'
+            enabled = not use_all
             try:
-                spinbox.config(state=state)
-                label.config(fg='gray' if use_all else 'white')
+                spinbox.setEnabled(enabled)
+                label.setStyleSheet("color: gray;" if use_all else "")
             except Exception:
                 pass
 
     def _set_mask_preset(self, dilation, use_all, all_iter, text_bubble_iter, empty_bubble_iter, free_text_iter):
         """Set mask dilation preset values with comprehensive iteration controls"""
-        self.mask_dilation_var.set(dilation)
-        self.use_all_iterations_var.set(use_all)
-        self.all_iterations_var.set(all_iter)
-        self.text_bubble_iterations_var.set(text_bubble_iter)
-        self.empty_bubble_iterations_var.set(empty_bubble_iter)
-        self.free_text_iterations_var.set(free_text_iter)
+        self.mask_dilation_spinbox.setValue(dilation)
+        self.use_all_iterations_checkbox.setChecked(use_all)
+        self.all_iterations_spinbox.setValue(all_iter)
+        self.text_bubble_iter_spinbox.setValue(text_bubble_iter)
+        self.empty_bubble_iter_spinbox.setValue(empty_bubble_iter)
+        self.free_text_iter_spinbox.setValue(free_text_iter)
         self._toggle_iteration_controls()
     
     def _create_cloud_api_tab(self, parent):
             """Create cloud API settings tab"""
-            # NO CANVAS - JUST USE PARENT DIRECTLY
-            frame = parent
+            # Create scroll area for content
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+            
+            content_widget = QWidget()
+            content_layout = QVBoxLayout(content_widget)
+            content_layout.setSpacing(10)
+            content_layout.setContentsMargins(20, 20, 20, 20)
+            
+            scroll_area.setWidget(content_widget)
+            
+            # Add scroll area to parent layout
+            parent_layout = QVBoxLayout(parent)
+            parent_layout.setContentsMargins(0, 0, 0, 0)
+            parent_layout.addWidget(scroll_area)
             
             # API Model Selection
-            model_frame = tk.LabelFrame(frame, text="Inpainting Model", padx=15, pady=10)
-            model_frame.pack(fill='x', padx=20, pady=(20, 0))
+            model_group = QGroupBox("Inpainting Model")
+            model_layout = QVBoxLayout(model_group)
+            content_layout.addWidget(model_group)
             
-            tk.Label(model_frame, text="Select the Replicate model to use for inpainting:").pack(anchor='w', pady=(0, 10))
+            model_desc = QLabel("Select the Replicate model to use for inpainting:")
+            model_layout.addWidget(model_desc)
+            model_layout.addSpacing(10)
             
-            # Model options
-            self.cloud_model_var = tk.StringVar(value=self.settings.get('cloud_inpaint_model', 'ideogram-v2'))
+            # Model options - use button group for radio buttons
+            self.cloud_model_button_group = QButtonGroup()
+            self.cloud_model_selected = self.settings.get('cloud_inpaint_model', 'ideogram-v2')
             
             models = [
                 ('ideogram-v2', 'Ideogram V2 (Best quality, with prompts)', 'ideogram-ai/ideogram-v2'),
@@ -1630,153 +1682,184 @@ class MangaSettingsDialog(QDialog):
             ]
             
             for value, text, model_id in models:
-                row_frame = tk.Frame(model_frame)
-                row_frame.pack(fill='x', pady=2)
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                model_layout.addWidget(row_widget)
                 
-                rb = tb.Radiobutton(
-                    row_frame,
-                    text=text,
-                    variable=self.cloud_model_var,
-                    value=value,
-                    command=self._on_cloud_model_change
-                )
-                rb.pack(side='left')
+                rb = QRadioButton(text)
+                rb.setChecked(value == self.cloud_model_selected)
+                rb.toggled.connect(lambda checked, v=value: self._on_cloud_model_change(v) if checked else None)
+                self.cloud_model_button_group.addButton(rb)
+                row_layout.addWidget(rb)
                 
                 if model_id:
-                    tk.Label(row_frame, text=f"({model_id})", font=('Arial', 8), fg='gray').pack(side='left', padx=(10, 0))
+                    model_id_label = QLabel(f"({model_id})")
+                    model_id_font = QFont('Arial', 8)
+                    model_id_label.setFont(model_id_font)
+                    model_id_label.setStyleSheet("color: gray;")
+                    row_layout.addWidget(model_id_label)
+                
+                row_layout.addStretch()
             
             # Custom version ID (now model identifier)
-            self.custom_version_frame = tk.Frame(model_frame)
-            self.custom_version_frame.pack(fill='x', pady=(10, 0))
+            self.custom_version_widget = QWidget()
+            custom_version_layout = QVBoxLayout(self.custom_version_widget)
+            custom_version_layout.setContentsMargins(0, 10, 0, 0)
+            model_layout.addWidget(self.custom_version_widget)
             
-            tk.Label(self.custom_version_frame, text="Model ID:", width=15, anchor='w').pack(side='left')
-            self.custom_version_var = tk.StringVar(value=self.settings.get('cloud_custom_version', ''))
-            self.custom_version_entry = tk.Entry(self.custom_version_frame, textvariable=self.custom_version_var, width=50)
-            self.custom_version_entry.pack(side='left', padx=10)
+            custom_id_row = QWidget()
+            custom_id_layout = QHBoxLayout(custom_id_row)
+            custom_id_layout.setContentsMargins(0, 0, 0, 0)
+            custom_version_layout.addWidget(custom_id_row)
+            
+            custom_id_label = QLabel("Model ID:")
+            custom_id_label.setMinimumWidth(120)
+            custom_id_layout.addWidget(custom_id_label)
+            
+            self.custom_version_entry = QLineEdit()
+            self.custom_version_entry.setText(self.settings.get('cloud_custom_version', ''))
+            custom_id_layout.addWidget(self.custom_version_entry)
             
             # Add helper text for custom model
-            helper_text = tk.Label(
-                self.custom_version_frame, 
-                text="Format: owner/model-name (e.g. stability-ai/stable-diffusion-inpainting)",
-                font=('Arial', 8), 
-                fg='gray'
-            )
-            helper_text.pack(anchor='w', padx=(70, 0), pady=(2, 0))
+            helper_text = QLabel("Format: owner/model-name (e.g. stability-ai/stable-diffusion-inpainting)")
+            helper_font = QFont('Arial', 8)
+            helper_text.setFont(helper_font)
+            helper_text.setStyleSheet("color: gray;")
+            helper_text.setContentsMargins(120, 0, 0, 0)
+            custom_version_layout.addWidget(helper_text)
             
             # Initially hide custom version entry
-            if self.cloud_model_var.get() != 'custom':
-                self.custom_version_frame.pack_forget()
+            if self.cloud_model_selected != 'custom':
+                self.custom_version_widget.setVisible(False)
             
             # Performance Settings
-            perf_frame = tk.LabelFrame(frame, text="Performance Settings", padx=15, pady=10)
-            perf_frame.pack(fill='x', padx=20, pady=(20, 0))
+            perf_group = QGroupBox("Performance Settings")
+            perf_layout = QVBoxLayout(perf_group)
+            content_layout.addWidget(perf_group)
     
             # Timeout
-            timeout_frame = tk.Frame(perf_frame)
-            timeout_frame.pack(fill='x', pady=5)
+            timeout_widget = QWidget()
+            timeout_layout = QHBoxLayout(timeout_widget)
+            timeout_layout.setContentsMargins(0, 0, 0, 0)
+            perf_layout.addWidget(timeout_widget)
             
-            tk.Label(timeout_frame, text="API Timeout:", width=15, anchor='w').pack(side='left')
-            self.cloud_timeout_var = tk.IntVar(value=self.settings.get('cloud_timeout', 60))
-            timeout_spinbox = tb.Spinbox(
-                timeout_frame,
-                from_=30,
-                to=300,
-                textvariable=self.cloud_timeout_var,
-                width=10
-            )
-            timeout_spinbox.pack(side='left', padx=10)
-            tk.Label(timeout_frame, text="seconds", font=('Arial', 9)).pack(side='left')
+            timeout_label = QLabel("API Timeout:")
+            timeout_label.setMinimumWidth(120)
+            timeout_layout.addWidget(timeout_label)
+            
+            self.cloud_timeout_spinbox = QSpinBox()
+            self.cloud_timeout_spinbox.setRange(30, 300)
+            self.cloud_timeout_spinbox.setValue(self.settings.get('cloud_timeout', 60))
+            timeout_layout.addWidget(self.cloud_timeout_spinbox)
+            
+            timeout_unit = QLabel("seconds")
+            timeout_unit_font = QFont('Arial', 9)
+            timeout_unit.setFont(timeout_unit_font)
+            timeout_layout.addWidget(timeout_unit)
+            timeout_layout.addStretch()
             
             # Help text
-            help_frame = tk.Frame(frame)
-            help_frame.pack(fill='x', padx=20, pady=20)
-            
-            help_text = tk.Label(
-                help_frame,
-                text="💡 Tips:\n"
-                     "• Ideogram V2 is currently the best quality option\n"
-                     "• SD inpainting is fast and supports prompts\n"
-                     "• FLUX inpainting offers high quality results\n"
-                     "• Find more models at replicate.com/collections/inpainting",
-                font=('Arial', 9),
-                fg='gray',
-                justify='left'
+            help_text = QLabel(
+                "💡 Tips:\n"
+                "• Ideogram V2 is currently the best quality option\n"
+                "• SD inpainting is fast and supports prompts\n"
+                "• FLUX inpainting offers high quality results\n"
+                "• Find more models at replicate.com/collections/inpainting"
             )
-            help_text.pack(anchor='w')
+            help_font = QFont('Arial', 9)
+            help_text.setFont(help_font)
+            help_text.setStyleSheet("color: gray;")
+            help_text.setWordWrap(True)
+            content_layout.addWidget(help_text)
             
             # Prompt Settings (for all models except custom)
-            self.prompt_frame = tk.LabelFrame(frame, text="Prompt Settings", padx=15, pady=10)
-            self.prompt_frame.pack(fill='x', padx=20, pady=(0, 20))
+            self.prompt_group = QGroupBox("Prompt Settings")
+            prompt_layout = QVBoxLayout(self.prompt_group)
+            content_layout.addWidget(self.prompt_group)
             
             # Positive prompt
-            tk.Label(self.prompt_frame, text="Inpainting Prompt:").pack(anchor='w', pady=(0, 5))
-            self.cloud_prompt_var = tk.StringVar(value=self.settings.get('cloud_inpaint_prompt', 'clean background, smooth surface'))
-            prompt_entry = tk.Entry(self.prompt_frame, textvariable=self.cloud_prompt_var, width=60)
-            prompt_entry.pack(fill='x', padx=(20, 20))
+            prompt_label = QLabel("Inpainting Prompt:")
+            prompt_layout.addWidget(prompt_label)
+            
+            self.cloud_prompt_entry = QLineEdit()
+            self.cloud_prompt_entry.setText(self.settings.get('cloud_inpaint_prompt', 'clean background, smooth surface'))
+            prompt_layout.addWidget(self.cloud_prompt_entry)
             
             # Add note about prompts
-            tk.Label(
-                self.prompt_frame, 
-                text="Tip: Describe what you want in the inpainted area (e.g., 'white wall', 'wooden floor')",
-                font=('Arial', 8), 
-                fg='gray'
-            ).pack(anchor='w', padx=(20, 0), pady=(2, 10))
+            prompt_tip = QLabel("Tip: Describe what you want in the inpainted area (e.g., 'white wall', 'wooden floor')")
+            prompt_tip_font = QFont('Arial', 8)
+            prompt_tip.setFont(prompt_tip_font)
+            prompt_tip.setStyleSheet("color: gray;")
+            prompt_tip.setWordWrap(True)
+            prompt_tip.setContentsMargins(0, 2, 0, 10)
+            prompt_layout.addWidget(prompt_tip)
             
             # Negative prompt (mainly for SD)
-            self.negative_prompt_label = tk.Label(self.prompt_frame, text="Negative Prompt (SD only):")
-            self.negative_prompt_label.pack(anchor='w', pady=(0, 5))
-            self.cloud_negative_prompt_var = tk.StringVar(value=self.settings.get('cloud_negative_prompt', 'text, writing, letters'))
-            self.negative_entry = tk.Entry(self.prompt_frame, textvariable=self.cloud_negative_prompt_var, width=60)
-            self.negative_entry.pack(fill='x', padx=(20, 20))
+            self.negative_prompt_label = QLabel("Negative Prompt (SD only):")
+            prompt_layout.addWidget(self.negative_prompt_label)
+            
+            self.negative_entry = QLineEdit()
+            self.negative_entry.setText(self.settings.get('cloud_negative_prompt', 'text, writing, letters'))
+            prompt_layout.addWidget(self.negative_entry)
             
             # Inference steps (for SD)
-            self.steps_frame = tk.Frame(self.prompt_frame)
-            self.steps_frame.pack(fill='x', pady=(10, 5))
+            self.steps_widget = QWidget()
+            steps_layout = QHBoxLayout(self.steps_widget)
+            steps_layout.setContentsMargins(0, 10, 0, 5)
+            prompt_layout.addWidget(self.steps_widget)
             
-            self.steps_label = tk.Label(self.steps_frame, text="Inference Steps (SD only):", width=20, anchor='w')
-            self.steps_label.pack(side='left', padx=(20, 0))
-            self.cloud_steps_var = tk.IntVar(value=self.settings.get('cloud_inference_steps', 20))
-            self.steps_spinbox = tb.Spinbox(
-                self.steps_frame,
-                from_=10,
-                to=50,
-                textvariable=self.cloud_steps_var,
-                width=10
-            )
-            self.steps_spinbox.pack(side='left', padx=10)
-            tk.Label(self.steps_frame, text="(Higher = better quality, slower)", font=('Arial', 9), fg='gray').pack(side='left')
+            self.steps_label = QLabel("Inference Steps (SD only):")
+            self.steps_label.setMinimumWidth(180)
+            steps_layout.addWidget(self.steps_label)
+            
+            self.steps_spinbox = QSpinBox()
+            self.steps_spinbox.setRange(10, 50)
+            self.steps_spinbox.setValue(self.settings.get('cloud_inference_steps', 20))
+            steps_layout.addWidget(self.steps_spinbox)
+            
+            steps_desc = QLabel("(Higher = better quality, slower)")
+            steps_desc_font = QFont('Arial', 9)
+            steps_desc.setFont(steps_desc_font)
+            steps_desc.setStyleSheet("color: gray;")
+            steps_layout.addWidget(steps_desc)
+            steps_layout.addStretch()
+            
+            # Add stretch at end
+            content_layout.addStretch()
             
             # Initially hide prompt frame if not using appropriate model
-            if self.cloud_model_var.get() == 'custom':
-                self.prompt_frame.pack_forget()
+            if self.cloud_model_selected == 'custom':
+                self.prompt_group.setVisible(False)
             
             # Show/hide SD-specific options based on model
-            self._on_cloud_model_change()
+            self._on_cloud_model_change(self.cloud_model_selected)
     
-    def _on_cloud_model_change(self):
+    def _on_cloud_model_change(self, model):
         """Handle cloud model selection change"""
-        model = self.cloud_model_var.get()
+        # Store the selected model
+        self.cloud_model_selected = model
         
         # Show/hide custom version entry
         if model == 'custom':
-            self.custom_version_frame.pack(fill='x', pady=(10, 0))
+            self.custom_version_widget.setVisible(True)
             # DON'T HIDE THE PROMPT FRAME FOR CUSTOM MODELS
-            self.prompt_frame.pack(fill='x', padx=20, pady=(20, 0))
+            self.prompt_group.setVisible(True)
         else:
-            self.custom_version_frame.pack_forget()
-            self.prompt_frame.pack(fill='x', padx=20, pady=(20, 0))
+            self.custom_version_widget.setVisible(False)
+            self.prompt_group.setVisible(True)
         
         # Show/hide SD-specific options
         if model == 'sd-inpainting':
             # Show negative prompt and steps
-            self.negative_prompt_label.pack(anchor='w', pady=(10, 5))
-            self.negative_entry.pack(fill='x', padx=(20, 0))
-            self.steps_frame.pack(fill='x', pady=(10, 0))
+            self.negative_prompt_label.setVisible(True)
+            self.negative_entry.setVisible(True)
+            self.steps_widget.setVisible(True)
         else:
             # Hide SD-specific options
-            self.negative_prompt_label.pack_forget()
-            self.negative_entry.pack_forget()
-            self.steps_frame.pack_forget()
+            self.negative_prompt_label.setVisible(False)
+            self.negative_entry.setVisible(False)
+            self.steps_widget.setVisible(False)
         
     def _toggle_preprocessing(self):
         """Enable/disable preprocessing controls based on main toggle"""
