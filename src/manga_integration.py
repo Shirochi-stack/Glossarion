@@ -7475,8 +7475,38 @@ class MangaTranslationTab:
                         self._log(f"⚠️ Bubble detector preload skipped: {_e}", "warning")
             except Exception:
                 pass
-            # 2) Skip up-front LOCAL inpainting preload — it will run in the OCR phase in the background
+            # 2) Preload LOCAL inpainting instances for panel parallelism
             inpaint_preload_event = None
+            try:
+                inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
+                if (
+                    effective_workers > 1
+                    and inpaint_method == 'local'
+                    and hasattr(self, 'translator')
+                    and self.translator
+                ):
+                    local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
+                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                    if not model_path:
+                        model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
+                    
+                    # Preload one shared instance plus spares for parallel panel processing
+                    desired_inp = effective_workers
+                    self._log(f"🧰 Preloading {desired_inp} local inpainting instance(s) for panel workers...", "info")
+                    try:
+                        import time as _time
+                        t0 = _time.time()
+                        # Use synchronous preload to ensure instances are ready before panel processing starts
+                        self.translator.preload_local_inpainters(local_method, model_path, desired_inp)
+                        dt = _time.time() - t0
+                        self._log(f"⏱️ Local inpainting preload finished in {dt:.2f}s", "info")
+                    except Exception as _e:
+                        self._log(f"⚠️ Local inpainting preload failed: {_e}", "warning")
+                        import traceback
+                        self._log(traceback.format_exc(), "debug")
+            except Exception as preload_err:
+                self._log(f"⚠️ Inpainting preload setup failed: {preload_err}", "warning")
+            
             # Log updated counters (diagnostic)
             try:
                 st2 = self.translator.get_preload_counters() if hasattr(self.translator, 'get_preload_counters') else None
@@ -7620,6 +7650,9 @@ class MangaTranslationTab:
                         # This prevents resource leaks and partial translation issues
                         try:
                             if translator:
+                                # Return checked-out inpainter to pool for reuse
+                                if hasattr(translator, '_return_inpainter_to_pool'):
+                                    translator._return_inpainter_to_pool()
                                 # Clear all caches and state
                                 if hasattr(translator, 'reset_for_new_image'):
                                     translator.reset_for_new_image()
@@ -7703,6 +7736,9 @@ class MangaTranslationTab:
                         # This prevents resource leaks and ensures proper cleanup in parallel mode
                         try:
                             if translator:
+                                # Return checked-out inpainter to pool for reuse
+                                if hasattr(translator, '_return_inpainter_to_pool'):
+                                    translator._return_inpainter_to_pool()
                                 # Force cleanup of all models and caches
                                 if hasattr(translator, 'clear_internal_state'):
                                     translator.clear_internal_state()

@@ -103,6 +103,30 @@ class MangaTranslator:
         with cls._global_cancel_lock:
             cls._global_cancelled = False
     
+    def _return_inpainter_to_pool(self):
+        """Return a checked-out inpainter instance back to the pool for reuse."""
+        if not hasattr(self, '_checked_out_inpainter') or not hasattr(self, '_inpainter_pool_key'):
+            return  # Nothing checked out
+        
+        try:
+            with MangaTranslator._inpaint_pool_lock:
+                key = self._inpainter_pool_key
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if rec and 'checked_out' in rec:
+                    checked_out = rec['checked_out']
+                    if self._checked_out_inpainter in checked_out:
+                        checked_out.remove(self._checked_out_inpainter)
+                        self._log(f"🔄 Returned inpainter to pool ({len(checked_out)}/{len(rec.get('spares', []))} still in use)", "debug")
+            # Clear the references
+            self._checked_out_inpainter = None
+            self._inpainter_pool_key = None
+        except Exception as e:
+            # Non-critical - just log
+            try:
+                self._log(f"⚠️ Failed to return inpainter to pool: {e}", "debug")
+            except:
+                pass
+    
     @classmethod
     def cleanup_singletons(cls, force=False):
         """Clean up singleton instances when no longer needed
@@ -6351,10 +6375,36 @@ class MangaTranslator:
         """Return a shared LocalInpainter for (local_method, model_path) with minimal locking.
         If another thread is loading the same model, wait on its event instead of competing.
         Set force_reload=True only when the method or model_path actually changed.
+        
+        If spare instances are available in the pool, check one out for use.
+        The instance will stay assigned to this translator until cleanup.
         """
         from local_inpainter import LocalInpainter
         key = (local_method, model_path or '')
-        # Fast path: check without lock
+        
+        # FIRST: Try to check out a spare instance if available (for true parallelism)
+        # Don't pop it - instead mark it as 'in use' so it stays in memory
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if rec and rec.get('spares'):
+                spares = rec.get('spares') or []
+                # Initialize checked_out list if it doesn't exist
+                if 'checked_out' not in rec:
+                    rec['checked_out'] = []
+                checked_out = rec['checked_out']
+                
+                # Look for an available spare (not checked out)
+                for spare in spares:
+                    if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                        # Mark as checked out
+                        checked_out.append(spare)
+                        self._log(f"🧰 Checked out spare inpainter ({len(checked_out)}/{len(spares)} in use)", "debug")
+                        # Store reference for later return
+                        self._checked_out_inpainter = spare
+                        self._inpainter_pool_key = key
+                        return spare
+        
+        # FALLBACK: Use the shared instance
         rec = MangaTranslator._inpaint_pool.get(key)
         if rec and rec.get('loaded') and rec.get('inpainter'):
             # Already loaded - do NOT force reload!
@@ -6508,7 +6558,34 @@ class MangaTranslator:
             return 0
         key = (local_method, model_path or '')
         created = 0
-        # Ensure pool record exists
+        
+        # FIRST: Ensure the shared instance is initialized and ready
+        # This prevents race conditions when spare instances run out
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if not rec or not rec.get('loaded') or not rec.get('inpainter'):
+                # Need to create the shared instance
+                if not rec:
+                    rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                    MangaTranslator._inpaint_pool[key] = rec
+                    need_init_shared = True
+                else:
+                    need_init_shared = not (rec.get('loaded') and rec.get('inpainter'))
+            else:
+                need_init_shared = False
+        
+        if need_init_shared:
+            self._log(f"📦 Initializing shared inpainter instance first...", "debug")
+            try:
+                shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=False)
+                if shared_inp and getattr(shared_inp, 'model_loaded', False):
+                    self._log(f"✅ Shared instance initialized successfully", "debug")
+                else:
+                    self._log(f"⚠️ Shared instance initialization returned but model not loaded", "warning")
+            except Exception as e:
+                self._log(f"⚠️ Shared instance initialization failed: {e}", "warning")
+        
+        # Ensure pool record and spares list exist
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
@@ -6516,7 +6593,7 @@ class MangaTranslator:
                 MangaTranslator._inpaint_pool[key] = rec
             if 'spares' not in rec or rec['spares'] is None:
                 rec['spares'] = []
-            spares = rec['spares']
+            spares = rec.get('spares')
         # Prepare tiling settings
         tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
         desired = max(0, int(count) - len(spares))
@@ -6548,6 +6625,10 @@ class MangaTranslator:
                             rec['spares'].append(inp)
                             MangaTranslator._inpaint_pool[key] = rec
                         created += 1
+                    elif ok and not getattr(inp, 'model_loaded', False):
+                        self._log(f"⚠️ Preload: load_model_with_retry returned True but model_loaded is False", "warning")
+                    elif not ok:
+                        self._log(f"⚠️ Preload: load_model_with_retry returned False", "warning")
                 else:
                     self._log("⚠️ Preload skipped: no model path available", "warning")
             except Exception as e:

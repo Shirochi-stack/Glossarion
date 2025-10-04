@@ -509,7 +509,8 @@ class LocalInpainter:
                 try:
                     with open(self.config_path, 'r', encoding='utf-8') as f:
                         full_config = json.load(f)
-                except Exception:
+                except Exception as read_err:
+                    logger.debug(f"Config read during save failed (non-critical): {read_err}")
                     full_config = {}
             # Update
             full_config.update(self.config)
@@ -519,12 +520,14 @@ class LocalInpainter:
                 json.dump(full_config, f, indent=2, ensure_ascii=False)
             try:
                 os.replace(tmp_path, self.config_path or 'config.json')
-            except Exception:
+            except Exception as replace_err:
+                logger.debug(f"Config atomic replace failed, trying direct write: {replace_err}")
                 # Fallback to direct write
                 with open(self.config_path or 'config.json', 'w', encoding='utf-8') as f:
                     json.dump(full_config, f, indent=2, ensure_ascii=False)
-        except Exception:
-            # Never crash on config save
+        except Exception as save_err:
+            # Never crash on config save, but log for debugging
+            logger.debug(f"Config save failed (non-critical): {save_err}")
             pass
     
     def set_stop_flag(self, stop_flag):
@@ -1099,7 +1102,10 @@ class LocalInpainter:
             
         except Exception as e:
             logger.error(f"❌ Failed to load ONNX: {e}")
+            import traceback
+            logger.debug(f"ONNX load traceback: {traceback.format_exc()}")
             self.use_onnx = False
+            self.model_loaded = False
             return False
         
     def _convert_checkpoint_key(self, key):
@@ -1279,6 +1285,11 @@ class LocalInpainter:
                 elif not self.use_onnx and self.model is not None:
                     logger.debug(f"✅ {method.upper()} already loaded (skipping reload)")
                     return True
+                else:
+                    # Model claims to be loaded but objects are missing - force reload
+                    logger.warning(f"⚠️ Model claims loaded but session/model object is None - forcing reload")
+                    force_reload = True
+                    self.model_loaded = False
             
             # Clear previous model if force reload
             if force_reload:
@@ -1378,23 +1389,41 @@ class LocalInpainter:
             # Handle ONNX files
             if is_onnx:
                 # Note: load_onnx_model will handle its own logging
-                if self.load_onnx_model(model_path):
-                    self.model_loaded = True
-                    # Ensure aot_onnx is properly set as current method
-                    if 'aot' in method.lower():
-                        self.current_method = 'aot_onnx'
+                try:
+                    onnx_load_result = self.load_onnx_model(model_path)
+                    if onnx_load_result:
+                        # CRITICAL: Set model_loaded flag FIRST before any other operations
+                        # This ensures concurrent threads see the correct state immediately
+                        self.model_loaded = True
+                        self.use_onnx = True
+                        self.is_jit_model = False
+                        # Ensure aot_onnx is properly set as current method
+                        if 'aot' in method.lower():
+                            self.current_method = 'aot_onnx'
+                        else:
+                            self.current_method = method
+                        # Save with BOTH key formats for compatibility (non-critical - do last)
+                        try:
+                            self.config[f'{method}_model_path'] = model_path
+                            self.config[f'manga_{method}_model_path'] = model_path
+                            self._save_config()
+                        except Exception as cfg_err:
+                            logger.debug(f"Config save after ONNX load failed (non-critical): {cfg_err}")
+                        logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
+                        # Double-check model_loaded flag is still set
+                        if not self.model_loaded:
+                            logger.error("❌ CRITICAL: model_loaded flag was unset after successful ONNX load!")
+                            self.model_loaded = True
+                        return True
                     else:
-                        self.current_method = method
-                    self.use_onnx = True
-                    self.is_jit_model = False
-                    # Save with BOTH key formats for compatibility
-                    self.config[f'{method}_model_path'] = model_path
-                    self.config[f'manga_{method}_model_path'] = model_path
-                    self._save_config()
-                    logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
-                    return True
-                else:
-                    logger.error("Failed to load ONNX model")
+                        logger.error("Failed to load ONNX model - load_onnx_model returned False")
+                        self.model_loaded = False
+                        return False
+                except Exception as onnx_err:
+                    logger.error(f"Exception during ONNX model loading: {onnx_err}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    self.model_loaded = False
                     return False
             
             # Check if it's a JIT model (.pt) or checkpoint (.ckpt/.pth)
