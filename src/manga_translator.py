@@ -6270,16 +6270,15 @@ class MangaTranslator:
                     self.main_gui.config[prefixed_key] = self.main_gui.config[non_prefixed_key]
                     self._log(f"🔄 Migrated model path config: {non_prefixed_key} → {prefixed_key}", "debug")
             
-            # Update manga_settings with the saved values ONLY if they are not already set
-            # This allows web UI to override with its own config
+            # Update manga_settings with the saved values
+            # ALWAYS use the top-level saved config to ensure correct model is loaded
             if 'inpainting' not in self.manga_settings:
                 self.manga_settings['inpainting'] = {}
             
-            # Only update if not already set (web UI case)
-            if 'method' not in self.manga_settings['inpainting'] or not self.manga_settings['inpainting']['method']:
-                self.manga_settings['inpainting']['method'] = saved_inpaint_method
-            if 'local_method' not in self.manga_settings['inpainting'] or not self.manga_settings['inpainting']['local_method']:
-                self.manga_settings['inpainting']['local_method'] = saved_local_method
+            # Always override with saved values from top-level config
+            # This ensures the user's model selection in the settings dialog is respected
+            self.manga_settings['inpainting']['method'] = saved_inpaint_method
+            self.manga_settings['inpainting']['local_method'] = saved_local_method
             
             # Now get the values (they'll be correct now)
             inpaint_method = self.manga_settings.get('inpainting', {}).get('method', 'cloud')
