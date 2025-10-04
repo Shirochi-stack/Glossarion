@@ -3026,34 +3026,62 @@ class MangaTranslator:
                 else:
                     self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages, order: {reading_order})")
                 
-                # Start Read operation with error handling
-                try:
-                    # Ensure client is alive before starting
-                    if getattr(self, 'vision_client', None) is None:
-                        self._log("⚠️ Azure client missing before read; reinitializing...", "warning")
-                        self._ensure_azure_client()
-                    if getattr(self, 'vision_client', None) is None:
-                        raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-cognitiveservices-vision-computervision installation.")
-
-                    read_response = self.vision_client.read_in_stream(
-                        image_stream,
-                        **read_params
-                    )
-                except Exception as e:
-                    error_msg = str(e)
-                    if 'Bad Request' in error_msg:
-                        self._log("⚠️ Azure Read API Bad Request - likely invalid image format or too small. Retrying without language parameter...", "warning")
-                        # Retry without language parameter
-                        image_stream.seek(0)
-                        read_params.pop('language', None)
+                # Start Read operation with error handling and rate limit retry
+                max_retries = 3
+                retry_delay = 60  # Start with 60 seconds for rate limits
+                read_response = None
+                
+                for retry_attempt in range(max_retries):
+                    try:
+                        # Ensure client is alive before starting
                         if getattr(self, 'vision_client', None) is None:
+                            self._log("⚠️ Azure client missing before read; reinitializing...", "warning")
                             self._ensure_azure_client()
+                        if getattr(self, 'vision_client', None) is None:
+                            raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-cognitiveservices-vision-computervision installation.")
+
+                        # Reset stream position for retry
+                        image_stream.seek(0)
+                        
                         read_response = self.vision_client.read_in_stream(
                             image_stream,
                             **read_params
                         )
-                    else:
-                        raise
+                        # Success! Break out of retry loop
+                        break
+                        
+                    except Exception as e:
+                        error_msg = str(e)
+                        
+                        # Handle rate limit errors with exponential backoff
+                        if 'Too Many Requests' in error_msg or '429' in error_msg:
+                            if retry_attempt < max_retries - 1:
+                                wait_time = retry_delay * (2 ** retry_attempt)  # Exponential backoff
+                                self._log(f"⚠️ Azure rate limit hit. Waiting {wait_time}s before retry {retry_attempt + 1}/{max_retries}...", "warning")
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                self._log(f"❌ Azure rate limit: Exhausted {max_retries} retries", "error")
+                                raise
+                        
+                        # Handle bad request errors
+                        elif 'Bad Request' in error_msg:
+                            self._log("⚠️ Azure Read API Bad Request - likely invalid image format or too small. Retrying without language parameter...", "warning")
+                            # Retry without language parameter
+                            image_stream.seek(0)
+                            read_params.pop('language', None)
+                            if getattr(self, 'vision_client', None) is None:
+                                self._ensure_azure_client()
+                            read_response = self.vision_client.read_in_stream(
+                                image_stream,
+                                **read_params
+                            )
+                            break
+                        else:
+                            raise
+                
+                if read_response is None:
+                    raise RuntimeError("Failed to get response from Azure Read API after retries")
                 
                 # Get operation ID
                 operation_location = read_response.headers.get("Operation-Location") if hasattr(read_response, 'headers') else None

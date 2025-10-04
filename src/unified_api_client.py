@@ -3550,6 +3550,15 @@ class UnifiedClient:
                 ):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
                     
+                    # PREVENT INFINITE LOOP: Don't attempt fallback if we're already a fallback client
+                    if getattr(self, '_is_retry_client', False):
+                        print(f"[RETRY CLIENT] Already in fallback, not recursing further")
+                        # Don't retry, just return error response
+                        self._save_failed_request(messages, e, context)
+                        self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                        fallback_content = self._handle_empty_result(messages, context, str(e))
+                        return fallback_content, 'error'
+                    
                     # Different behavior based on mode
                     if self._multi_key_mode:
                         # Multi-key mode: Attempt main key retry once, then fall through to fallback
@@ -4069,11 +4078,6 @@ class UnifiedClient:
         Try fallback API keys directly when main key fails (single-key mode).
         Used when fallback keys are enabled in single-key mode.
         """
-        # PREVENT INFINITE LOOP: Check if we're already in a fallback attempt
-        if getattr(self, '_is_retry_client', False):
-            print(f"[FALLBACK DIRECT] Already in fallback attempt, preventing infinite loop")
-            return None
-        
         # Check if fallback keys are enabled
         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
         if not use_fallback_keys:
@@ -4114,6 +4118,10 @@ class UnifiedClient:
                         output_dir=self.output_dir
                     )
                     
+                    # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
+                    # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
+                    temp_client._is_retry_client = True
+                    
                     # Set key-specific credentials
                     if fallback_google_creds:
                         temp_client.current_key_google_creds = fallback_google_creds
@@ -4137,7 +4145,6 @@ class UnifiedClient:
                     # Force single-key mode
                     temp_client._multi_key_mode = False
                     temp_client.key_identifier = f"FALLBACK KEY ({fallback_model})"
-                    temp_client._is_retry_client = True
                     
                     # Setup the client
                     temp_client._setup_client()
