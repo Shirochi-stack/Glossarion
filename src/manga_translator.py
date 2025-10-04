@@ -1535,6 +1535,19 @@ class MangaTranslator:
             merged_regions = []
             used_indices = set()
             
+            # Build lookup of free text regions for exclusion
+            free_text_bboxes = free_text_regions if detector_type in ('rtdetr', 'rtdetr_onnx') else []
+            
+            # Helper to check if a point is in any free text region
+            def _point_in_free_text(cx, cy, free_boxes):
+                try:
+                    for (fx, fy, fw, fh) in free_boxes or []:
+                        if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                            return True
+                except Exception:
+                    pass
+                return False
+            
             for bubble_idx, (bx, by, bw, bh) in enumerate(bubbles):
                 bubble_regions = []
                 
@@ -1546,8 +1559,17 @@ class MangaTranslator:
                     region_center_x = rx + rw / 2
                     region_center_y = ry + rh / 2
                     
+                    # Check if center is inside this bubble
                     if (bx <= region_center_x <= bx + bw and 
                         by <= region_center_y <= by + bh):
+                        
+                        # CRITICAL: Don't merge if this region is in a free text area
+                        # Free text should stay separate from bubbles
+                        if _point_in_free_text(region_center_x, region_center_y, free_text_bboxes):
+                            # This region is in a free text area, don't merge it into bubble
+                            self._log(f"   Skipping region in bubble {bubble_idx + 1}: overlaps with free text area", "debug")
+                            continue
+                        
                         bubble_regions.append(region)
                         used_indices.add(idx)
                 
@@ -1597,7 +1619,7 @@ class MangaTranslator:
                     # This text is outside any bubble
                     
                     # For RT-DETR mode, check if we should include free text
-                    if detector_type == 'rtdetr':
+                    if detector_type in ('rtdetr', 'rtdetr_onnx'):
                         # If "Free Text" checkbox is checked, include ALL text outside bubbles
                         # Don't require RT-DETR to specifically detect it as free text
                         if ocr_settings.get('detect_free_text', True):
@@ -1606,11 +1628,16 @@ class MangaTranslator:
                             try:
                                 cx = region.bounding_box[0] + region.bounding_box[2] / 2
                                 cy = region.bounding_box[1] + region.bounding_box[3] / 2
-                                if _point_in_any_bbox(cx, cy, free_text_regions):
+                                if _point_in_free_text(cx, cy, free_text_bboxes):
                                     region.bubble_type = 'free_text'
+                                    self._log(f"   Free text region INCLUDED: '{region.text[:30]}...'", "debug")
+                                else:
+                                    # Text outside bubbles but not in free text box - still mark as free text
+                                    region.bubble_type = 'free_text'
+                                    self._log(f"   Text outside bubbles INCLUDED (as free text): '{region.text[:30]}...'", "debug")
                             except Exception:
-                                pass
-                            self._log(f"   Text outside bubbles INCLUDED: '{region.text[:30]}...'", "debug")
+                                # Default to free text if check fails
+                                region.bubble_type = 'free_text'
                         else:
                             region.should_inpaint = False
                             self._log(f"   Text outside bubbles EXCLUDED (Free Text unchecked): '{region.text[:30]}...'", "info")
@@ -2094,12 +2121,21 @@ class MangaTranslator:
                     rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                     
                     if rtdetr_detections:
-                        # Collect all text-containing regions
+                        # Collect all text-containing regions WITH TYPE TRACKING
                         all_regions = []
+                        # Track region type to assign bubble_type later
+                        region_types = {}
+                        idx = 0
                         if 'text_bubbles' in rtdetr_detections:
-                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            for bbox in rtdetr_detections.get('text_bubbles', []):
+                                all_regions.append(bbox)
+                                region_types[idx] = 'text_bubble'
+                                idx += 1
                         if 'text_free' in rtdetr_detections:
-                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                            for bbox in rtdetr_detections.get('text_free', []):
+                                all_regions.append(bbox)
+                                region_types[idx] = 'free_text'
+                                idx += 1
                         
                         if all_regions:
                             self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Google Vision")
@@ -2112,7 +2148,7 @@ class MangaTranslator:
                             else:
                                 # Define worker function for concurrent OCR
                                 def ocr_region_google(region_data):
-                                    i, x, y, w, h = region_data
+                                    i, region_idx, x, y, w, h = region_data
                                     try:
                                         # RATE LIMITING: Add small delay to avoid potential rate limits
                                         # Google has high limits (1,800/min paid tier) but being conservative
@@ -2177,8 +2213,10 @@ class MangaTranslator:
                                                 confidence=0.9,  # RT-DETR confidence
                                                 region_type='text_block'
                                             )
+                                            # Assign bubble_type from RT-DETR detection
+                                            region.bubble_type = region_types.get(region_idx, 'text_bubble')
                                             if not getattr(self, 'concise_logs', False):
-                                                self._log(f"✅ Region {i}/{len(all_regions)}: {region_text[:50]}...")
+                                                self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
                                             return region
                                         return None
                                     
@@ -2196,7 +2234,7 @@ class MangaTranslator:
                                 # Use rtdetr_max_concurrency setting (default 2) to control parallel OCR calls
                                 max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
                                 
-                                region_data_list = [(i+1, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
+                                region_data_list = [(i+1, i, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
                                 
                                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                                     futures = {executor.submit(ocr_region_google, rd): rd for rd in region_data_list}
@@ -2419,12 +2457,21 @@ class MangaTranslator:
                     rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                     
                     if rtdetr_detections:
-                        # Collect all text-containing regions
+                        # Collect all text-containing regions WITH TYPE TRACKING
                         all_regions = []
+                        # Track region type to assign bubble_type later
+                        region_types = {}
+                        idx = 0
                         if 'text_bubbles' in rtdetr_detections:
-                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            for bbox in rtdetr_detections.get('text_bubbles', []):
+                                all_regions.append(bbox)
+                                region_types[idx] = 'text_bubble'
+                                idx += 1
                         if 'text_free' in rtdetr_detections:
-                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                            for bbox in rtdetr_detections.get('text_free', []):
+                                all_regions.append(bbox)
+                                region_types[idx] = 'free_text'
+                                idx += 1
                         
                         if all_regions:
                             self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Azure Vision")
@@ -2445,7 +2492,7 @@ class MangaTranslator:
                                 
                                 # Define worker function for concurrent OCR
                                 def ocr_region_azure(region_data):
-                                    i, x, y, w, h = region_data
+                                    i, region_idx, x, y, w, h = region_data
                                     try:
                                         # Crop region
                                         cropped = self._safe_crop_region(cv_image, x, y, w, h)
@@ -2509,8 +2556,10 @@ class MangaTranslator:
                                                     confidence=0.9,  # RT-DETR confidence
                                                     region_type='text_block'
                                                 )
+                                                # Assign bubble_type from RT-DETR detection
+                                                region.bubble_type = region_types.get(region_idx, 'text_bubble')
                                                 if not getattr(self, 'concise_logs', False):
-                                                    self._log(f"✅ Region {i}/{len(all_regions)}: {region_text[:50]}...")
+                                                    self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
                                                 return region
                                         return None
                                     
@@ -2532,7 +2581,7 @@ class MangaTranslator:
                                 # Note: Azure has rate limits - adjust rtdetr_max_concurrency in settings if you hit limits
                                 max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
                                 
-                                region_data_list = [(i+1, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
+                                region_data_list = [(i+1, i, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
                                 
                                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                                     futures = {executor.submit(ocr_region_azure, rd): rd for rd in region_data_list}
@@ -3875,7 +3924,8 @@ class MangaTranslator:
         work_rois = []
         for roi in rois:
             x, y, w, h = roi['bbox']
-            cache_key = ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode)
+            # Include region type in cache key to prevent mismapping
+            cache_key = ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode, roi.get('type', 'unknown'))
             # THREAD-SAFE: Use lock for cache access in parallel panel translation
             with self._cache_lock:
                 cached_text = self.ocr_roi_cache.get(cache_key)
@@ -4009,7 +4059,8 @@ class MangaTranslator:
         work_rois: List[Dict[str, Any]] = []
         for roi in rois:
             x, y, w, h = roi['bbox']
-            cache_key = ("azure", page_hash, x, y, w, h, tuple(language_hints), model_version, reading_order)
+            # Include region type in cache key to prevent mismapping
+            cache_key = ("azure", page_hash, x, y, w, h, reading_order, roi.get('type', 'unknown'))
             # THREAD-SAFE: Use lock for cache access in parallel panel translation
             with self._cache_lock:
                 text_cached = self.ocr_roi_cache.get(cache_key)

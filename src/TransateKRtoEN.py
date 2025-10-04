@@ -247,17 +247,30 @@ class PatternManager:
     CJK_HONORIFICS = {
         'korean': [
             # Modern honorifics
-            '님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', '사장님', '회장님',
+            '님', '씨', '선배', '후배', '동기', '형', '누나', '언니', '오빠', '동생',
+            '선생님', '교수님', '박사님', '사장님', '회장님', '부장님', '과장님', '대리님',
+            '팀장님', '실장님', '이사님', '전무님', '상무님', '부사장님', '고문님',
+            
             # Classical/formal honorifics
             '공', '옹', '군', '양', '낭', '랑', '생', '자', '부', '모', '시', '제', '족하',
+            
             # Royal/noble address forms
-            '마마', '마노라', '대감', '영감', '나리', '도령', '낭자', '각하', '전하', '폐하',
+            '마마', '마노라', '대감', '영감', '나리', '도령', '낭자', '아씨', '규수',
+            '각하', '전하', '폐하', '저하', '합하', '대비', '대왕', '왕자', '공주',
+            
             # Buddhist/religious
             '스님', '사부님', '조사님', '큰스님', '화상', '대덕', '대사', '법사',
+            '선사', '율사', '보살님', '거사님', '신부님', '목사님', '장로님', '집사님',
+            
             # Confucian/scholarly
-            '부자', '선생', '대인', '어른', '존자', '현자', '군자', '대부',
+            '부자', '선생', '대인', '어른', '어르신', '존자', '현자', '군자', '대부',
+            '학사', '진사', '문하생', '제자',
+            
             # Kinship honorifics
             '어르신', '할아버님', '할머님', '아버님', '어머님', '형님', '누님',
+            '아주버님', '아주머님', '삼촌', '이모님', '고모님', '외삼촌', '장인어른',
+            '장모님', '시아버님', '시어머님', '처남', '처형', '매형', '손님',
+            
             # Verb-based honorific endings and speech levels
             '습니다', 'ㅂ니다', '습니까', 'ㅂ니까', '시다', '세요', '셔요', '십시오', '시오',
             '이에요', '예요', '이예요', '에요', '어요', '아요', '여요', '해요', '이세요', '으세요',
@@ -265,16 +278,25 @@ class PatternManager:
             '드립니다', '드려요', '드릴게요', '드리겠습니다', '올립니다', '올려요',
             '사옵니다', '사뢰', '여쭙니다', '여쭤요', '아뢰', '뵙니다', '뵈요', '모십니다',
             '시지요', '시죠', '시네요', '시는군요', '시는구나', '으실', '실',
+            '드시다', '잡수시다', '주무시다', '계시다', '가시다', '오시다',
+            
             # Common verb endings with 있다/없다/하다
             '있어요', '있습니다', '있으세요', '있으십니까', '없어요', '없습니다', '없으세요',
             '해요', '합니다', '하세요', '하십시오', '하시죠', '하시네요', '했어요', '했습니다',
+            '되세요', '되셨어요', '되십니다', '됩니다', '되요', '돼요',
             '이야', '이네', '이구나', '이군', '이네요', '인가요', '인가', '일까요', '일까',
             '거예요', '거에요', '겁니다', '건가요', '게요', '을게요', '을까요', '었어요', '었습니다',
+            '겠습니다', '겠어요', '겠네요', '을겁니다', '을거예요', '을거에요',
+            
             # Common endings
             '요', '죠', '네요', '는데요', '거든요', '니까', '으니까', '는걸요', '군요', '구나',
+            '는구나', '는군요', '더라고요', '더군요', '던데요', '나요', '가요', '까요',
+            '라고요', '다고요', '냐고요', '자고요', '란다', '단다', '냔다', '잔다',
+            
             # Formal archaic endings
             '나이다', '사옵나이다', '옵니다', '오', '소서', '으오', '으옵소서', '사이다',
-            '으시옵니다', '시옵니다', '으시옵니까', '시옵니까'
+            '으시옵니다', '시옵니다', '으시옵니까', '시옵니까', '나이까', '리이까', '리이다',
+            '옵소서', '으소서', '소이다', '로소이다', '이옵니다', '이올시다', '하옵니다'
         ],
         'japanese': [
             # Modern honorifics
@@ -327,42 +349,98 @@ class PatternManager:
             '拜', '拜见', '拜访', '拜读', '拜托', '拜谢', '敬上', '谨上', '顿首'
         ],
         'english': [
-            # Modern romanizations
-            ' san', ' chan', ' kun', ' sama', ' sensei', ' senpai', ' dono', ' shi', ' tan', ' chin',
-            '-ssi', '-nim', '-ah', '-ya', '-hyung', '-hyungnim', '-oppa', '-unnie', '-noona',
-            '-sunbae', '-sunbaenim', '-hubae', '-seonsaeng', '-seonsaengnim', '-gun', '-yang',
-            # Korean verb endings romanized
-            '-seumnida', '-bnida', '-seumnikka', '-bnikka', '-seyo', '-syeoyo', '-sipsio', '-sio',
-            '-ieyo', '-yeyo', '-eyo', '-ayo', '-yeoyo', '-haeyo', '-iseyo', '-euseyo',
+            # Modern Korean romanizations (Revised Romanization of Korean - 2000)
+            '-nim', '-ssi', '-seonbae', '-hubae', '-donggi', '-hyeong', '-nuna', 
+            '-eonni', '-oppa', '-dongsaeng', '-seonsaengnim', '-gyosunim', 
+            '-baksanim', '-sajangnim', '-hoejangnim', '-bujangnim', '-gwajangnim',
+            '-daerim', '-timjangnim', '-siljangnim', '-isanim', '-jeonmunim',
+            '-sangmunim', '-busajangnim', '-gomunnim',
+            
+            # Classical/formal Korean romanizations  
+            '-gong', '-ong', '-gun', '-yang', '-nang', '-rang', '-saeng', '-ja',
+            '-bu', '-mo', '-si', '-je', '-jokha',
+            
+            # Royal/noble Korean romanizations
+            '-mama', '-manora', '-daegam', '-yeonggam', '-nari', '-doryeong',
+            '-nangja', '-assi', '-gyusu', '-gakha', '-jeonha', '-pyeha', '-jeoha',
+            '-hapka', '-daebi', '-daewang', '-wangja', '-gongju',
+            
+            # Buddhist/religious Korean romanizations
+            '-seunim', '-sabunim', '-josanim', '-keunseunim', '-hwasang',
+            '-daedeok', '-daesa', '-beopsa', '-seonsa', '-yulsa', '-bosalnim',
+            '-geosanim', '-sinbunim', '-moksanim', '-jangnonim', '-jipsanim',
+            
+            # Confucian/scholarly Korean romanizations
+            '-buja', '-seonsaeng', '-daein', '-eoreun', '-eoreusin', '-jonja', 
+            '-hyeonja', '-gunja', '-daebu', '-haksa', '-jinsa', '-munhasaeng', '-jeja',
+            
+            # Kinship Korean romanizations
+            '-harabeonim', '-halmeonim', '-abeonim', '-eomeonim', '-hyeongnim', 
+            '-nunim', '-ajubeonim', '-ajumeonim', '-samchon', '-imonim', '-gomonim',
+            '-oesamchon', '-jangineoreun', '-jangmonim', '-siabeonim', '-sieomeonim',
+            '-cheonam', '-cheohyeong', '-maehyeong', '-sonnim',
+            
+            # Korean verb endings romanized (Revised Romanization)
+            '-seumnida', '-mnida', '-seumnikka', '-mnikka', '-sida', '-seyo', 
+            '-syeoyo', '-sipsio', '-sio', '-ieyo', '-yeyo', '-iyeyo', '-eyo', 
+            '-eoyo', '-ayo', '-yeoyo', '-haeyo', '-iseyo', '-euseyo',
             '-eusi', '-si', '-eusimnida', '-simnida', '-eusimnikka', '-simnikka',
-            '-deurimnida', '-deuryeoyo', '-deurilgeyo', '-ollimnida', '-ollyeoyo',
-            '-saopnida', '-yeojupnida', '-yeokkweoyo', '-boemnida', '-boeyo', '-mosimnida',
+            '-eusyeot', '-syeot', '-deurimnida', '-deuryeoyo', '-deurilgeyo',
+            '-deurigesseumnida', '-ollimnida', '-ollyeoyo', '-saomnida', '-saroe',
+            '-yeojjumnida', '-yeojjwoyo', '-aroe', '-boemnida', '-boeyo', '-mosimnida',
             '-sijiyo', '-sijyo', '-sineyo', '-sineungunyo', '-sineunguna', '-eusil', '-sil',
-            # Common verb endings romanized
-            '-isseoyo', '-isseumnida', '-isseuseyo', '-isseusimnikka', '-eopseoyo', '-eopseumnida',
-            '-haeyo', '-hamnida', '-haseyo', '-hasipsio', '-hasijyo', '-hasineyo', '-haesseoyo',
-            '-iya', '-ine', '-iguna', '-igun', '-ineyo', '-ingayo', '-inga', '-ilkkayo', '-ilkka',
-            '-geoyeyo', '-geoye', '-geomnida', '-geongayo', '-geyo', '-eulgeyo', '-eulkkayo',
-            '-yo', '-jyo', '-neyo', '-neundeyo', '-geodeuneyo', '-nikka', '-eunikka', '-neungeolyo',
-            # Archaic Korean romanized
-            '-naida', '-saopnaida', '-opnida', '-o', '-soseo', '-euo', '-euopsoseo', '-saida',
-            # Japanese keigo romanized
-            '-desu', '-masu', '-gozaimasu', '-irassharu', '-irasshaimasu', '-ossharu', '-osshaimasu',
-            '-nasaru', '-nasaimasu', '-kudasaru', '-kudasaimasu', '-itadaku', '-itadakimasu',
-            '-orimasu', '-degozaimasu', '-gozaimasen', '-itashimasu', '-itashimashita',
-            '-mousu', '-moushimasu', '-moushiageru', '-moushiagemasu', '-zonjiru', '-zonjimasu',
-            '-ukagau', '-ukagaimasu', '-mairu', '-mairimasu', '-haiken', '-haikenshimasu',
-            # Chinese romanizations
-            '-xiong', '-di', '-ge', '-gege', '-didi', '-jie', '-jiejie', '-meimei', '-shixiong',
-            '-shidi', '-shijie', '-shimei', '-gongzi', '-guniang', '-xiaojie', '-daren', '-qianbei',
-            '-daoyou', '-zhanglao', '-shibo', '-shishu', '-shifu', '-laoshi', '-xiansheng',
-            '-daxia', '-shaoxia', '-nvxia', '-jushi', '-shanren', '-dazhang', '-zhenren',
+            '-deusida', '-japsusida', '-jumusida', '-gyesida', '-gasida', '-osida',
+            
+            # Common Korean verb endings romanized
+            '-isseoyo', '-isseumnida', '-isseuseyo', '-isseusimnikka', 
+            '-eopseoyo', '-eopseumnida', '-eopseuseyo', '-hamnida', '-haseyo', 
+            '-hasipsio', '-hasijyo', '-hasineyo', '-haesseoyo', '-haesseumnida',
+            '-doeseyo', '-doesyeosseoyo', '-doesimnida', '-doemnida', '-doeyo', '-dwaeyo',
+            '-iya', '-ine', '-iguna', '-igun', '-ineyo', '-ingayo', '-inga', 
+            '-ilkkayo', '-ilkka', '-geoyeyo', '-geoeyo', '-geomnida', '-geongayo',
+            '-geyo', '-eulgeyo', '-eulkkayo', '-eosseoyo', '-eosseumnida',
+            '-gesseumnida', '-gesseoyo', '-genneyo', '-eulgeommida', '-eulgeoyeyo', '-eulgeoeyo',
+            
+            # Common Korean endings romanized
+            '-yo', '-jyo', '-neyo', '-neundeyo', '-geodeunyo', '-nikka', 
+            '-eunikka', '-neungeolyo', '-gunyo', '-guna', '-neunguna', '-neungunyo',
+            '-deoragoyo', '-deogunyo', '-deondeyo', '-nayo', '-gayo', '-kkayo',
+            '-ragoyo', '-dagoyo', '-nyagoyo', '-jagoyo', '-randa', '-danda', 
+            '-nyanda', '-janda',
+            
+            # Formal archaic Korean romanized
+            '-naida', '-saomnaida', '-omnida', '-o', '-soseo', '-euo', 
+            '-euopsoseo', '-saida', '-eusiomnida', '-siomnida', '-eusiomnikka', 
+            '-siomnikka', '-naikka', '-riikka', '-riida', '-opsoseo', '-eusoseo',
+            '-soida', '-rosoida', '-iomnida', '-iolsida', '-haomnida',
+            
+            # Japanese keigo romanized (keeping existing)
+            '-san', '-chan', '-kun', '-sama', '-sensei', '-senpai', '-dono', 
+            '-shi', '-tan', '-chin', '-desu', '-masu', '-gozaimasu', 
+            '-irassharu', '-irasshaimasu', '-ossharu', '-osshaimasu',
+            '-nasaru', '-nasaimasu', '-kudasaru', '-kudasaimasu', '-itadaku', 
+            '-itadakimasu', '-orimasu', '-degozaimasu', '-gozaimasen', 
+            '-itashimasu', '-itashimashita', '-mousu', '-moushimasu', 
+            '-moushiageru', '-moushiagemasu', '-zonjiru', '-zonjimasu',
+            '-ukagau', '-ukagaimasu', '-mairu', '-mairimasu', '-haiken', 
+            '-haikenshimasu',
+            
+            # Chinese romanizations (keeping existing)
+            '-xiong', '-di', '-ge', '-gege', '-didi', '-jie', '-jiejie', 
+            '-meimei', '-shixiong', '-shidi', '-shijie', '-shimei', '-gongzi', 
+            '-guniang', '-xiaojie', '-daren', '-qianbei', '-daoyou', '-zhanglao', 
+            '-shibo', '-shishu', '-shifu', '-laoshi', '-xiansheng', '-daxia', 
+            '-shaoxia', '-nvxia', '-jushi', '-shanren', '-dazhang', '-zhenren',
+            
             # Ancient Chinese romanizations
-            '-zi', '-gong', '-hou', '-bo', '-jun', '-qing', '-weng', '-fu', '-sheng',
-            '-lang', '-langjun', '-niangzi', '-furen', '-gege', '-jiejie', '-yeye', '-nainai',
+            '-zi', '-gong', '-hou', '-bo', '-jun', '-qing', '-weng', '-fu', 
+            '-sheng', '-lang', '-langjun', '-niangzi', '-furen', '-gege', 
+            '-jiejie', '-yeye', '-nainai',
+            
             # Chinese politeness markers romanized
             '-qing', '-jing', '-gong', '-hui', '-ci', '-bai', '-gan', '-chui',
-            'qingwen', 'ganwen', 'gongjing', 'jingjing', 'baijian', 'baifang', 'baituo'
+            'qingwen', 'ganwen', 'gongjing', 'jingjing', 'baijian', 'baifang', 
+            'baituo'
         ]
     }
 
