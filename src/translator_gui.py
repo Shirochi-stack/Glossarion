@@ -13463,32 +13463,40 @@ Important rules:
             self.config['prompt_profiles'] = self.prompt_profiles
             self.config['contextual'] = self.contextual_var.get()
             
-            # Validate numeric fields
-            delay_val = self.delay_entry.get().strip()
-            if delay_val and not delay_val.replace('.', '', 1).isdigit():
-                messagebox.showerror("Invalid Input", "Please enter a valid number for API call delay")
-                return
-            self.config['delay'] = safe_float(delay_val, 2)
-
-            thread_delay_val = self.thread_delay_var.get().strip()
-            if not thread_delay_val.replace('.', '', 1).isdigit():
-                messagebox.showerror("Invalid Input", "Please enter a valid number for Threading Delay")
-                return
-            self.config['thread_submission_delay'] = safe_float(thread_delay_val, 0.5)
-            
-            trans_temp_val = self.trans_temp.get().strip()
-            if trans_temp_val:
-                try: float(trans_temp_val)
-                except ValueError:
-                    messagebox.showerror("Invalid Input", "Please enter a valid number for Temperature")
+            # Validate numeric fields (skip validation if called from manga integration with show_message=False)
+            if show_message:
+                delay_val = self.delay_entry.get().strip()
+                if delay_val and not delay_val.replace('.', '', 1).isdigit():
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for API call delay")
                     return
-            self.config['translation_temperature'] = safe_float(trans_temp_val, 0.3)
+            self.config['delay'] = safe_float(self.delay_entry.get().strip(), 2)
+
+            if show_message:
+                thread_delay_val = self.thread_delay_var.get().strip()
+                if not thread_delay_val.replace('.', '', 1).isdigit():
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Threading Delay")
+                    return
+            self.config['thread_submission_delay'] = safe_float(self.thread_delay_var.get().strip(), 0.5)
             
-            trans_history_val = self.trans_history.get().strip()
-            if trans_history_val and not trans_history_val.isdigit():
-                messagebox.showerror("Invalid Input", "Please enter a valid number for Translation History Limit")
-                return
-            self.config['translation_history_limit'] = safe_int(trans_history_val, 2)
+            if show_message:
+                trans_temp_val = self.trans_temp.get().strip()
+                if trans_temp_val:
+                    try: float(trans_temp_val)
+                    except ValueError:
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Temperature")
+                        return
+            self.config['translation_temperature'] = safe_float(self.trans_temp.get().strip(), 0.3)
+            
+            if show_message:
+                trans_history_val = self.trans_history.get().strip()
+                if trans_history_val and not trans_history_val.isdigit():
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Translation History Limit")
+                    return
+            self.config['translation_history_limit'] = safe_int(self.trans_history.get().strip(), 2)
             
             # Add fuzzy matching threshold
             if hasattr(self, 'fuzzy_threshold_var'):
@@ -13852,11 +13860,17 @@ Important rules:
             
             # Only show message if requested
             if show_message:
-                messagebox.showinfo("Saved", "Configuration saved.")
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(None, "Saved", "Configuration saved.")
                 
         except Exception as e:
             # Always show error messages regardless of show_message
-            messagebox.showerror("Error", f"Failed to save configuration: {e}")
+            if show_message:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(None, "Error", f"Failed to save configuration: {e}")
+            else:
+                # Silent fail when called from manga integration auto-save
+                print(f"Warning: Config save failed (silent): {e}")
             # Try to restore from backup if save failed
             self._restore_config_from_backup()
 
@@ -13928,7 +13942,8 @@ Important rules:
             
             # Copy backup to config file
             shutil.copy2(latest_backup, CONFIG_FILE)
-            messagebox.showinfo("Config Restored", 
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(None, "Config Restored", 
                               f"Configuration was restored from backup: {os.path.basename(latest_backup)}")
             
             # Reload config
@@ -13937,19 +13952,22 @@ Important rules:
                     self.config = json.load(f)
                     self.config = decrypt_config(self.config)
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to reload configuration: {e}")
+                QMessageBox.critical(None, "Error", f"Failed to reload configuration: {e}")
                 
         except Exception as e:
-            messagebox.showerror("Restore Failed", f"Could not restore config from backup: {e}")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Restore Failed", f"Could not restore config from backup: {e}")
             
     def _create_manual_config_backup(self):
         """Create a manual config backup."""
         try:
             # Force create backup even if config file doesn't exist
             self._backup_config_file()
-            messagebox.showinfo("Backup Created", "Configuration backup created successfully!")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(None, "Backup Created", "Configuration backup created successfully!")
         except Exception as e:
-            messagebox.showerror("Backup Failed", f"Failed to create backup: {e}")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Backup Failed", f"Failed to create backup: {e}")
     
     def _open_backup_folder(self):
         """Open the config backups folder in file explorer."""
@@ -13962,7 +13980,8 @@ Important rules:
             
             if not os.path.exists(backup_dir):
                 os.makedirs(backup_dir, exist_ok=True)
-                messagebox.showinfo("Backup Folder", f"Created backup folder: {backup_dir}")
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(None, "Backup Folder", f"Created backup folder: {backup_dir}")
             
             # Open folder in explorer (cross-platform)
             import subprocess
@@ -13976,7 +13995,8 @@ Important rules:
                 subprocess.run(["xdg-open", backup_dir])
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Could not open backup folder: {e}")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Error", f"Could not open backup folder: {e}")
     
     def _manual_restore_config(self):
         """Show dialog to manually select and restore a config backup."""
@@ -13988,7 +14008,8 @@ Important rules:
             backup_dir = os.path.join(config_dir, "config_backups")
             
             if not os.path.exists(backup_dir):
-                messagebox.showinfo("No Backups", "No backup folder found. No backups have been created yet.")
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(None, "No Backups", "No backup folder found. No backups have been created yet.")
                 return
             
             # Get list of available backups
@@ -13996,7 +14017,8 @@ Important rules:
                       if f.startswith("config_") and f.endswith(".json.bak")]
             
             if not backups:
-                messagebox.showinfo("No Backups", "No config backups found.")
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(None, "No Backups", "No config backups found.")
                 return
             
             # Sort by creation time (newest first)

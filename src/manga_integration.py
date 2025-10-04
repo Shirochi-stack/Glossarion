@@ -3007,8 +3007,8 @@ class MangaTranslationTab:
         # Free text only background opacity toggle (applies BG opacity only to free-text regions)
         self.ft_only_checkbox = self._create_styled_checkbox("Free text only background opacity")
         self.ft_only_checkbox.setChecked(self.free_text_only_bg_opacity_value)
-        # Connect to handler that updates value and saves
-        self.ft_only_checkbox.stateChanged.connect(lambda state: self._on_ft_only_bg_opacity_changed())
+        # Connect directly to save+apply (working pattern)
+        self.ft_only_checkbox.stateChanged.connect(lambda: (self._on_ft_only_bg_opacity_changed(), self._save_rendering_settings(), self._apply_rendering_settings()))
         bg_settings_layout.addWidget(self.ft_only_checkbox)
 
         # Background opacity slider
@@ -3026,7 +3026,7 @@ class MangaTranslationTab:
         self.opacity_slider.setMaximum(255)
         self.opacity_slider.setValue(self.bg_opacity_value)
         self.opacity_slider.setMinimumWidth(200)
-        self.opacity_slider.valueChanged.connect(self._update_opacity_label)
+        self.opacity_slider.valueChanged.connect(lambda value: (self._update_opacity_label(value), self._save_rendering_settings(), self._apply_rendering_settings()))
         opacity_layout.addWidget(self.opacity_slider)
         
         self.opacity_label = QLabel("100%")
@@ -3055,7 +3055,7 @@ class MangaTranslationTab:
         self.reduction_slider.setSingleStep(0.05)
         self.reduction_slider.setValue(self.bg_reduction_value)
         self.reduction_slider.setMinimumWidth(100)
-        self.reduction_slider.valueChanged.connect(self._update_reduction_label)
+        self.reduction_slider.valueChanged.connect(lambda value: (self._update_reduction_label(value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.reduction_slider)
         reduction_layout.addWidget(self.reduction_slider)
         
@@ -3084,19 +3084,19 @@ class MangaTranslationTab:
         
         box_radio = QRadioButton("Box")
         box_radio.setChecked(self.bg_style_value == "box")
-        box_radio.toggled.connect(lambda checked: self._save_rendering_settings() if checked else None)
+        box_radio.toggled.connect(lambda checked: (setattr(self, 'bg_style_value', 'box'), self._save_rendering_settings(), self._apply_rendering_settings()) if checked else None)
         self.bg_style_group.addButton(box_radio, 0)
         style_layout.addWidget(box_radio)
 
         circle_radio = QRadioButton("Circle")
         circle_radio.setChecked(self.bg_style_value == "circle")
-        circle_radio.toggled.connect(lambda checked: self._save_rendering_settings() if checked else None)
+        circle_radio.toggled.connect(lambda checked: (setattr(self, 'bg_style_value', 'circle'), self._save_rendering_settings(), self._apply_rendering_settings()) if checked else None)
         self.bg_style_group.addButton(circle_radio, 1)
         style_layout.addWidget(circle_radio)
 
         wrap_radio = QRadioButton("Wrap")
         wrap_radio.setChecked(self.bg_style_value == "wrap")
-        wrap_radio.toggled.connect(lambda checked: self._save_rendering_settings() if checked else None)
+        wrap_radio.toggled.connect(lambda checked: (setattr(self, 'bg_style_value', 'wrap'), self._save_rendering_settings(), self._apply_rendering_settings()) if checked else None)
         self.bg_style_group.addButton(wrap_radio, 2)
         style_layout.addWidget(wrap_radio)
         
@@ -3154,7 +3154,7 @@ class MangaTranslationTab:
         ]):
             rb = QRadioButton(text)
             rb.setChecked(self.font_algorithm_value == value)
-            rb.toggled.connect(lambda checked, v=value: self._save_rendering_settings() if checked else None)
+            rb.toggled.connect(lambda checked, v=value: (setattr(self, 'font_algorithm_value', v), self._save_rendering_settings(), self._apply_rendering_settings()) if checked else None)
             self.font_algorithm_group.addButton(rb, idx)
             algo_layout.addWidget(rb)
         
@@ -3182,19 +3182,19 @@ class MangaTranslationTab:
         
         auto_radio = QRadioButton("Auto")
         auto_radio.setChecked(self.font_size_mode_value == "auto")
-        auto_radio.toggled.connect(lambda checked: self._toggle_font_size_mode() if checked else None)
+        auto_radio.toggled.connect(lambda checked: (setattr(self, 'font_size_mode_value', 'auto'), self._toggle_font_size_mode()) if checked else None)
         self.font_size_mode_group.addButton(auto_radio, 0)
         mode_layout.addWidget(auto_radio)
         
         fixed_radio = QRadioButton("Fixed Size")
         fixed_radio.setChecked(self.font_size_mode_value == "fixed")
-        fixed_radio.toggled.connect(lambda checked: self._toggle_font_size_mode() if checked else None)
+        fixed_radio.toggled.connect(lambda checked: (setattr(self, 'font_size_mode_value', 'fixed'), self._toggle_font_size_mode()) if checked else None)
         self.font_size_mode_group.addButton(fixed_radio, 1)
         mode_layout.addWidget(fixed_radio)
         
         multiplier_radio = QRadioButton("Dynamic Multiplier")
         multiplier_radio.setChecked(self.font_size_mode_value == "multiplier")
-        multiplier_radio.toggled.connect(lambda checked: self._toggle_font_size_mode() if checked else None)
+        multiplier_radio.toggled.connect(lambda checked: (setattr(self, 'font_size_mode_value', 'multiplier'), self._toggle_font_size_mode()) if checked else None)
         self.font_size_mode_group.addButton(multiplier_radio, 2)
         mode_layout.addWidget(multiplier_radio)
         
@@ -3221,7 +3221,7 @@ class MangaTranslationTab:
         self.font_size_spinbox.setMaximum(72)
         self.font_size_spinbox.setValue(self.font_size_value)
         self.font_size_spinbox.setMinimumWidth(100)
-        self.font_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self.font_size_spinbox.valueChanged.connect(lambda value: (setattr(self, 'font_size_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.font_size_spinbox)
         fixed_size_layout.addWidget(self.font_size_spinbox)
 
@@ -3250,7 +3250,7 @@ class MangaTranslationTab:
         self.multiplier_slider.setSingleStep(0.1)
         self.multiplier_slider.setValue(self.font_size_multiplier_value)
         self.multiplier_slider.setMinimumWidth(100)
-        self.multiplier_slider.valueChanged.connect(self._update_multiplier_label)
+        self.multiplier_slider.valueChanged.connect(lambda value: (self._update_multiplier_label(value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.multiplier_slider)
         multiplier_layout.addWidget(self.multiplier_slider)
 
@@ -3275,7 +3275,7 @@ class MangaTranslationTab:
         
         self.constrain_checkbox = self._create_styled_checkbox("Constrain text to bubble boundaries")
         self.constrain_checkbox.setChecked(self.constrain_to_bubble_value)
-        self.constrain_checkbox.stateChanged.connect(self._save_rendering_settings)
+        self.constrain_checkbox.stateChanged.connect(lambda: (setattr(self, 'constrain_to_bubble_value', self.constrain_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         constraint_layout.addWidget(self.constrain_checkbox)
 
         constraint_help_label = QLabel("(Unchecked allows text to exceed bubbles)")
@@ -3305,7 +3305,7 @@ class MangaTranslationTab:
         self.min_size_spinbox.setMaximum(20)
         self.min_size_spinbox.setValue(self.auto_min_size_value)
         self.min_size_spinbox.setMinimumWidth(100)
-        self.min_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self.min_size_spinbox.valueChanged.connect(lambda value: (setattr(self, 'auto_min_size_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.min_size_spinbox)
         min_size_layout.addWidget(self.min_size_spinbox)
 
@@ -3333,7 +3333,7 @@ class MangaTranslationTab:
         self.max_size_spinbox.setMaximum(100)
         self.max_size_spinbox.setValue(self.max_font_size_value)
         self.max_size_spinbox.setMinimumWidth(100)
-        self.max_size_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self.max_size_spinbox.valueChanged.connect(lambda value: (setattr(self, 'max_font_size_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.max_size_spinbox)
         max_size_layout.addWidget(self.max_size_spinbox)
 
@@ -3365,7 +3365,7 @@ class MangaTranslationTab:
         for idx, (value, text) in enumerate([('compact','Compact'), ('balanced','Balanced'), ('readable','Readable')]):
             rb = QRadioButton(text)
             rb.setChecked(self.auto_fit_style_value == value)
-            rb.toggled.connect(lambda checked, v=value: self._save_rendering_settings() if checked else None)
+            rb.toggled.connect(lambda checked, v=value: (setattr(self, 'auto_fit_style_value', v), self._save_rendering_settings(), self._apply_rendering_settings()) if checked else None)
             self.auto_fit_style_group.addButton(rb, idx)
             fit_layout.addWidget(rb)
         
@@ -3375,12 +3375,12 @@ class MangaTranslationTab:
         # Behavior toggles
         self.prefer_larger_checkbox = self._create_styled_checkbox("Prefer larger text")
         self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
-        self.prefer_larger_checkbox.stateChanged.connect(self._save_rendering_settings)
+        self.prefer_larger_checkbox.stateChanged.connect(lambda: (setattr(self, 'prefer_larger_value', self.prefer_larger_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         sizing_group_layout.addWidget(self.prefer_larger_checkbox)
         
         self.bubble_size_factor_checkbox = self._create_styled_checkbox("Scale with bubble size")
         self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
-        self.bubble_size_factor_checkbox.stateChanged.connect(self._save_rendering_settings)
+        self.bubble_size_factor_checkbox.stateChanged.connect(lambda: (setattr(self, 'bubble_size_factor_value', self.bubble_size_factor_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         sizing_group_layout.addWidget(self.bubble_size_factor_checkbox)
 
         # Line Spacing row with live value label
@@ -3399,7 +3399,7 @@ class MangaTranslationTab:
         self.line_spacing_spinbox.setSingleStep(0.01)
         self.line_spacing_spinbox.setValue(self.line_spacing_value)
         self.line_spacing_spinbox.setMinimumWidth(100)
-        self.line_spacing_spinbox.valueChanged.connect(self._on_line_spacing_changed)
+        self.line_spacing_spinbox.valueChanged.connect(lambda value: (self._on_line_spacing_changed(value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.line_spacing_spinbox)
         ls_layout.addWidget(self.line_spacing_spinbox)
         
@@ -3425,7 +3425,7 @@ class MangaTranslationTab:
         self.max_lines_spinbox.setMaximum(20)
         self.max_lines_spinbox.setValue(self.max_lines_value)
         self.max_lines_spinbox.setMinimumWidth(100)
-        self.max_lines_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self.max_lines_spinbox.valueChanged.connect(lambda value: (setattr(self, 'max_lines_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.max_lines_spinbox)
         ml_layout.addWidget(self.max_lines_spinbox)
         ml_layout.addStretch()
@@ -3468,7 +3468,7 @@ class MangaTranslationTab:
 
         self.strict_wrap_checkbox = self._create_styled_checkbox("Strict text wrapping (force text to fit within bubbles)")
         self.strict_wrap_checkbox.setChecked(self.strict_text_wrapping_value)
-        self.strict_wrap_checkbox.stateChanged.connect(self._save_rendering_settings)
+        self.strict_wrap_checkbox.stateChanged.connect(lambda: (setattr(self, 'strict_text_wrapping_value', self.strict_wrap_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         wrap_layout.addWidget(self.strict_wrap_checkbox)
 
         wrap_help_label = QLabel("(Break words with hyphens if needed)")
@@ -3480,7 +3480,7 @@ class MangaTranslationTab:
         # Force CAPS LOCK directly below strict wrapping
         self.force_caps_checkbox = self._create_styled_checkbox("Force CAPS LOCK")
         self.force_caps_checkbox.setChecked(self.force_caps_lock_value)
-        self.force_caps_checkbox.stateChanged.connect(self._apply_rendering_settings)
+        self.force_caps_checkbox.stateChanged.connect(lambda: (setattr(self, 'force_caps_lock_value', self.force_caps_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         wrap_layout.addWidget(self.force_caps_checkbox)
         
         sizing_group_layout.addWidget(wrap_frame)
@@ -3506,7 +3506,7 @@ class MangaTranslationTab:
         self.font_combo.addItems(self._get_available_fonts())
         self.font_combo.setCurrentText(self.font_style_value)
         self.font_combo.setMinimumWidth(300)
-        self.font_combo.currentTextChanged.connect(self._on_font_selected)
+        self.font_combo.currentTextChanged.connect(lambda: (self._on_font_selected(), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_combobox_mousewheel(self.font_combo)  # Disable mousewheel scrolling
         font_style_layout.addWidget(self.font_combo)
         font_style_layout.addStretch()
@@ -3554,6 +3554,8 @@ class MangaTranslationTab:
                 # Update display
                 self.rgb_label.setText(f"RGB({color.red()},{color.green()},{color.blue()})")
                 self._update_color_preview(None)
+                # Save settings to config
+                self._save_rendering_settings()
         
         choose_color_btn = QPushButton("Choose Color")
         choose_color_btn.clicked.connect(pick_font_color)
@@ -3573,7 +3575,7 @@ class MangaTranslationTab:
         # Shadow enabled checkbox
         self.shadow_enabled_checkbox = self._create_styled_checkbox("Enable Shadow")
         self.shadow_enabled_checkbox.setChecked(self.shadow_enabled_value)
-        self.shadow_enabled_checkbox.stateChanged.connect(self._toggle_shadow_controls)
+        self.shadow_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'shadow_enabled_value', self.shadow_enabled_checkbox.isChecked()), self._toggle_shadow_controls(), self._save_rendering_settings(), self._apply_rendering_settings()))
         shadow_header_layout.addWidget(self.shadow_enabled_checkbox)
         shadow_header_layout.addStretch()
         
@@ -3626,6 +3628,8 @@ class MangaTranslationTab:
                 # Update display
                 self.shadow_rgb_label.setText(f"RGB({color.red()},{color.green()},{color.blue()})")
                 self._update_shadow_preview(None)
+                # Save settings to config
+                self._save_rendering_settings()
         
         choose_shadow_btn = QPushButton("Choose Color")
         choose_shadow_btn.setMinimumWidth(120)
@@ -3657,7 +3661,7 @@ class MangaTranslationTab:
         self.shadow_offset_x_spinbox.setMaximum(10)
         self.shadow_offset_x_spinbox.setValue(self.shadow_offset_x_value)
         self.shadow_offset_x_spinbox.setMinimumWidth(60)
-        self.shadow_offset_x_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self.shadow_offset_x_spinbox.valueChanged.connect(lambda value: (setattr(self, 'shadow_offset_x_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.shadow_offset_x_spinbox)
         offset_layout.addWidget(self.shadow_offset_x_spinbox)
         
@@ -3670,7 +3674,7 @@ class MangaTranslationTab:
         self.shadow_offset_y_spinbox.setMaximum(10)
         self.shadow_offset_y_spinbox.setValue(self.shadow_offset_y_value)
         self.shadow_offset_y_spinbox.setMinimumWidth(60)
-        self.shadow_offset_y_spinbox.valueChanged.connect(self._save_rendering_settings)
+        self.shadow_offset_y_spinbox.valueChanged.connect(lambda value: (setattr(self, 'shadow_offset_y_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.shadow_offset_y_spinbox)
         offset_layout.addWidget(self.shadow_offset_y_spinbox)
         offset_layout.addStretch()
@@ -3692,7 +3696,7 @@ class MangaTranslationTab:
         self.shadow_blur_spinbox.setMaximum(10)
         self.shadow_blur_spinbox.setValue(self.shadow_blur_value)
         self.shadow_blur_spinbox.setMinimumWidth(100)
-        self.shadow_blur_spinbox.valueChanged.connect(self._on_shadow_blur_changed)
+        self.shadow_blur_spinbox.valueChanged.connect(lambda value: (self._on_shadow_blur_changed(value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.shadow_blur_spinbox)
         blur_layout.addWidget(self.shadow_blur_spinbox)
         
@@ -4072,40 +4076,38 @@ class MangaTranslationTab:
         # MIN/MAX FIELDS ARE ALWAYS VISIBLE - NEVER HIDE THEM
         # They are packed at creation time and stay visible in all modes
         
-        # Only save if we're not initializing
+        # Only save and apply if we're not initializing
         if not hasattr(self, '_initializing') or not self._initializing:
             self._save_rendering_settings()
+            self._apply_rendering_settings()
 
     def _update_multiplier_label(self, value):
-        """Update multiplier label"""
+        """Update multiplier label and value variable"""
+        self.font_size_multiplier_value = float(value)  # UPDATE THE VALUE VARIABLE!
         self.multiplier_label.setText(f"{float(value):.1f}x")
-        # Auto-save on change
-        self._save_rendering_settings()
 
     def _on_line_spacing_changed(self, value):
-        """Update line spacing value label and save"""
+        """Update line spacing value label and value variable"""
+        self.line_spacing_value = float(value)  # UPDATE THE VALUE VARIABLE!
         try:
             if hasattr(self, 'line_spacing_value_label'):
                 self.line_spacing_value_label.setText(f"{float(value):.2f}")
         except Exception:
             pass
-        self._save_rendering_settings()
     
     def _on_shadow_blur_changed(self, value):
-        """Update shadow blur value label and save"""
+        """Update shadow blur value label and value variable"""
+        self.shadow_blur_value = int(float(value))  # UPDATE THE VALUE VARIABLE!
         try:
             if hasattr(self, 'shadow_blur_value_label'):
                 self.shadow_blur_value_label.setText(f"{int(float(value))}")
         except Exception:
             pass
-        self._save_rendering_settings()
     
     def _on_ft_only_bg_opacity_changed(self):
         """Handle free text only background opacity checkbox change (PySide6)"""
         # Update the value from checkbox state
         self.free_text_only_bg_opacity_value = self.ft_only_checkbox.isChecked()
-        # Auto-save on change
-        self._save_rendering_settings()
     
     def _update_color_preview(self, event=None):
         """Update the font color preview"""
@@ -4114,9 +4116,10 @@ class MangaTranslationTab:
         b = self.text_color_b_value
         if hasattr(self, 'color_preview_frame'):
             self.color_preview_frame.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #5a9fd4;")
-        # Auto-save on change
+        # Auto-save and apply on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
+            self._apply_rendering_settings()
     
     def _update_shadow_preview(self, event=None):
         """Update the shadow color preview"""
@@ -4125,9 +4128,10 @@ class MangaTranslationTab:
         b = self.shadow_color_b_value
         if hasattr(self, 'shadow_preview_frame'):
             self.shadow_preview_frame.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #5a9fd4;")
-        # Auto-save on change
+        # Auto-save and apply on change
         if event is not None:  # Only save on user interaction, not initial load
             self._save_rendering_settings()
+            self._apply_rendering_settings()
     
     def _toggle_azure_key_visibility(self, state):
         """Toggle visibility of Azure API key"""
@@ -4152,9 +4156,6 @@ class MangaTranslationTab:
         else:
             if hasattr(self, 'shadow_controls'):
                 self.shadow_controls.setEnabled(False)
-        # Auto-save on change (but not during initialization)
-        if not getattr(self, '_initializing', False):
-            self._save_rendering_settings()
 
     def _set_font_preset(self, preset: str):
         """Apply font sizing preset (moved from dialog)"""
@@ -4574,11 +4575,10 @@ class MangaTranslationTab:
             if hasattr(self, 'rapidocr_language_value'):
                 self.main_gui.config['rapidocr_language'] = self.rapidocr_language_value
 
-            # Don't call save_config here - it causes Tkinter black window to appear
-            # Settings are already stored in self.main_gui.config
-            # They will be persisted to disk when the main dialog closes
-            # if hasattr(self.main_gui, 'save_config'):
-            #     self.main_gui.save_config(show_message=False)
+            # Auto-save to disk (PySide6 version - no Tkinter black window issue)
+            # Settings are stored in self.main_gui.config and persisted immediately
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
                 
         except Exception as e:
             # Log error but don't crash
@@ -5315,8 +5315,8 @@ class MangaTranslationTab:
         
         return fonts
     
-    def _on_font_selected(self, event=None):
-        """Handle font selection"""
+    def _on_font_selected(self):
+        """Handle font selection - updates font path only, save+apply called by widget"""
         if not hasattr(self, 'font_combo'):
             return
         selected = self.font_combo.currentText()
@@ -5385,23 +5385,18 @@ class MangaTranslationTab:
         
         # Store current selection for next time
         self.previous_font_selection = selected
-        
-        # Auto-save on change
-        self._save_rendering_settings()
     
     def _update_opacity_label(self, value):
-        """Update opacity percentage label"""
+        """Update opacity percentage label and value variable"""
+        self.bg_opacity_value = int(value)  # UPDATE THE VALUE VARIABLE!
         percentage = int((float(value) / 255) * 100)
         self.opacity_label.setText(f"{percentage}%")
-        # Auto-save on change
-        self._save_rendering_settings()
     
     def _update_reduction_label(self, value):
-        """Update size reduction percentage label"""
+        """Update size reduction percentage label and value variable"""
+        self.bg_reduction_value = float(value)  # UPDATE THE VALUE VARIABLE!
         percentage = int(float(value) * 100)
         self.reduction_label.setText(f"{percentage}%")
-        # Auto-save on change
-        self._save_rendering_settings()
         
     def _toggle_inpaint_quality_visibility(self):
         """Show/hide inpaint quality options based on skip_inpainting setting"""
