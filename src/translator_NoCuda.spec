@@ -1010,7 +1010,7 @@ excludes = [
     'sphinx', 'docutils',
     
     # Alternative GUIs
-    'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
+    'PyQt5', 'PyQt6', 'PySide2',
     'wx', 'kivy', 'pygame',
     
     # Web frameworks
