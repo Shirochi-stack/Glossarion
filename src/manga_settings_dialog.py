@@ -90,6 +90,7 @@ class MangaSettingsDialog(QDialog):
                 'detect_text_bubbles': True,
                 'detect_free_text': True,
                 'rtdetr_model_url': '',
+                'use_rtdetr_for_ocr_regions': False,
                 'azure_reading_order': 'natural',
                 'azure_model_version': 'latest',
                 'azure_max_wait': 60,
@@ -2731,7 +2732,7 @@ class MangaSettingsDialog(QDialog):
         
         # Use RT-DETR for text region detection (not just bubble detection)
         self.use_rtdetr_for_ocr_checkbox = self._create_styled_checkbox("Use RT-DETR to guide OCR (Google/Azure only - others already do this)")
-        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', True))  # Default: True
+        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', False))  # Default: False
         self.use_rtdetr_for_ocr_checkbox.setToolTip(
             "When enabled, RT-DETR first detects all text regions (text bubbles + free text), \n"
             "then your OCR provider reads each region separately.\n\n"
@@ -3449,7 +3450,7 @@ class MangaSettingsDialog(QDialog):
         workers_layout.addWidget(self.workers_label)
         
         self.max_workers_spinbox = QSpinBox()
-        self.max_workers_spinbox.setRange(1, 8)
+        self.max_workers_spinbox.setRange(1, 999)
         self.max_workers_spinbox.setValue(self.settings['advanced']['max_workers'])
         workers_layout.addWidget(self.max_workers_spinbox)
         
@@ -3538,7 +3539,7 @@ class MangaSettingsDialog(QDialog):
         rtdetr_conc_layout.addWidget(rtdetr_conc_label)
         
         self.rtdetr_max_concurrency_spinbox = QSpinBox()
-        self.rtdetr_max_concurrency_spinbox.setRange(1, 8)
+        self.rtdetr_max_concurrency_spinbox.setRange(1, 999)
         self.rtdetr_max_concurrency_spinbox.setValue(self.settings['ocr'].get('rtdetr_max_concurrency', 2))
         self.rtdetr_max_concurrency_spinbox.setToolTip("Maximum concurrent RT-DETR region OCR calls (lower = less memory)")
         rtdetr_conc_layout.addWidget(self.rtdetr_max_concurrency_spinbox)
