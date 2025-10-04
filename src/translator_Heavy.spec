@@ -1034,7 +1034,7 @@ excludes = [
     # Documentation
     'sphinx', 'docutils',
     # Other GUI frameworks
-    'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'wx', 'kivy',
+    'PyQt5', 'PyQt6', 'PySide2', 'wx', 'kivy',
     # Web frameworks
     'flask', 'django', 'fastapi', 'uvicorn',
 ]
