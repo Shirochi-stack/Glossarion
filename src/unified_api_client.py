@@ -4063,12 +4063,17 @@ class UnifiedClient:
             setattr(tls, retry_flag, False)
     
     def _try_fallback_keys_direct(self, messages, temperature=None, max_tokens=None, 
-                                  max_completion_tokens=None, context=None,
-                                  request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
+                                  max_completion_tokens=None, context=None, 
+                                  request_id=None, image_data=None) -> Optional[Tuple[str, str]]:
         """
-        Try fallback keys directly in single-key mode without retrying main key.
+        Try fallback API keys directly when main key fails (single-key mode).
         Used when fallback keys are enabled in single-key mode.
         """
+        # PREVENT INFINITE LOOP: Check if we're already in a fallback attempt
+        if getattr(self, '_is_retry_client', False):
+            print(f"[FALLBACK DIRECT] Already in fallback attempt, preventing infinite loop")
+            return None
+        
         # Check if fallback keys are enabled
         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
         if not use_fallback_keys:
