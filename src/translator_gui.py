@@ -1135,30 +1135,57 @@ class WindowManager:
             
             test.destroy()
             
-            # Sanity check - if we got the full desktop width, try another method
+            # Get total desktop width for comparison
             total_width = reference_window.winfo_screenwidth()
-            if primary_width >= total_width * 0.9:
-                # Likely got the full desktop, not just primary monitor
-                # Use aspect ratio method as fallback
-                screen_height = reference_window.winfo_screenheight()
+            screen_height = reference_window.winfo_screenheight()
+            
+            print(f"[DEBUG] Maximized test window: {primary_width}x{primary_height}")
+            print(f"[DEBUG] Total desktop: {total_width}x{screen_height}")
+            
+            # If the maximized width equals total width, check for dual monitors
+            if primary_width >= total_width * 0.95:
+                # Maximized window = total desktop width, need to detect if dual monitor
+                aspect = total_width / screen_height
+                print(f"[DEBUG] Aspect ratio: {aspect:.2f}")
                 
-                # Common aspect ratios
-                aspect_ratios = [16/9, 16/10, 21/9, 4/3]
-                for ratio in aspect_ratios:
-                    test_width = int(screen_height * ratio)
-                    if test_width < total_width * 0.7:  # Reasonable for primary monitor
-                        primary_width = test_width
-                        break
-                else:
-                    # Default to half of total if nothing else works
+                # For dual monitors detection:
+                # - Two 1920x1080 monitors = 3840x1080 (aspect 3.56)
+                # - Two 2560x1440 monitors = 5120x1440 (aspect 3.56)
+                # - Two 1280x1440 monitors = 2560x1440 (aspect 1.78)
+                # Single ultrawide:
+                # - 3440x1440 = aspect 2.39
+                # - 2560x1080 = aspect 2.37
+                
+                # If width is exactly double a common resolution, it's dual monitors
+                if total_width == 3840 and screen_height == 1080:
+                    # Two 1920x1080 monitors
+                    primary_width = 1920
+                    print(f"[DEBUG] Detected dual 1920x1080 monitors: {primary_width}")
+                elif total_width == 2560 and screen_height == 1440:
+                    # Two 1280x1440 monitors OR could be single 1440p
+                    # Check if this is likely dual by seeing if half width makes sense
+                    primary_width = 1280
+                    print(f"[DEBUG] Detected dual 1280x1440 monitors: {primary_width}")
+                elif total_width == 5120 and screen_height == 1440:
+                    # Two 2560x1440 monitors
+                    primary_width = 2560
+                    print(f"[DEBUG] Detected dual 2560x1440 monitors: {primary_width}")
+                elif aspect > 3.0:
+                    # Likely dual monitor based on aspect ratio
                     primary_width = total_width // 2
+                    print(f"[DEBUG] Detected dual monitors by aspect ratio: {primary_width}")
+                else:
+                    # Single ultrawide or normal monitor
+                    print(f"[DEBUG] Single monitor detected: {primary_width}")
+            else:
+                print(f"[DEBUG] Primary monitor width detected: {primary_width}")
             
             self._primary_monitor_width = primary_width
-            print(f"Detected primary monitor width: {primary_width}")
+            print(f"✅ Final primary monitor width: {primary_width}")
             return primary_width
             
         except Exception as e:
-            print(f"Error detecting monitor: {e}")
+            print(f"⚠️ Error detecting monitor: {e}")
             # Fallback to common resolutions based on height
             height = reference_window.winfo_screenheight()
             if height >= 2160:
@@ -1171,7 +1198,7 @@ class WindowManager:
                 return 1366  # 720p
 
     def center_window(self, window):
-        """Center a window on primary screen with auto-detection"""
+        """Center a window on primary screen with auto-detection and taskbar awareness"""
         def do_center():
             if window.winfo_exists():
                 window.update_idletasks()
@@ -1182,19 +1209,28 @@ class WindowManager:
                 # Auto-detect primary monitor width
                 primary_width = self.detect_primary_monitor_width(window)
                 
-                # Center on primary monitor
+                # Windows taskbar is typically 40-50px at the bottom
+                taskbar_height = 50
+                usable_height = screen_height - taskbar_height
+                
+                # Center horizontally on primary monitor (which starts at x=0)
+                # If window is wider than primary monitor, center it anyway
+                # (it will extend into the second monitor, which is fine)
                 x = (primary_width - width) // 2
-                y = (screen_height - height) // 2
                 
-                # Move up by reducing Y (adjust this value as needed)
-                y = max(30, y - 340)  # Move up by 340 pixels, but keep at least 30 from top
+                # Allow negative x if window is wider - this centers it on primary monitor
+                # even if it extends into second monitor
                 
-                # Ensure it stays on primary monitor
-                x = max(0, min(x, primary_width - width))
+                # Position vertically - lower on screen
+                y = 50
+                
+                print(f"[DEBUG] Positioning window at: {x}, {y} (size: {width}x{height})")
+                print(f"[DEBUG] Primary monitor width: {primary_width}, Screen height: {screen_height}")
                 
                 window.geometry(f"+{x}+{y}")
         
-        window.after_idle(do_center)
+        # Execute immediately (no after_idle delay)
+        do_center()
     
 class TranslatorGUI:
     def __init__(self, master):        
@@ -1212,23 +1248,34 @@ class TranslatorGUI:
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
-        # Get screen dimensions
-        screen_width = master.winfo_screenwidth()
+        # Get screen dimensions - need to detect primary monitor width first
         screen_height = master.winfo_screenheight()
         
-        # Set window size as ratio of screen (e.g., 0.8 = 80% of screen)
-        width_ratio = 1.2  # 120% of screen width
-        height_ratio = 1.2  # 120% of screen height
+        # Detect primary monitor width (not combined width of all monitors)
+        primary_width = self.wm.detect_primary_monitor_width(master)
         
-        window_width = int(screen_width * width_ratio)
-        window_height = int(screen_height * height_ratio)
+        # Set window size - making it wider as requested
+        # 95% was 1216px, +30% = ~1580px, which is 1.234x the primary monitor
+        # This will span slightly into the second monitor but centered on primary
+        width_ratio = 1.23  # 123% of primary monitor width (30% wider than before)
+        # Account for Windows taskbar (typically 40-50px)
+        taskbar_height = 50
+        usable_height = screen_height - taskbar_height
+        height_ratio = 0.92  # 92% of usable height (slightly reduced)
+        
+        window_width = int(primary_width * width_ratio)
+        window_height = int(usable_height * height_ratio)
+        
+        print(f"[DEBUG] Calculated window size: {window_width}x{window_height}")
+        print(f"[DEBUG] Primary width: {primary_width}, Usable height: {usable_height}")
+        print(f"[DEBUG] Width ratio: {width_ratio}, Height ratio: {height_ratio}")
         
         # Apply size
         master.geometry(f"{window_width}x{window_height}")
         
         # Set minimum size as ratio too
-        min_width = int(screen_width * 0.6)  # 60% minimum
-        min_height = int(screen_height * 0.6)  # 60% minimum
+        min_width = int(primary_width * 0.5)  # 50% minimum of primary monitor
+        min_height = int(usable_height * 0.5)  # 50% minimum
         master.minsize(min_width, min_height)
         
         self.wm.center_window(master)
