@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v5.0.1 - PyInstaller Specification File
+Glossarion Lite v5.0.2 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v5.0.1'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_Lite v5.0.2'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -101,6 +101,7 @@ app_files = [
 	('multi_api_key_manager.py', '.'),	
 	('individual_endpoint_dialog.py', '.'),
 	('model_options.py', '.'),
+	('hyphen_textwrap.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -146,6 +147,7 @@ app_modules = [
 	'local_inpainter',  	
 	'ocr_manager',
 	'model_options',
+	'hyphen_textwrap',
 	
 ]
 
