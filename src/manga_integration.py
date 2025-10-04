@@ -225,6 +225,29 @@ class MangaTranslationTab:
             dialog: The dialog window (PySide6 QDialog)
             scroll_area: The scroll area widget (PySide6 QScrollArea, optional)
         """
+        # CRITICAL: Set thread limits FIRST before any imports or processing
+        import os
+        parallel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', False)
+        if not parallel_enabled:
+            # Force single-threaded mode for all libraries
+            os.environ['OMP_NUM_THREADS'] = '1'
+            os.environ['MKL_NUM_THREADS'] = '1'
+            os.environ['OPENBLAS_NUM_THREADS'] = '1'
+            os.environ['NUMEXPR_NUM_THREADS'] = '1'
+            os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+            os.environ['ONNXRUNTIME_NUM_THREADS'] = '1'
+            # Also set torch and cv2 thread limits if already imported
+            try:
+                import torch
+                torch.set_num_threads(1)
+            except (ImportError, RuntimeError):
+                pass
+            try:
+                import cv2
+                cv2.setNumThreads(1)
+            except (ImportError, AttributeError):
+                pass
+        
         self.parent_widget = parent_widget
         self.main_gui = main_gui
         self.dialog = dialog
@@ -6599,28 +6622,46 @@ class MangaTranslationTab:
                 parallel_enabled = advanced.get('parallel_processing', False)
                 
                 if parallel_enabled:
-                    # Allow PyTorch to use multiple threads for parallel processing
+                    # Allow multiple threads for parallel processing
                     num_threads = advanced.get('max_workers', 4)
                     import os
                     os.environ['OMP_NUM_THREADS'] = str(num_threads)
                     os.environ['MKL_NUM_THREADS'] = str(num_threads)
+                    os.environ['OPENBLAS_NUM_THREADS'] = str(num_threads)
+                    os.environ['NUMEXPR_NUM_THREADS'] = str(num_threads)
+                    os.environ['VECLIB_MAXIMUM_THREADS'] = str(num_threads)
+                    os.environ['ONNXRUNTIME_NUM_THREADS'] = str(num_threads)
                     try:
                         import torch
                         torch.set_num_threads(num_threads)
-                        self._log(f"⚡ Thread limit: {num_threads} threads (parallel processing enabled)", "debug")
                     except ImportError:
                         pass
+                    try:
+                        import cv2
+                        cv2.setNumThreads(num_threads)
+                    except (ImportError, AttributeError):
+                        pass
+                    self._log(f"⚡ Thread limit: {num_threads} threads (parallel processing enabled)", "debug")
                 else:
                     # HARDCODED: Limit to exactly 1 thread for sequential processing
                     import os
                     os.environ['OMP_NUM_THREADS'] = '1'
                     os.environ['MKL_NUM_THREADS'] = '1'
+                    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+                    os.environ['NUMEXPR_NUM_THREADS'] = '1'
+                    os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+                    os.environ['ONNXRUNTIME_NUM_THREADS'] = '1'
                     try:
                         import torch
                         torch.set_num_threads(1)  # Hardcoded to 1
-                        self._log("⚡ Thread limit: 1 thread (sequential processing)", "debug")
                     except ImportError:
                         pass
+                    try:
+                        import cv2
+                        cv2.setNumThreads(1)  # Limit OpenCV to 1 thread
+                    except (ImportError, AttributeError):
+                        pass
+                    self._log("⚡ Thread limit: 1 thread (sequential processing)", "debug")
             except Exception as e:
                 self._log(f"⚠️ Warning: Could not set thread limits: {e}", "warning")
             

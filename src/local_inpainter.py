@@ -336,6 +336,24 @@ class LocalInpainter:
     }
     
     def __init__(self, config_path="config.json"):
+        # Set thread limits early if environment indicates single-threaded mode
+        try:
+            if os.environ.get('OMP_NUM_THREADS') == '1':
+                # Already in single-threaded mode, ensure it's applied to this process
+                # Check if torch is available at module level before trying to use it
+                if TORCH_AVAILABLE and torch is not None:
+                    try:
+                        torch.set_num_threads(1)
+                    except (RuntimeError, AttributeError):
+                        pass
+                try:
+                    import cv2
+                    cv2.setNumThreads(1)
+                except (ImportError, AttributeError):
+                    pass
+        except Exception:
+            pass
+        
         self.config_path = config_path
         self.config = self._load_config()
         self.model = None

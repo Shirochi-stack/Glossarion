@@ -74,6 +74,25 @@ class OCRProvider:
     """Base class for OCR providers"""
     
     def __init__(self, log_callback=None):
+        # Set thread limits early if environment indicates single-threaded mode
+        try:
+            if os.environ.get('OMP_NUM_THREADS') == '1':
+                # Already in single-threaded mode, ensure it's applied to this process
+                try:
+                    import sys
+                    if 'torch' in sys.modules:
+                        import torch
+                        torch.set_num_threads(1)
+                except (ImportError, RuntimeError, AttributeError):
+                    pass
+                try:
+                    import cv2
+                    cv2.setNumThreads(1)
+                except (ImportError, AttributeError):
+                    pass
+        except Exception:
+            pass
+        
         self.log_callback = log_callback
         self.is_installed = False
         self.is_loaded = False

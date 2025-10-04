@@ -146,6 +146,31 @@ class MangaTranslator:
                     'azure_endpoint': str (if azure)
                 }
         """
+        # CRITICAL: Set thread limits FIRST before any heavy library operations
+        # This must happen before cv2, torch, numpy operations
+        try:
+            parallel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', False)
+            if not parallel_enabled:
+                # Force single-threaded mode for all computational libraries
+                os.environ['OMP_NUM_THREADS'] = '1'
+                os.environ['MKL_NUM_THREADS'] = '1'
+                os.environ['OPENBLAS_NUM_THREADS'] = '1'
+                os.environ['NUMEXPR_NUM_THREADS'] = '1'
+                os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+                os.environ['ONNXRUNTIME_NUM_THREADS'] = '1'
+                # Set torch and cv2 thread limits if already imported
+                try:
+                    import torch
+                    torch.set_num_threads(1)
+                except (ImportError, RuntimeError):
+                    pass
+                try:
+                    cv2.setNumThreads(1)
+                except (AttributeError, NameError):
+                    pass
+        except Exception:
+            pass  # Silently fail if config not available
+        
         # Set up logging first
         self.log_callback = log_callback
         self.main_gui = main_gui
