@@ -379,6 +379,8 @@ class GlossarionWeb:
         os.environ['OR_THINKING_TOKENS'] = str(config('or_thinking_tokens', 2000))
         os.environ['ENABLE_GEMINI_THINKING'] = '1' if config('enable_gemini_thinking', True) else '0'
         os.environ['GEMINI_THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
+        # IMPORTANT: Also set THINKING_BUDGET for unified_api_client compatibility
+        os.environ['THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
         
         # Translation Settings
         os.environ['CONTEXTUAL'] = '1' if config('contextual', False) else '0'

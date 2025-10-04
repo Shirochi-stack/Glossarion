@@ -394,7 +394,7 @@ class LocalInpainter:
         # Quantization/precision toggle (off by default)
         try:
             adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
-            # Track singleton mode from settings for thread limiting
+            # Track singleton mode from settings for thread limiting (deprecated - kept for compatibility)
             self.singleton_mode = bool(adv_cfg.get('use_singleton_models', True))
             env_quant = os.environ.get('MODEL_QUANTIZE', 'false').lower() == 'true'
             self.quantize_enabled = bool(env_quant or adv_cfg.get('quantize_models', False))
@@ -1014,19 +1014,11 @@ class LocalInpainter:
                 so.enable_cpu_mem_arena = False
             except Exception:
                 pass
-            # If singleton mode, limit ORT internal threading and parallel execution
+            # Enable optimal performance settings (let ONNX use all CPU cores)
             try:
-                if getattr(self, 'singleton_mode', False):
-                    so.intra_op_num_threads = 1
-                    so.inter_op_num_threads = 1
-                    try:
-                        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                    except Exception:
-                        pass
-                    try:
-                        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-                    except Exception:
-                        pass
+                # Use all available CPU threads for best performance
+                # ONNX Runtime will automatically use optimal thread count
+                so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
             except Exception:
                 pass
             # Try to create an inference session, with graceful fallbacks
@@ -1260,7 +1252,7 @@ class LocalInpainter:
                     logger.info("Inpainting will be unavailable for this session")
                     return False
             
-            # Check if already loaded - both ONNX and regular models
+            # Check if already loaded in THIS instance
             if self.model_loaded and self.current_method == method and not force_reload:
                 # Additional check for ONNX - make sure the session exists
                 if self.use_onnx and self.onnx_session is not None:

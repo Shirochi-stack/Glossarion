@@ -4604,16 +4604,16 @@ class UnifiedClient:
                         content = candidate.content
                         self._debug_log(f"   🔍 [Gemini] Content object: {content}")
                         self._debug_log(f"   🔍 [Gemini] Content type: {type(content)}")
-                        self._debug_log(f"   🔍 [Gemini] Content attributes: {[attr for attr in dir(content) if not attr.startswith('_')][:10]}")
                         
-                        # NEW: Try to access content as string directly first
-                        try:
-                            content_str = str(content)
-                            if content_str and len(content_str) > 20 and 'role=' not in content_str:
-                                self._debug_log(f"   ✅ [Gemini] Got content from string conversion: {len(content_str)} chars")
-                                return content_str, finish_reason
-                        except Exception as e:
-                            self._debug_log(f"   ⚠️ [Gemini] String conversion failed: {e}")
+                        # CRITICAL FIX: Try direct .text property first (works even when parts=None)
+                        if hasattr(content, 'text'):
+                            try:
+                                text_value = content.text
+                                if text_value:
+                                    self._debug_log(f"   ✅ [Gemini] Got text from content.text: {len(text_value)} chars")
+                                    return text_value, finish_reason
+                            except Exception as e:
+                                self._debug_log(f"   ⚠️ [Gemini] Failed to access content.text: {e}")
                         
                         # Content might have parts - FIX: Add None check for parts
                         if hasattr(content, 'parts') and content.parts is not None:
@@ -4637,11 +4637,23 @@ class UnifiedClient:
                                 self._debug_log(f"   ⚠️ [Gemini] Parts found but no text extracted from {parts_count} parts")           
                                 # Don't return here, try other methods
                         
-                        # Try direct text access on content
-                        elif hasattr(content, 'text'):
-                            if content.text:
-                                self._debug_log(f"   ✅ [Gemini] Got text from content.text: {len(content.text)} chars")
-                                return content.text, finish_reason
+                        # NEW: Try Pydantic model_dump if available (for google.genai types)
+                        if hasattr(content, 'model_dump'):
+                            try:
+                                dumped = content.model_dump()
+                                self._debug_log(f"   🔍 [Gemini] model_dump result: {dumped}")
+                                # Look for text in the dumped dict
+                                if isinstance(dumped, dict):
+                                    if 'parts' in dumped and dumped['parts']:
+                                        for part in dumped['parts']:
+                                            if isinstance(part, dict) and 'text' in part and part['text']:
+                                                self._debug_log(f"   ✅ [Gemini] Got text from model_dump parts: {len(part['text'])} chars")
+                                                return part['text'], finish_reason
+                                    elif 'text' in dumped and dumped['text']:
+                                        self._debug_log(f"   ✅ [Gemini] Got text from model_dump: {len(dumped['text'])} chars")
+                                        return dumped['text'], finish_reason
+                            except Exception as e:
+                                self._debug_log(f"   ⚠️ [Gemini] model_dump failed: {e}")
                         
                         # NEW: Try accessing raw content data
                         for attr in ['text', 'content', 'data', 'message', 'response']:
