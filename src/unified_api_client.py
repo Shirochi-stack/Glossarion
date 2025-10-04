@@ -822,6 +822,11 @@ class UnifiedClient:
         self._force_rotation = True
         self._rotation_frequency = 1
         
+        # CRITICAL: Flag to prevent infinite fallback recursion
+        # This flag is set to True ONLY for temporary clients created during fallback attempts
+        # It prevents the fallback client from attempting its own fallback (which would cause infinite loops)
+        self._is_retry_client = False
+        
         # Instance variables
         self.output_dir = output_dir
         self._cancelled = False
@@ -3552,12 +3557,10 @@ class UnifiedClient:
                     
                     # PREVENT INFINITE LOOP: Don't attempt fallback if we're already a fallback client
                     if getattr(self, '_is_retry_client', False):
-                        print(f"[RETRY CLIENT] Already in fallback, not recursing further")
-                        # Don't retry, just return error response
-                        self._save_failed_request(messages, e, context)
-                        self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                        fallback_content = self._handle_empty_result(messages, context, str(e))
-                        return fallback_content, 'error'
+                        print(f"[RETRY CLIENT] Already in fallback, not recursing further - re-raising to allow parent loop to try next key")
+                        # Re-raise the exception so the parent retry loop can try the next key
+                        # This allows _retry_with_main_key() to continue to additional fallback keys
+                        raise
                     
                     # Different behavior based on mode
                     if self._multi_key_mode:
@@ -3989,6 +3992,10 @@ class UnifiedClient:
                     temp_client._multi_key_mode = False
                     temp_client.use_multi_keys = False
                     temp_client.key_identifier = f"{label} ({fallback_model})"
+                    
+                    # CRITICAL: Mark as retry client to prevent recursive fallback attempts
+                    # When this temp client fails, it will re-raise the exception (not return)
+                    # allowing the parent loop to try the next key in the fallback list
                     temp_client._is_retry_client = True
                     
                     # The client should already be set up from __init__, but verify
