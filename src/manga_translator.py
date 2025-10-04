@@ -2231,13 +2231,27 @@ class MangaTranslator:
                                         if cropped is None:
                                             return None
                                         
-                                        # Validate crop size (Google Vision requires minimum dimensions)
+                                        # Validate and resize crop if needed (Google Vision requires minimum dimensions)
                                         h_crop, w_crop = cropped.shape[:2]
+                                        MIN_SIZE = 50  # Minimum dimension (increased from 10 for better OCR)
+                                        MIN_AREA = 2500  # Minimum area (50x50)
+                                        
+                                        if h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA:
+                                            # Region too small - try to resize it
+                                            scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
+                                            scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
+                                            scale = max(scale_w, scale_h)
+                                            
+                                            if scale > 1.0:
+                                                new_w = int(w_crop * scale)
+                                                new_h = int(h_crop * scale)
+                                                cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                self._log(f"🔍 Region {i} resized from {w_crop}x{h_crop}px to {new_w}x{new_h}px for OCR", "debug")
+                                                h_crop, w_crop = new_h, new_w
+                                        
+                                        # Final validation
                                         if h_crop < 10 or w_crop < 10:
-                                            self._log(f"⚠️ Region {i} too small ({w_crop}x{h_crop}px), skipping", "debug")
-                                            return None
-                                        if h_crop * w_crop < 100:  # Less than 100 pixels total
-                                            self._log(f"⚠️ Region {i} area too small ({h_crop*w_crop}px²), skipping", "debug")
+                                            self._log(f"⚠️ Region {i} too small even after resize ({w_crop}x{h_crop}px), skipping", "debug")
                                             return None
                                         
                                         # Encode cropped image
@@ -2670,6 +2684,29 @@ class MangaTranslator:
                                         # Crop region
                                         cropped = self._safe_crop_region(cv_image, x, y, w, h)
                                         if cropped is None:
+                                            return None
+                                        
+                                        # Validate and resize crop if needed (Azure Vision requires minimum dimensions)
+                                        h_crop, w_crop = cropped.shape[:2]
+                                        MIN_SIZE = 50  # Minimum dimension (Azure requirement)
+                                        MIN_AREA = 2500  # Minimum area (50x50)
+                                        
+                                        if h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA:
+                                            # Region too small - try to resize it
+                                            scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
+                                            scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
+                                            scale = max(scale_w, scale_h)
+                                            
+                                            if scale > 1.0:
+                                                new_w = int(w_crop * scale)
+                                                new_h = int(h_crop * scale)
+                                                cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                self._log(f"🔍 Region {i} resized from {w_crop}x{h_crop}px to {new_w}x{new_h}px for Azure OCR", "debug")
+                                                h_crop, w_crop = new_h, new_w
+                                        
+                                        # Final validation
+                                        if h_crop < 10 or w_crop < 10:
+                                            self._log(f"⚠️ Region {i} too small even after resize ({w_crop}x{h_crop}px), skipping", "debug")
                                             return None
                                         
                                         # RATE LIMITING: Add delay between Azure API calls to avoid "Too Many Requests"
@@ -5826,59 +5863,91 @@ class MangaTranslator:
                 
                 # CRITICAL: Check if this is a refusal message BEFORE regex fallback
                 # OpenAI and other APIs refuse certain content with text responses instead of JSON
+                # ONLY check if response looks like plain text refusal (not malformed JSON with translations)
                 import re
                 response_lower = response_text.lower()
                 
-                # Refusal patterns - both simple strings and regex patterns
-                refusal_patterns = [
-                    "i cannot",
-                    "i can't",
-                    "i'm unable to",
-                    "i am unable to",
-                    "i apologize, but i cannot",
-                    "i'm sorry, but i cannot",
-                    "sorry — i can't help",  # OpenAI specific
-                    "i don't have the ability to",
-                    "i'm not able to",
-                    "this request cannot be",
-                    "unable to process",
-                    "cannot complete",
-                    "cannot generate",
-                    r"against.{0,20}policy",  # regex for "against...policy"
-                    "content policy",
-                    "sexually explicit content",
-                    "appears to sexualize",
-                    "prohibited content",
-                    "content blocked",
-                    r"content.{0,20}filter"  # regex for "content...filter"
-                ]
+                # Skip refusal check if response contains valid-looking JSON structure with translations
+                # (indicates malformed JSON that should go to regex fallback, not a refusal)
+                has_json_structure = (
+                    (response_text.strip().startswith('{') and ':' in response_text and '"' in response_text) or
+                    (response_text.strip().startswith('[') and ':' in response_text and '"' in response_text)
+                )
                 
-                # Check both simple string matching and regex patterns
-                is_refusal = False
-                for pattern in refusal_patterns:
-                    if '.*' in pattern or r'.{' in pattern:
-                        # It's a regex pattern
-                        if re.search(pattern, response_lower):
-                            is_refusal = True
-                            break
-                    else:
-                        # Simple string match
-                        if pattern in response_lower:
-                            is_refusal = True
-                            break
+                # Also check if response contains short translations (not refusal paragraphs)
+                # Refusals are typically long paragraphs, translations are short
+                avg_value_length = 0
+                if has_json_structure:
+                    # Quick estimate: count chars between quotes
+                    import re
+                    values = re.findall(r'"([^"]{1,200})"\s*[,}]', response_text)
+                    if values:
+                        avg_value_length = sum(len(v) for v in values) / len(values)
                 
-                if is_refusal:
-                    self._log("\n🚫 ========================================", "error")
-                    self._log("🚫 API REFUSED TO TRANSLATE THIS CONTENT", "error")
-                    self._log("🚫 ========================================", "error")
-                    self._log(f"📋 Refusal reason: {response_text[:300]}...", "error")
-                    self._log("\n💡 Suggested actions:", "warning")
-                    self._log("   1. Try a different API model (e.g., Claude, Gemini with safety disabled)", "warning")
-                    self._log("   2. Check if content violates the API's usage policies", "warning")
-                    self._log("   3. Try with a different page/image", "warning")
-                    self._log("🚫 ========================================\n", "error")
-                    # Return empty dict to fail gracefully without attempting regex extraction
-                    return {}
+                # If looks like JSON with short values, skip refusal check (go to regex fallback)
+                if has_json_structure and avg_value_length > 0 and avg_value_length < 150:
+                    self._log(f"🔍 Detected malformed JSON with translations (avg len: {avg_value_length:.0f}), trying regex fallback", "debug")
+                    # Skip refusal detection, go straight to regex fallback
+                    pass
+                else:
+                    # Check for refusal patterns
+                    # Refusal patterns - both simple strings and regex patterns
+                    # Must be strict to avoid false positives on valid translations
+                    refusal_patterns = [
+                        "i cannot assist",
+                        "i can't assist",
+                        "i cannot help",
+                        "i can't help",
+                        r"sorry.{0,10}i can't (assist|help|translate)",  # OpenAI specific
+                        "i'm unable to translate",
+                        "i am unable to translate",
+                        "i apologize, but i cannot",
+                        "i'm sorry, but i cannot",
+                        "i don't have the ability to",
+                        "this request cannot be",
+                        "unable to process this",
+                        "cannot complete this",
+                        r"against.{0,20}(content )?policy",  # "against policy" or "against content policy"
+                        "violates.*policy",
+                        r"(can't|cannot).{0,30}(sexual|explicit|inappropriate)",  # "can't translate sexual"
+                        "appears to sexualize",
+                        "who appear to be",
+                        "prohibited content",
+                        "content blocked",
+                    ]
+                    
+                    # Check both simple string matching and regex patterns
+                    is_refusal = False
+                    for pattern in refusal_patterns:
+                        if '.*' in pattern or r'.{' in pattern:
+                            # It's a regex pattern
+                            if re.search(pattern, response_lower):
+                                is_refusal = True
+                                break
+                        else:
+                            # Simple string match
+                            if pattern in response_lower:
+                                is_refusal = True
+                                break
+                    
+                    if is_refusal:
+                        self._log("\n🚫 ========================================", "error")
+                        self._log("🚫 API REFUSED TO TRANSLATE THIS CONTENT", "error")
+                        self._log("🚫 ========================================", "error")
+                        self._log(f"📋 Refusal reason: {response_text[:300]}...", "error")
+                        self._log("\n💡 Suggested actions:", "warning")
+                        self._log("   1. Try a different API model (e.g., Claude, Gemini with safety disabled)", "warning")
+                        self._log("   2. Check if content violates the API's usage policies", "warning")
+                        self._log("   3. Try with a different page/image", "warning")
+                        self._log("🚫 ========================================\n", "error")
+                        
+                        # Raise UnifiedClientError with prohibited_content type for proper error handling
+                        from unified_api_client import UnifiedClientError
+                        raise UnifiedClientError(
+                            f"Content refused by API: {response_text[:200]}",
+                            error_type="prohibited_content",
+                            details={"refusal_message": response_text[:500]}
+                        )
                 
                 # Fallback: try regex extraction (handles both quoted and unquoted keys)
                 try:
@@ -5941,9 +6010,64 @@ class MangaTranslator:
             self._log(f"🔍 DEBUG: translation_values after cleaning:", "debug")
             for i, val in enumerate(translation_values):
                 self._log(f"  [{i}]: {repr(val)}", "debug")
+            
+            # CRITICAL: Check if translation values are actually refusal messages
+            # API sometimes returns valid JSON where each "translation" is a refusal
+            if translation_values:
+                # Check first few translations for refusal patterns
+                import re
+                refusal_patterns = [
+                    "i cannot",
+                    "i can't",
+                    r"sorry.{0,5}i can't help",
+                    r"sorry.{0,5}i can't",
+                    "sexually explicit",
+                    "content policy",
+                    "prohibited content",
+                    "appears to be",
+                    "who appear to be",
+                ]
+                
+                # Sample first 3 translations (or all if fewer)
+                sample_size = min(3, len(translation_values))
+                refusal_count = 0
+                
+                for sample_val in translation_values[:sample_size]:
+                    if sample_val:
+                        val_lower = sample_val.lower()
+                        for pattern in refusal_patterns:
+                            if '.*' in pattern or r'.{' in pattern:
+                                if re.search(pattern, val_lower):
+                                    refusal_count += 1
+                                    break
+                            else:
+                                if pattern in val_lower:
+                                    refusal_count += 1
+                                    break
+                
+                # If most translations are refusals, treat as refusal
+                if refusal_count >= sample_size * 0.5:  # 50% threshold
+                    self._log("\n🚫 ========================================", "error")
+                    self._log("🚫 API REFUSED TO TRANSLATE THIS CONTENT", "error")
+                    self._log("🚫 ========================================", "error")
+                    self._log(f"📋 Refusal detected in translation values", "error")
+                    self._log(f"📋 Sample refusal: {translation_values[0][:200]}...", "error")
+                    self._log("\n💡 Suggested actions:", "warning")
+                    self._log("   1. Try a different API model (e.g., Claude, Gemini with safety disabled)", "warning")
+                    self._log("   2. Check if content violates the API's usage policies", "warning")
+                    self._log("   3. Try with a different page/image", "warning")
+                    self._log("🚫 ========================================\n", "error")
+                    
+                    # Raise UnifiedClientError with prohibited_content type
+                    from unified_api_client import UnifiedClientError
+                    raise UnifiedClientError(
+                        f"Content refused by API: {translation_values[0][:200]}",
+                        error_type="prohibited_content",
+                        details={"refusal_message": translation_values[0][:500]}
+                    )
 
             # Position-based mapping
-            self._log(f"📊 Mapping {len(translation_values)} translations to {len(regions)} regions")
+            self._log(f"📋 Mapping {len(translation_values)} translations to {len(regions)} regions")
             
             for i, region in enumerate(regions):
                 if i % 10 == 0 and self._check_stop():
