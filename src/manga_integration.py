@@ -3007,7 +3007,8 @@ class MangaTranslationTab:
         # Free text only background opacity toggle (applies BG opacity only to free-text regions)
         self.ft_only_checkbox = self._create_styled_checkbox("Free text only background opacity")
         self.ft_only_checkbox.setChecked(self.free_text_only_bg_opacity_value)
-        self.ft_only_checkbox.stateChanged.connect(self._apply_rendering_settings)
+        # Connect to handler that updates value and saves
+        self.ft_only_checkbox.stateChanged.connect(lambda state: self._on_ft_only_bg_opacity_changed())
         bg_settings_layout.addWidget(self.ft_only_checkbox)
 
         # Background opacity slider
@@ -4097,6 +4098,13 @@ class MangaTranslationTab:
                 self.shadow_blur_value_label.setText(f"{int(float(value))}")
         except Exception:
             pass
+        self._save_rendering_settings()
+    
+    def _on_ft_only_bg_opacity_changed(self):
+        """Handle free text only background opacity checkbox change (PySide6)"""
+        # Update the value from checkbox state
+        self.free_text_only_bg_opacity_value = self.ft_only_checkbox.isChecked()
+        # Auto-save on change
         self._save_rendering_settings()
     
     def _update_color_preview(self, event=None):
@@ -7206,21 +7214,80 @@ class MangaTranslationTab:
             self.translation_thread.start()
     
     def _apply_rendering_settings(self):
-        """Apply current rendering settings to translator"""
+        """Apply current rendering settings to translator (PySide6 version)"""
         if not self.translator:
             return
         
-        # Get text color and shadow color
+        # Read all values from PySide6 widgets to ensure they're current
+        # Background opacity slider
+        if hasattr(self, 'opacity_slider'):
+            self.bg_opacity_value = self.opacity_slider.value()
+        
+        # Background reduction slider
+        if hasattr(self, 'reduction_slider'):
+            self.bg_reduction_value = self.reduction_slider.value()
+        
+        # Background style (radio buttons)
+        if hasattr(self, 'bg_style_group'):
+            checked_id = self.bg_style_group.checkedId()
+            if checked_id == 0:
+                self.bg_style_value = "box"
+            elif checked_id == 1:
+                self.bg_style_value = "circle"
+            elif checked_id == 2:
+                self.bg_style_value = "wrap"
+        
+        # Font selection
+        if hasattr(self, 'font_combo'):
+            selected = self.font_combo.currentText()
+            if selected == "Default":
+                self.selected_font_path = None
+            elif selected in self.font_mapping:
+                self.selected_font_path = self.font_mapping[selected]
+        
+        # Text color (stored in value variables updated by color picker)
         text_color = (
             self.text_color_r_value,
             self.text_color_g_value,
             self.text_color_b_value
         )
+        
+        # Shadow enabled checkbox
+        if hasattr(self, 'shadow_enabled_checkbox'):
+            self.shadow_enabled_value = self.shadow_enabled_checkbox.isChecked()
+        
+        # Shadow color (stored in value variables updated by color picker)
         shadow_color = (
             self.shadow_color_r_value,
             self.shadow_color_g_value,
             self.shadow_color_b_value
         )
+        
+        # Shadow offset spinboxes
+        if hasattr(self, 'shadow_offset_x_spinbox'):
+            self.shadow_offset_x_value = self.shadow_offset_x_spinbox.value()
+        if hasattr(self, 'shadow_offset_y_spinbox'):
+            self.shadow_offset_y_value = self.shadow_offset_y_spinbox.value()
+        
+        # Shadow blur spinbox
+        if hasattr(self, 'shadow_blur_spinbox'):
+            self.shadow_blur_value = self.shadow_blur_spinbox.value()
+        
+        # Force caps lock checkbox
+        if hasattr(self, 'force_caps_checkbox'):
+            self.force_caps_lock_value = self.force_caps_checkbox.isChecked()
+        
+        # Strict text wrapping checkbox
+        if hasattr(self, 'strict_wrap_checkbox'):
+            self.strict_text_wrapping_value = self.strict_wrap_checkbox.isChecked()
+        
+        # Font sizing controls
+        if hasattr(self, 'min_size_spinbox'):
+            self.auto_min_size_value = self.min_size_spinbox.value()
+        if hasattr(self, 'max_size_spinbox'):
+            self.max_font_size_value = self.max_size_spinbox.value()
+        if hasattr(self, 'multiplier_slider'):
+            self.font_size_multiplier_value = self.multiplier_slider.value()
         
         # Determine font size value based on mode
         if self.font_size_mode_value == 'multiplier':
@@ -7253,10 +7320,13 @@ class MangaTranslationTab:
             force_caps_lock=self.force_caps_lock_value
         )
         
-        # Free-text-only background opacity toggle -> pass through to translator
+        # Free-text-only background opacity toggle -> read from checkbox (PySide6)
         try:
-            if hasattr(self, 'free_text_only_bg_opacity_value'):
-                self.translator.free_text_only_bg_opacity = bool(self.free_text_only_bg_opacity_value)
+            if hasattr(self, 'ft_only_checkbox'):
+                ft_only_enabled = self.ft_only_checkbox.isChecked()
+                self.translator.free_text_only_bg_opacity = bool(ft_only_enabled)
+                # Also update the value variable
+                self.free_text_only_bg_opacity_value = ft_only_enabled
         except Exception:
             pass
         
@@ -7306,12 +7376,8 @@ class MangaTranslationTab:
             self.translator.use_cloud_inpainting = False
             self._log("  Inpainting: Local", "info")
         
-        # Persist free-text-only BG opacity setting to config as well
-        try:
-            if hasattr(self, 'free_text_only_bg_opacity_var'):
-                self.main_gui.config['manga_free_text_only_bg_opacity'] = bool(self.free_text_only_bg_opacity_var.get())
-        except Exception:
-            pass
+        # Persist free-text-only BG opacity setting to config (handled in _save_rendering_settings)
+        # Value is now read directly from checkbox in PySide6
         
         # Log the applied rendering and inpainting settings
         self._log(f"Applied rendering settings:", "info")

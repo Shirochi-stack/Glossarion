@@ -2186,7 +2186,7 @@ class MangaTranslator:
                                         # Provide more detailed error info for debugging
                                         error_msg = str(e)
                                         if 'Bad Request' in error_msg or 'invalid' in error_msg.lower():
-                                            self._log(f"⚠️ Region {i} rejected by Google Vision (likely too small/invalid): {error_msg}", "debug")
+                                            self._log(f"⏭️ Skipping region {i}: Too small or invalid for Google Vision (dimensions < 10x10px or area < 100px²)", "debug")
                                         else:
                                             self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
                                         return None
@@ -2515,14 +2515,22 @@ class MangaTranslator:
                                         return None
                                     
                                     except Exception as e:
-                                        self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
+                                        # Provide more detailed error info for debugging
+                                        error_msg = str(e)
+                                        if 'Bad Request' in error_msg or 'invalid' in error_msg.lower() or 'Too Many Requests' in error_msg:
+                                            if 'Too Many Requests' in error_msg:
+                                                self._log(f"⏸️ Region {i}: Azure rate limit hit, consider increasing delays", "warning")
+                                            else:
+                                                self._log(f"⏭️ Skipping region {i}: Too small or invalid for Azure Vision", "debug")
+                                        else:
+                                            self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
                                         return None
                                 
                                 # Process regions concurrently with RT-DETR concurrency control
                                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                                # AZURE RATE LIMITING: Reduce max_workers to 1 to prevent rate limit errors
-                                # Azure has strict rate limits (Free: 20/min, Standard: varies by tier)
-                                max_workers = 1  # Force sequential to avoid rate limits
+                                # Use rtdetr_max_concurrency setting (default 2)
+                                # Note: Azure has rate limits - adjust rtdetr_max_concurrency in settings if you hit limits
+                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
                                 
                                 region_data_list = [(i+1, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
                                 
@@ -2761,7 +2769,7 @@ class MangaTranslator:
                 except Exception as e:
                     error_msg = str(e)
                     if 'Bad Request' in error_msg:
-                        self._log("❌ Azure Read API Bad Request - retrying without language parameter", "error")
+                        self._log("⚠️ Azure Read API Bad Request - likely invalid image format or too small. Retrying without language parameter...", "warning")
                         # Retry without language parameter
                         image_stream.seek(0)
                         read_params.pop('language', None)
