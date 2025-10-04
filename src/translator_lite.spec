@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v5.0.0 - PyInstaller Specification File
+Glossarion Lite v5.0.1 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v5.0.0'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_Lite v5.0.1'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -974,7 +974,7 @@ excludes = [
     # ============================================================================
     # ALTERNATIVE GUI FRAMEWORKS
     # ============================================================================
-    'PyQt5', 'PyQt6', 'PySide2',
+    'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
     'wx', 'kivy', 'pygame',
     
     # ============================================================================

@@ -1208,7 +1208,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "5.0.0"
+        __version__ = "5.0.1"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1216,31 +1216,22 @@ class TranslatorGUI:
         screen_width = master.winfo_screenwidth()
         screen_height = master.winfo_screenheight()
         
-        # Update idletasks before positioning
-        master.update_idletasks()
+        # Set window size as ratio of screen (e.g., 0.8 = 80% of screen)
+        width_ratio = 1.2  # 120% of screen width
+        height_ratio = 1.2  # 120% of screen height
         
-        # For multi-monitor setups, assume primary monitor is 1920px wide
-        # Use screen_width directly if it's reasonable (single monitor or proper detection)
-        if screen_width <= 2560:  # Single monitor or reasonable width
-            primary_width = screen_width
-        else:  # Multi-monitor - assume standard 1920px primary
-            primary_width = 1920
+        window_width = int(screen_width * width_ratio)
+        window_height = int(screen_height * height_ratio)
         
-        # Set window size - 85% of primary monitor width, leave space for taskbar
-        window_width = int(primary_width * 0.85)
-        window_height = int(screen_height * 0.85)  # Leave 15% for taskbar
+        # Apply size
+        master.geometry(f"{window_width}x{window_height}")
         
-        # Center on primary monitor
-        x = (primary_width - window_width) // 2
-        y = (screen_height - window_height) // 2
-        
-        # Apply size and position
-        master.geometry(f"{window_width}x{window_height}+{x}+{y}")
-        
-        # Set minimum size
-        min_width = int(primary_width * 0.6)
-        min_height = int(screen_height * 0.6)
+        # Set minimum size as ratio too
+        min_width = int(screen_width * 0.6)  # 60% minimum
+        min_height = int(screen_height * 0.6)  # 60% minimum
         master.minsize(min_width, min_height)
+        
+        self.wm.center_window(master)
         
         # Setup fullscreen support
         self.wm.setup_fullscreen_support(master)
@@ -2375,7 +2366,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v5.0.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v5.0.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -14301,7 +14292,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v5.0.0...")
+    print("🚀 Starting Glossarion v5.0.1...")
     
     # Initialize splash screen
     splash_manager = None
