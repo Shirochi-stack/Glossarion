@@ -5451,8 +5451,14 @@ class MangaTranslator:
             self._log(f"   Traceback: {traceback.format_exc()}", "error")
             return text
 
-    def translate_full_page_context(self, regions: List[TextRegion], image_path: str) -> Dict[str, str]:
-        """Translate all text regions with full page context in a single request"""
+    def translate_full_page_context(self, regions: List[TextRegion], image_path: str, _in_fallback=False) -> Dict[str, str]:
+        """Translate all text regions with full page context in a single request
+        
+        Args:
+            regions: List of text regions to translate
+            image_path: Path to the manga page image
+            _in_fallback: Internal flag to prevent infinite recursion during fallback attempts
+        """
         try:
             import time
             import traceback
@@ -5596,6 +5602,9 @@ class MangaTranslator:
             if self._check_stop():
                 self._log("⏹️ Translation stopped before API call", "warning")
                 return {}
+            
+            # Store original model for fallback
+            original_model = self.client.model if hasattr(self.client, 'model') else None
             
             # Check input token limit
             text_tokens = 0
@@ -5867,6 +5876,17 @@ class MangaTranslator:
                 import re
                 response_lower = response_text.lower()
                 
+                # Quick check: if response starts with refusal keywords, it's definitely a refusal
+                refusal_starts = ['sorry', 'i cannot', "i can't", 'i apologize', 'i am unable', "i'm unable"]
+                if any(response_lower.strip().startswith(start) for start in refusal_starts):
+                    # Very likely a refusal - raise immediately
+                    from unified_api_client import UnifiedClientError
+                    raise UnifiedClientError(
+                        f"Content refused by API",
+                        error_type="prohibited_content",
+                        details={"refusal_message": response_text[:500]}
+                    )
+                
                 # Skip refusal check if response contains valid-looking JSON structure with translations
                 # (indicates malformed JSON that should go to regex fallback, not a refusal)
                 has_json_structure = (
@@ -6116,11 +6136,96 @@ class MangaTranslator:
                 self._log("⏹️ Translation stopped due to user request", "warning")
                 return {}
             
-            # Check if this is a prohibited_content error - re-raise it for fallback handling
+            # Check if this is a prohibited_content error
             from unified_api_client import UnifiedClientError
             if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "prohibited_content":
-                # Re-raise silently for fallback mechanism
-                raise
+                # Check if USE_FALLBACK_KEYS is enabled and we're not already in a fallback attempt
+                use_fallback = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                
+                if use_fallback and not _in_fallback:
+                    self._log(f"⛔ Content refused by primary model, trying fallback keys...", "warning")
+                    
+                    # Store original credentials to restore after fallback attempts
+                    original_api_key = self.client.api_key
+                    original_model = self.client.model
+                    
+                    # Try to get fallback keys from environment
+                    try:
+                        fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
+                        fallback_keys = json.loads(fallback_keys_json) if fallback_keys_json != '[]' else []
+                        
+                        if fallback_keys:
+                            for idx, fallback in enumerate(fallback_keys, 1):
+                                if self._check_stop():
+                                    self._log("⏹️ Translation stopped during fallback", "warning")
+                                    return {}
+                                
+                                fallback_model = fallback.get('model')
+                                fallback_key = fallback.get('api_key')
+                                
+                                if not fallback_model or not fallback_key:
+                                    continue
+                                
+                                self._log(f"🔄 Trying fallback {idx}/{len(fallback_keys)}: {fallback_model}", "info")
+                                
+                                try:
+                                    # Temporarily switch to fallback model
+                                    old_key = self.client.api_key
+                                    old_model = self.client.model
+                                    
+                                    self.client.api_key = fallback_key
+                                    self.client.model = fallback_model
+                                    
+                                    # Re-setup client with new credentials
+                                    if hasattr(self.client, '_setup_client'):
+                                        self.client._setup_client()
+                                    
+                                    # Retry the translation with fallback model (mark as in_fallback to prevent recursion)
+                                    return self.translate_full_page_context(regions, image_path, _in_fallback=True)
+                                    
+                                except UnifiedClientError as fallback_err:
+                                    if getattr(fallback_err, "error_type", None) == "prohibited_content":
+                                        self._log(f"  ⛔ Fallback {idx} also refused", "warning")
+                                        # Restore original credentials and try next fallback
+                                        self.client.api_key = old_key
+                                        self.client.model = old_model
+                                        if hasattr(self.client, '_setup_client'):
+                                            self.client._setup_client()
+                                        continue
+                                    else:
+                                        # Other error, restore and raise
+                                        self.client.api_key = old_key
+                                        self.client.model = old_model
+                                        if hasattr(self.client, '_setup_client'):
+                                            self.client._setup_client()
+                                        raise
+                                except Exception as fallback_err:
+                                    self._log(f"  ❌ Fallback {idx} error: {str(fallback_err)[:100]}", "error")
+                                    # Restore original credentials and try next fallback
+                                    self.client.api_key = old_key
+                                    self.client.model = old_model
+                                    if hasattr(self.client, '_setup_client'):
+                                        self.client._setup_client()
+                                    continue
+                            
+                            self._log(f"❌ All fallback keys refused content", "error")
+                        else:
+                            self._log(f"⚠️ No fallback keys configured", "warning")
+                    except Exception as fallback_error:
+                        self._log(f"❌ Error processing fallback keys: {str(fallback_error)}", "error")
+                    finally:
+                        # Always restore original credentials after fallback attempts
+                        try:
+                            self.client.api_key = original_api_key
+                            self.client.model = original_model
+                            if hasattr(self.client, '_setup_client'):
+                                self.client._setup_client()
+                        except Exception:
+                            pass  # Ignore errors during credential restoration
+                
+                # If we get here, all fallbacks failed or weren't configured
+                self._log(f"❌ Content refused by API", "error")
+                return {}
                 
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
