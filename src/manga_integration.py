@@ -6554,9 +6554,28 @@ class MangaTranslationTab:
         # Log start directly to GUI
         try:
             if hasattr(self, 'log_text') and self.log_text:
-                from PySide6.QtGui import QColor
+                from PySide6.QtGui import QColor, QTextCursor
+                from PySide6.QtCore import QTimer
                 self.log_text.setTextColor(QColor('white'))
                 self.log_text.append("🚀 Starting new manga translation batch")
+                
+                # Scroll to bottom after a short delay to ensure it happens after button processing
+                def scroll_to_bottom():
+                    try:
+                        if hasattr(self, 'log_text') and self.log_text:
+                            self.log_text.moveCursor(QTextCursor.End)
+                            self.log_text.ensureCursorVisible()
+                            # Also scroll the parent scroll area if it exists
+                            if hasattr(self, 'scroll_area') and self.scroll_area:
+                                scrollbar = self.scroll_area.verticalScrollBar()
+                                if scrollbar:
+                                    scrollbar.setValue(scrollbar.maximum())
+                    except Exception:
+                        pass
+                
+                # Schedule scroll with a small delay
+                QTimer.singleShot(50, scroll_to_bottom)
+                QTimer.singleShot(150, scroll_to_bottom)  # Second attempt to be sure
         except Exception:
             pass
         
@@ -6574,6 +6593,37 @@ class MangaTranslationTab:
     def _start_translation_heavy(self):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
         try:
+            # Set thread limits based on parallel processing settings
+            try:
+                advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                parallel_enabled = advanced.get('parallel_processing', False)
+                
+                if parallel_enabled:
+                    # Allow PyTorch to use multiple threads for parallel processing
+                    num_threads = advanced.get('max_workers', 4)
+                    import os
+                    os.environ['OMP_NUM_THREADS'] = str(num_threads)
+                    os.environ['MKL_NUM_THREADS'] = str(num_threads)
+                    try:
+                        import torch
+                        torch.set_num_threads(num_threads)
+                        self._log(f"⚡ Thread limit: {num_threads} threads (parallel processing enabled)", "debug")
+                    except ImportError:
+                        pass
+                else:
+                    # HARDCODED: Limit to exactly 1 thread for sequential processing
+                    import os
+                    os.environ['OMP_NUM_THREADS'] = '1'
+                    os.environ['MKL_NUM_THREADS'] = '1'
+                    try:
+                        import torch
+                        torch.set_num_threads(1)  # Hardcoded to 1
+                        self._log("⚡ Thread limit: 1 thread (sequential processing)", "debug")
+                    except ImportError:
+                        pass
+            except Exception as e:
+                self._log(f"⚠️ Warning: Could not set thread limits: {e}", "warning")
+            
             # Early feedback
             self._log("⏳ Preparing configuration...", "info")
             # Build OCR configuration

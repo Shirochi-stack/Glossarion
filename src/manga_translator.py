@@ -623,38 +623,29 @@ class MangaTranslator:
         """Sync all GUI environment variables to ensure manga translation respects GUI settings
         This ensures settings like RETRY_TRUNCATED, THINKING_BUDGET, etc. are properly set
         """
-        print("🔧 [SYNC] Starting environment variable sync...")
         try:
             # Get config from main_gui if available
             if not hasattr(self, 'main_gui') or not self.main_gui:
-                print("⚠️ [SYNC] No main_gui available, skipping sync")
                 return
             
             # Use the main_gui's set_all_environment_variables method if available
             if hasattr(self.main_gui, 'set_all_environment_variables'):
-                print("🔧 [SYNC] Using main_gui.set_all_environment_variables()")
                 self.main_gui.set_all_environment_variables()
-                self._log("✅ Synced all GUI environment variables", "debug")
             else:
-                print("🔧 [SYNC] Using manual environment variable setting")
                 # Fallback: manually set key variables
                 config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
-                print(f"🔧 [SYNC] Config keys: {list(config.keys())[:10] if config else 'NO CONFIG'}")
                 
                 # Thinking settings (most important for speed)
                 thinking_enabled = config.get('enable_gemini_thinking', True)
                 thinking_budget = config.get('gemini_thinking_budget', -1)
-                print(f"💡 [SYNC] Config thinking_enabled={thinking_enabled}, thinking_budget={thinking_budget}")
                 
                 # CRITICAL FIX: If thinking is disabled, force budget to 0 regardless of config value
                 if not thinking_enabled:
                     thinking_budget = 0
-                    print(f"⚡ [SYNC] Thinking disabled, forcing budget to 0")
                 
                 os.environ['ENABLE_GEMINI_THINKING'] = '1' if thinking_enabled else '0'
                 os.environ['GEMINI_THINKING_BUDGET'] = str(thinking_budget)
                 os.environ['THINKING_BUDGET'] = str(thinking_budget)  # Also set for unified_api_client
-                print(f"✅ [SYNC] Set THINKING_BUDGET={os.environ.get('THINKING_BUDGET')}")
                 
                 # Retry settings
                 retry_truncated = config.get('retry_truncated', False)
@@ -667,10 +658,6 @@ class MangaTranslator:
                 # Safety settings
                 disable_gemini_safety = config.get('disable_gemini_safety', False)
                 os.environ['DISABLE_GEMINI_SAFETY'] = '1' if disable_gemini_safety else '0'
-                
-                self._log("✅ Manually synced key environment variables", "debug")
-                self._log(f"   THINKING_BUDGET={os.environ.get('THINKING_BUDGET')}", "debug")
-                self._log(f"   RETRY_TRUNCATED={os.environ.get('RETRY_TRUNCATED')}", "debug")
                 
         except Exception as e:
             self._log(f"⚠️ Failed to sync environment variables: {e}", "warning")
