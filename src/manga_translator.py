@@ -2076,21 +2076,14 @@ class MangaTranslator:
                             if cv_image is None:
                                 self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
                             else:
-                                # NOTE: Sequential processing is intentional here for Google/Azure API calls.
-                                # RT-DETR guided OCR is slower than full-page OCR for cloud APIs due to:
-                                # - Multiple API calls (network latency per region)
-                                # - API rate limits and throttling
-                                # This feature is useful for ACCURACY, not speed.
-                                # For speed, use local OCR providers (manga-ocr, EasyOCR, PaddleOCR) which
-                                # already use RT-DETR guidance without API overhead.
-                                
-                                # OCR each detected region sequentially
-                                for i, (x, y, w, h) in enumerate(all_regions, 1):
+                                # Define worker function for concurrent OCR
+                                def ocr_region_google(region_data):
+                                    i, x, y, w, h = region_data
                                     try:
                                         # Crop region
                                         cropped = self._safe_crop_region(cv_image, x, y, w, h)
                                         if cropped is None:
-                                            continue
+                                            return None
                                         
                                         # Encode cropped image
                                         _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -2117,7 +2110,7 @@ class MangaTranslator:
                                         
                                         if response.error.message:
                                             self._log(f"⚠️ Region {i} error: {response.error.message}", "warning")
-                                            continue
+                                            return None
                                         
                                         # Extract text from this region
                                         region_text = response.full_text_annotation.text if response.full_text_annotation else ""
@@ -2135,13 +2128,32 @@ class MangaTranslator:
                                                 confidence=0.9,  # RT-DETR confidence
                                                 region_type='text_block'
                                             )
-                                            regions.append(region)
                                             if not getattr(self, 'concise_logs', False):
                                                 self._log(f"✅ Region {i}/{len(all_regions)}: {region_text[:50]}...")
+                                            return region
+                                        return None
                                     
                                     except Exception as e:
                                         self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
-                                        continue
+                                        return None
+                                
+                                # Process regions concurrently with RT-DETR concurrency control
+                                from concurrent.futures import ThreadPoolExecutor, as_completed
+                                # Use rtdetr_max_concurrency setting (default 2) to control parallel OCR calls
+                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
+                                
+                                region_data_list = [(i+1, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
+                                
+                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                    futures = {executor.submit(ocr_region_google, rd): rd for rd in region_data_list}
+                                    for future in as_completed(futures):
+                                        try:
+                                            result = future.result()
+                                            if result:
+                                                regions.append(result)
+                                        finally:
+                                            # Clean up future to free memory
+                                            del future
                                 
                                 # If we got results, return them (skip full-page OCR)
                                 if regions:
@@ -2377,14 +2389,14 @@ class MangaTranslator:
                                 azure_max_wait = ocr_settings.get('azure_max_wait', 60)
                                 azure_poll_interval = ocr_settings.get('azure_poll_interval', 1.0)
                                 
-                                # NOTE: Sequential processing (same reasoning as Google above)
-                                # OCR each detected region sequentially
-                                for i, (x, y, w, h) in enumerate(all_regions, 1):
+                                # Define worker function for concurrent OCR
+                                def ocr_region_azure(region_data):
+                                    i, x, y, w, h = region_data
                                     try:
                                         # Crop region
                                         cropped = self._safe_crop_region(cv_image, x, y, w, h)
                                         if cropped is None:
-                                            continue
+                                            return None
                                         
                                         # Encode cropped image
                                         _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -2435,13 +2447,32 @@ class MangaTranslator:
                                                     confidence=0.9,  # RT-DETR confidence
                                                     region_type='text_block'
                                                 )
-                                                regions.append(region)
                                                 if not getattr(self, 'concise_logs', False):
                                                     self._log(f"✅ Region {i}/{len(all_regions)}: {region_text[:50]}...")
+                                                return region
+                                        return None
                                     
                                     except Exception as e:
                                         self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
-                                        continue
+                                        return None
+                                
+                                # Process regions concurrently with RT-DETR concurrency control
+                                from concurrent.futures import ThreadPoolExecutor, as_completed
+                                # Use rtdetr_max_concurrency setting (default 2) to control parallel OCR calls
+                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
+                                
+                                region_data_list = [(i+1, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
+                                
+                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                    futures = {executor.submit(ocr_region_azure, rd): rd for rd in region_data_list}
+                                    for future in as_completed(futures):
+                                        try:
+                                            result = future.result()
+                                            if result:
+                                                regions.append(result)
+                                        finally:
+                                            # Clean up future to free memory
+                                            del future
                                 
                                 # If we got results, return them (skip full-page OCR)
                                 if regions:

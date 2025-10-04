@@ -2933,30 +2933,6 @@ class MangaSettingsDialog(QDialog):
         self.rtdetr_conf_label = self.bubble_conf_label  # Alias
         conf_layout.addStretch()
 
-        # RT-DETR Concurrency (NEW - for memory optimization)
-        rtdetr_conc_widget = QWidget()
-        rtdetr_conc_layout = QHBoxLayout(rtdetr_conc_widget)
-        rtdetr_conc_layout.setContentsMargins(0, 6, 0, 0)
-        yolo_settings_layout.addWidget(rtdetr_conc_widget)
-        self.rtdetr_conc_frame = rtdetr_conc_widget
-        
-        rtdetr_conc_label = QLabel("RT-DETR Concurrency:")
-        rtdetr_conc_label.setMinimumWidth(100)
-        rtdetr_conc_layout.addWidget(rtdetr_conc_label)
-        
-        self.rtdetr_max_concurrency_spinbox = QSpinBox()
-        self.rtdetr_max_concurrency_spinbox.setRange(1, 8)
-        self.rtdetr_max_concurrency_spinbox.setValue(self.settings['ocr'].get('rtdetr_max_concurrency', 2))
-        self.rtdetr_max_concurrency_spinbox.setToolTip("Maximum concurrent RT-DETR region OCR calls (lower = less memory)")
-        rtdetr_conc_layout.addWidget(self.rtdetr_max_concurrency_spinbox)
-        
-        rtdetr_conc_desc = QLabel("parallel OCR calls (lower = less RAM)")
-        rtdetr_conc_desc_font = QFont('Arial', 9)
-        rtdetr_conc_desc.setFont(rtdetr_conc_desc_font)
-        rtdetr_conc_desc.setStyleSheet("color: gray;")
-        rtdetr_conc_layout.addWidget(rtdetr_conc_desc)
-        rtdetr_conc_layout.addStretch()
-
         # YOLO-specific: Max detections (only visible for YOLO)
         self.yolo_maxdet_widget = QWidget()
         yolo_maxdet_layout = QHBoxLayout(self.yolo_maxdet_widget)
@@ -3073,19 +3049,24 @@ class MangaSettingsDialog(QDialog):
             self.rtdetr_download_btn.setVisible(True)
         
         # Show/hide RT-DETR specific controls
-        if 'RT-DETR' in detector or 'RTEDR_onnx' in detector:
+        is_rtdetr = 'RT-DETR' in detector or 'RTEDR_onnx' in detector
+        
+        if is_rtdetr:
             self.rtdetr_classes_frame.setVisible(True)
-            self.rtdetr_conc_frame.setVisible(True)  # Show RT-DETR concurrency control
             # Hide YOLO-only max det row
             self.yolo_maxdet_widget.setVisible(False)
         else:
             self.rtdetr_classes_frame.setVisible(False)
-            self.rtdetr_conc_frame.setVisible(False)  # Hide RT-DETR concurrency control
             # Show YOLO-only max det row for YOLO models
             if 'YOLO' in detector or 'Yolo' in detector or 'yolo' in detector or detector == 'Custom Model':
                 self.yolo_maxdet_widget.setVisible(True)
             else:
                 self.yolo_maxdet_widget.setVisible(False)
+        
+        # Show/hide RT-DETR concurrency control in Performance section (Advanced tab)
+        # Only update if the widget has been created (Advanced tab may not be loaded yet)
+        if hasattr(self, 'rtdetr_conc_frame'):
+            self.rtdetr_conc_frame.setVisible(is_rtdetr)
         
         # Always show settings frame
         self.yolo_settings_group.setVisible(True)
@@ -3537,20 +3518,47 @@ class MangaSettingsDialog(QDialog):
         self.parallel_panel_checkbox.toggled.connect(self._toggle_panel_controls)
         panel_layout.addWidget(self.parallel_panel_checkbox)
         
-        # Inpainting Performance (add to performance group)
-        inpaint_perf_group = QGroupBox("Inpainting Performance")
+        # Local LLM Performance (add to performance group)
+        inpaint_perf_group = QGroupBox("Local LLM Performance")
         perf_layout.addWidget(inpaint_perf_group)
         inpaint_perf_layout = QVBoxLayout(inpaint_perf_group)
         inpaint_perf_layout.setContentsMargins(8, 8, 8, 6)
         inpaint_perf_layout.setSpacing(4)
         
-        # Batch size
+        # RT-DETR Concurrency (for memory optimization)
+        rtdetr_conc_widget = QWidget()
+        rtdetr_conc_layout = QHBoxLayout(rtdetr_conc_widget)
+        rtdetr_conc_layout.setContentsMargins(0, 0, 0, 0)
+        inpaint_perf_layout.addWidget(rtdetr_conc_widget)
+        self.rtdetr_conc_frame = rtdetr_conc_widget
+        
+        rtdetr_conc_label = QLabel("RT-DETR Concurrency:")
+        rtdetr_conc_label.setMinimumWidth(150)
+        rtdetr_conc_layout.addWidget(rtdetr_conc_label)
+        
+        self.rtdetr_max_concurrency_spinbox = QSpinBox()
+        self.rtdetr_max_concurrency_spinbox.setRange(1, 8)
+        self.rtdetr_max_concurrency_spinbox.setValue(self.settings['ocr'].get('rtdetr_max_concurrency', 2))
+        self.rtdetr_max_concurrency_spinbox.setToolTip("Maximum concurrent RT-DETR region OCR calls (lower = less memory)")
+        rtdetr_conc_layout.addWidget(self.rtdetr_max_concurrency_spinbox)
+        
+        rtdetr_conc_desc = QLabel("parallel OCR calls (lower = less RAM)")
+        rtdetr_conc_desc_font = QFont('Arial', 9)
+        rtdetr_conc_desc.setFont(rtdetr_conc_desc_font)
+        rtdetr_conc_desc.setStyleSheet("color: gray;")
+        rtdetr_conc_layout.addWidget(rtdetr_conc_desc)
+        rtdetr_conc_layout.addStretch()
+        
+        # Initially hide RT-DETR concurrency control until we check detector type
+        self.rtdetr_conc_frame.setVisible(False)
+        
+        # Inpainting Concurrency
         inpaint_bs_frame = QWidget()
         inpaint_bs_layout = QHBoxLayout(inpaint_bs_frame)
         inpaint_bs_layout.setContentsMargins(0, 0, 0, 0)
         inpaint_perf_layout.addWidget(inpaint_bs_frame)
         
-        inpaint_bs_label = QLabel("Batch Size:")
+        inpaint_bs_label = QLabel("Inpainting Concurrency:")
         inpaint_bs_label.setMinimumWidth(150)
         inpaint_bs_layout.addWidget(inpaint_bs_label)
         
@@ -3778,6 +3786,17 @@ class MangaSettingsDialog(QDialog):
         self.ram_gate_floor_spinbox.setValue(int(self.settings.get('advanced', {}).get('ram_min_floor_over_baseline_mb', 128)))
         floor_layout.addWidget(self.ram_gate_floor_spinbox)
         floor_layout.addStretch()
+        
+        # Update RT-DETR concurrency control visibility based on current detector type
+        # This is called after the Advanced tab is fully created to sync with OCR tab state
+        QTimer.singleShot(0, self._sync_rtdetr_concurrency_visibility)
+
+    def _sync_rtdetr_concurrency_visibility(self):
+        """Sync RT-DETR concurrency control visibility with detector type selection"""
+        if hasattr(self, 'detector_type_combo') and hasattr(self, 'rtdetr_conc_frame'):
+            detector = self.detector_type_combo.currentText()
+            is_rtdetr = 'RT-DETR' in detector or 'RTEDR_onnx' in detector
+            self.rtdetr_conc_frame.setVisible(is_rtdetr)
 
     def _toggle_workers(self):
         """Enable/disable worker settings based on parallel processing toggle"""

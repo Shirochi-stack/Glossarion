@@ -160,12 +160,14 @@ class BubbleDetector:
     _rtdetr_onnx_loaded = False
     _rtdetr_onnx_providers = None
     _rtdetr_onnx_model_path = None
-    # Limit DML concurrent runs to avoid DXGI device hang. Adjustable via env DML_MAX_CONCURRENT
+    # Limit concurrent runs to avoid device hangs. Defaults to 2 for better parallelism.
+    # Can be overridden via env DML_MAX_CONCURRENT or config rtdetr_max_concurrency
     try:
-        _rtdetr_onnx_max_concurrent = int(os.environ.get('DML_MAX_CONCURRENT', '1'))
+        _rtdetr_onnx_max_concurrent = int(os.environ.get('DML_MAX_CONCURRENT', '2'))
     except Exception:
-        _rtdetr_onnx_max_concurrent = 1
+        _rtdetr_onnx_max_concurrent = 2
     _rtdetr_onnx_sema = threading.Semaphore(max(1, _rtdetr_onnx_max_concurrent))
+    _rtdetr_onnx_sema_initialized = False
     
     def __init__(self, config_path: str = "config.json"):
         """
@@ -234,6 +236,18 @@ class BubbleDetector:
         # Cache directory for ONNX conversions
         self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'models')
         os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # RT-DETR concurrency setting from config
+        try:
+            rtdetr_max_conc = int(ocr_cfg.get('rtdetr_max_concurrency', 2))
+            # Update class-level semaphore if not yet initialized or if value changed
+            if not BubbleDetector._rtdetr_onnx_sema_initialized or rtdetr_max_conc != BubbleDetector._rtdetr_onnx_max_concurrent:
+                BubbleDetector._rtdetr_onnx_max_concurrent = max(1, rtdetr_max_conc)
+                BubbleDetector._rtdetr_onnx_sema = threading.Semaphore(BubbleDetector._rtdetr_onnx_max_concurrent)
+                BubbleDetector._rtdetr_onnx_sema_initialized = True
+                logger.info(f"RT-DETR concurrency set to: {BubbleDetector._rtdetr_onnx_max_concurrent}")
+        except Exception as e:
+            logger.warning(f"Failed to set RT-DETR concurrency: {e}")
         
         # GPU availability
         self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
@@ -1670,51 +1684,58 @@ class BubbleDetector:
             w, h = pil_image.size
             orig_size = np.array([[w, h]], dtype=np.int64)
 
-            # Run with a concurrency guard when using DML to prevent device hangs
+            # Run with a concurrency guard to prevent device hangs and limit memory usage
+            # Apply semaphore for ALL providers (not just DML) to control concurrency
             providers = BubbleDetector._rtdetr_onnx_providers or []
             def _do_run(session):
                 return session.run(None, {
                     'images': im_data,
                     'orig_target_sizes': orig_size
                 })
-            if 'DmlExecutionProvider' in providers:
-                acquired = False
-                try:
-                    BubbleDetector._rtdetr_onnx_sema.acquire()
-                    acquired = True
-                    outputs = _do_run(self.rtdetr_onnx_session)
-                except Exception as dml_err:
-                    msg = str(dml_err)
-                    if '887A0005' in msg or '887A0006' in msg or 'Dml' in msg:
-                        # Rebuild CPU session and retry once
-                        try:
-                            base_path = BubbleDetector._rtdetr_onnx_model_path
-                            if base_path:
-                                so = ort.SessionOptions()
-                                so.enable_mem_pattern = False
-                                so.enable_cpu_mem_arena = False
-                                cpu_providers = ['CPUExecutionProvider']
-                                # Serialize rebuild
-                                with BubbleDetector._rtdetr_onnx_init_lock:
-                                    sess = ort.InferenceSession(base_path, providers=cpu_providers, sess_options=so)
-                                    BubbleDetector._rtdetr_onnx_shared_session = sess
-                                    BubbleDetector._rtdetr_onnx_providers = cpu_providers
-                                    self.rtdetr_onnx_session = sess
-                                outputs = _do_run(self.rtdetr_onnx_session)
-                            else:
+            
+            # Always use semaphore to limit concurrent RT-DETR calls
+            acquired = False
+            try:
+                BubbleDetector._rtdetr_onnx_sema.acquire()
+                acquired = True
+                
+                # Special DML error handling
+                if 'DmlExecutionProvider' in providers:
+                    try:
+                        outputs = _do_run(self.rtdetr_onnx_session)
+                    except Exception as dml_err:
+                        msg = str(dml_err)
+                        if '887A0005' in msg or '887A0006' in msg or 'Dml' in msg:
+                            # Rebuild CPU session and retry once
+                            try:
+                                base_path = BubbleDetector._rtdetr_onnx_model_path
+                                if base_path:
+                                    so = ort.SessionOptions()
+                                    so.enable_mem_pattern = False
+                                    so.enable_cpu_mem_arena = False
+                                    cpu_providers = ['CPUExecutionProvider']
+                                    # Serialize rebuild
+                                    with BubbleDetector._rtdetr_onnx_init_lock:
+                                        sess = ort.InferenceSession(base_path, providers=cpu_providers, sess_options=so)
+                                        BubbleDetector._rtdetr_onnx_shared_session = sess
+                                        BubbleDetector._rtdetr_onnx_providers = cpu_providers
+                                        self.rtdetr_onnx_session = sess
+                                    outputs = _do_run(self.rtdetr_onnx_session)
+                                else:
+                                    raise
+                            except Exception:
                                 raise
-                        except Exception:
+                        else:
                             raise
-                    else:
-                        raise
-                finally:
-                    if acquired:
-                        try:
-                            BubbleDetector._rtdetr_onnx_sema.release()
-                        except Exception:
-                            pass
-            else:
-                outputs = _do_run(self.rtdetr_onnx_session)
+                else:
+                    # Non-DML providers - just run directly
+                    outputs = _do_run(self.rtdetr_onnx_session)
+            finally:
+                if acquired:
+                    try:
+                        BubbleDetector._rtdetr_onnx_sema.release()
+                    except Exception:
+                        pass
 
             # outputs expected: labels, boxes, scores
             labels, boxes, scores = outputs[:3]
