@@ -1538,18 +1538,29 @@ class MangaTranslator:
             # Build lookup of free text regions for exclusion
             free_text_bboxes = free_text_regions if detector_type in ('rtdetr', 'rtdetr_onnx') else []
             
+            # DEBUG: Log free text bboxes
+            if free_text_bboxes:
+                self._log(f"🔍 Free text exclusion zones: {len(free_text_bboxes)} regions", "debug")
+                for idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                    self._log(f"   Free text zone {idx + 1}: x={fx:.0f}, y={fy:.0f}, w={fw:.0f}, h={fh:.0f}", "debug")
+            else:
+                self._log(f"⚠️ No free text exclusion zones detected by RT-DETR", "warning")
+            
             # Helper to check if a point is in any free text region
             def _point_in_free_text(cx, cy, free_boxes):
                 try:
-                    for (fx, fy, fw, fh) in free_boxes or []:
+                    for idx, (fx, fy, fw, fh) in enumerate(free_boxes or []):
                         if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                            self._log(f"      ✓ Point ({cx:.0f}, {cy:.0f}) is in free text zone {idx + 1}", "debug")
                             return True
-                except Exception:
+                except Exception as e:
+                    self._log(f"      ⚠️ Error checking free text: {e}", "debug")
                     pass
                 return False
             
             for bubble_idx, (bx, by, bw, bh) in enumerate(bubbles):
                 bubble_regions = []
+                self._log(f"\n   Processing bubble {bubble_idx + 1}: x={bx:.0f}, y={by:.0f}, w={bw:.0f}, h={bh:.0f}", "debug")
                 
                 for idx, region in enumerate(regions):
                     if idx in used_indices:
@@ -1563,13 +1574,16 @@ class MangaTranslator:
                     if (bx <= region_center_x <= bx + bw and 
                         by <= region_center_y <= by + bh):
                         
+                        self._log(f"      Region '{region.text[:20]}...' center ({region_center_x:.0f}, {region_center_y:.0f}) is in bubble", "debug")
+                        
                         # CRITICAL: Don't merge if this region is in a free text area
                         # Free text should stay separate from bubbles
                         if _point_in_free_text(region_center_x, region_center_y, free_text_bboxes):
                             # This region is in a free text area, don't merge it into bubble
-                            self._log(f"   Skipping region in bubble {bubble_idx + 1}: overlaps with free text area", "debug")
+                            self._log(f"      ❌ SKIPPING: Region overlaps with free text area", "debug")
                             continue
                         
+                        self._log(f"      ✓ Adding region to bubble {bubble_idx + 1}", "debug")
                         bubble_regions.append(region)
                         used_indices.add(idx)
                 
@@ -2247,9 +2261,109 @@ class MangaTranslator:
                                             # Clean up future to free memory
                                             del future
                                 
-                                # If we got results, return them (skip full-page OCR)
+                                # If we got results, post-process to fix overlapping classifications
                                 if regions:
                                     self._log(f"✅ RT-DETR + Google Vision: {len(regions)} text regions detected")
+                                    
+                                    # POST-PROCESS: Check for text_bubbles that overlap with free_text regions
+                                    # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
+                                    free_text_bboxes = rtdetr_detections.get('text_free', [])
+                                    if free_text_bboxes:
+                                        reclassified_count = 0
+                                        for region in regions:
+                                            if getattr(region, 'bubble_type', None) == 'text_bubble':
+                                                # Get region center
+                                                x, y, w, h = region.bounding_box
+                                                cx = x + w / 2
+                                                cy = y + h / 2
+                                                
+                                                self._log(f"   Checking text_bubble '{region.text[:30]}...' at center ({cx:.0f}, {cy:.0f})", "debug")
+                                                
+                                                # Check if center is in any free_text bbox
+                                                for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                                    in_x = fx <= cx <= fx + fw
+                                                    in_y = fy <= cy <= fy + fh
+                                                    self._log(f"      vs free_text bbox {bbox_idx+1}: in_x={in_x}, in_y={in_y}", "debug")
+                                                    
+                                                    if in_x and in_y:
+                                                        # Reclassify as free text
+                                                        old_type = region.bubble_type
+                                                        region.bubble_type = 'free_text'
+                                                        reclassified_count += 1
+                                                        self._log(f"      ✅ RECLASSIFIED '{region.text[:30]}...' from {old_type} to free_text", "info")
+                                                        break
+                                        
+                                        if reclassified_count > 0:
+                                            self._log(f"🔄 Reclassified {reclassified_count} overlapping regions as free_text", "info")
+                                            
+                                            # MERGE: Combine free_text regions that are within the same free_text bbox
+                                            # Group free_text regions by which free_text bbox they belong to
+                                            free_text_groups = {}
+                                            other_regions = []
+                                            
+                                            for region in regions:
+                                                if getattr(region, 'bubble_type', None) == 'free_text':
+                                                    # Find which free_text bbox this region belongs to
+                                                    x, y, w, h = region.bounding_box
+                                                    cx = x + w / 2
+                                                    cy = y + h / 2
+                                                    
+                                                    for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                                        if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                                                            if bbox_idx not in free_text_groups:
+                                                                free_text_groups[bbox_idx] = []
+                                                            free_text_groups[bbox_idx].append(region)
+                                                            break
+                                                    else:
+                                                        # Free text region not in any bbox (shouldn't happen, but handle it)
+                                                        other_regions.append(region)
+                                                else:
+                                                    other_regions.append(region)
+                                            
+                                            # Merge each group of free_text regions
+                                            merged_free_text = []
+                                            for bbox_idx, group in free_text_groups.items():
+                                                if len(group) > 1:
+                                                    # Merge multiple free text regions in same bbox
+                                                    merged_text = " ".join(r.text for r in group)
+                                                    
+                                                    min_x = min(r.bounding_box[0] for r in group)
+                                                    min_y = min(r.bounding_box[1] for r in group)
+                                                    max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in group)
+                                                    max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in group)
+                                                    
+                                                    all_vertices = []
+                                                    for r in group:
+                                                        if hasattr(r, 'vertices') and r.vertices:
+                                                            all_vertices.extend(r.vertices)
+                                                    
+                                                    if not all_vertices:
+                                                        all_vertices = [
+                                                            (min_x, min_y),
+                                                            (max_x, min_y),
+                                                            (max_x, max_y),
+                                                            (min_x, max_y)
+                                                        ]
+                                                    
+                                                    merged_region = TextRegion(
+                                                        text=merged_text,
+                                                        vertices=all_vertices,
+                                                        bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
+                                                        confidence=0.95,
+                                                        region_type='text_block'
+                                                    )
+                                                    merged_region.bubble_type = 'free_text'
+                                                    merged_region.should_inpaint = True
+                                                    merged_free_text.append(merged_region)
+                                                    self._log(f"🔀 Merged {len(group)} free_text regions into one: '{merged_text[:50]}...'", "debug")
+                                                else:
+                                                    # Single region, keep as-is
+                                                    merged_free_text.extend(group)
+                                            
+                                            # Combine all regions
+                                            regions = other_regions + merged_free_text
+                                            self._log(f"✅ Final: {len(regions)} regions after reclassification and merging", "info")
+                                    
                                     # Skip merging section and return directly
                                     return regions
                                 else:
@@ -2594,9 +2708,119 @@ class MangaTranslator:
                                             # Clean up future to free memory
                                             del future
                                 
-                                # If we got results, return them (skip full-page OCR)
+                                # If we got results, post-process to fix overlapping classifications
                                 if regions:
                                     self._log(f"✅ RT-DETR + Azure Vision: {len(regions)} text regions detected")
+                                    
+                                    # POST-PROCESS: Check for text_bubbles that overlap with free_text regions
+                                    # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
+                                    free_text_bboxes = rtdetr_detections.get('text_free', [])
+                                    
+                                    # DEBUG: Log what we have
+                                    self._log(f"🔍 POST-PROCESS: Found {len(free_text_bboxes)} free_text bboxes from RT-DETR", "debug")
+                                    for idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                        self._log(f"   Free text bbox {idx+1}: x={fx:.0f}, y={fy:.0f}, w={fw:.0f}, h={fh:.0f}", "debug")
+                                    
+                                    text_bubble_count = sum(1 for r in regions if getattr(r, 'bubble_type', None) == 'text_bubble')
+                                    free_text_count = sum(1 for r in regions if getattr(r, 'bubble_type', None) == 'free_text')
+                                    self._log(f"🔍 Before reclassification: {text_bubble_count} text_bubbles, {free_text_count} free_text", "debug")
+                                    
+                                    if free_text_bboxes:
+                                        reclassified_count = 0
+                                        for region in regions:
+                                            if getattr(region, 'bubble_type', None) == 'text_bubble':
+                                                # Get region center
+                                                x, y, w, h = region.bounding_box
+                                                cx = x + w / 2
+                                                cy = y + h / 2
+                                                
+                                                self._log(f"   Checking text_bubble '{region.text[:30]}...' at center ({cx:.0f}, {cy:.0f})", "debug")
+                                                
+                                                # Check if center is in any free_text bbox
+                                                for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                                    in_x = fx <= cx <= fx + fw
+                                                    in_y = fy <= cy <= fy + fh
+                                                    self._log(f"      vs free_text bbox {bbox_idx+1}: in_x={in_x}, in_y={in_y}", "debug")
+                                                    
+                                                    if in_x and in_y:
+                                                        # Reclassify as free text
+                                                        old_type = region.bubble_type
+                                                        region.bubble_type = 'free_text'
+                                                        reclassified_count += 1
+                                                        self._log(f"      ✅ RECLASSIFIED '{region.text[:30]}...' from {old_type} to free_text", "info")
+                                                        break
+                                        
+                                        if reclassified_count > 0:
+                                            self._log(f"🔄 Reclassified {reclassified_count} overlapping regions as free_text", "info")
+                                            
+                                            # MERGE: Combine free_text regions that are within the same free_text bbox
+                                            # Group free_text regions by which free_text bbox they belong to
+                                            free_text_groups = {}
+                                            other_regions = []
+                                            
+                                            for region in regions:
+                                                if getattr(region, 'bubble_type', None) == 'free_text':
+                                                    # Find which free_text bbox this region belongs to
+                                                    x, y, w, h = region.bounding_box
+                                                    cx = x + w / 2
+                                                    cy = y + h / 2
+                                                    
+                                                    for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
+                                                        if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                                                            if bbox_idx not in free_text_groups:
+                                                                free_text_groups[bbox_idx] = []
+                                                            free_text_groups[bbox_idx].append(region)
+                                                            break
+                                                    else:
+                                                        # Free text region not in any bbox (shouldn't happen, but handle it)
+                                                        other_regions.append(region)
+                                                else:
+                                                    other_regions.append(region)
+                                            
+                                            # Merge each group of free_text regions
+                                            merged_free_text = []
+                                            for bbox_idx, group in free_text_groups.items():
+                                                if len(group) > 1:
+                                                    # Merge multiple free text regions in same bbox
+                                                    merged_text = " ".join(r.text for r in group)
+                                                    
+                                                    min_x = min(r.bounding_box[0] for r in group)
+                                                    min_y = min(r.bounding_box[1] for r in group)
+                                                    max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in group)
+                                                    max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in group)
+                                                    
+                                                    all_vertices = []
+                                                    for r in group:
+                                                        if hasattr(r, 'vertices') and r.vertices:
+                                                            all_vertices.extend(r.vertices)
+                                                    
+                                                    if not all_vertices:
+                                                        all_vertices = [
+                                                            (min_x, min_y),
+                                                            (max_x, min_y),
+                                                            (max_x, max_y),
+                                                            (min_x, max_y)
+                                                        ]
+                                                    
+                                                    merged_region = TextRegion(
+                                                        text=merged_text,
+                                                        vertices=all_vertices,
+                                                        bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
+                                                        confidence=0.95,
+                                                        region_type='text_block'
+                                                    )
+                                                    merged_region.bubble_type = 'free_text'
+                                                    merged_region.should_inpaint = True
+                                                    merged_free_text.append(merged_region)
+                                                    self._log(f"🔀 Merged {len(group)} free_text regions into one: '{merged_text[:50]}...'", "debug")
+                                                else:
+                                                    # Single region, keep as-is
+                                                    merged_free_text.extend(group)
+                                            
+                                            # Combine all regions
+                                            regions = other_regions + merged_free_text
+                                            self._log(f"✅ Final: {len(regions)} regions after reclassification and merging", "info")
+                                    
                                     # Skip merging section and return directly
                                     return regions
                                 else:

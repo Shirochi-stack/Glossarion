@@ -975,33 +975,86 @@ class BubbleDetector:
             
             logger.info(f"📊 RT-DETR found {len(results['boxes'])} detections above {confidence:.2f} confidence")
 
-            # Organize detections by class
+            # Apply NMS to remove duplicate detections
+            # Group detections by class
+            class_detections = {self.CLASS_BUBBLE: [], self.CLASS_TEXT_BUBBLE: [], self.CLASS_TEXT_FREE: []}
+            
+            for box, score, label in zip(results['boxes'], results['scores'], results['labels']):
+                x1, y1, x2, y2 = map(float, box.tolist())
+                label_id = label.item()
+                if label_id in class_detections:
+                    class_detections[label_id].append((x1, y1, x2, y2, float(score.item())))
+            
+            # Apply NMS per class to remove duplicates
+            def compute_iou(box1, box2):
+                """Compute IoU between two boxes (x1, y1, x2, y2)"""
+                x1_1, y1_1, x2_1, y2_1 = box1[:4]
+                x1_2, y1_2, x2_2, y2_2 = box2[:4]
+                
+                # Intersection
+                x_left = max(x1_1, x1_2)
+                y_top = max(y1_1, y1_2)
+                x_right = min(x2_1, x2_2)
+                y_bottom = min(y2_1, y2_2)
+                
+                if x_right < x_left or y_bottom < y_top:
+                    return 0.0
+                
+                intersection = (x_right - x_left) * (y_bottom - y_top)
+                
+                # Union
+                area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+                area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+                union = area1 + area2 - intersection
+                
+                return intersection / union if union > 0 else 0.0
+            
+            def apply_nms(boxes_with_scores, iou_threshold=0.45):
+                """Apply Non-Maximum Suppression"""
+                if not boxes_with_scores:
+                    return []
+                
+                # Sort by score (descending)
+                sorted_boxes = sorted(boxes_with_scores, key=lambda x: x[4], reverse=True)
+                keep = []
+                
+                while sorted_boxes:
+                    # Keep the box with highest score
+                    current = sorted_boxes.pop(0)
+                    keep.append(current)
+                    
+                    # Remove boxes with high IoU
+                    sorted_boxes = [box for box in sorted_boxes if compute_iou(current, box) < iou_threshold]
+                
+                return keep
+            
+            # Apply NMS and organize by class
             detections = {
                 'bubbles': [],       # Empty speech bubbles
                 'text_bubbles': [],  # Bubbles with text
                 'text_free': []      # Text without bubbles
             }
             
-            for box, score, label in zip(results['boxes'], results['scores'], results['labels']):
-                x1, y1, x2, y2 = map(int, box.tolist())
-                width = x2 - x1
-                height = y2 - y1
+            for class_id, boxes_list in class_detections.items():
+                nms_boxes = apply_nms(boxes_list, iou_threshold=self.default_iou_threshold)
                 
-                # Store as (x, y, width, height) to match YOLOv8 format
-                bbox = (x1, y1, width, height)
-                
-                label_id = label.item()
-                if label_id == self.CLASS_BUBBLE:
-                    detections['bubbles'].append(bbox)
-                elif label_id == self.CLASS_TEXT_BUBBLE:
-                    detections['text_bubbles'].append(bbox)
-                elif label_id == self.CLASS_TEXT_FREE:
-                    detections['text_free'].append(bbox)
-                
-                # Stop early if we hit the configured cap across all classes
-                total_count = len(detections['bubbles']) + len(detections['text_bubbles']) + len(detections['text_free'])
-                if total_count >= (self.config.get('manga_settings', {}).get('ocr', {}).get('bubble_max_detections', self.default_max_detections) if isinstance(self.config, dict) else self.default_max_detections):
-                    break
+                for x1, y1, x2, y2, scr in nms_boxes:
+                    width = int(x2 - x1)
+                    height = int(y2 - y1)
+                    # Store as (x, y, width, height) to match YOLOv8 format
+                    bbox = (int(x1), int(y1), width, height)
+                    
+                    if class_id == self.CLASS_BUBBLE:
+                        detections['bubbles'].append(bbox)
+                    elif class_id == self.CLASS_TEXT_BUBBLE:
+                        detections['text_bubbles'].append(bbox)
+                    elif class_id == self.CLASS_TEXT_FREE:
+                        detections['text_free'].append(bbox)
+                    
+                    # Stop early if we hit the configured cap across all classes
+                    total_count = len(detections['bubbles']) + len(detections['text_bubbles']) + len(detections['text_free'])
+                    if total_count >= (self.config.get('manga_settings', {}).get('ocr', {}).get('bubble_max_detections', self.default_max_detections) if isinstance(self.config, dict) else self.default_max_detections):
+                        break
             
             # Log results
             total = len(detections['bubbles']) + len(detections['text_bubbles']) + len(detections['text_free'])
@@ -1746,22 +1799,79 @@ class BubbleDetector:
             if boxes.ndim == 3 and boxes.shape[0] == 1:
                 boxes = boxes[0]
 
-            detections = {'bubbles': [], 'text_bubbles': [], 'text_free': []}
-            bubbles_all = []
+            # Apply NMS to remove duplicate detections
+            # Group detections by class and apply NMS per class
+            class_detections = {self.CLASS_BUBBLE: [], self.CLASS_TEXT_BUBBLE: [], self.CLASS_TEXT_FREE: []}
+            
             for lab, box, scr in zip(labels, boxes, scores):
                 if float(scr) < float(confidence):
                     continue
-                x1, y1, x2, y2 = map(int, box)
-                bbox = (x1, y1, x2 - x1, y2 - y1)
                 label_id = int(lab)
-                if label_id == self.CLASS_BUBBLE:
-                    detections['bubbles'].append(bbox)
-                    bubbles_all.append(bbox)
-                elif label_id == self.CLASS_TEXT_BUBBLE:
-                    detections['text_bubbles'].append(bbox)
-                    bubbles_all.append(bbox)
-                elif label_id == self.CLASS_TEXT_FREE:
-                    detections['text_free'].append(bbox)
+                if label_id in class_detections:
+                    x1, y1, x2, y2 = map(float, box)
+                    class_detections[label_id].append((x1, y1, x2, y2, float(scr)))
+            
+            # Apply NMS per class to remove duplicates
+            def compute_iou(box1, box2):
+                """Compute IoU between two boxes (x1, y1, x2, y2)"""
+                x1_1, y1_1, x2_1, y2_1 = box1[:4]
+                x1_2, y1_2, x2_2, y2_2 = box2[:4]
+                
+                # Intersection
+                x_left = max(x1_1, x1_2)
+                y_top = max(y1_1, y1_2)
+                x_right = min(x2_1, x2_2)
+                y_bottom = min(y2_1, y2_2)
+                
+                if x_right < x_left or y_bottom < y_top:
+                    return 0.0
+                
+                intersection = (x_right - x_left) * (y_bottom - y_top)
+                
+                # Union
+                area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+                area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+                union = area1 + area2 - intersection
+                
+                return intersection / union if union > 0 else 0.0
+            
+            def apply_nms(boxes_with_scores, iou_threshold=0.45):
+                """Apply Non-Maximum Suppression"""
+                if not boxes_with_scores:
+                    return []
+                
+                # Sort by score (descending)
+                sorted_boxes = sorted(boxes_with_scores, key=lambda x: x[4], reverse=True)
+                keep = []
+                
+                while sorted_boxes:
+                    # Keep the box with highest score
+                    current = sorted_boxes.pop(0)
+                    keep.append(current)
+                    
+                    # Remove boxes with high IoU
+                    sorted_boxes = [box for box in sorted_boxes if compute_iou(current, box) < iou_threshold]
+                
+                return keep
+            
+            # Apply NMS and build final detections
+            detections = {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+            bubbles_all = []
+            
+            for class_id, boxes_list in class_detections.items():
+                nms_boxes = apply_nms(boxes_list, iou_threshold=self.default_iou_threshold)
+                
+                for x1, y1, x2, y2, scr in nms_boxes:
+                    bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+                    
+                    if class_id == self.CLASS_BUBBLE:
+                        detections['bubbles'].append(bbox)
+                        bubbles_all.append(bbox)
+                    elif class_id == self.CLASS_TEXT_BUBBLE:
+                        detections['text_bubbles'].append(bbox)
+                        bubbles_all.append(bbox)
+                    elif class_id == self.CLASS_TEXT_FREE:
+                        detections['text_free'].append(bbox)
 
             return bubbles_all if return_all_bubbles else detections
         except Exception as e:
