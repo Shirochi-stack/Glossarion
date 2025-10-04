@@ -3027,7 +3027,8 @@ class MangaTranslator:
                     self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages, order: {reading_order})")
                 
                 # Start Read operation with error handling and rate limit retry
-                max_retries = 3
+                # Use max_retries from config (default 7, configurable in Other Settings)
+                max_retries = self.main_gui.config.get('max_retries', 7)
                 retry_delay = 60  # Start with 60 seconds for rate limits
                 read_response = None
                 
@@ -3053,10 +3054,10 @@ class MangaTranslator:
                     except Exception as e:
                         error_msg = str(e)
                         
-                        # Handle rate limit errors with exponential backoff
+                        # Handle rate limit errors with fixed 60s wait
                         if 'Too Many Requests' in error_msg or '429' in error_msg:
                             if retry_attempt < max_retries - 1:
-                                wait_time = retry_delay * (2 ** retry_attempt)  # Exponential backoff
+                                wait_time = retry_delay  # Fixed 60s wait each time
                                 self._log(f"⚠️ Azure rate limit hit. Waiting {wait_time}s before retry {retry_attempt + 1}/{max_retries}...", "warning")
                                 time.sleep(wait_time)
                                 continue
