@@ -2245,8 +2245,8 @@ class MangaTranslator:
                                 
                                 # Process regions concurrently with RT-DETR concurrency control
                                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                                # Use rtdetr_max_concurrency setting (default 2) to control parallel OCR calls
-                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
+                                # Use rtdetr_max_concurrency setting (default 12) to control parallel OCR calls
+                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 12), len(all_regions))
                                 
                                 region_data_list = [(i+1, i, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
                                 
@@ -2691,9 +2691,9 @@ class MangaTranslator:
                                 
                                 # Process regions concurrently with RT-DETR concurrency control
                                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                                # Use rtdetr_max_concurrency setting (default 2)
-                                # Note: Azure has rate limits - adjust rtdetr_max_concurrency in settings if you hit limits
-                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
+                                # Use rtdetr_max_concurrency setting (default 12)
+                                # Note: Rate limiting is handled via 0.1-0.3s delays per request
+                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 12), len(all_regions))
                                 
                                 region_data_list = [(i+1, i, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
                                 
