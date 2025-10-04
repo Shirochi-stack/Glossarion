@@ -360,21 +360,20 @@ class MangaTranslator:
         # Default prompt for full page context mode
         self.full_page_context_prompt = (
             "You will receive multiple text segments from a manga page. "
-            "Each segment will be prefixed with [0], [1], [2], etc. for tracking. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
             "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
-            "INCLUDING the [0], [1] index prefixes, and each value is the translation.\n"
+            "(without the [0], [1] index prefixes) and each value is the translation.\n"
             "Make sure to properly escape any special characters in the JSON:\n"
             "- Use \\n for newlines\n"
             "- Use \\\" for quotes\n"
             "- Use \\\\ for backslashes\n\n"
-            "Example format (you must preserve the [0], [1] prefixes):\n"
+            "Example:\n"
             '{\n'
-            '  "[0] こんにちは": "Hello",\n'
-            '  "[1] ありがとう": "Thank you"\n'
+            '  こんにちは: Hello,\n'
+            '  ありがとう: Thank you\n'
             '}\n\n'
-            'CRITICAL: You MUST include the [0], [1], etc. prefixes in the JSON keys exactly as provided.'
+            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
 
         # Visual context setting (for non-vision model support)
@@ -395,12 +394,7 @@ class MangaTranslator:
         except Exception:
             self.min_readable_size = int(main_gui.config.get('manga_min_readable_size', 16))
         self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
-        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', True)
-        
-        # Hyphenation settings - minimum characters before/after hyphen
-        # Default: 2 chars minimum (prevents breaks like "a-pple" or "appl-e")
-        self.min_chars_before_hyphen = main_gui.config.get('manga_min_chars_before_hyphen', 2)
-        self.min_chars_after_hyphen = main_gui.config.get('manga_min_chars_after_hyphen', 2)
+        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', False)
         
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
@@ -2105,19 +2099,9 @@ class MangaTranslator:
                         processed_image_data = image_file.read()
             
             # Compute per-image hash for caching (based on uploaded bytes)
-            # CRITICAL FIX: Never allow None page_hash to prevent cache key collisions
             try:
                 import hashlib
-                import uuid
                 page_hash = hashlib.sha1(processed_image_data).hexdigest()
-                
-                # CRITICAL: Never allow None page_hash
-                if page_hash is None:
-                    # Fallback: use image path + timestamp for uniqueness
-                    page_hash = hashlib.sha1(
-                        f"{image_path}_{time.time()}_{uuid.uuid4()}".encode()
-                    ).hexdigest()
-                    self._log("⚠️ Using fallback page hash for cache isolation", "warning")
                 
                 # CRITICAL: If image hash changed, force clear ROI cache
                 # THREAD-SAFE: Use lock for parallel panel translation
@@ -2127,12 +2111,9 @@ class MangaTranslator:
                             self.ocr_roi_cache.clear()
                         self._log("🧹 Image changed - cleared ROI cache", "debug")
                 self._current_image_hash = page_hash
-            except Exception as e:
-                # Emergency fallback - never let page_hash be None
-                import uuid
-                page_hash = str(uuid.uuid4())
-                self._current_image_hash = page_hash
-                self._log(f"⚠️ Page hash generation failed: {e}, using UUID fallback", "error")
+            except Exception:
+                page_hash = None
+                self._current_image_hash = None
             
             regions = []
             
@@ -2280,9 +2261,12 @@ class MangaTranslator:
                                             # Clean up future to free memory
                                             del future
                                 
-                                # If we got results, post-process to fix overlapping classifications
+                                # If we got results, sort and post-process
                                 if regions:
-                                    self._log(f"✅ RT-DETR + Google Vision: {len(regions)} text regions detected")
+                                    # CRITICAL: Sort regions by position (top-to-bottom, left-to-right)
+                                    # Concurrent processing returns them in completion order, not detection order
+                                    regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+                                    self._log(f"✅ RT-DETR + Google Vision: {len(regions)} text regions detected (sorted by position)")
                                     
                                     # POST-PROCESS: Check for text_bubbles that overlap with free_text regions
                                     # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
@@ -2727,9 +2711,12 @@ class MangaTranslator:
                                             # Clean up future to free memory
                                             del future
                                 
-                                # If we got results, post-process to fix overlapping classifications
+                                # If we got results, sort and post-process
                                 if regions:
-                                    self._log(f"✅ RT-DETR + Azure Vision: {len(regions)} text regions detected")
+                                    # CRITICAL: Sort regions by position (top-to-bottom, left-to-right)
+                                    # Concurrent processing returns them in completion order, not detection order
+                                    regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+                                    self._log(f"✅ RT-DETR + Azure Vision: {len(regions)} text regions detected (sorted by position)")
                                     
                                     # POST-PROCESS: Check for text_bubbles that overlap with free_text regions
                                     # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
@@ -3847,13 +3834,6 @@ class MangaTranslator:
             import traceback
             self._log(traceback.format_exc(), "error")
             raise
-        finally:
-            # CRITICAL FIX #2: Clear cache after processing each image
-            # This ensures no text leaks to next image even if translator is reused
-            if hasattr(self, 'ocr_roi_cache'):
-                with self._cache_lock:
-                    self.ocr_roi_cache.clear()
-                self._log("🧹 Cleared ROI cache after processing", "debug")
 
     def _validate_easyocr_languages(self, languages):
         """Validate EasyOCR language combinations"""
@@ -4203,8 +4183,7 @@ class MangaTranslator:
         work_rois = []
         for roi in rois:
             x, y, w, h = roi['bbox']
-            # FIX #3: Include region type AND page_hash in cache key to prevent mismapping
-            # page_hash ensures different images never share cache entries
+            # Include region type in cache key to prevent mismapping
             cache_key = ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode, roi.get('type', 'unknown'))
             # THREAD-SAFE: Use lock for cache access in parallel panel translation
             with self._cache_lock:
@@ -4226,18 +4205,6 @@ class MangaTranslator:
             else:
                 roi['cache_key'] = cache_key
                 work_rois.append(roi)
-        
-        # FIX #5: Log cache statistics for debugging cross-image contamination
-        cache_hits = len(results)
-        cache_misses = len(work_rois)
-        total_rois = cache_hits + cache_misses
-        if total_rois > 0:
-            hit_rate = (cache_hits / total_rois) * 100
-            self._log(f"📊 Google ROI Cache: {cache_hits}/{total_rois} hits ({hit_rate:.1f}%), page_hash={page_hash[:8] if page_hash else 'None'}...", "info")
-            if cache_hits > 0 and page_hash:
-                # Log sample of cached text for verification
-                for i, region in enumerate(results[:2]):
-                    self._log(f"  💾 Cached[{i}]: '{region.text[:40]}...'", "debug")
 
         if not work_rois:
             return results
@@ -4321,7 +4288,6 @@ class MangaTranslator:
                 except Exception:
                     pass
                 results.append(region)
-        
         return results
 
     def _azure_ocr_rois_concurrent(self, rois: List[Dict[str, Any]], ocr_settings: Dict, max_workers: int, page_hash: str) -> List[TextRegion]:
@@ -4352,8 +4318,7 @@ class MangaTranslator:
         work_rois: List[Dict[str, Any]] = []
         for roi in rois:
             x, y, w, h = roi['bbox']
-            # FIX #3: Include region type AND page_hash in cache key to prevent mismapping
-            # page_hash ensures different images never share cache entries
+            # Include region type in cache key to prevent mismapping
             cache_key = ("azure", page_hash, x, y, w, h, reading_order, roi.get('type', 'unknown'))
             # THREAD-SAFE: Use lock for cache access in parallel panel translation
             with self._cache_lock:
@@ -4375,18 +4340,6 @@ class MangaTranslator:
             else:
                 roi['cache_key'] = cache_key
                 work_rois.append(roi)
-        
-        # FIX #5: Log cache statistics for debugging cross-image contamination
-        cache_hits = len(cached_regions)
-        cache_misses = len(work_rois)
-        total_rois = cache_hits + cache_misses
-        if total_rois > 0:
-            hit_rate = (cache_hits / total_rois) * 100
-            self._log(f"📊 Azure ROI Cache: {cache_hits}/{total_rois} hits ({hit_rate:.1f}%), page_hash={page_hash[:8] if page_hash else 'None'}...", "info")
-            if cache_hits > 0 and page_hash:
-                # Log sample of cached text for verification
-                for i, region in enumerate(cached_regions[:2]):
-                    self._log(f"  💾 Cached[{i}]: '{region.text[:40]}...'", "debug")
 
         def ocr_one(roi):
             try:
@@ -4497,7 +4450,6 @@ class MangaTranslator:
                     reg = fut.result()
                     if reg is not None:
                         results.append(reg)
-        
         return results
 
     def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
@@ -5816,40 +5768,44 @@ class MangaTranslator:
                 self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
                 self._log(f"Response preview: {response_text[:500]}...", "warning")
                 
-                # Fallback: try regex extraction
-                try:
-                    import re
-                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
-                    matches = re.findall(pattern, response_text)
-                    
-                    for key, value in matches:
-                        # Unescape the value
-                        value = value.replace('\\n', '\n')
-                        value = value.replace('\\"', '"')
-                        value = value.replace('\\\\', '\\')
-                        translations[key] = value
-                    
-                    if translations:
-                        self._log(f"✅ Recovered {len(translations)} translations using regex")
-                except:
-                    self._log("❌ All parsing attempts failed", "error")
-                    return {}
-                
-                # Try fallback regex extraction
+                # Fallback: try regex extraction (handles both quoted and unquoted keys)
                 try:
                     import re
                     translations = {}
-                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
-                    matches = re.findall(pattern, response_text)
                     
-                    for key, value in matches:
-                        value = value.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
-                        translations[key] = value
+                    # Try 1: Standard quoted keys and values
+                    pattern1 = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                    matches = re.findall(pattern1, response_text)
                     
-                    if translations:
-                        self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
-                except Exception as e2:
-                    self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
+                    if matches:
+                        for key, value in matches:
+                            value = value.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+                            translations[key] = value
+                        self._log(f"✅ Recovered {len(translations)} translations using regex (quoted keys)")
+                    else:
+                        # Try 2: Unquoted keys (for invalid JSON like: key: "value")
+                        pattern2 = r'([^\s:{}]+)\s*:\s*([^\n}]+)'
+                        matches = re.findall(pattern2, response_text)
+                        
+                        for key, value in matches:
+                            # Clean up key and value
+                            key = key.strip()
+                            value = value.strip().rstrip(',')
+                            # Remove quotes from value if present
+                            if value.startswith('"') and value.endswith('"'):
+                                value = value[1:-1]
+                            elif value.startswith("'") and value.endswith("'"):
+                                value = value[1:-1]
+                            translations[key] = value
+                        
+                        if translations:
+                            self._log(f"✅ Recovered {len(translations)} translations using regex (unquoted keys)")
+                    
+                    if not translations:
+                        self._log("❌ All parsing attempts failed", "error")
+                        return {}
+                except Exception as e:
+                    self._log(f"❌ Failed to recover JSON: {e}", "error")
                     return {}
             
             # Map translations back to regions
@@ -5857,54 +5813,45 @@ class MangaTranslator:
             all_originals = []
             all_translations = []
 
-            # Map using flexible text matching
-            self._log(f"📊 Mapping {len(translations)} translations to {len(regions)} regions")
-            
-            # Helper function to normalize text for matching
-            def normalize_for_matching(text):
-                """Remove common OCR artifacts and normalize for matching"""
-                import re
-                # Remove index prefix if present
-                text = re.sub(r'^\[\d+\]\s*', '', text)
-                # Remove furigana patterns (small hiragana after kanji)
-                text = re.sub(r'[\u3040-\u309f\s]+', '', text)
-                # Remove spaces and normalize
-                return text.strip().replace(' ', '').replace('\u3000', '')
-            
-            # Create a mapping of normalized keys to original keys
-            normalized_map = {}
-            for orig_key in translations.keys():
-                norm_key = normalize_for_matching(orig_key)
-                normalized_map[norm_key] = orig_key
-                self._log(f"  🔍 Normalized '{orig_key[:30]}...' -> '{norm_key[:30]}...'", "debug")
+            # Extract translation values in order
+            translation_values = list(translations.values()) if translations else []
+
+            # DEBUG: Log what we extracted
+            self._log(f"📊 Extracted {len(translation_values)} translation values", "debug")
+            for i, val in enumerate(translation_values[:1000]):  # First 1000 for debugging
+                # Safely handle None values
+                val_str = str(val) if val is not None else ""
+                self._log(f"  Translation {i}: '{val_str[:1000]}...'", "debug")
+
+            # Clean all translation values to remove quotes
+            translation_values = [self._clean_translation_text(t) for t in translation_values]
+
+            self._log(f"🔍 DEBUG: translation_values after cleaning:", "debug")
+            for i, val in enumerate(translation_values):
+                self._log(f"  [{i}]: {repr(val)}", "debug")
+
+            # Position-based mapping
+            self._log(f"📊 Mapping {len(translation_values)} translations to {len(regions)} regions")
             
             for i, region in enumerate(regions):
                 if i % 10 == 0 and self._check_stop():
                     self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
                     return result
                 
-                # Get translation using flexible matching
+                # Get translation by position or key
                 translated = ""
-                indexed_key = f"[{i}] {region.text}"
                 
-                # Try 1: Exact indexed key match
-                if indexed_key in translations:
-                    translated = self._clean_translation_text(translations[indexed_key])
-                    self._log(f"  ✅ [Method 1] Found for indexed key: {indexed_key[:40]}...", "debug")
-                # Try 2: Exact plain text match
+                # Try position-based first
+                if i < len(translation_values):
+                    translated = translation_values[i]
+                # Try key-based fallback
                 elif region.text in translations:
                     translated = self._clean_translation_text(translations[region.text])
-                    self._log(f"  ✅ [Method 2] Found for plain text: {region.text[:40]}...", "debug")
-                # Try 3: Normalized text matching
+                # Try indexed key
                 else:
-                    norm_region = normalize_for_matching(region.text)
-                    if norm_region in normalized_map:
-                        orig_key = normalized_map[norm_region]
-                        translated = self._clean_translation_text(translations[orig_key])
-                        self._log(f"  ✅ [Method 3] Fuzzy match: '{region.text[:30]}...' -> '{orig_key[:30]}...'", "debug")
-                    else:
-                        self._log(f"  ⚠️ No translation found for: {region.text[:40]}...", "warning")
-                        self._log(f"     Normalized to: {norm_region[:40]}...", "debug")
+                    key = f"[{i}] {region.text}"
+                    if key in translations:
+                        translated = self._clean_translation_text(translations[key])
                 
                 # Don't use original Japanese text if no translation found
                 if not translated or translated == region.text:
@@ -7772,193 +7719,141 @@ class MangaTranslator:
         return safe_x, safe_y, safe_width, safe_height
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
-        """Find optimal font size using comic-translate's top-down approach
-        
-        This closely mirrors comic-translate's pil_word_wrap algorithm:
-        - Start with maximum font size
-        - Decrement continuously (0.75 steps) until text fits
-        - Use actual multiline text measurement
-        - Optimize column wrapping when width is issue
-        - Brute force optimization when at minimum size
-        """
+        """Find optimal font size with better algorithm"""
         
         # Get usable area
         if region and hasattr(region, 'vertices') and region.vertices:
             safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
-            roi_width = safe_width
-            roi_height = safe_height
+            usable_width = safe_width
+            usable_height = safe_height
         else:
             # Use 85% of bubble area
             margin = 0.85
-            roi_width = int(max_width * margin)
-            roi_height = int(max_height * margin)
+            usable_width = int(max_width * margin)
+            usable_height = int(max_height * margin)
         
         # Font size limits
-        min_font_size = max(10, self.min_readable_size)
-        init_font_size = min(40, self.max_font_size_limit)  # Start high
+        MIN_FONT = max(10, self.min_readable_size)
+        MAX_FONT = min(40, self.max_font_size_limit)  # Cap at reasonable max
         
-        # Helper function to measure actual multiline text dimensions
-        def eval_metrics(txt: str, font: ImageFont) -> Tuple[float, float]:
-            """Calculate actual width/height of multiline text (like comic-translate)"""
-            # Split into lines if not already
-            lines = txt.split('\n') if '\n' in txt else [txt]
-            
-            # Measure each line
-            max_width = 0
-            total_height = 0
-            
-            for line in lines:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                line_width = bbox[2] - bbox[0]
-                line_height = bbox[3] - bbox[1]
-                max_width = max(max_width, line_width)
-                total_height += line_height
-            
-            # Add spacing between lines (approximate)
-            if len(lines) > 1:
-                line_spacing = font.size * 0.2 if hasattr(font, 'size') else 2
-                total_height += line_spacing * (len(lines) - 1)
-            
-            return max_width, total_height
+        # Quick estimate based on bubble size
+        # Smaller bubbles need smaller fonts
+        bubble_area = usable_width * usable_height
+        if bubble_area < 5000:  # Very small bubble
+            MAX_FONT = min(MAX_FONT, 18)
+        elif bubble_area < 10000:  # Small bubble
+            MAX_FONT = min(MAX_FONT, 22)
+        elif bubble_area < 20000:  # Medium bubble
+            MAX_FONT = min(MAX_FONT, 28)
         
-        # Top-down approach: start high, decrement until fits
-        mutable_message = text
-        font_size = float(init_font_size)
+        # Start with a reasonable guess based on text length
+        text_length = len(text.strip())
+        chars_per_line = max(1, usable_width // 20)  # Estimate ~20 pixels per character
+        estimated_lines = max(1, text_length // chars_per_line)
         
-        while font_size > min_font_size:
-            font = self._get_font(int(font_size))
-            width, height = eval_metrics(mutable_message, font)
+        # Initial size estimate based on height available per line
+        if estimated_lines > 0:
+            initial_size = int(usable_height / (estimated_lines * 1.5))  # 1.5 for line spacing
+            initial_size = max(MIN_FONT, min(initial_size, MAX_FONT))
+        else:
+            initial_size = (MIN_FONT + MAX_FONT) // 2
+        
+        # Binary search for optimal size
+        low = MIN_FONT
+        high = min(initial_size + 10, MAX_FONT)  # Start searching from initial estimate
+        best_size = MIN_FONT
+        best_lines = []
+        
+        # Track attempts to avoid infinite loops
+        attempts = 0
+        max_attempts = 15
+        
+        while low <= high and attempts < max_attempts:
+            attempts += 1
+            mid = (low + high) // 2
             
-            # Check if height exceeds (comic-translate line 61)
-            if height > roi_height:
-                font_size -= 0.75  # Reduce point size
-                mutable_message = text  # Restore original text
+            font = self._get_font(mid)
+            lines = self._wrap_text(text, font, usable_width, draw)
             
-            # Check if width exceeds (comic-translate line 64)
-            elif width > roi_width:
-                # Try different column widths to find best wrapping
-                columns = len(mutable_message)
-                found_fit = False
+            if not lines:  # Safety check
+                low = mid + 1
+                continue
+            
+            # Calculate actual height needed
+            line_height = mid * 1.3  # Standard line spacing
+            total_height = len(lines) * line_height
+            
+            # Check if it fits
+            if total_height <= usable_height:
+                # It fits, try larger
+                best_size = mid
+                best_lines = lines
                 
-                # Set minimum column width to prevent single-letter wrapping
-                # Use at least 3 characters per line, or fewer only if text is very short
-                min_columns = min(3, max(1, len(text) // 10))  # At most 10 lines
-                
-                while columns >= min_columns:
-                    columns -= 1
-                    if columns < min_columns:
-                        break
-                    
-                    # Wrap text with hyphenation using our _wrap_text_with_columns helper
-                    wrapped_text = self._wrap_text_with_columns(text, columns)
-                    wrapped_width, _ = eval_metrics(wrapped_text, font)
-                    
-                    if wrapped_width <= roi_width:
-                        mutable_message = wrapped_text
-                        found_fit = True
-                        break
-                
-                # If no column width worked, reduce font size
-                if not found_fit:
-                    font_size -= 0.75
-                    mutable_message = text  # Restore original
-                else:
-                    # Found good wrapping, done!
+                # But don't go too large - check readability
+                if len(lines) == 1 and mid >= MAX_FONT * 0.8:
+                    # Single line at large size, good enough
                     break
+                elif len(lines) <= 3 and mid >= MAX_FONT * 0.7:
+                    # Few lines at good size, good enough
+                    break
+                
+                low = mid + 1
             else:
-                # Both width and height fit, we're done!
-                break
+                # Doesn't fit, go smaller
+                high = mid - 1
         
-        # If we hit minimum font size, do brute-force optimization (comic-translate lines 80-98)
-        if font_size <= min_font_size:
-            font_size = min_font_size
-            font = self._get_font(int(font_size))
-            
-            # Brute force search all column widths for best fit
-            # Minimize cost: (width - roi_width)^2 + (height - roi_height)^2
-            min_cost = float('inf')
-            best_text = text
-            
-            # Set reasonable bounds for column search to prevent single-letter wrapping
-            min_columns = min(3, max(1, len(text) // 10))  # At most 10 lines
-            max_columns = len(text)
-            
-            for columns in range(min_columns, max_columns + 1):
-                wrapped_text = self._wrap_text_with_columns(text, columns)
-                wrapped_width, wrapped_height = eval_metrics(wrapped_text, font)
-                
-                # Calculate cost (comic-translate line 93)
-                cost = (wrapped_width - roi_width)**2 + (wrapped_height - roi_height)**2
-                
-                if cost < min_cost:
-                    min_cost = cost
-                    best_text = wrapped_text
-            
-            mutable_message = best_text
-        
-        # Convert back to list of lines
-        final_lines = mutable_message.split('\n') if '\n' in mutable_message else [mutable_message]
-        final_size = int(font_size)
+        # Fallback if no good size found
+        if not best_lines:
+            font = self._get_font(MIN_FONT)
+            best_lines = self._wrap_text(text, font, usable_width, draw)
+            best_size = MIN_FONT
         
         # Apply multiplier if in multiplier mode
         if self.font_size_mode == 'multiplier':
-            target_size = int(final_size * self.font_size_multiplier)
+            target_size = int(best_size * self.font_size_multiplier)
             
+            # Check if multiplied size still fits (if constrained)
             if self.constrain_to_bubble:
-                # Check if multiplied size still fits
-                test_font = self._get_font(target_size)
-                test_text = '\n'.join(final_lines)
-                test_width, test_height = eval_metrics(test_text, test_font)
+                font = self._get_font(target_size)
+                test_lines = self._wrap_text(text, font, usable_width, draw)
+                test_height = len(test_lines) * target_size * 1.3
                 
-                if test_height <= roi_height and test_width <= roi_width:
-                    final_size = target_size
+                if test_height <= usable_height:
+                    best_size = target_size
+                    best_lines = test_lines
                 else:
+                    # Multiplied size doesn't fit, use original
                     self._log(f"  Multiplier {self.font_size_multiplier}x would exceed bubble", "debug")
             else:
-                final_size = target_size
+                # Not constrained, use multiplied size
+                best_size = target_size
+                font = self._get_font(best_size)
+                best_lines = self._wrap_text(text, font, usable_width, draw)
         
-        self._log(f"  Font sizing: text_len={len(text)}, size={final_size}, lines={len(final_lines)}", "debug")
+        self._log(f"  Font sizing: text_len={text_length}, size={best_size}, lines={len(best_lines)}", "debug")
         
-        return final_size, final_lines
+        return best_size, best_lines
 
     def _fit_text_simple_topdown(self, text: str, usable_width: int, usable_height: int, 
                                  draw: ImageDraw, min_size: int, max_size: int) -> Tuple[int, List[str]]:
-        """Binary search approach (comic-translate method) - find largest font that fits"""
+        """Simple top-down approach - start large and shrink only if needed"""
+        # Start from a reasonable large size
+        start_size = int(max_size * 0.8)
         
-        def wrap_and_measure(font_size):
-            """Helper to wrap text and measure total height"""
+        for font_size in range(start_size, min_size - 1, -2):  # Step by 2 for speed
             font = self._get_font(font_size)
             lines = self._wrap_text(text, font, usable_width, draw)
-            line_height = font_size * 1.2
+            
+            line_height = font_size * 1.2  # Tighter for overlaps
             total_height = len(lines) * line_height
-            return lines, total_height
-        
-        # Binary search for the largest font size that fits
-        lo, hi = min_size, max_size
-        best_size = min_size
-        best_lines = []
-        found_fit = False
-        
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            lines, total_height = wrap_and_measure(mid)
             
             if total_height <= usable_height:
-                # Fits! Try larger
-                found_fit = True
-                best_size = mid
-                best_lines = lines
-                lo = mid + 1
-            else:
-                # Too big, try smaller
-                hi = mid - 1
+                return font_size, lines
         
-        # If nothing fit, force minimum size
-        if not found_fit:
-            best_lines, _ = wrap_and_measure(min_size)
-            best_size = min_size
-        
-        return best_size, best_lines
+        # If nothing fits, use minimum
+        font = self._get_font(min_size)
+        lines = self._wrap_text(text, font, usable_width, draw)
+        return min_size, lines
 
     def _check_potential_overlap(self, region: TextRegion) -> bool:
         """Check if this region might overlap with others based on position"""
@@ -7976,43 +7871,8 @@ class MangaTranslator:
         # For now, default to no overlap for larger bubbles
         return False
     
-    def _wrap_text_with_columns(self, text: str, columns: int) -> str:
-        """Wrap text to specific column width using TextWrapper with hyphenation.
-        Returns newline-joined string like comic-translate does.
-        
-        Args:
-            text: Text to wrap
-            columns: Character column width
-            
-        Returns:
-            Wrapped text with \n separators
-        """
-        from hyphen_textwrap import wrap as hyphen_wrap
-        
-        # Safety: Don't wrap if columns is too small (prevents single-letter lines)
-        if columns < 1:
-            return text
-        
-        # Prevent wrapping into single letters for very small column counts
-        # Only allow if text is genuinely that short
-        if columns < 3 and len(text) > 5:
-            columns = 3
-        
-        # Use hyphen_wrap like comic-translate does (line 70, 91)
-        # break_on_hyphens=True allows breaking at existing hyphens
-        # but we respect strict_text_wrapping for forced word breaking
-        wrapped_lines = hyphen_wrap(
-            text, 
-            columns,
-            break_on_hyphens=True,  # Allow breaking at hyphens
-            break_long_words=self.strict_text_wrapping,  # Controlled by setting
-            hyphenate_broken_words=self.strict_text_wrapping  # Add hyphens when breaking
-        )
-        
-        return '\n'.join(wrapped_lines)
-    
     def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
-        """Wrap text to fit within max_width using comic-translate's hyphenation approach"""
+        """Wrap text to fit within max_width with optional strict wrapping"""
         # Handle empty text
         if not text.strip():
             return []
@@ -8022,76 +7882,123 @@ class MangaTranslator:
             self._log(f"  ⚠️ Invalid max_width: {max_width}, using fallback", "warning")
             return [text[:20] + "..."] if len(text) > 20 else [text]
         
-        # Import TextWrapper from our new module
-        from hyphen_textwrap import TextWrapper
+        words = text.split()
+        lines = []
+        current_line = []
         
-        # Helper function to measure text width with PIL font
-        def measure_text_width(txt: str) -> float:
-            """Measure pixel width of text using PIL font"""
-            bbox = draw.textbbox((0, 0), txt, font=font)
-            return bbox[2] - bbox[0]
-        
-        # If text already fits without wrapping, return it as-is
-        if measure_text_width(text) <= max_width:
-            return [text]
-        
-        # Use binary search to find optimal column width
-        # Start with reasonable bounds based on text length
-        min_columns = 1
-        max_columns = len(text)
-        best_lines = [text]  # Fallback
-        best_cost = float('inf')
-        
-        # Quick optimization: estimate starting column count
-        # Assume average character width is roughly font_size * 0.6
-        font_size = font.size if hasattr(font, 'size') else 16
-        estimated_char_width = font_size * 0.6
-        estimated_columns = max(1, int(max_width / estimated_char_width))
-        
-        # Search around the estimate
-        search_range = range(max(1, estimated_columns - 10), min(len(text), estimated_columns + 30))
-        
-        for columns in search_range:
-            # Use TextWrapper to wrap text with hyphenation
-            wrapper = TextWrapper(
-                width=columns,
-                break_long_words=self.strict_text_wrapping,
-                break_on_hyphens=True,
-                hyphenate_broken_words=self.strict_text_wrapping,
-                drop_whitespace=True,
-                expand_tabs=True,
-                replace_whitespace=True
-            )
+        for word in words:
+            # Check if word alone is too long
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            word_width = word_bbox[2] - word_bbox[0]
             
-            try:
-                wrapped_lines = wrapper.wrap(text)
-                if not wrapped_lines:
-                    continue
+            if word_width > max_width and len(word) > 1:
+                # Word is too long for the bubble
+                if current_line:
+                    # Save current line first
+                    lines.append(' '.join(current_line))
+                    current_line = []
                 
-                # Measure the actual width of wrapped text
-                # Find the widest line
-                max_line_width = max(measure_text_width(line) for line in wrapped_lines)
+                if self.strict_text_wrapping:
+                    # STRICT MODE: Force break the word to fit within bubble
+                    # This is the original behavior that ensures text stays within bounds
+                    broken_parts = self._force_break_word(word, font, max_width, draw)
+                    lines.extend(broken_parts)
+                else:
+                    # RELAXED MODE: Keep word whole (may exceed bubble)
+                    lines.append(word)
+                    # self._log(f"  ⚠️ Word '{word}' exceeds bubble width, keeping whole", "warning")
+            else:
+                # Normal word processing
+                if current_line:
+                    test_line = ' '.join(current_line + [word])
+                else:
+                    test_line = word
                 
-                # Check if this wrapping fits within max_width
-                if max_line_width <= max_width:
-                    # Calculate cost: prefer fewer lines with good width utilization
-                    # Cost = number of lines + width underutilization penalty
-                    width_utilization = max_line_width / max_width
-                    cost = len(wrapped_lines) + (1.0 - width_utilization) * 0.5
-                    
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_lines = wrapped_lines
-                        
-                        # Early exit if we found a very good solution
-                        if len(wrapped_lines) <= 3 and width_utilization > 0.85:
-                            break
-            except (ValueError, Exception) as e:
-                # Skip invalid column widths
-                continue
+                text_bbox = draw.textbbox((0, 0), test_line, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                
+                if text_width <= max_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word that fits
+                        lines.append(word)
         
-        return best_lines
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return lines
 
+    # Keep the existing _force_break_word method as is (the complete version from earlier):
+    def _force_break_word(self, word: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
+        """Force break a word that's too long to fit"""
+        lines = []
+        
+        # Binary search to find how many characters fit
+        low = 1
+        high = len(word)
+        chars_that_fit = 1
+        
+        while low <= high:
+            mid = (low + high) // 2
+            test_text = word[:mid]
+            bbox = draw.textbbox((0, 0), test_text, font=font)
+            width = bbox[2] - bbox[0]
+            
+            if width <= max_width:
+                chars_that_fit = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        
+        # Break the word into pieces
+        remaining = word
+        while remaining:
+            if len(remaining) <= chars_that_fit:
+                # Last piece
+                lines.append(remaining)
+                break
+            else:
+                # Find the best break point
+                break_at = chars_that_fit
+                
+                # Try to break at a more natural point if possible
+                # Look for vowel-consonant boundaries for better hyphenation
+                for i in range(min(chars_that_fit, len(remaining) - 1), max(1, chars_that_fit - 5), -1):
+                    if i < len(remaining) - 1:
+                        current_char = remaining[i].lower()
+                        next_char = remaining[i + 1].lower()
+                        
+                        # Good hyphenation points:
+                        # - Between consonant and vowel
+                        # - After prefix (un-, re-, pre-, etc.)
+                        # - Before suffix (-ing, -ed, -er, etc.)
+                        if (current_char in 'bcdfghjklmnpqrstvwxyz' and next_char in 'aeiou') or \
+                           (current_char in 'aeiou' and next_char in 'bcdfghjklmnpqrstvwxyz'):
+                            break_at = i + 1
+                            break
+                
+                # Add hyphen if we're breaking in the middle of a word
+                if break_at < len(remaining):
+                    # Check if adding hyphen still fits
+                    test_with_hyphen = remaining[:break_at] + '-'
+                    bbox = draw.textbbox((0, 0), test_with_hyphen, font=font)
+                    width = bbox[2] - bbox[0]
+                    
+                    if width <= max_width:
+                        lines.append(remaining[:break_at] + '-')
+                    else:
+                        # Hyphen doesn't fit, break without it
+                        lines.append(remaining[:break_at])
+                else:
+                    lines.append(remaining[:break_at])
+                
+                remaining = remaining[break_at:]
+        
+        return lines
     
     def _estimate_font_size_for_region(self, region: TextRegion) -> int:
         """Estimate the likely font size for a text region based on its dimensions and text content"""
