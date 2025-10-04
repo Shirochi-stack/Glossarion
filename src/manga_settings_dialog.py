@@ -3540,8 +3540,8 @@ class MangaSettingsDialog(QDialog):
         
         self.rtdetr_max_concurrency_spinbox = QSpinBox()
         self.rtdetr_max_concurrency_spinbox.setRange(1, 999)
-        self.rtdetr_max_concurrency_spinbox.setValue(self.settings['ocr'].get('rtdetr_max_concurrency', 2))
-        self.rtdetr_max_concurrency_spinbox.setToolTip("Maximum concurrent RT-DETR region OCR calls (lower = less memory)")
+        self.rtdetr_max_concurrency_spinbox.setValue(self.settings['ocr'].get('rtdetr_max_concurrency', 12))
+        self.rtdetr_max_concurrency_spinbox.setToolTip("Maximum concurrent RT-DETR region OCR calls (rate limiting handled via delays)")
         rtdetr_conc_layout.addWidget(self.rtdetr_max_concurrency_spinbox)
         
         rtdetr_conc_desc = QLabel("parallel OCR calls (lower = less RAM)")
