@@ -5779,8 +5779,10 @@ class MangaTranslator:
 
             # DEBUG: Log what we extracted
             self._log(f"📊 Extracted {len(translation_values)} translation values", "debug")
-            for i, val in enumerate(translation_values[:1000]):  # First 3 for debugging
-                self._log(f"  Translation {i}: '{val[:1000]}...'", "debug")
+            for i, val in enumerate(translation_values[:1000]):  # First 1000 for debugging
+                # Safely handle None values
+                val_str = str(val) if val is not None else ""
+                self._log(f"  Translation {i}: '{val_str[:1000]}...'", "debug")
 
             # Clean all translation values to remove quotes
             translation_values = [self._clean_translation_text(t) for t in translation_values]
