@@ -2050,6 +2050,107 @@ class MangaTranslator:
                     self._ensure_google_client()
                 except Exception:
                     pass
+                
+                # Check if we should use RT-DETR for text region detection (NEW FEATURE)
+                if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                    self._log("🎯 Using RT-DETR to guide Google Cloud Vision OCR")
+                    
+                    # Run RT-DETR to detect text regions first
+                    _ = self._get_thread_bubble_detector()
+                    rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                    
+                    if rtdetr_detections:
+                        # Collect all text-containing regions
+                        all_regions = []
+                        if 'text_bubbles' in rtdetr_detections:
+                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                        if 'text_free' in rtdetr_detections:
+                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                        
+                        if all_regions:
+                            self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Google Vision")
+                            
+                            # Load image for cropping
+                            import cv2
+                            cv_image = cv2.imread(image_path)
+                            if cv_image is None:
+                                self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
+                            else:
+                                # NOTE: Sequential processing is intentional here for Google/Azure API calls.
+                                # RT-DETR guided OCR is slower than full-page OCR for cloud APIs due to:
+                                # - Multiple API calls (network latency per region)
+                                # - API rate limits and throttling
+                                # This feature is useful for ACCURACY, not speed.
+                                # For speed, use local OCR providers (manga-ocr, EasyOCR, PaddleOCR) which
+                                # already use RT-DETR guidance without API overhead.
+                                
+                                # OCR each detected region sequentially
+                                for i, (x, y, w, h) in enumerate(all_regions, 1):
+                                    try:
+                                        # Crop region
+                                        cropped = self._safe_crop_region(cv_image, x, y, w, h)
+                                        if cropped is None:
+                                            continue
+                                        
+                                        # Encode cropped image
+                                        _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                        region_image_data = encoded.tobytes()
+                                        
+                                        # Create Vision API image object
+                                        vision_image = vision.Image(content=region_image_data)
+                                        image_context = vision.ImageContext(
+                                            language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                                        )
+                                        
+                                        # Detect text in this region
+                                        detection_mode = ocr_settings.get('text_detection_mode', 'document')
+                                        if detection_mode == 'document':
+                                            response = self.vision_client.document_text_detection(
+                                                image=vision_image,
+                                                image_context=image_context
+                                            )
+                                        else:
+                                            response = self.vision_client.text_detection(
+                                                image=vision_image,
+                                                image_context=image_context
+                                            )
+                                        
+                                        if response.error.message:
+                                            self._log(f"⚠️ Region {i} error: {response.error.message}", "warning")
+                                            continue
+                                        
+                                        # Extract text from this region
+                                        region_text = response.full_text_annotation.text if response.full_text_annotation else ""
+                                        if region_text.strip():
+                                            # Clean the text
+                                            region_text = self._fix_encoding_issues(region_text)
+                                            region_text = self._sanitize_unicode_characters(region_text)
+                                            region_text = region_text.strip()
+                                            
+                                            # Create TextRegion with original image coordinates
+                                            region = TextRegion(
+                                                text=region_text,
+                                                vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                                                bounding_box=(x, y, w, h),
+                                                confidence=0.9,  # RT-DETR confidence
+                                                region_type='text_block'
+                                            )
+                                            regions.append(region)
+                                            if not getattr(self, 'concise_logs', False):
+                                                self._log(f"✅ Region {i}/{len(all_regions)}: {region_text[:50]}...")
+                                    
+                                    except Exception as e:
+                                        self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
+                                        continue
+                                
+                                # If we got results, return them (skip full-page OCR)
+                                if regions:
+                                    self._log(f"✅ RT-DETR + Google Vision: {len(regions)} text regions detected")
+                                    # Skip merging section and return directly
+                                    return regions
+                                else:
+                                    self._log("⚠️ No text found in RT-DETR regions, falling back to full-page OCR", "warning")
+                
                 # If bubble detection is enabled and batch variables suggest batching, do ROI-based batched OCR
                 try:
                     use_roi_locality = ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('roi_locality_enabled', False)
@@ -2234,6 +2335,113 @@ class MangaTranslator:
                 import io
                 import time
                 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+                
+                # Check if we should use RT-DETR for text region detection (NEW FEATURE)
+                if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                    self._log("🎯 Using RT-DETR to guide Azure Computer Vision OCR")
+                    
+                    # Run RT-DETR to detect text regions first
+                    _ = self._get_thread_bubble_detector()
+                    rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                    
+                    if rtdetr_detections:
+                        # Collect all text-containing regions
+                        all_regions = []
+                        if 'text_bubbles' in rtdetr_detections:
+                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                        if 'text_free' in rtdetr_detections:
+                            all_regions.extend(rtdetr_detections.get('text_free', []))
+                        
+                        if all_regions:
+                            self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Azure Vision")
+                            
+                            # Load image for cropping
+                            import cv2
+                            cv_image = cv2.imread(image_path)
+                            if cv_image is None:
+                                self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
+                            else:
+                                ocr_results = []
+                                
+                                # Get Azure settings
+                                azure_reading_order = ocr_settings.get('azure_reading_order', 'natural')
+                                azure_model_version = ocr_settings.get('azure_model_version', 'latest')
+                                azure_max_wait = ocr_settings.get('azure_max_wait', 60)
+                                azure_poll_interval = ocr_settings.get('azure_poll_interval', 1.0)
+                                
+                                # NOTE: Sequential processing (same reasoning as Google above)
+                                # OCR each detected region sequentially
+                                for i, (x, y, w, h) in enumerate(all_regions, 1):
+                                    try:
+                                        # Crop region
+                                        cropped = self._safe_crop_region(cv_image, x, y, w, h)
+                                        if cropped is None:
+                                            continue
+                                        
+                                        # Encode cropped image
+                                        _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                        region_image_bytes = encoded.tobytes()
+                                        
+                                        # Call Azure Read API
+                                        read_response = self.vision_client.read_in_stream(
+                                            io.BytesIO(region_image_bytes),
+                                            language=ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja',
+                                            model_version=azure_model_version,
+                                            reading_order=azure_reading_order,
+                                            raw=True
+                                        )
+                                        
+                                        # Get operation location
+                                        operation_location = read_response.headers['Operation-Location']
+                                        operation_id = operation_location.split('/')[-1]
+                                        
+                                        # Poll for result
+                                        start_time = time.time()
+                                        while True:
+                                            result = self.vision_client.get_read_result(operation_id)
+                                            if result.status not in [OperationStatusCodes.not_started, OperationStatusCodes.running]:
+                                                break
+                                            if time.time() - start_time > azure_max_wait:
+                                                self._log(f"⚠️ Azure timeout for region {i}", "warning")
+                                                break
+                                            time.sleep(azure_poll_interval)
+                                        
+                                        if result.status == OperationStatusCodes.succeeded:
+                                            # Extract text from result
+                                            region_text = ""
+                                            for text_result in result.analyze_result.read_results:
+                                                for line in text_result.lines:
+                                                    region_text += line.text + "\n"
+                                            
+                                            region_text = region_text.strip()
+                                            if region_text:
+                                                # Clean the text
+                                                region_text = self._fix_encoding_issues(region_text)
+                                                region_text = self._sanitize_unicode_characters(region_text)
+                                                
+                                                # Create TextRegion with original image coordinates
+                                                region = TextRegion(
+                                                    text=region_text,
+                                                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                                                    bounding_box=(x, y, w, h),
+                                                    confidence=0.9,  # RT-DETR confidence
+                                                    region_type='text_block'
+                                                )
+                                                regions.append(region)
+                                                if not getattr(self, 'concise_logs', False):
+                                                    self._log(f"✅ Region {i}/{len(all_regions)}: {region_text[:50]}...")
+                                    
+                                    except Exception as e:
+                                        self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
+                                        continue
+                                
+                                # If we got results, return them (skip full-page OCR)
+                                if regions:
+                                    self._log(f"✅ RT-DETR + Azure Vision: {len(regions)} text regions detected")
+                                    # Skip merging section and return directly
+                                    return regions
+                                else:
+                                    self._log("⚠️ No text found in RT-DETR regions, falling back to full-page OCR", "warning")
                 
                 # ROI-based concurrent OCR when bubble detection is enabled and batching is requested
                 try:
@@ -5469,20 +5677,30 @@ class MangaTranslator:
         # Get dilation settings
         base_dilation_size = manga_settings.get('mask_dilation', 15)
         
-        # If Auto is enabled, also auto-set dilation by OCR provider
-        auto_iterations = manga_settings.get('auto_iterations', False)
+        # If Auto Iterations is enabled, auto-set dilation by OCR provider and RT-DETR guide status
+        auto_iterations = manga_settings.get('auto_iterations', True)
         if auto_iterations:
             try:
-                if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google'):
+                ocr_settings = manga_settings.get('ocr', {})
+                use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
+                
+                # If RT-DETR guide is enabled for Google/Azure, force dilation to 0
+                if (getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') and 
+                    bubble_detection_enabled and use_rtdetr_guide):
+                    base_dilation_size = 0
+                    self._log(f"📏 Auto dilation (RT-DETR guided): 0px (using iterations only)", "info")
+                elif getattr(self, 'ocr_provider', '').lower() in ('azure', 'google'):
                     base_dilation_size = 15
+                    self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size}px", "info")
                 else:
                     base_dilation_size = 0
-                self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size} px", "info")
+                    self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size}px", "info")
             except Exception:
                 pass
         
         # Auto iterations: decide by image color vs B&W
-        auto_iterations = manga_settings.get('auto_iterations', False)
+        auto_iterations = manga_settings.get('auto_iterations', True)
         if auto_iterations:
             try:
                 # Heuristic: consider image B&W if RGB channels are near-equal

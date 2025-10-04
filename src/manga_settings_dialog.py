@@ -2728,6 +2728,23 @@ class MangaSettingsDialog(QDialog):
         self.bubble_detection_enabled_checkbox.setChecked(self.settings['ocr'].get('bubble_detection_enabled', False))
         self.bubble_detection_enabled_checkbox.stateChanged.connect(self._toggle_bubble_controls)
         bubble_layout.addWidget(self.bubble_detection_enabled_checkbox)
+        
+        # Use RT-DETR for text region detection (not just bubble detection)
+        self.use_rtdetr_for_ocr_checkbox = self._create_styled_checkbox("Use RT-DETR to guide OCR (Google/Azure only - others already do this)")
+        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', True))  # Default: True
+        self.use_rtdetr_for_ocr_checkbox.setToolTip(
+            "When enabled, RT-DETR first detects all text regions (text bubbles + free text), \n"
+            "then your OCR provider reads each region separately.\n\n"
+            "🎯 Applies to: Google Cloud Vision, Azure Computer Vision\n"
+            "✓ Already enabled: Qwen2-VL, Custom API, EasyOCR, PaddleOCR, DocTR, manga-ocr\n\n"
+            "Benefits:\n"
+            "• More accurate text detection (trained specifically for manga/comics)\n"
+            "• Better separation of overlapping text\n"
+            "• Improved handling of different text types (bubbles vs. free text)\n"
+            "• Focused OCR on actual text regions (faster, more accurate)\n\n"
+            "Note: Requires bubble detection to be enabled and uses the selected detector above."
+        )
+        bubble_layout.addWidget(self.use_rtdetr_for_ocr_checkbox)
 
         # Detector type dropdown
         detector_type_widget = QWidget()
@@ -4131,6 +4148,7 @@ class MangaSettingsDialog(QDialog):
             
             # Bubble detection settings
             self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled_checkbox.isChecked()
+            self.settings['ocr']['use_rtdetr_for_ocr_regions'] = self.use_rtdetr_for_ocr_checkbox.isChecked()  # NEW: RT-DETR for OCR guidance
             self.settings['ocr']['bubble_model_path'] = self.bubble_model_entry.text()
             self.settings['ocr']['bubble_confidence'] = self.bubble_conf_slider.value() / 100.0
             self.settings['ocr']['rtdetr_confidence'] = self.bubble_conf_slider.value() / 100.0
