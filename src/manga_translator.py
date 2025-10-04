@@ -5824,6 +5824,62 @@ class MangaTranslator:
                 self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
                 self._log(f"Response preview: {response_text[:500]}...", "warning")
                 
+                # CRITICAL: Check if this is a refusal message BEFORE regex fallback
+                # OpenAI and other APIs refuse certain content with text responses instead of JSON
+                import re
+                response_lower = response_text.lower()
+                
+                # Refusal patterns - both simple strings and regex patterns
+                refusal_patterns = [
+                    "i cannot",
+                    "i can't",
+                    "i'm unable to",
+                    "i am unable to",
+                    "i apologize, but i cannot",
+                    "i'm sorry, but i cannot",
+                    "sorry — i can't help",  # OpenAI specific
+                    "i don't have the ability to",
+                    "i'm not able to",
+                    "this request cannot be",
+                    "unable to process",
+                    "cannot complete",
+                    "cannot generate",
+                    r"against.{0,20}policy",  # regex for "against...policy"
+                    "content policy",
+                    "sexually explicit content",
+                    "appears to sexualize",
+                    "prohibited content",
+                    "content blocked",
+                    r"content.{0,20}filter"  # regex for "content...filter"
+                ]
+                
+                # Check both simple string matching and regex patterns
+                is_refusal = False
+                for pattern in refusal_patterns:
+                    if '.*' in pattern or r'.{' in pattern:
+                        # It's a regex pattern
+                        if re.search(pattern, response_lower):
+                            is_refusal = True
+                            break
+                    else:
+                        # Simple string match
+                        if pattern in response_lower:
+                            is_refusal = True
+                            break
+                
+                if is_refusal:
+                    self._log("\n🚫 ========================================", "error")
+                    self._log("🚫 API REFUSED TO TRANSLATE THIS CONTENT", "error")
+                    self._log("🚫 ========================================", "error")
+                    self._log(f"📋 Refusal reason: {response_text[:300]}...", "error")
+                    self._log("\n💡 Suggested actions:", "warning")
+                    self._log("   1. Try a different API model (e.g., Claude, Gemini with safety disabled)", "warning")
+                    self._log("   2. Check if content violates the API's usage policies", "warning")
+                    self._log("   3. Try with a different page/image", "warning")
+                    self._log("🚫 ========================================\n", "error")
+                    # Return empty dict to fail gracefully without attempting regex extraction
+                    return {}
+                
                 # Fallback: try regex extraction (handles both quoted and unquoted keys)
                 try:
                     import re
