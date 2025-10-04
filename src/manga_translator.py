@@ -6213,6 +6213,16 @@ class MangaTranslator:
             saved_local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
             saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
             
+            # MIGRATION: Ensure manga_ prefixed model path keys exist for ONNX methods
+            # This fixes compatibility where model paths were saved without manga_ prefix
+            for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx']:
+                non_prefixed_key = f'{method_variant}_model_path'
+                prefixed_key = f'manga_{method_variant}_model_path'
+                # If we have the non-prefixed but not the prefixed, migrate it
+                if non_prefixed_key in self.main_gui.config and prefixed_key not in self.main_gui.config:
+                    self.main_gui.config[prefixed_key] = self.main_gui.config[non_prefixed_key]
+                    self._log(f"🔄 Migrated model path config: {non_prefixed_key} → {prefixed_key}", "debug")
+            
             # Update manga_settings with the saved values ONLY if they are not already set
             # This allows web UI to override with its own config
             if 'inpainting' not in self.manga_settings:
@@ -6231,8 +6241,11 @@ class MangaTranslator:
                 # This will now get the correct saved value
                 local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
                 
-                # Model path is saved with manga_ prefix
+                # Model path is saved with manga_ prefix - try both key formats for compatibility
                 model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                if not model_path:
+                    # Fallback to non-prefixed key (older format)
+                    model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
                 
                 self._log(f"Using local method: {local_method} (loaded from config)", "info")
                 

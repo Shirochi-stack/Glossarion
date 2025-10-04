@@ -583,8 +583,13 @@ class MangaTranslationTab:
                             models_to_load.append(('detector', detector_type, detector_name, model_url))
             
             if inpainting_enabled:
-                local_method = inpaint_settings.get('local_method', 'anime')
+                # Check top-level config first (manga_local_inpaint_model), then nested config
+                local_method = self.main_gui.config.get('manga_local_inpaint_model', 
+                                                        inpaint_settings.get('local_method', 'anime_onnx'))
                 model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                # Fallback to non-prefixed key if not found
+                if not model_path:
+                    model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
                 key = (local_method, model_path or '')
                 model_id = f"inpainter_{local_method}_{model_path}"
                 

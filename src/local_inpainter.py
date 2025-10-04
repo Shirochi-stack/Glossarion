@@ -1387,7 +1387,9 @@ class LocalInpainter:
                         self.current_method = method
                     self.use_onnx = True
                     self.is_jit_model = False
+                    # Save with BOTH key formats for compatibility
                     self.config[f'{method}_model_path'] = model_path
+                    self.config[f'manga_{method}_model_path'] = model_path
                     self._save_config()
                     logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
                     return True
@@ -1460,7 +1462,9 @@ class LocalInpainter:
                         except Exception as _qe:
                             logger.warning(f"INT8 quantization skipped: {_qe}")
                     
+                    # Save with BOTH key formats for compatibility
                     self.config[f'{method}_model_path'] = model_path
+                    self.config[f'manga_{method}_model_path'] = model_path
                     self._save_config()
                     
                     # ONNX CONVERSION (optionally in background)
