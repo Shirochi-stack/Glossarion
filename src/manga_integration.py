@@ -7491,6 +7491,8 @@ class MangaTranslationTab:
                 import concurrent.futures
                 import threading as _threading
                 progress_lock = _threading.Lock()
+                # Memory barrier: ensures resources are fully released before next panel starts
+                completion_barrier = _threading.Semaphore(1)  # Only one panel can complete at a time
                 counters = {
                     'started': 0,
                     'done': 0,
@@ -7504,6 +7506,7 @@ class MangaTranslationTab:
                         return False
                     
                     # Create an isolated translator instance per panel
+                    translator = None  # Initialize outside try block for cleanup
                     try:
                         # Check again before starting expensive work
                         if self.stop_flag.is_set():
@@ -7613,39 +7616,75 @@ class MangaTranslationTab:
                         # Process image
                         result = translator.process_image(filepath, output_path, batch_index=idx+1, batch_total=total)
                         
-                        # Update counters only if not stopped
-                        with progress_lock:
-                            if self.stop_flag.is_set():
-                                # Don't update counters if translation was stopped
-                                return False
+                        # CRITICAL: Explicitly cleanup this panel's translator resources
+                        # This prevents resource leaks and partial translation issues
+                        try:
+                            if translator:
+                                # Clear all caches and state
+                                if hasattr(translator, 'reset_for_new_image'):
+                                    translator.reset_for_new_image()
+                                # Clear internal state
+                                if hasattr(translator, 'clear_internal_state'):
+                                    translator.clear_internal_state()
+                        except Exception as cleanup_err:
+                            self._log(f"⚠️ Panel translator cleanup warning: {cleanup_err}", "debug")
+                        
+                        # CRITICAL: Use completion barrier to prevent resource conflicts
+                        # This ensures only one panel completes/cleans up at a time
+                        with completion_barrier:
+                            # Update counters only if not stopped
+                            with progress_lock:
+                                if self.stop_flag.is_set():
+                                    # Don't update counters if translation was stopped
+                                    return False
                             
                             # Check if translation actually produced valid output
                             translation_successful = False
                             if result.get('success', False) and not result.get('interrupted', False):
                                 # Verify there's an actual output file and translated regions
                                 output_exists = result.get('output_path') and os.path.exists(result.get('output_path', ''))
-                                has_translations = any(r.get('translated_text', '') for r in result.get('regions', []))
-                                translation_successful = output_exists and has_translations
-                            
-                            if translation_successful:
-                                self.completed_files += 1
-                                self._log(f"✅ Translation completed: {filename}", "success")
-                                time.sleep(0.1)  # Brief pause for stability
-                                self._log("💤 Panel completion pausing briefly for stability", "debug")
-                            else:
-                                self.failed_files += 1
-                                # Log the specific reason for failure
-                                if result.get('interrupted', False):
-                                    self._log(f"⚠️ Translation interrupted: {filename}", "warning")
-                                elif not result.get('success', False):
-                                    self._log(f"❌ Translation failed: {filename}", "error")
-                                elif not result.get('output_path') or not os.path.exists(result.get('output_path', '')):
-                                    self._log(f"❌ Output file not created: {filename}", "error")
+                                regions = result.get('regions', [])
+                                has_translations = any(r.get('translated_text', '') for r in regions)
+                                
+                                # CRITICAL: Verify all detected regions got translated
+                                # Partial failures indicate inpainting or rendering issues
+                                if has_translations and regions:
+                                    translated_count = sum(1 for r in regions if r.get('translated_text', '').strip())
+                                    detected_count = len(regions)
+                                    completion_rate = translated_count / detected_count if detected_count > 0 else 0
+                                    
+                                    # Log warning if completion rate is less than 100%
+                                    if completion_rate < 1.0:
+                                        self._log(f"⚠️ Partial translation: {translated_count}/{detected_count} regions translated ({completion_rate*100:.1f}%)", "warning")
+                                        self._log(f"   This may indicate bubble detector or inpainter issues", "warning")
+                                    
+                                    # Only consider successful if at least 50% of regions translated
+                                    # This prevents marking completely failed images as successful
+                                    translation_successful = output_exists and completion_rate >= 0.5
                                 else:
-                                    self._log(f"❌ No text was translated: {filename}", "error")
-                                counters['failed'] += 1
-                            counters['done'] += 1
-                            self._update_progress(counters['done'], total, f"Completed {counters['done']}/{total}")
+                                    translation_successful = output_exists and has_translations
+                            
+                                if translation_successful:
+                                    self.completed_files += 1
+                                    self._log(f"✅ Translation completed: {filename}", "success")
+                                    # Memory barrier: ensure resources are released before next completion
+                                    time.sleep(0.15)  # Slightly longer pause for stability
+                                    self._log("💤 Panel completion pausing for resource cleanup", "debug")
+                                else:
+                                    self.failed_files += 1
+                                    # Log the specific reason for failure
+                                    if result.get('interrupted', False):
+                                        self._log(f"⚠️ Translation interrupted: {filename}", "warning")
+                                    elif not result.get('success', False):
+                                        self._log(f"❌ Translation failed: {filename}", "error")
+                                    elif not result.get('output_path') or not os.path.exists(result.get('output_path', '')):
+                                        self._log(f"❌ Output file not created: {filename}", "error")
+                                    else:
+                                        self._log(f"❌ No text was translated: {filename}", "error")
+                                    counters['failed'] += 1
+                                counters['done'] += 1
+                                self._update_progress(counters['done'], total, f"Completed {counters['done']}/{total}")
+                            # End of completion_barrier block - resources now released for next panel
                         
                         return result.get('success', False)
                     except Exception as e:
@@ -7659,6 +7698,18 @@ class MangaTranslationTab:
                             self._log(f"❌ Error in panel task: {str(e)}", "error")
                             self._log(traceback.format_exc(), "error")
                         return False
+                    finally:
+                        # CRITICAL: Always cleanup translator resources, even on error
+                        # This prevents resource leaks and ensures proper cleanup in parallel mode
+                        try:
+                            if translator:
+                                # Force cleanup of all models and caches
+                                if hasattr(translator, 'clear_internal_state'):
+                                    translator.clear_internal_state()
+                                # Clear any remaining references
+                                translator = None
+                        except Exception:
+                            pass  # Never let cleanup fail the finally block
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, effective_workers)) as executor:
                     futures = []

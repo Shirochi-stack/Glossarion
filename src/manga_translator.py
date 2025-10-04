@@ -2141,7 +2141,8 @@ class MangaTranslator:
                     pass
                 
                 # Check if we should use RT-DETR for text region detection (NEW FEATURE)
-                if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
+                # IMPORTANT: bubble_detection_enabled should default to True for optimal detection
+                if ocr_settings.get('bubble_detection_enabled', True) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
                     self._log("🎯 Using RT-DETR to guide Google Cloud Vision OCR")
                     
                     # Run RT-DETR to detect text regions first
@@ -5867,8 +5868,9 @@ class MangaTranslator:
                     if key in translations:
                         translated = self._clean_translation_text(translations[key])
                 
-                # Don't use original Japanese text if no translation found
-                if not translated or translated == region.text:
+                # Only mark as missing if we genuinely have no translation
+                # NOTE: Keep translation even if it matches original (e.g., numbers, names, SFX)
+                if not translated:
                     self._log(f"  ⚠️ No translation for region {i}, leaving empty", "warning")
                     translated = ""
                 
@@ -6391,12 +6393,35 @@ class MangaTranslator:
                 loaded_ok = False
                 if model_path and os.path.exists(model_path):
                     try:
+                        self._log(f"📦 Loading inpainter model...", "debug")
+                        self._log(f"   Method: {local_method}", "debug")
+                        self._log(f"   Path: {model_path}", "debug")
                         # Only force reload if explicitly requested AND this is not the first load
                         # For shared pool, we should never force reload on initial load
-                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=False)
+                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=force_reload)
+                        if not loaded_ok:
+                            # Retry with force_reload if initial load failed
+                            self._log(f"🔄 Initial load failed, retrying with force_reload=True", "warning")
+                            loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
+                            if not loaded_ok:
+                                self._log(f"❌ Both load attempts failed", "error")
+                                # Check file validity
+                                try:
+                                    size_mb = os.path.getsize(model_path) / (1024 * 1024)
+                                    self._log(f"   File size: {size_mb:.2f} MB", "info")
+                                    if size_mb < 1:
+                                        self._log(f"   ⚠️ File may be corrupted (too small)", "warning")
+                                except Exception:
+                                    self._log(f"   ⚠️ Could not read model file", "warning")
                     except Exception as e:
-                        self._log(f"⚠️ Inpainter load failed: {e}", "warning")
+                        self._log(f"⚠️ Inpainter load exception: {e}", "warning")
+                        import traceback
+                        self._log(traceback.format_exc(), "debug")
                         loaded_ok = False
+                elif not model_path:
+                    self._log(f"⚠️ No model path configured for {local_method}", "warning")
+                elif not os.path.exists(model_path):
+                    self._log(f"⚠️ Model file does not exist: {model_path}", "warning")
                 # Publish result
                 with MangaTranslator._inpaint_pool_lock:
                     rec = MangaTranslator._inpaint_pool.get(key) or rec
@@ -6414,9 +6439,42 @@ class MangaTranslator:
                 return None
         else:
             # Wait for loader to finish (without holding the lock)
-            event.wait(timeout=120)
+            success = event.wait(timeout=120)
+            if not success:
+                self._log(f"⏱️ Timeout waiting for inpainter to load (120s)", "warning")
+                return None
+            
+            # Check if load was successful
             rec2 = MangaTranslator._inpaint_pool.get(key)
-            return rec2['inpainter'] if rec2 else None
+            if not rec2:
+                self._log(f"⚠️ Inpainter pool record disappeared after load", "warning")
+                return None
+            
+            inp = rec2.get('inpainter')
+            loaded = rec2.get('loaded', False)
+            
+            if inp and loaded:
+                # Successfully loaded by another thread
+                return inp
+            elif inp and not loaded:
+                # Inpainter created but model failed to load
+                # Try to load it ourselves
+                self._log(f"⚠️ Inpainter exists but model not loaded, attempting to load", "debug")
+                if model_path and os.path.exists(model_path):
+                    try:
+                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
+                        if loaded_ok:
+                            # Update the pool record
+                            with MangaTranslator._inpaint_pool_lock:
+                                rec2['loaded'] = True
+                            self._log(f"✅ Successfully loaded model on retry in waiting thread", "info")
+                            return inp
+                    except Exception as e:
+                        self._log(f"❌ Failed to load in waiting thread: {e}", "warning")
+                return inp  # Return anyway, inpaint will no-op
+            else:
+                self._log(f"⚠️ Loader thread failed to create inpainter", "warning")
+                return None
 
     @classmethod
     def _count_preloaded_inpainters(cls) -> int:
@@ -6756,7 +6814,38 @@ class MangaTranslator:
                         return True
                     else:
                         self._log(f"⚠️ Shared inpainter created but model not loaded", "warning")
-                        return True  # Still return True as inpainter exists even without model
+                        self._log(f"🔄 Attempting to retry model loading...", "info")
+                        
+                        # Retry loading the model
+                        if model_path and os.path.exists(model_path):
+                            self._log(f"📦 Model path: {model_path}", "info")
+                            self._log(f"📋 Method: {local_method}", "info")
+                            try:
+                                loaded_ok = inp_shared.load_model_with_retry(local_method, model_path, force_reload=True)
+                                if loaded_ok and getattr(inp_shared, 'model_loaded', False):
+                                    self._log(f"✅ Model loaded successfully on retry", "info")
+                                    return True
+                                else:
+                                    self._log(f"❌ Model still not loaded after retry", "error")
+                                    # Check if model file exists and is valid
+                                    try:
+                                        size_mb = os.path.getsize(model_path) / (1024 * 1024)
+                                        self._log(f"📊 Model file size: {size_mb:.2f} MB", "info")
+                                        if size_mb < 1:
+                                            self._log(f"⚠️ Model file seems too small (< 1 MB) - may be corrupted", "warning")
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                self._log(f"❌ Retry load failed: {e}", "error")
+                                import traceback
+                                self._log(traceback.format_exc(), "debug")
+                        elif not model_path:
+                            self._log(f"❌ No model path provided", "error")
+                        elif not os.path.exists(model_path):
+                            self._log(f"❌ Model path does not exist: {model_path}", "error")
+                            self._log(f"📥 Tip: Try downloading the model from the Manga Settings dialog", "info")
+                        
+                        # If retry failed, fall through to fallback logic below
                 
                 # Fall back to instance-level init only if shared init completely failed
                 self._log("⚠️ Shared inpainter init failed, falling back to instance creation", "warning")

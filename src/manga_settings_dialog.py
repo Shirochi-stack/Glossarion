@@ -2726,7 +2726,8 @@ class MangaSettingsDialog(QDialog):
 
         # Enable bubble detection
         self.bubble_detection_enabled_checkbox = self._create_styled_checkbox("Enable AI-powered bubble detection (overrides traditional merging)")
-        self.bubble_detection_enabled_checkbox.setChecked(self.settings['ocr'].get('bubble_detection_enabled', False))
+        # IMPORTANT: Default to True for optimal text detection (especially for Chinese/Japanese text)
+        self.bubble_detection_enabled_checkbox.setChecked(self.settings['ocr'].get('bubble_detection_enabled', True))
         self.bubble_detection_enabled_checkbox.stateChanged.connect(self._toggle_bubble_controls)
         bubble_layout.addWidget(self.bubble_detection_enabled_checkbox)
         
