@@ -4334,7 +4334,7 @@ class MangaTranslationTab:
         if font_max_top is None:
             self.main_gui.config['manga_max_font_size'] = int(effective_max)
         
-        self.strict_text_wrapping_value = config.get('manga_strict_text_wrapping', False)
+        self.strict_text_wrapping_value = config.get('manga_strict_text_wrapping', True)
         
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
