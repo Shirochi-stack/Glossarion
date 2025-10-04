@@ -5931,20 +5931,11 @@ class MangaTranslator:
                                 break
                     
                     if is_refusal:
-                        self._log("\n🚫 ========================================", "error")
-                        self._log("🚫 API REFUSED TO TRANSLATE THIS CONTENT", "error")
-                        self._log("🚫 ========================================", "error")
-                        self._log(f"📋 Refusal reason: {response_text[:300]}...", "error")
-                        self._log("\n💡 Suggested actions:", "warning")
-                        self._log("   1. Try a different API model (e.g., Claude, Gemini with safety disabled)", "warning")
-                        self._log("   2. Check if content violates the API's usage policies", "warning")
-                        self._log("   3. Try with a different page/image", "warning")
-                        self._log("🚫 ========================================\n", "error")
-                        
-                        # Raise UnifiedClientError with prohibited_content type for proper error handling
+                        # Raise UnifiedClientError with prohibited_content type
+                        # Fallback mechanism will handle this automatically
                         from unified_api_client import UnifiedClientError
                         raise UnifiedClientError(
-                            f"Content refused by API: {response_text[:200]}",
+                            f"Content refused by API",
                             error_type="prohibited_content",
                             details={"refusal_message": response_text[:500]}
                         )
@@ -6047,21 +6038,11 @@ class MangaTranslator:
                 
                 # If most translations are refusals, treat as refusal
                 if refusal_count >= sample_size * 0.5:  # 50% threshold
-                    self._log("\n🚫 ========================================", "error")
-                    self._log("🚫 API REFUSED TO TRANSLATE THIS CONTENT", "error")
-                    self._log("🚫 ========================================", "error")
-                    self._log(f"📋 Refusal detected in translation values", "error")
-                    self._log(f"📋 Sample refusal: {translation_values[0][:200]}...", "error")
-                    self._log("\n💡 Suggested actions:", "warning")
-                    self._log("   1. Try a different API model (e.g., Claude, Gemini with safety disabled)", "warning")
-                    self._log("   2. Check if content violates the API's usage policies", "warning")
-                    self._log("   3. Try with a different page/image", "warning")
-                    self._log("🚫 ========================================\n", "error")
-                    
                     # Raise UnifiedClientError with prohibited_content type
+                    # Fallback mechanism will handle this automatically
                     from unified_api_client import UnifiedClientError
                     raise UnifiedClientError(
-                        f"Content refused by API: {translation_values[0][:200]}",
+                        f"Content refused by API",
                         error_type="prohibited_content",
                         details={"refusal_message": translation_values[0][:500]}
                     )
@@ -6134,6 +6115,12 @@ class MangaTranslator:
             if self._check_stop():
                 self._log("⏹️ Translation stopped due to user request", "warning")
                 return {}
+            
+            # Check if this is a prohibited_content error - re-raise it for fallback handling
+            from unified_api_client import UnifiedClientError
+            if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "prohibited_content":
+                # Re-raise silently for fallback mechanism
+                raise
                 
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
