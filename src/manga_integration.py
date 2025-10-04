@@ -1932,6 +1932,9 @@ class MangaTranslationTab:
         # Check provider status to show appropriate buttons
         self._check_provider_status()
         
+        # Update the main status label at the top based on new provider
+        self._update_main_status_label()
+        
         # Log the change
         provider_descriptions = {
             'custom-api': "Custom API - use your own vision model",
@@ -1956,6 +1959,43 @@ class MangaTranslationTab:
         if hasattr(self, 'translator') and self.translator:
             self._log(f"OCR provider changed to {provider.upper()}. Translator will be recreated on next run.", "info")
             self.translator = None  # Force recreation on next translation
+    
+    def _update_main_status_label(self):
+        """Update the main status label at the top based on current provider and credentials"""
+        if not hasattr(self, 'status_label'):
+            return
+        
+        # Get API key
+        try:
+            if hasattr(self.main_gui.api_key_entry, 'text'):
+                has_api_key = bool(self.main_gui.api_key_entry.text().strip())
+            elif hasattr(self.main_gui.api_key_entry, 'get'):
+                has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+            else:
+                has_api_key = False
+        except:
+            has_api_key = False
+        
+        # Get current provider
+        provider = self.ocr_provider_value if hasattr(self, 'ocr_provider_value') else self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        
+        # Determine readiness based on provider
+        if provider == 'google':
+            has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
+            is_ready = has_api_key and has_vision
+        elif provider == 'azure':
+            has_azure = bool(self.main_gui.config.get('azure_vision_key', ''))
+            is_ready = has_api_key and has_azure
+        else:
+            # Local providers or custom-api only need API key for translation
+            is_ready = has_api_key
+        
+        # Update label
+        status_text = "✅ Ready" if is_ready else "❌ Setup Required"
+        status_color = "green" if is_ready else "red"
+        
+        self.status_label.setText(status_text)
+        self.status_label.setStyleSheet(f"color: {status_color};")
     
     def _build_interface(self):
         """Build the enhanced manga translation interface using PySide6"""
@@ -2042,12 +2082,25 @@ class MangaTranslationTab:
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
         
-        # Requirements check
+        # Requirements check - based on selected OCR provider
         has_api_key = bool(self.main_gui.api_key_entry.text().strip()) if hasattr(self.main_gui.api_key_entry, 'text') else bool(self.main_gui.api_key_entry.get().strip())
-        has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
         
-        status_text = "✅ Ready" if (has_api_key and has_vision) else "❌ Setup Required"
-        status_color = "green" if (has_api_key and has_vision) else "red"
+        # Get the saved OCR provider to check appropriate credentials
+        saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        
+        # Determine readiness based on provider
+        if saved_provider == 'google':
+            has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
+            is_ready = has_api_key and has_vision
+        elif saved_provider == 'azure':
+            has_azure = bool(self.main_gui.config.get('azure_vision_key', ''))
+            is_ready = has_api_key and has_azure
+        else:
+            # Local providers or custom-api only need API key for translation
+            is_ready = has_api_key
+        
+        status_text = "✅ Ready" if is_ready else "❌ Setup Required"
+        status_color = "green" if is_ready else "red"
         
         status_label = QLabel(status_text)
         status_font = QFont("Arial", 10)
@@ -2108,8 +2161,8 @@ class MangaTranslationTab:
         self.preload_progress_frame.setVisible(False)  # Hidden by default
         main_layout.addWidget(self.preload_progress_frame)
         
-        # Add instructions and Google Cloud setup
-        if not (has_api_key and has_vision):
+        # Add instructions based on selected provider
+        if not is_ready:
             req_frame = QWidget()
             req_layout = QVBoxLayout(req_frame)
             req_layout.setContentsMargins(0, 5, 0, 5)
@@ -2117,17 +2170,30 @@ class MangaTranslationTab:
             req_text = []
             if not has_api_key:
                 req_text.append("• API Key not configured")
-            if not has_vision:
-                req_text.append("• Google Cloud Vision credentials not set")
             
-            req_label = QLabel("\n".join(req_text))
-            req_font = QFont("Arial", 10)
-            req_label.setFont(req_font)
-            req_label.setStyleSheet("color: red;")
-            req_label.setAlignment(Qt.AlignLeft)
-            req_layout.addWidget(req_label)
+            # Only show provider-specific credential warnings
+            if saved_provider == 'google':
+                has_vision = os.path.exists(self.main_gui.config.get('google_vision_credentials', ''))
+                if not has_vision:
+                    req_text.append("• Google Cloud Vision credentials not set")
+            elif saved_provider == 'azure':
+                has_azure = bool(self.main_gui.config.get('azure_vision_key', ''))
+                if not has_azure:
+                    req_text.append("• Azure credentials not configured")
             
-        main_layout.addWidget(req_frame)
+            if req_text:  # Only show frame if there are actual missing requirements
+                req_label = QLabel("\n".join(req_text))
+                req_font = QFont("Arial", 10)
+                req_label.setFont(req_font)
+                req_label.setStyleSheet("color: red;")
+                req_label.setAlignment(Qt.AlignLeft)
+                req_layout.addWidget(req_label)
+                main_layout.addWidget(req_frame)
+        else:
+            # Create empty frame to maintain layout consistency
+            req_frame = QWidget()
+            req_frame.setVisible(False)
+            main_layout.addWidget(req_frame)
         
         # File selection frame - SPANS BOTH COLUMNS
         file_frame = QGroupBox("Select Manga Images")
@@ -4752,10 +4818,9 @@ class MangaTranslationTab:
                 self.creds_label.setText(os.path.basename(file_path))
                 self.creds_label.setStyleSheet("color: green;")
             
-            # Update status if we have a reference
-            if hasattr(self, 'status_label'):
-                self.status_label.setText("✅ Ready")
-                self.status_label.setStyleSheet("color: green;")
+            # Update the main status label and provider status
+            self._update_main_status_label()
+            self._check_provider_status()
             
             QMessageBox.information(self.dialog, "Success", "Google Cloud credentials set successfully!")
     
