@@ -3453,7 +3453,8 @@ class MangaSettingsDialog(QDialog):
         self.max_workers_spinbox.setValue(self.settings['advanced']['max_workers'])
         workers_layout.addWidget(self.max_workers_spinbox)
         
-        workers_layout.addWidget(QLabel("(threads for parallel processing)"))
+        self.workers_desc_label = QLabel("(threads for parallel processing)")
+        workers_layout.addWidget(self.workers_desc_label)
         workers_layout.addStretch()
         
         # Initialize workers state
@@ -3805,7 +3806,11 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'max_workers_spinbox'):
                 self.max_workers_spinbox.setEnabled(enabled)
             if hasattr(self, 'workers_label'):
-                self.workers_label.setStyleSheet("" if enabled else "color: gray;")
+                self.workers_label.setEnabled(enabled)
+                self.workers_label.setStyleSheet("color: white;" if enabled else "color: gray;")
+            if hasattr(self, 'workers_desc_label'):
+                self.workers_desc_label.setEnabled(enabled)
+                self.workers_desc_label.setStyleSheet("color: white;" if enabled else "color: gray;")
     
     def _toggle_singleton_controls(self):
         """Enable/disable parallel panel translation based on singleton toggle."""
