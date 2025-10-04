@@ -90,7 +90,7 @@ class MangaSettingsDialog(QDialog):
                 'detect_text_bubbles': True,
                 'detect_free_text': True,
                 'rtdetr_model_url': '',
-                'use_rtdetr_for_ocr_regions': False,
+                'use_rtdetr_for_ocr_regions': True,
                 'azure_reading_order': 'natural',
                 'azure_model_version': 'latest',
                 'azure_max_wait': 60,
@@ -2732,7 +2732,7 @@ class MangaSettingsDialog(QDialog):
         
         # Use RT-DETR for text region detection (not just bubble detection)
         self.use_rtdetr_for_ocr_checkbox = self._create_styled_checkbox("Use RT-DETR to guide OCR (Google/Azure only - others already do this)")
-        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', False))  # Default: False
+        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', True))  # Default: True
         self.use_rtdetr_for_ocr_checkbox.setToolTip(
             "When enabled, RT-DETR first detects all text regions (text bubbles + free text), \n"
             "then your OCR provider reads each region separately.\n\n"

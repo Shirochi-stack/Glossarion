@@ -230,8 +230,15 @@ class MangaTranslator:
         except Exception:
             self.batch_mode = False
         
-        # OCR ROI cache (image_hash + bbox + provider + lang + mode -> text)
+        # OCR ROI cache - PER IMAGE ONLY (cleared aggressively to prevent text leakage)
+        # CRITICAL: This cache MUST be cleared before every new image to prevent text contamination
+        # THREAD-SAFE: Each translator instance has its own cache (safe for parallel panel translation)
         self.ocr_roi_cache = {}
+        self._current_image_hash = None  # Track current image to force cache invalidation
+        
+        # Thread-safe lock for cache operations (critical for parallel panel translation)
+        import threading
+        self._cache_lock = threading.Lock()
         try:
             self.batch_size = int(os.getenv('BATCH_SIZE', '1'))
         except Exception:
@@ -256,7 +263,8 @@ class MangaTranslator:
             else:
                 self._log("📦 BATCH MODE: Bubble detection is disabled")
         
-        # Cache for processed images
+        # Cache for processed images - DEPRECATED/UNUSED (kept for backward compatibility)
+        # DO NOT USE THIS FOR TEXT DATA - IT CAN LEAK BETWEEN IMAGES
         self.cache = {}
         # Determine OCR provider
         self.ocr_provider = ocr_config.get('provider', 'google')
@@ -1984,27 +1992,43 @@ class MangaTranslator:
                 self._log(f"🔍 Detecting text: {os.path.basename(image_path)}")
         
         try:
-            # BATCH OPTIMIZATION: Skip clearing cache in batch mode
-            if not self.batch_mode:
-                # Clear any cached state from previous image
-                if hasattr(self, 'ocr_manager') and self.ocr_manager:
-                    if hasattr(self.ocr_manager, 'last_results'):
-                        self.ocr_manager.last_results = None
-                    if hasattr(self.ocr_manager, 'cache'):
-                        self.ocr_manager.cache = {}
-                        
-            # CLEAR ANY CACHED STATE FROM PREVIOUS IMAGE
+            # ============================================================
+            # CRITICAL: FORCE CLEAR ALL TEXT-RELATED CACHES
+            # This MUST happen for EVERY image to prevent text contamination
+            # NO EXCEPTIONS - batch mode or not, ALL caches get cleared
+            # ============================================================
+            
+            # 1. Clear OCR ROI cache (prevents text from previous images leaking)
+            # THREAD-SAFE: Use lock to prevent race conditions in parallel panel translation
+            if hasattr(self, 'ocr_roi_cache'):
+                with self._cache_lock:
+                    self.ocr_roi_cache.clear()
+                self._log("🧹 Cleared OCR ROI cache", "debug")
+            
+            # 2. Clear OCR manager caches (multiple potential cache locations)
             if hasattr(self, 'ocr_manager') and self.ocr_manager:
-                # Clear any cached results in OCR manager
+                # Clear last_results (can contain text from previous image)
                 if hasattr(self.ocr_manager, 'last_results'):
                     self.ocr_manager.last_results = None
+                # Clear generic cache
                 if hasattr(self.ocr_manager, 'cache'):
-                    self.ocr_manager.cache = {}
+                    self.ocr_manager.cache.clear()
+                # Clear provider-level caches
+                if hasattr(self.ocr_manager, 'providers'):
+                    for provider_name, provider in self.ocr_manager.providers.items():
+                        if hasattr(provider, 'last_results'):
+                            provider.last_results = None
+                        if hasattr(provider, 'cache'):
+                            provider.cache.clear()
+                self._log("🧹 Cleared OCR manager caches", "debug")
             
-            # Clear bubble detector cache if it exists
+            # 3. Clear bubble detector cache (can contain text region info)
             if hasattr(self, 'bubble_detector') and self.bubble_detector:
                 if hasattr(self.bubble_detector, 'last_detections'):
                     self.bubble_detector.last_detections = None
+                if hasattr(self.bubble_detector, 'cache'):
+                    self.bubble_detector.cache.clear()
+                self._log("🧹 Cleared bubble detector cache", "debug")
             
             # Get manga settings from main_gui config
             manga_settings = self.main_gui.config.get('manga_settings', {})
@@ -2037,8 +2061,18 @@ class MangaTranslator:
             try:
                 import hashlib
                 page_hash = hashlib.sha1(processed_image_data).hexdigest()
+                
+                # CRITICAL: If image hash changed, force clear ROI cache
+                # THREAD-SAFE: Use lock for parallel panel translation
+                if hasattr(self, '_current_image_hash') and self._current_image_hash != page_hash:
+                    if hasattr(self, 'ocr_roi_cache'):
+                        with self._cache_lock:
+                            self.ocr_roi_cache.clear()
+                        self._log("🧹 Image changed - cleared ROI cache", "debug")
+                self._current_image_hash = page_hash
             except Exception:
                 page_hash = None
+                self._current_image_hash = None
             
             regions = []
             
@@ -2080,9 +2114,24 @@ class MangaTranslator:
                                 def ocr_region_google(region_data):
                                     i, x, y, w, h = region_data
                                     try:
+                                        # RATE LIMITING: Add small delay to avoid potential rate limits
+                                        # Google has high limits (1,800/min paid tier) but being conservative
+                                        import time
+                                        import random
+                                        time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
+                                        
                                         # Crop region
                                         cropped = self._safe_crop_region(cv_image, x, y, w, h)
                                         if cropped is None:
+                                            return None
+                                        
+                                        # Validate crop size (Google Vision requires minimum dimensions)
+                                        h_crop, w_crop = cropped.shape[:2]
+                                        if h_crop < 10 or w_crop < 10:
+                                            self._log(f"⚠️ Region {i} too small ({w_crop}x{h_crop}px), skipping", "debug")
+                                            return None
+                                        if h_crop * w_crop < 100:  # Less than 100 pixels total
+                                            self._log(f"⚠️ Region {i} area too small ({h_crop*w_crop}px²), skipping", "debug")
                                             return None
                                         
                                         # Encode cropped image
@@ -2134,7 +2183,12 @@ class MangaTranslator:
                                         return None
                                     
                                     except Exception as e:
-                                        self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
+                                        # Provide more detailed error info for debugging
+                                        error_msg = str(e)
+                                        if 'Bad Request' in error_msg or 'invalid' in error_msg.lower():
+                                            self._log(f"⚠️ Region {i} rejected by Google Vision (likely too small/invalid): {error_msg}", "debug")
+                                        else:
+                                            self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
                                         return None
                                 
                                 # Process regions concurrently with RT-DETR concurrency control
@@ -2398,6 +2452,14 @@ class MangaTranslator:
                                         if cropped is None:
                                             return None
                                         
+                                        # RATE LIMITING: Add delay between Azure API calls to avoid "Too Many Requests"
+                                        # Azure Free tier: 20 calls/minute = 1 call per 3 seconds
+                                        # Azure Standard tier: Higher limits but still needs throttling
+                                        import time
+                                        import random
+                                        # Stagger requests with randomized delay (0.5-1.5 seconds)
+                                        time.sleep(0.5 + random.random())  # 0.5-1.5s random delay
+                                        
                                         # Encode cropped image
                                         _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
                                         region_image_bytes = encoded.tobytes()
@@ -2458,8 +2520,9 @@ class MangaTranslator:
                                 
                                 # Process regions concurrently with RT-DETR concurrency control
                                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                                # Use rtdetr_max_concurrency setting (default 2) to control parallel OCR calls
-                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 2), len(all_regions))
+                                # AZURE RATE LIMITING: Reduce max_workers to 1 to prevent rate limit errors
+                                # Azure has strict rate limits (Free: 20/min, Standard: varies by tier)
+                                max_workers = 1  # Force sequential to avoid rate limits
                                 
                                 region_data_list = [(i+1, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
                                 
@@ -2502,15 +2565,18 @@ class MangaTranslator:
                 if use_roi_locality and (ocr_batch_enabled or ocr_batch_size > 1):
                     rois = self._prepare_ocr_rois_from_bubbles(image_path, ocr_settings, preprocessing, page_hash)
                     if rois:
-                        # Azure recommended: 2–4 workers; derive from batch size
+                        # AZURE RATE LIMITING: Force low concurrency to prevent "Too Many Requests"
+                        # Azure has strict rate limits that vary by tier:
+                        # - Free tier: 20 requests/minute
+                        # - Standard tier: Higher but still limited
                         try:
                             azure_workers = int(ocr_settings.get('ocr_max_concurrency') or 0)
                             if azure_workers <= 0:
-                                azure_workers = min(4, max(1, ocr_batch_size))
+                                azure_workers = 1  # Force sequential by default
                             else:
-                                azure_workers = min(4, max(1, azure_workers))
+                                azure_workers = min(2, max(1, azure_workers))  # Cap at 2 max
                         except Exception:
-                            azure_workers = 2
+                            azure_workers = 1  # Safe default
                         regions = self._azure_ocr_rois_concurrent(rois, ocr_settings, azure_workers, page_hash)
                         self._log(f"✅ Azure OCR concurrent over {len(rois)} ROIs → {len(regions)} regions (workers={azure_workers})", "info")
                         
@@ -3802,7 +3868,9 @@ class MangaTranslator:
         for roi in rois:
             x, y, w, h = roi['bbox']
             cache_key = ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode)
-            cached_text = self.ocr_roi_cache.get(cache_key)
+            # THREAD-SAFE: Use lock for cache access in parallel panel translation
+            with self._cache_lock:
+                cached_text = self.ocr_roi_cache.get(cache_key)
             if cached_text:
                 region = TextRegion(
                     text=cached_text,
@@ -3830,6 +3898,11 @@ class MangaTranslator:
         max_concurrency = max(1, int(max_concurrency or 1))
 
         def do_batch(batch):
+            # RATE LIMITING: Add small delay before batch submission
+            import time
+            import random
+            time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
+            
             requests = []
             for roi in batch:
                 img = _vision.Image(content=roi['bytes'])
@@ -3878,9 +3951,11 @@ class MangaTranslator:
                     continue
                 x, y, w, h = roi['bbox']
                 # Update cache
+                # THREAD-SAFE: Use lock for cache write in parallel panel translation
                 try:
                     ck = roi.get('cache_key') or ("google", page_hash, x, y, w, h, tuple(lang_hints), detection_mode)
-                    self.ocr_roi_cache[ck] = text_clean
+                    with self._cache_lock:
+                        self.ocr_roi_cache[ck] = text_clean
                 except Exception:
                     pass
                 region = TextRegion(
@@ -3927,7 +4002,9 @@ class MangaTranslator:
         for roi in rois:
             x, y, w, h = roi['bbox']
             cache_key = ("azure", page_hash, x, y, w, h, tuple(language_hints), model_version, reading_order)
-            text_cached = self.ocr_roi_cache.get(cache_key)
+            # THREAD-SAFE: Use lock for cache access in parallel panel translation
+            with self._cache_lock:
+                text_cached = self.ocr_roi_cache.get(cache_key)
             if text_cached:
                 region = TextRegion(
                     text=text_cached,
@@ -3948,6 +4025,12 @@ class MangaTranslator:
 
         def ocr_one(roi):
             try:
+                # RATE LIMITING: Add delay between Azure API calls to avoid "Too Many Requests"
+                import time
+                import random
+                # Stagger requests with randomized delay
+                time.sleep(0.5 + random.random())  # 0.5-1.5s random delay
+                
                 # Ensure Azure-supported format for ROI bytes; honor compression preference when possible
                 data = roi['bytes']
                 try:
@@ -4014,10 +4097,12 @@ class MangaTranslator:
                     return None
                 x, y, w, h = roi['bbox']
                 # Update cache
+                # THREAD-SAFE: Use lock for cache write in parallel panel translation
                 try:
                     ck = roi.get('cache_key')
                     if ck:
-                        self.ocr_roi_cache[ck] = text_all
+                        with self._cache_lock:
+                            self.ocr_roi_cache[ck] = text_all
                 except Exception:
                     pass
                 region = TextRegion(
@@ -8590,16 +8675,42 @@ class MangaTranslator:
 
     def reset_for_new_image(self):
         """Reset internal state for processing a new image"""
+        # ============================================================
+        # CRITICAL: COMPREHENSIVE CACHE CLEARING FOR NEW IMAGE
+        # This ensures NO text data leaks between images
+        # ============================================================
+        
         # Clear any cached detection results
         if hasattr(self, 'last_detection_results'):
             del self.last_detection_results
         
-        # Clear OCR manager cache if it exists
+        # FORCE clear OCR ROI cache (main text contamination source)
+        # THREAD-SAFE: Use lock for parallel panel translation
+        if hasattr(self, 'ocr_roi_cache'):
+            with self._cache_lock:
+                self.ocr_roi_cache.clear()
+        self._current_image_hash = None
+        
+        # Clear OCR manager and ALL provider caches
         if hasattr(self, 'ocr_manager') and self.ocr_manager:
             if hasattr(self.ocr_manager, 'last_results'):
                 self.ocr_manager.last_results = None
             if hasattr(self.ocr_manager, 'cache'):
-                self.ocr_manager.cache = {}
+                self.ocr_manager.cache.clear()
+            # Clear ALL provider-level caches
+            if hasattr(self.ocr_manager, 'providers'):
+                for provider_name, provider in self.ocr_manager.providers.items():
+                    if hasattr(provider, 'last_results'):
+                        provider.last_results = None
+                    if hasattr(provider, 'cache'):
+                        provider.cache.clear()
+        
+        # Clear bubble detector cache
+        if hasattr(self, 'bubble_detector') and self.bubble_detector:
+            if hasattr(self.bubble_detector, 'last_detections'):
+                self.bubble_detector.last_detections = None
+            if hasattr(self.bubble_detector, 'cache'):
+                self.bubble_detector.cache.clear()
         
         # Don't clear translation context if using rolling history
         if not self.rolling_history_enabled:
@@ -8609,7 +8720,7 @@ class MangaTranslator:
         if hasattr(self, '_cached_regions'):
             del self._cached_regions
         
-        self._log("🔄 Reset translator state for new image", "debug")
+        self._log("🔄 Reset translator state for new image (ALL text caches cleared)", "debug")
 
     def _translate_single_region_parallel(self, region: TextRegion, index: int, total: int, image_path: str) -> Optional[str]:
         """Translate a single region for parallel processing"""
@@ -9256,9 +9367,14 @@ class MangaTranslator:
             if hasattr(self, 'translated_regions'):
                 self.translated_regions = []
             
-            # Clear cache
+            # Clear ALL caches (including text caches)
+            # THREAD-SAFE: Use lock for parallel panel translation
             if hasattr(self, 'cache'):
                 self.cache.clear()
+            if hasattr(self, 'ocr_roi_cache'):
+                with self._cache_lock:
+                    self.ocr_roi_cache.clear()
+            self._current_image_hash = None
             
             # Clear history and context
             if hasattr(self, 'translation_context'):
