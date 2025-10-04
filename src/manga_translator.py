@@ -2099,9 +2099,20 @@ class MangaTranslator:
                         processed_image_data = image_file.read()
             
             # Compute per-image hash for caching (based on uploaded bytes)
+            # CRITICAL FIX #1: Never allow None page_hash to prevent cache key collisions
             try:
                 import hashlib
                 page_hash = hashlib.sha1(processed_image_data).hexdigest()
+                
+                # CRITICAL: Never allow None page_hash
+                if page_hash is None:
+                    # Fallback: use image path + timestamp for uniqueness
+                    import time
+                    import uuid
+                    page_hash = hashlib.sha1(
+                        f"{image_path}_{time.time()}_{uuid.uuid4()}".encode()
+                    ).hexdigest()
+                    self._log("⚠️ Using fallback page hash for cache isolation", "warning")
                 
                 # CRITICAL: If image hash changed, force clear ROI cache
                 # THREAD-SAFE: Use lock for parallel panel translation
@@ -2111,9 +2122,12 @@ class MangaTranslator:
                             self.ocr_roi_cache.clear()
                         self._log("🧹 Image changed - cleared ROI cache", "debug")
                 self._current_image_hash = page_hash
-            except Exception:
-                page_hash = None
-                self._current_image_hash = None
+            except Exception as e:
+                # Emergency fallback - never let page_hash be None
+                import uuid
+                page_hash = str(uuid.uuid4())
+                self._current_image_hash = page_hash
+                self._log(f"⚠️ Page hash generation failed: {e}, using UUID fallback", "error")
             
             regions = []
             
@@ -7671,6 +7685,130 @@ class MangaTranslator:
         
         return ImageFont.load_default()
      
+    def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
+                       init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int]:
+        """Comic-translate's pil_word_wrap algorithm - top-down font sizing with column wrapping.
+        
+        Break long text to multiple lines, and reduce point size until all text fits within bounds.
+        This is a direct port from comic-translate for better text fitting.
+        """
+        from hyphen_textwrap import wrap as hyphen_wrap
+        
+        mutable_message = text
+        font_size = init_font_size
+        
+        def eval_metrics(txt, font):
+            """Calculate width/height of multiline text."""
+            lines = txt.split('\n')
+            max_width = 0
+            total_height = 0
+            
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+                line_height = bbox[3] - bbox[1]
+                max_width = max(max_width, line_width)
+                total_height += line_height
+            
+            return (max_width, total_height)
+        
+        # Get initial font
+        try:
+            if font_path:
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        
+        # Top-down algorithm: start with large font, shrink until it fits
+        while font_size > min_font_size:
+            try:
+                if font_path:
+                    font = ImageFont.truetype(font_path, font_size)
+                else:
+                    font = ImageFont.load_default()
+            except Exception:
+                font = ImageFont.load_default()
+            
+            width, height = eval_metrics(mutable_message, font)
+            
+            if height > roi_height:
+                # Text is too tall, reduce font size
+                font_size -= 0.75
+                mutable_message = text  # Restore original text
+            elif width > roi_width:
+                # Text is too wide, try wrapping with column optimization
+                columns = len(mutable_message)
+                
+                # Search for optimal column width
+                while columns > 0:
+                    columns -= 1
+                    if columns == 0:
+                        break
+                    
+                    # Use hyphen_wrap for smart wrapping
+                    try:
+                        wrapped = '\n'.join(hyphen_wrap(
+                            text, columns,
+                            break_on_hyphens=False,
+                            break_long_words=False,
+                            hyphenate_broken_words=True
+                        ))
+                        wrapped_width, _ = eval_metrics(wrapped, font)
+                        if wrapped_width <= roi_width:
+                            mutable_message = wrapped
+                            break
+                    except Exception:
+                        # Fallback to simple wrapping if hyphen_wrap fails
+                        break
+                
+                if columns < 1:
+                    # Couldn't find good column width, reduce font size
+                    font_size -= 0.75
+                    mutable_message = text  # Restore original text
+            else:
+                # Text fits!
+                break
+        
+        # If we hit minimum font size, do brute-force optimization
+        if font_size <= min_font_size:
+            font_size = min_font_size
+            mutable_message = text
+            
+            try:
+                if font_path:
+                    font = ImageFont.truetype(font_path, font_size)
+                else:
+                    font = ImageFont.load_default()
+            except Exception:
+                font = ImageFont.load_default()
+            
+            # Brute force: minimize cost function (width - roi_width)^2 + (height - roi_height)^2
+            min_cost = 1e9
+            min_text = text
+            
+            for columns in range(1, min(len(text) + 1, 100)):  # Limit iterations for performance
+                try:
+                    wrapped_text = '\n'.join(hyphen_wrap(
+                        text, columns,
+                        break_on_hyphens=False,
+                        break_long_words=False,
+                        hyphenate_broken_words=True
+                    ))
+                    wrapped_width, wrapped_height = eval_metrics(wrapped_text, font)
+                    cost = (wrapped_width - roi_width)**2 + (wrapped_height - roi_height)**2
+                    
+                    if cost < min_cost:
+                        min_cost = cost
+                        min_text = wrapped_text
+                except Exception:
+                    continue
+            
+            mutable_message = min_text
+        
+        return mutable_message, int(font_size)
+    
     def get_safe_text_area(self, region: TextRegion) -> Tuple[int, int, int, int]:
         """Get safe text area with less conservative margins for readability"""
         if not hasattr(region, 'vertices') or not region.vertices:
@@ -7719,7 +7857,7 @@ class MangaTranslator:
         return safe_x, safe_y, safe_width, safe_height
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
-        """Find optimal font size with better algorithm"""
+        """Find optimal font size using comic-translate's pil_word_wrap algorithm"""
         
         # Get usable area
         if region and hasattr(region, 'vertices') and region.vertices:
@@ -7732,107 +7870,56 @@ class MangaTranslator:
             usable_width = int(max_width * margin)
             usable_height = int(max_height * margin)
         
-        # Font size limits
-        MIN_FONT = max(10, self.min_readable_size)
-        MAX_FONT = min(40, self.max_font_size_limit)  # Cap at reasonable max
+        # Font size limits (GUI settings)
+        min_font_size = max(10, self.min_readable_size)
+        init_font_size = min(40, self.max_font_size_limit)
         
-        # Quick estimate based on bubble size
-        # Smaller bubbles need smaller fonts
-        bubble_area = usable_width * usable_height
-        if bubble_area < 5000:  # Very small bubble
-            MAX_FONT = min(MAX_FONT, 18)
-        elif bubble_area < 10000:  # Small bubble
-            MAX_FONT = min(MAX_FONT, 22)
-        elif bubble_area < 20000:  # Medium bubble
-            MAX_FONT = min(MAX_FONT, 28)
+        # Use comic-translate's pil_word_wrap algorithm
+        wrapped_text, final_font_size = self._pil_word_wrap(
+            text=text,
+            font_path=self.selected_font_style or self.font_path,
+            roi_width=usable_width,
+            roi_height=usable_height,
+            init_font_size=init_font_size,
+            min_font_size=min_font_size,
+            draw=draw
+        )
         
-        # Start with a reasonable guess based on text length
-        text_length = len(text.strip())
-        chars_per_line = max(1, usable_width // 20)  # Estimate ~20 pixels per character
-        estimated_lines = max(1, text_length // chars_per_line)
-        
-        # Initial size estimate based on height available per line
-        if estimated_lines > 0:
-            initial_size = int(usable_height / (estimated_lines * 1.5))  # 1.5 for line spacing
-            initial_size = max(MIN_FONT, min(initial_size, MAX_FONT))
-        else:
-            initial_size = (MIN_FONT + MAX_FONT) // 2
-        
-        # Binary search for optimal size
-        low = MIN_FONT
-        high = min(initial_size + 10, MAX_FONT)  # Start searching from initial estimate
-        best_size = MIN_FONT
-        best_lines = []
-        
-        # Track attempts to avoid infinite loops
-        attempts = 0
-        max_attempts = 15
-        
-        while low <= high and attempts < max_attempts:
-            attempts += 1
-            mid = (low + high) // 2
-            
-            font = self._get_font(mid)
-            lines = self._wrap_text(text, font, usable_width, draw)
-            
-            if not lines:  # Safety check
-                low = mid + 1
-                continue
-            
-            # Calculate actual height needed
-            line_height = mid * 1.3  # Standard line spacing
-            total_height = len(lines) * line_height
-            
-            # Check if it fits
-            if total_height <= usable_height:
-                # It fits, try larger
-                best_size = mid
-                best_lines = lines
-                
-                # But don't go too large - check readability
-                if len(lines) == 1 and mid >= MAX_FONT * 0.8:
-                    # Single line at large size, good enough
-                    break
-                elif len(lines) <= 3 and mid >= MAX_FONT * 0.7:
-                    # Few lines at good size, good enough
-                    break
-                
-                low = mid + 1
-            else:
-                # Doesn't fit, go smaller
-                high = mid - 1
-        
-        # Fallback if no good size found
-        if not best_lines:
-            font = self._get_font(MIN_FONT)
-            best_lines = self._wrap_text(text, font, usable_width, draw)
-            best_size = MIN_FONT
+        # Convert wrapped text to lines
+        lines = wrapped_text.split('\n') if wrapped_text else [text]
         
         # Apply multiplier if in multiplier mode
         if self.font_size_mode == 'multiplier':
-            target_size = int(best_size * self.font_size_multiplier)
+            target_size = int(final_font_size * self.font_size_multiplier)
             
             # Check if multiplied size still fits (if constrained)
             if self.constrain_to_bubble:
-                font = self._get_font(target_size)
-                test_lines = self._wrap_text(text, font, usable_width, draw)
-                test_height = len(test_lines) * target_size * 1.3
+                # Re-wrap at target size to check fit
+                test_wrapped, _ = self._pil_word_wrap(
+                    text=text,
+                    font_path=self.selected_font_style or self.font_path,
+                    roi_width=usable_width,
+                    roi_height=usable_height,
+                    init_font_size=target_size,
+                    min_font_size=target_size,  # Force this size
+                    draw=draw
+                )
+                test_lines = test_wrapped.split('\n') if test_wrapped else [text]
+                test_height = len(test_lines) * target_size * 1.2
                 
                 if test_height <= usable_height:
-                    best_size = target_size
-                    best_lines = test_lines
+                    final_font_size = target_size
+                    lines = test_lines
                 else:
-                    # Multiplied size doesn't fit, use original
                     self._log(f"  Multiplier {self.font_size_multiplier}x would exceed bubble", "debug")
             else:
                 # Not constrained, use multiplied size
-                best_size = target_size
-                font = self._get_font(best_size)
-                best_lines = self._wrap_text(text, font, usable_width, draw)
+                final_font_size = target_size
+                lines = wrapped_text.split('\n') if wrapped_text else [text]
         
-        self._log(f"  Font sizing: text_len={text_length}, size={best_size}, lines={len(best_lines)}", "debug")
+        self._log(f"  Font sizing: text_len={len(text)}, size={final_font_size}, lines={len(lines)}", "debug")
         
-        return best_size, best_lines
+        return final_font_size, lines
 
     def _fit_text_simple_topdown(self, text: str, usable_width: int, usable_height: int, 
                                  draw: ImageDraw, min_size: int, max_size: int) -> Tuple[int, List[str]]:
