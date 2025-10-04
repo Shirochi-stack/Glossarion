@@ -83,7 +83,7 @@ class MangaSettingsDialog(QDialog):
                 'bubble_detection_enabled': True,
                 'roi_locality_enabled': False,
                 'bubble_model_path': '',
-                'bubble_confidence': 0.5,
+                'bubble_confidence': 0.3,
                 'detector_type': 'rtdetr_onnx',
                 'rtdetr_confidence': 0.3,
                 'detect_empty_bubbles': True,

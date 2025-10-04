@@ -1507,7 +1507,7 @@ class MangaTranslator:
                         self._log("⚠️ Failed to load YOLO model, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                 
-                confidence = ocr_settings.get('bubble_confidence', 0.5)
+                confidence = ocr_settings.get('bubble_confidence', 0.3)
                 self._log(f"🎯 Detecting bubbles with YOLO (confidence >= {confidence:.2f})")
                 bubbles = bd.detect_bubbles(image_path, confidence=confidence, use_rtdetr=False)
                 
@@ -1878,7 +1878,7 @@ class MangaTranslator:
         """
         detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
         model_path = ocr_settings.get('bubble_model_path', '')
-        confidence = ocr_settings.get('bubble_confidence', 0.5)
+        confidence = ocr_settings.get('bubble_confidence', 0.3)
         
         bd = self._get_thread_bubble_detector()
         

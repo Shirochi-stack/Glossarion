@@ -220,7 +220,7 @@ class BubbleDetector:
         self.CLASS_TEXT_FREE = 2   # Text without bubble
         
         # Detection settings
-        self.default_confidence = 0.5
+        self.default_confidence = 0.3
         self.default_iou_threshold = 0.45
         # Allow override from settings
         try:

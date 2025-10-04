@@ -1208,7 +1208,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.8.5"
+        __version__ = "5.0.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -2366,7 +2366,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.8.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v5.0.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -14292,7 +14292,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v4.8.5...")
+    print("🚀 Starting Glossarion v5.0.0...")
     
     # Initialize splash screen
     splash_manager = None
