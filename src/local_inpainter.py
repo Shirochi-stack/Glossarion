@@ -2294,6 +2294,17 @@ class LocalInpainter:
                 logger.debug(f"No-op detection step failed: {e}")
             
             logger.info("✅ Inpainted successfully!")
+            
+            # Force garbage collection to reduce memory spikes
+            try:
+                import gc
+                gc.collect()
+                # Clear CUDA cache if using GPU
+                if torch is not None and hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            
             time.sleep(0.1)  # Brief pause for stability
             logger.debug("💤 Inpainting completion pausing briefly for stability")
             return result

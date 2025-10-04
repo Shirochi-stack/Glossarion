@@ -2933,6 +2933,30 @@ class MangaSettingsDialog(QDialog):
         self.rtdetr_conf_label = self.bubble_conf_label  # Alias
         conf_layout.addStretch()
 
+        # RT-DETR Concurrency (NEW - for memory optimization)
+        rtdetr_conc_widget = QWidget()
+        rtdetr_conc_layout = QHBoxLayout(rtdetr_conc_widget)
+        rtdetr_conc_layout.setContentsMargins(0, 6, 0, 0)
+        yolo_settings_layout.addWidget(rtdetr_conc_widget)
+        self.rtdetr_conc_frame = rtdetr_conc_widget
+        
+        rtdetr_conc_label = QLabel("RT-DETR Concurrency:")
+        rtdetr_conc_label.setMinimumWidth(100)
+        rtdetr_conc_layout.addWidget(rtdetr_conc_label)
+        
+        self.rtdetr_max_concurrency_spinbox = QSpinBox()
+        self.rtdetr_max_concurrency_spinbox.setRange(1, 8)
+        self.rtdetr_max_concurrency_spinbox.setValue(self.settings['ocr'].get('rtdetr_max_concurrency', 2))
+        self.rtdetr_max_concurrency_spinbox.setToolTip("Maximum concurrent RT-DETR region OCR calls (lower = less memory)")
+        rtdetr_conc_layout.addWidget(self.rtdetr_max_concurrency_spinbox)
+        
+        rtdetr_conc_desc = QLabel("parallel OCR calls (lower = less RAM)")
+        rtdetr_conc_desc_font = QFont('Arial', 9)
+        rtdetr_conc_desc.setFont(rtdetr_conc_desc_font)
+        rtdetr_conc_desc.setStyleSheet("color: gray;")
+        rtdetr_conc_layout.addWidget(rtdetr_conc_desc)
+        rtdetr_conc_layout.addStretch()
+
         # YOLO-specific: Max detections (only visible for YOLO)
         self.yolo_maxdet_widget = QWidget()
         yolo_maxdet_layout = QHBoxLayout(self.yolo_maxdet_widget)
@@ -3051,10 +3075,12 @@ class MangaSettingsDialog(QDialog):
         # Show/hide RT-DETR specific controls
         if 'RT-DETR' in detector or 'RTEDR_onnx' in detector:
             self.rtdetr_classes_frame.setVisible(True)
+            self.rtdetr_conc_frame.setVisible(True)  # Show RT-DETR concurrency control
             # Hide YOLO-only max det row
             self.yolo_maxdet_widget.setVisible(False)
         else:
             self.rtdetr_classes_frame.setVisible(False)
+            self.rtdetr_conc_frame.setVisible(False)  # Hide RT-DETR concurrency control
             # Show YOLO-only max det row for YOLO models
             if 'YOLO' in detector or 'Yolo' in detector or 'yolo' in detector or detector == 'Custom Model':
                 self.yolo_maxdet_widget.setVisible(True)
@@ -4157,6 +4183,7 @@ class MangaSettingsDialog(QDialog):
             self.settings['ocr']['detect_free_text'] = self.detect_free_text_checkbox.isChecked()
             self.settings['ocr']['rtdetr_model_url'] = self.bubble_model_entry.text()
             self.settings['ocr']['bubble_max_detections_yolo'] = int(self.bubble_max_det_yolo_spinbox.value())
+            self.settings['ocr']['rtdetr_max_concurrency'] = int(self.rtdetr_max_concurrency_spinbox.value())
             
             # Save the detector type properly
             detector_display = self.detector_type_combo.currentText()

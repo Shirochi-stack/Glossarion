@@ -2184,6 +2184,14 @@ class MangaTranslator:
                             max_cc = min(max(1, ocr_batch_size), 2)
                         regions = self._google_ocr_rois_batched(rois, ocr_settings, max(1, ocr_batch_size), max_cc, page_hash)
                         self._log(f"✅ Google OCR batched over {len(rois)} ROIs → {len(regions)} regions (cc={max_cc})", "info")
+                        
+                        # Force garbage collection after concurrent OCR to reduce memory spikes
+                        try:
+                            import gc
+                            gc.collect()
+                        except Exception:
+                            pass
+                        
                         return regions
 
                 # Start local inpainter preload while Google OCR runs (background; multiple if panel-parallel)
@@ -2474,6 +2482,14 @@ class MangaTranslator:
                             azure_workers = 2
                         regions = self._azure_ocr_rois_concurrent(rois, ocr_settings, azure_workers, page_hash)
                         self._log(f"✅ Azure OCR concurrent over {len(rois)} ROIs → {len(regions)} regions (workers={azure_workers})", "info")
+                        
+                        # Force garbage collection after concurrent OCR to reduce memory spikes
+                        try:
+                            import gc
+                            gc.collect()
+                        except Exception:
+                            pass
+                        
                         return regions
 
                 # Start local inpainter preload while Azure OCR runs (background; multiple if panel-parallel)
