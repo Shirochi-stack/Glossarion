@@ -2618,8 +2618,8 @@ class MangaTranslator:
                                         # Azure Standard tier: Higher limits but still needs throttling
                                         import time
                                         import random
-                                        # Stagger requests with randomized delay (0.5-1.5 seconds)
-                                        time.sleep(0.5 + random.random())  # 0.5-1.5s random delay
+                                        # Stagger requests with randomized delay (0.1-0.3 seconds)
+                                        time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
                                         
                                         # Encode cropped image
                                         _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -4312,7 +4312,7 @@ class MangaTranslator:
                 import time
                 import random
                 # Stagger requests with randomized delay
-                time.sleep(0.5 + random.random())  # 0.5-1.5s random delay
+                time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
                 
                 # Ensure Azure-supported format for ROI bytes; honor compression preference when possible
                 data = roi['bytes']
