@@ -128,27 +128,26 @@ class MangaTranslator:
                 pass
     
     def _return_bubble_detector_to_pool(self):
-        """Return a bubble detector instance back to the pool for reuse."""
-        if not hasattr(self, '_thread_local') or not hasattr(self._thread_local, 'bubble_detector'):
-            return  # Nothing to return
+        """Return a checked-out bubble detector instance back to the pool for reuse."""
+        if not hasattr(self, '_checked_out_bubble_detector') or not hasattr(self, '_bubble_detector_pool_key'):
+            return  # Nothing checked out
         
         try:
-            bd = self._thread_local.bubble_detector
-            if bd is None:
-                return
-            
-            # Try to identify which pool this came from
-            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
-            det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
-            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
-            key = (det_type, model_id)
-            
-            # Note: For bubble detectors, we don't need check-out/check-in since they're stored
-            # in thread-local storage. Just log that we're preserving it.
-            self._log(f"🤖 Bubble detector preserved in thread-local storage for reuse", "debug")
+            with MangaTranslator._detector_pool_lock:
+                key = self._bubble_detector_pool_key
+                rec = MangaTranslator._detector_pool.get(key)
+                if rec and 'checked_out' in rec:
+                    checked_out = rec['checked_out']
+                    if self._checked_out_bubble_detector in checked_out:
+                        checked_out.remove(self._checked_out_bubble_detector)
+                        self._log(f"🔄 Returned bubble detector to pool ({len(checked_out)}/{len(rec.get('spares', []))} still in use)", "info")
+            # Clear the references
+            self._checked_out_bubble_detector = None
+            self._bubble_detector_pool_key = None
         except Exception as e:
+            # Non-critical - just log
             try:
-                self._log(f"⚠️ Bubble detector cleanup info: {e}", "debug")
+                self._log(f"⚠️ Failed to return bubble detector to pool: {e}", "debug")
             except:
                 pass
     
@@ -632,22 +631,15 @@ class MangaTranslator:
                             tl.local_inpainters.clear()
                         except Exception:
                             pass
-                # Release thread-local bubble detector
+                # Return thread-local bubble detector to pool (DO NOT unload)
                 if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
                     try:
-                        bd = tl.bubble_detector
-                        try:
-                            if hasattr(bd, 'unload'):
-                                bd.unload(release_shared=False)
-                        except Exception:
-                            pass
+                        # Instead of unloading, return to pool for reuse
+                        self._return_bubble_detector_to_pool()
+                        # Keep thread-local reference intact for reuse in next image
+                        # Only clear if we're truly shutting down the thread
                     except Exception:
                         pass
-                    finally:
-                        try:
-                            tl.bubble_detector = None
-                        except Exception:
-                            pass
         except Exception:
             # Best-effort cleanup only
             pass
@@ -8855,9 +8847,13 @@ class MangaTranslator:
                         if rec and isinstance(rec, dict):
                             spares = rec.get('spares') or []
                             self._log(f"[DEBUG] Found pool record with {len(spares)} spares", "debug")
+                            # For singleton mode, we can use a pool instance without checking it out
+                            # since the singleton will keep it loaded permanently
                             if spares:
-                                bd = spares.pop(0)
-                                self._log("🤖 Using preloaded bubble detector from pool", "info")
+                                # Just use the first spare (don't pop or check out)
+                                # Singleton will keep it loaded, pool can still track it
+                                bd = spares[0]
+                                self._log(f"🤖 Using pool bubble detector for singleton (no check-out needed)", "info")
                         else:
                             self._log(f"[DEBUG] No pool record found for key: {key}", "debug")
                 except Exception as e:
@@ -8946,7 +8942,7 @@ class MangaTranslator:
                 self._thread_local = threading.local()
             if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
                 from bubble_detector import BubbleDetector
-                # Try to consume a preloaded spare for the current detector settings
+                # Try to check out a preloaded spare for the current detector settings
                 try:
                     ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
                     det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
@@ -8956,9 +8952,23 @@ class MangaTranslator:
                         rec = MangaTranslator._detector_pool.get(key)
                         if rec and isinstance(rec, dict):
                             spares = rec.get('spares') or []
+                            # Initialize checked_out list if it doesn't exist
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
+                            checked_out = rec['checked_out']
+                            
+                            # Look for an available spare (not checked out)
                             if spares:
-                                self._thread_local.bubble_detector = spares.pop(0)
-                                self._log("🤖 Using preloaded bubble detector instance", "info")
+                                for spare in spares:
+                                    if spare not in checked_out and spare:
+                                        # Check out this spare instance
+                                        checked_out.append(spare)
+                                        self._thread_local.bubble_detector = spare
+                                        # Store references for later return
+                                        self._checked_out_bubble_detector = spare
+                                        self._bubble_detector_pool_key = key
+                                        self._log(f"🤖 Checked out bubble detector from pool ({len(checked_out)}/{len(spares)} in use)", "info")
+                                        break
                 except Exception:
                     pass
                 # If still not set, create a fresh detector and store it for future use
@@ -8970,9 +8980,18 @@ class MangaTranslator:
                     try:
                         with MangaTranslator._detector_pool_lock:
                             if key not in MangaTranslator._detector_pool:
-                                MangaTranslator._detector_pool[key] = {'spares': []}
-                            # Note: We don't add the current one as it's in use,
-                            # but we've initialized the pool entry for future storage
+                                MangaTranslator._detector_pool[key] = {'spares': [], 'checked_out': []}
+                            # Add this new detector to spares and immediately check it out
+                            rec = MangaTranslator._detector_pool[key]
+                            if 'spares' not in rec:
+                                rec['spares'] = []
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
+                            rec['spares'].append(self._thread_local.bubble_detector)
+                            rec['checked_out'].append(self._thread_local.bubble_detector)
+                            # Store references for later return
+                            self._checked_out_bubble_detector = self._thread_local.bubble_detector
+                            self._bubble_detector_pool_key = key
                     except Exception:
                         pass
             return self._thread_local.bubble_detector
