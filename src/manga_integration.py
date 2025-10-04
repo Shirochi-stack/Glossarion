@@ -7564,6 +7564,14 @@ class MangaTranslationTab:
                         translator = MangaTranslator(ocr_config, self.main_gui.client, self.main_gui, log_callback=self._log)
                         translator.set_stop_flag(self.stop_flag)
                         
+                        # CRITICAL: Disable singleton bubble detector for parallel panel processing
+                        # Each panel should use pool-based detectors for true parallelism
+                        try:
+                            translator.use_singleton_bubble_detector = False
+                            self._log(f"   🤖 Panel translator: bubble detector pool mode enabled", "debug")
+                        except Exception:
+                            pass
+                        
                         # Ensure parallel processing settings are properly applied to each panel translator
                         # The web UI maps parallel_panel_translation to parallel_processing for MangaTranslator compatibility
                         try:
@@ -7653,6 +7661,9 @@ class MangaTranslationTab:
                                 # Return checked-out inpainter to pool for reuse
                                 if hasattr(translator, '_return_inpainter_to_pool'):
                                     translator._return_inpainter_to_pool()
+                                # Return bubble detector to pool for reuse
+                                if hasattr(translator, '_return_bubble_detector_to_pool'):
+                                    translator._return_bubble_detector_to_pool()
                                 # Clear all caches and state
                                 if hasattr(translator, 'reset_for_new_image'):
                                     translator.reset_for_new_image()
@@ -7739,6 +7750,9 @@ class MangaTranslationTab:
                                 # Return checked-out inpainter to pool for reuse
                                 if hasattr(translator, '_return_inpainter_to_pool'):
                                     translator._return_inpainter_to_pool()
+                                # Return bubble detector to pool for reuse
+                                if hasattr(translator, '_return_bubble_detector_to_pool'):
+                                    translator._return_bubble_detector_to_pool()
                                 # Force cleanup of all models and caches
                                 if hasattr(translator, 'clear_internal_state'):
                                     translator.clear_internal_state()

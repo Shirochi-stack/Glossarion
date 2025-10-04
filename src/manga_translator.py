@@ -116,7 +116,7 @@ class MangaTranslator:
                     checked_out = rec['checked_out']
                     if self._checked_out_inpainter in checked_out:
                         checked_out.remove(self._checked_out_inpainter)
-                        self._log(f"🔄 Returned inpainter to pool ({len(checked_out)}/{len(rec.get('spares', []))} still in use)", "debug")
+                        self._log(f"🔄 Returned inpainter to pool ({len(checked_out)}/{len(rec.get('spares', []))} still in use)", "info")
             # Clear the references
             self._checked_out_inpainter = None
             self._inpainter_pool_key = None
@@ -124,6 +124,31 @@ class MangaTranslator:
             # Non-critical - just log
             try:
                 self._log(f"⚠️ Failed to return inpainter to pool: {e}", "debug")
+            except:
+                pass
+    
+    def _return_bubble_detector_to_pool(self):
+        """Return a bubble detector instance back to the pool for reuse."""
+        if not hasattr(self, '_thread_local') or not hasattr(self._thread_local, 'bubble_detector'):
+            return  # Nothing to return
+        
+        try:
+            bd = self._thread_local.bubble_detector
+            if bd is None:
+                return
+            
+            # Try to identify which pool this came from
+            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
+            det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+            key = (det_type, model_id)
+            
+            # Note: For bubble detectors, we don't need check-out/check-in since they're stored
+            # in thread-local storage. Just log that we're preserving it.
+            self._log(f"🤖 Bubble detector preserved in thread-local storage for reuse", "debug")
+        except Exception as e:
+            try:
+                self._log(f"⚠️ Bubble detector cleanup info: {e}", "debug")
             except:
                 pass
     
@@ -6575,15 +6600,24 @@ class MangaTranslator:
                 need_init_shared = False
         
         if need_init_shared:
-            self._log(f"📦 Initializing shared inpainter instance first...", "debug")
+            self._log(f"📦 Initializing shared inpainter instance first...", "info")
             try:
                 shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=False)
                 if shared_inp and getattr(shared_inp, 'model_loaded', False):
-                    self._log(f"✅ Shared instance initialized successfully", "debug")
+                    self._log(f"✅ Shared instance initialized and model loaded", "info")
+                    # Verify the pool record is updated
+                    with MangaTranslator._inpaint_pool_lock:
+                        rec_check = MangaTranslator._inpaint_pool.get(key)
+                        if rec_check:
+                            self._log(f"   Pool record: loaded={rec_check.get('loaded')}, has_inpainter={rec_check.get('inpainter') is not None}", "debug")
                 else:
                     self._log(f"⚠️ Shared instance initialization returned but model not loaded", "warning")
+                    if shared_inp:
+                        self._log(f"   Instance exists but model_loaded={getattr(shared_inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
             except Exception as e:
                 self._log(f"⚠️ Shared instance initialization failed: {e}", "warning")
+                import traceback
+                self._log(traceback.format_exc(), "debug")
         
         # Ensure pool record and spares list exist
         with MangaTranslator._inpaint_pool_lock:
@@ -9990,13 +10024,18 @@ class MangaTranslator:
                 except Exception as e:
                     self._log(f"   Warning: OCR cleanup failed: {e}", "debug")
             
-            # IMPORTANT: Properly unload local inpainter
+            # IMPORTANT: Handle local inpainter cleanup carefully
+            # DO NOT unload if it's a shared/checked-out instance from the pool
             if hasattr(self, 'local_inpainter') and self.local_inpainter:
                 try:
-                    if hasattr(self.local_inpainter, 'unload'):
+                    # Only unload if this is NOT a checked-out or shared instance
+                    is_from_pool = hasattr(self, '_checked_out_inpainter') or hasattr(self, '_inpainter_pool_key')
+                    if not is_from_pool and hasattr(self.local_inpainter, 'unload'):
                         self.local_inpainter.unload()
+                        self._log("   ✓ Local inpainter unloaded", "debug")
+                    else:
+                        self._log("   ✓ Local inpainter reference cleared (pool instance preserved)", "debug")
                     self.local_inpainter = None
-                    self._log("   ✓ Local inpainter cleared", "debug")
                 except Exception as e:
                     self._log(f"   Warning: Inpainter cleanup failed: {e}", "debug")
             
@@ -10017,13 +10056,20 @@ class MangaTranslator:
                         pass
                 self.inpainter = None
             
-            # IMPORTANT: Properly unload bubble detector
+            # IMPORTANT: Handle bubble detector cleanup carefully
+            # DO NOT unload if it's a singleton or from a preloaded pool
             if hasattr(self, 'bubble_detector') and self.bubble_detector:
                 try:
-                    if not getattr(self, 'use_singleton_bubble_detector', False):
+                    is_singleton = getattr(self, 'use_singleton_bubble_detector', False)
+                    # Check if it's from thread-local which might have gotten it from the pool
+                    is_from_pool = hasattr(self, '_thread_local') and hasattr(self._thread_local, 'bubble_detector')
+                    
+                    if not is_singleton and not is_from_pool:
                         if hasattr(self.bubble_detector, 'unload'):
                             self.bubble_detector.unload(release_shared=True)
-                        self._log("   ✓ Bubble detector cleared", "debug")
+                        self._log("   ✓ Bubble detector unloaded", "debug")
+                    else:
+                        self._log("   ✓ Bubble detector reference cleared (pool/singleton instance preserved)", "debug")
                     # In all cases, clear our instance reference
                     self.bubble_detector = None
                 except Exception as e:
