@@ -7013,13 +7013,55 @@ class MangaTranslationTab:
                 needs_new_translator = True
         if needs_new_translator:
             self._log("⚙️ Initializing translator...", "info")
+            
+            # CRITICAL: Set batch environment variables BEFORE creating translator
+            # This ensures MangaTranslator picks up the batch settings on initialization
+            try:
+                # Get batch translation setting from main GUI
+                batch_translation_enabled = False
+                batch_size_value = 1
+                
+                if hasattr(self.main_gui, 'batch_translation_var'):
+                    # Check if batch translation is enabled in GUI
+                    try:
+                        if hasattr(self.main_gui.batch_translation_var, 'get'):
+                            batch_translation_enabled = bool(self.main_gui.batch_translation_var.get())
+                        else:
+                            batch_translation_enabled = bool(self.main_gui.batch_translation_var)
+                    except Exception:
+                        pass
+                
+                if hasattr(self.main_gui, 'batch_size_var'):
+                    # Get batch size from GUI
+                    try:
+                        if hasattr(self.main_gui.batch_size_var, 'get'):
+                            batch_size_value = int(self.main_gui.batch_size_var.get())
+                        else:
+                            batch_size_value = int(self.main_gui.batch_size_var)
+                    except Exception:
+                        batch_size_value = 1
+                
+                # Set environment variables for the translator to pick up
+                if batch_translation_enabled:
+                    os.environ['BATCH_TRANSLATION'] = '1'
+                    os.environ['BATCH_SIZE'] = str(max(1, batch_size_value))
+                    self._log(f"📦 Batch Translation ENABLED: {batch_size_value} concurrent API calls", "info")
+                else:
+                    os.environ['BATCH_TRANSLATION'] = '0'
+                    os.environ['BATCH_SIZE'] = '1'
+                    self._log("📦 Batch Translation DISABLED: Sequential API calls", "info")
+            except Exception as e:
+                self._log(f"⚠️ Warning: Could not set batch settings: {e}", "warning")
+                os.environ['BATCH_TRANSLATION'] = '0'
+                os.environ['BATCH_SIZE'] = '1'
+            
             try:
                 self.translator = MangaTranslator(
                     ocr_config,
                     self.main_gui.client,
                     self.main_gui,
                     log_callback=self._log
-                )               
+                )
                 
                 # Fix 4: Safely set OCR manager
                 if hasattr(self, 'ocr_manager'):
@@ -7063,6 +7105,45 @@ class MangaTranslationTab:
                 self._reset_ui_state()
                 return
         else:
+            # Update batch settings for existing translator
+            try:
+                batch_translation_enabled = False
+                batch_size_value = 1
+                
+                if hasattr(self.main_gui, 'batch_translation_var'):
+                    try:
+                        if hasattr(self.main_gui.batch_translation_var, 'get'):
+                            batch_translation_enabled = bool(self.main_gui.batch_translation_var.get())
+                        else:
+                            batch_translation_enabled = bool(self.main_gui.batch_translation_var)
+                    except Exception:
+                        pass
+                
+                if hasattr(self.main_gui, 'batch_size_var'):
+                    try:
+                        if hasattr(self.main_gui.batch_size_var, 'get'):
+                            batch_size_value = int(self.main_gui.batch_size_var.get())
+                        else:
+                            batch_size_value = int(self.main_gui.batch_size_var)
+                    except Exception:
+                        batch_size_value = 1
+                
+                # Update environment variables and translator attributes
+                if batch_translation_enabled:
+                    os.environ['BATCH_TRANSLATION'] = '1'
+                    os.environ['BATCH_SIZE'] = str(max(1, batch_size_value))
+                    self.translator.batch_mode = True
+                    self.translator.batch_size = max(1, batch_size_value)
+                    self._log(f"📦 Batch Translation UPDATED: {batch_size_value} concurrent API calls", "info")
+                else:
+                    os.environ['BATCH_TRANSLATION'] = '0'
+                    os.environ['BATCH_SIZE'] = '1'
+                    self.translator.batch_mode = False
+                    self.translator.batch_size = 1
+                    self._log("📦 Batch Translation UPDATED: Sequential API calls", "info")
+            except Exception as e:
+                self._log(f"⚠️ Warning: Could not update batch settings: {e}", "warning")
+            
             # Update the translator with the new client if model changed
             if needs_new_client and hasattr(self.translator, 'client'):
                 self.translator.client = self.main_gui.client

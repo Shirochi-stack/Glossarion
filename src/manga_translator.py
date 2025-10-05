@@ -8589,7 +8589,7 @@ class MangaTranslator:
             if not getattr(self, 'concise_logs', False):
                 has_attr = hasattr(region, 'bubble_bounds')
                 is_none = getattr(region, 'bubble_bounds', None) is None if has_attr else True
-                self._log(f"  ⚠️ manga-ocr but NO bubble_bounds (has_attr={has_attr}, is_none={is_none})", "warning")
+                #self._log(f"  ⚠️ manga-ocr but NO bubble_bounds (has_attr={has_attr}, is_none={is_none})", "warning")
         
         # PRIORITY 2: For Azure/Google or when bubble_bounds not available, extract from mask
         if full_mask is not None:
@@ -9998,11 +9998,17 @@ class MangaTranslator:
             self._log(f"\n⏹️ Translation stopped before processing any regions", "warning")
             return regions
         
-        # Check if parallel processing is enabled
+        # Check if parallel processing OR batch translation is enabled
         parallel_enabled = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
+        batch_enabled = getattr(self, 'batch_mode', False)
         max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
         
-        if parallel_enabled and len(regions) > 1:
+        # Batch translation (parallel API calls) should work independently of parallel processing
+        if batch_enabled:
+            max_workers = getattr(self, 'batch_size', max_workers)
+            self._log(f"📦 Using BATCH TRANSLATION with {max_workers} concurrent API calls")
+            return self._translate_regions_parallel(regions, image_path, max_workers)
+        elif parallel_enabled and len(regions) > 1:
             self._log(f"🚀 Using PARALLEL processing with {max_workers} workers")
             return self._translate_regions_parallel(regions, image_path, max_workers)
         else:
