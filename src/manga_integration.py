@@ -313,21 +313,23 @@ class MangaTranslationTab:
         
         # Initialize the full page context prompt
         self.full_page_context_prompt = (
-            "You will receive multiple text segments from a manga page. "
+            "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
-            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
-            "(without the [0], [1] index prefixes) and each value is the translation.\n"
+            "CRITICAL: Return your response as a valid JSON object where each key includes BOTH the index prefix "
+            "AND the original text EXACTLY as provided (e.g., '[0] こんにちは'), and each value is the translation.\n"
+            "This is essential for correct mapping - do not modify or omit the index prefixes!\n\n"
             "Make sure to properly escape any special characters in the JSON:\n"
             "- Use \\n for newlines\n"
             "- Use \\\" for quotes\n"
             "- Use \\\\ for backslashes\n\n"
             "Example:\n"
             '{\n'
-            '  こんにちは: Hello,\n'
-            '  ありがとう: Thank you\n'
+            '  "[0] こんにちは": "Hello",\n'
+            '  "[1] ありがとう": "Thank you",\n'
+            '  "[2] さようなら": "Goodbye"\n'
             '}\n\n'
-            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+            'REMEMBER: Keep the [index] prefix in each JSON key exactly as shown in the input!'
         )
 
         # Initialize the OCR system prompt
@@ -4361,21 +4363,23 @@ class MangaTranslationTab:
         self.full_page_context_value = config.get('manga_full_page_context', False)
         
         self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
-            "You will receive multiple text segments from a manga page. "
+            "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
-            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
-            "(without the [0], [1] index prefixes) and each value is the translation.\n"
+            "CRITICAL: Return your response as a valid JSON object where each key includes BOTH the index prefix "
+            "AND the original text EXACTLY as provided (e.g., '[0] こんにちは'), and each value is the translation.\n"
+            "This is essential for correct mapping - do not modify or omit the index prefixes!\n\n"
             "Make sure to properly escape any special characters in the JSON:\n"
             "- Use \\n for newlines\n"
             "- Use \\\" for quotes\n"
             "- Use \\\\ for backslashes\n\n"
             "Example:\n"
             '{\n'
-            '  こんにちは: Hello,\n'
-            '  ありがとう: Thank you\n'
+            '  "[0] こんにちは": "Hello",\n'
+            '  "[1] ありがとう": "Thank you",\n'
+            '  "[2] さようなら": "Goodbye"\n'
             '}\n\n'
-            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+            'REMEMBER: Keep the [index] prefix in each JSON key exactly as shown in the input!'
         )
  
         # Load OCR prompt
@@ -4654,16 +4658,23 @@ class MangaTranslationTab:
         
         def reset_prompt():
             default_prompt = (
-                "You will receive multiple text segments from a manga page. "
+                "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
                 "Translate each segment considering the context of all segments together. "
                 "Maintain consistency in character names, tone, and style across all translations.\n\n"
-                "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
-                "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
+                "CRITICAL: Return your response as a valid JSON object where each key includes BOTH the index prefix "
+                "AND the original text EXACTLY as provided (e.g., '[0] こんにちは'), and each value is the translation.\n"
+                "This is essential for correct mapping - do not modify or omit the index prefixes!\n\n"
+                "Make sure to properly escape any special characters in the JSON:\n"
+                "- Use \\n for newlines\n"
+                "- Use \\\" for quotes\n"
+                "- Use \\\\ for backslashes\n\n"
+                "Example:\n"
                 '{\n'
-                '  こんにちは: Hello,\n'
-                '  ありがとう: Thank you\n'
+                '  "[0] こんにちは": "Hello",\n'
+                '  "[1] ありがとう": "Thank you",\n'
+                '  "[2] さようなら": "Goodbye"\n'
                 '}\n\n'
-                'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+                'REMEMBER: Keep the [index] prefix in each JSON key exactly as shown in the input!'
             )
             text_editor.setPlainText(default_prompt)
             

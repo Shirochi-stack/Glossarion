@@ -407,21 +407,23 @@ class MangaTranslator:
         
         # Default prompt for full page context mode
         self.full_page_context_prompt = (
-            "You will receive multiple text segments from a manga page. "
+            "You will receive multiple text segments from a manga page, each prefixed with an index like [0], [1], etc. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
-            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
-            "(without the [0], [1] index prefixes) and each value is the translation.\n"
+            "CRITICAL: Return your response as a valid JSON object where each key includes BOTH the index prefix "
+            "AND the original text EXACTLY as provided (e.g., '[0] こんにちは'), and each value is the translation.\n"
+            "This is essential for correct mapping - do not modify or omit the index prefixes!\n\n"
             "Make sure to properly escape any special characters in the JSON:\n"
             "- Use \\n for newlines\n"
             "- Use \\\" for quotes\n"
             "- Use \\\\ for backslashes\n\n"
             "Example:\n"
             '{\n'
-            '  こんにちは: Hello,\n'
-            '  ありがとう: Thank you\n'
+            '  "[0] こんにちは": "Hello",\n'
+            '  "[1] ありがとう": "Thank you",\n'
+            '  "[2] さようなら": "Goodbye"\n'
             '}\n\n'
-            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+            'REMEMBER: Keep the [index] prefix in each JSON key exactly as shown in the input!'
         )
 
         # Visual context setting (for non-vision model support)
@@ -6016,7 +6018,20 @@ class MangaTranslator:
                 self._log(f"  Translation {i}: '{val_str[:1000]}...'", "debug")
 
             # Clean all translation values to remove quotes
-            translation_values = [self._clean_translation_text(t) for t in translation_values]
+            # CRITICAL: Also clean the keys in the dictionary to maintain correct mapping
+            cleaned_translations = {}
+            for key, value in translations.items():
+                cleaned_key = key
+                cleaned_value = self._clean_translation_text(value)
+                # Only add if the cleaned value is not empty (avoid misalignment)
+                if cleaned_value:
+                    cleaned_translations[cleaned_key] = cleaned_value
+                else:
+                    self._log(f"🔍 Skipping empty translation after cleaning: '{key}' → ''", "debug")
+            
+            # Replace original dict with cleaned version
+            translations = cleaned_translations
+            translation_values = list(translations.values()) if translations else []
 
             self._log(f"🔍 DEBUG: translation_values after cleaning:", "debug")
             for i, val in enumerate(translation_values):
@@ -6067,28 +6082,30 @@ class MangaTranslator:
                         details={"refusal_message": translation_values[0][:500]}
                     )
 
-            # Position-based mapping
-            self._log(f"📋 Mapping {len(translation_values)} translations to {len(regions)} regions")
+            # Key-based mapping (prioritize indexed format as requested in prompt)
+            self._log(f"📋 Mapping {len(translations)} translations to {len(regions)} regions")
             
             for i, region in enumerate(regions):
                 if i % 10 == 0 and self._check_stop():
                     self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
                     return result
                 
-                # Get translation by position or key
+                # Get translation using multiple strategies (indexed format is most reliable)
                 translated = ""
                 
-                # Try position-based first
-                if i < len(translation_values):
-                    translated = translation_values[i]
-                # Try key-based fallback
+                # Strategy 1: Indexed key format "[N] original_text" (NEW STANDARD - most reliable)
+                key = f"[{i}] {region.text}"
+                if key in translations:
+                    translated = translations[key]
+                    self._log(f"  ✅ Matched indexed key: '{key[:40]}...'", "debug")
+                # Strategy 2: Direct key match without index (backward compatibility)
                 elif region.text in translations:
-                    translated = self._clean_translation_text(translations[region.text])
-                # Try indexed key
-                else:
-                    key = f"[{i}] {region.text}"
-                    if key in translations:
-                        translated = self._clean_translation_text(translations[key])
+                    translated = translations[region.text]
+                    self._log(f"  ✅ Matched direct key: '{region.text[:40]}...'", "debug")
+                # Strategy 3: Position-based fallback (least reliable, only if counts match exactly)
+                elif i < len(translation_values) and len(translation_values) == len(regions):
+                    translated = translation_values[i]
+                    self._log(f"  ⚠️ Using position-based fallback for region {i}", "debug")
                 
                 # Only mark as missing if we genuinely have no translation
                 # NOTE: Keep translation even if it matches original (e.g., numbers, names, SFX)
