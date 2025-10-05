@@ -4799,7 +4799,8 @@ class MangaTranslator:
             avg_confidence = np.mean([r.confidence for r in regions]) if regions else 0
             
             for i, region in enumerate(regions):
-                x, y, w, h = region.bounding_box
+                # Convert to int to avoid OpenCV type errors
+                x, y, w, h = map(int, region.bounding_box)
                 
                 # Color based on confidence
                 if region.confidence > 0.95:
@@ -4884,6 +4885,8 @@ class MangaTranslator:
                             # Draw safe text area
                             try:
                                 safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region)
+                                # Convert to int for OpenCV
+                                safe_x, safe_y, safe_w, safe_h = map(int, (safe_x, safe_y, safe_w, safe_h))
                                 cv2.rectangle(polygon_img, (safe_x, safe_y), 
                                             (safe_x + safe_w, safe_y + safe_h), 
                                             (0, 255, 0), 1)
@@ -4899,7 +4902,8 @@ class MangaTranslator:
                 os.makedirs(regions_dir, exist_ok=True)
                 
                 for i, region in enumerate(regions[:10]):  # Limit to first 10 regions
-                    x, y, w, h = region.bounding_box
+                    # Convert to int to avoid OpenCV type errors
+                    x, y, w, h = map(int, region.bounding_box)
                     # Add padding
                     pad = 10
                     x1 = max(0, x - pad)
@@ -4937,7 +4941,8 @@ class MangaTranslator:
         heatmap = np.zeros_like(img[:, :, 0], dtype=np.float32)
         
         for region in regions:
-            x, y, w, h = region.bounding_box
+            # Convert to int for array indexing
+            x, y, w, h = map(int, region.bounding_box)
             confidence = region.confidence
             heatmap[y:y+h, x:x+w] = confidence
         
