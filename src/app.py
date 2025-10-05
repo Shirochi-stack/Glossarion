@@ -122,6 +122,15 @@ class GlossarionWeb:
         os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
         print(f"🔧 Initialized API call delay: {api_call_delay}s")
         
+        # Set batch translation settings
+        if 'batch_translation' not in self.config:
+            self.config['batch_translation'] = True
+            self.decrypted_config['batch_translation'] = True
+        if 'batch_size' not in self.config:
+            self.config['batch_size'] = 10
+            self.decrypted_config['batch_size'] = 10
+        print(f"📦 Initialized batch translation: {self.config['batch_translation']}, batch size: {self.config['batch_size']}")
+        
         # Set font algorithm and auto fit style if not present
         if 'manga_settings' not in self.config:
             self.config['manga_settings'] = {}
@@ -298,6 +307,8 @@ class GlossarionWeb:
             'model': 'gpt-4-turbo',
             'api_key': '',
             'api_call_delay': 0.5,  # Default 0.5 seconds between API calls
+            'batch_translation': True,  # Enable batch translation by default
+            'batch_size': 10,  # Default batch size
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
