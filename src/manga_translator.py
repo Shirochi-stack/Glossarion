@@ -2275,8 +2275,13 @@ class MangaTranslator:
                                         MIN_SIZE = 50  # Minimum dimension (increased from 10 for better OCR)
                                         MIN_AREA = 2500  # Minimum area (50x50)
                                         
+                                        # Skip completely invalid/corrupted regions (0 or negative dimensions)
+                                        if h_crop <= 0 or w_crop <= 0:
+                                            self._log(f"⚠️ Region {i} has invalid dimensions ({w_crop}x{h_crop}px), skipping", "debug")
+                                            return None
+                                        
                                         if h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA:
-                                            # Region too small - try to resize it
+                                            # Region too small - resize it
                                             scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
                                             scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
                                             scale = max(scale_w, scale_h)
@@ -2287,11 +2292,6 @@ class MangaTranslator:
                                                 cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
                                                 self._log(f"🔍 Region {i} resized from {w_crop}x{h_crop}px to {new_w}x{new_h}px for OCR", "debug")
                                                 h_crop, w_crop = new_h, new_w
-                                        
-                                        # Final validation
-                                        if h_crop < 10 or w_crop < 10:
-                                            self._log(f"⚠️ Region {i} too small even after resize ({w_crop}x{h_crop}px), skipping", "debug")
-                                            return None
                                         
                                         # Encode cropped image
                                         _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -2730,8 +2730,13 @@ class MangaTranslator:
                                         MIN_SIZE = 50  # Minimum dimension (Azure requirement)
                                         MIN_AREA = 2500  # Minimum area (50x50)
                                         
+                                        # Skip completely invalid/corrupted regions (0 or negative dimensions)
+                                        if h_crop <= 0 or w_crop <= 0:
+                                            self._log(f"⚠️ Region {i} has invalid dimensions ({w_crop}x{h_crop}px), skipping", "debug")
+                                            return None
+                                        
                                         if h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA:
-                                            # Region too small - try to resize it
+                                            # Region too small - resize it
                                             scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
                                             scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
                                             scale = max(scale_w, scale_h)
@@ -2742,11 +2747,6 @@ class MangaTranslator:
                                                 cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
                                                 self._log(f"🔍 Region {i} resized from {w_crop}x{h_crop}px to {new_w}x{new_h}px for Azure OCR", "debug")
                                                 h_crop, w_crop = new_h, new_w
-                                        
-                                        # Final validation
-                                        if h_crop < 10 or w_crop < 10:
-                                            self._log(f"⚠️ Region {i} too small even after resize ({w_crop}x{h_crop}px), skipping", "debug")
-                                            return None
                                         
                                         # RATE LIMITING: Add delay between Azure API calls to avoid "Too Many Requests"
                                         # Azure Free tier: 20 calls/minute = 1 call per 3 seconds

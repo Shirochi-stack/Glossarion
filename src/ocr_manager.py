@@ -454,10 +454,32 @@ class CustomAPIProvider(OCRProvider):
             import base64
             import io
             
+            # Validate and resize image if too small (consistent with Google/Azure logic)
+            h, w = image.shape[:2]
+            MIN_SIZE = 50  # Minimum dimension for good OCR quality
+            MIN_AREA = 2500  # Minimum area (50x50)
+            
+            # Skip completely invalid/corrupted images (0 or negative dimensions)
+            if h <= 0 or w <= 0:
+                self._log(f"⚠️ Invalid image dimensions ({w}x{h}px), skipping", "warning")
+                return results
+            
+            if h < MIN_SIZE or w < MIN_SIZE or h * w < MIN_AREA:
+                # Image too small - resize it
+                scale_w = MIN_SIZE / w if w < MIN_SIZE else 1.0
+                scale_h = MIN_SIZE / h if h < MIN_SIZE else 1.0
+                scale = max(scale_w, scale_h)
+                
+                if scale > 1.0:
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                    self._log(f"🔍 Image resized from {w}x{h}px to {new_w}x{new_h}px for Custom API OCR", "debug")
+                    h, w = new_h, new_w
+            
             # Convert numpy array to PIL Image
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(image_rgb)
-            h, w = image.shape[:2]
             
             # Convert PIL Image to base64 string
             buffer = io.BytesIO()
