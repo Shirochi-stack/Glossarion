@@ -1124,10 +1124,10 @@ def _create_processing_options_section(self, parent):
         self.force_bs_for_traditional_var = tk.BooleanVar(
             value=self.config.get('force_bs_for_traditional', True)
         )
-    tb.Checkbutton(extraction_frame, text="Force BeautifulSoup for DeepL / Google Translate",
+    tb.Checkbutton(extraction_frame, text="Force BeautifulSoup for DeepL / Google Translate / Google Free",
                   variable=self.force_bs_for_traditional_var,
                   bootstyle="round-toggle").pack(anchor=tk.W, pady=(0, 5))
-    tk.Label(extraction_frame, text="When enabled, DeepL/Google Translate always use BeautifulSoup extraction even if Enhanced is selected.",
+    tk.Label(extraction_frame, text="When enabled, DeepL/Google Translate/Google Free always use BeautifulSoup extraction even if Enhanced is selected.",
              font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
     
     # Chapter merging option

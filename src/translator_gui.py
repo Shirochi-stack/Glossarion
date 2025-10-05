@@ -225,7 +225,7 @@ except Exception as _e:
 
 def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
-    return model in ['deepl', 'google-translate'] or model.startswith('deepl/') or model.startswith('google-translate/')
+    return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
     
 def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
     """
