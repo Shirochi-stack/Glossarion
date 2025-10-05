@@ -8380,40 +8380,102 @@ class MangaTranslator:
         return mutable_message, int(font_size)
     
     def get_safe_text_area(self, region: TextRegion) -> Tuple[int, int, int, int]:
-        """Get safe text area with less conservative margins for readability"""
+        """Get safe text area with algorithm-aware shrink strategy.
+        
+        Respects font_algorithm and auto_fit_style settings:
+        - conservative: Comic-translate's 15% shrink (85% usable)
+        - smart: Adaptive 10-20% shrink based on bubble shape
+        - aggressive: Minimal 5% shrink (95% usable)
+        
+        Also applies OCR-specific adjustments for Azure/Google without RT-DETR guidance.
+        """
+        # Get font sizing settings from config
+        try:
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            font_sizing = manga_settings.get('font_sizing', {})
+            rendering = manga_settings.get('rendering', {})
+            
+            font_algorithm = font_sizing.get('algorithm', 'smart')
+            auto_fit_style = rendering.get('auto_fit_style', 'balanced')
+            
+            # Check if using Azure/Google without RT-DETR guidance
+            ocr_settings = manga_settings.get('ocr', {})
+            use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+            is_azure_google = getattr(self, 'ocr_provider', '').lower() in ('azure', 'google')
+            needs_aggressive = is_azure_google and not use_rtdetr_guide
+        except Exception:
+            font_algorithm = 'smart'
+            auto_fit_style = 'balanced'
+            needs_aggressive = False
+        
+        # Base margin factor by algorithm
+        if font_algorithm == 'conservative':
+            # Comic-translate default: 15% shrink = 85% usable
+            base_margin = 0.85
+        elif font_algorithm == 'aggressive':
+            # Aggressive: 5% shrink = 95% usable
+            base_margin = 0.95
+        else:  # 'smart'
+            # Smart: adaptive based on auto_fit_style
+            if auto_fit_style == 'compact':
+                base_margin = 0.82  # 18% shrink - tight fit
+            elif auto_fit_style == 'readable':
+                base_margin = 0.92  # 8% shrink - loose fit
+            else:  # 'balanced'
+                base_margin = 0.87  # 13% shrink - balanced
+        
+        # SPECIAL CASE: Azure/Google without RT-DETR guidance
+        # Their OCR is too conservative, so we need more aggressive sizing
+        if needs_aggressive:
+            # Boost margin by 5-8% to compensate for conservative OCR bounds
+            base_margin = min(0.98, base_margin + 0.08)
+            self._log(f"  🎯 Azure/Google non-RT-DETR mode: Using aggressive {int(base_margin*100)}% margin", "debug")
+        
+        # Handle regions without vertices (simple bounding box)
         if not hasattr(region, 'vertices') or not region.vertices:
             x, y, w, h = region.bounding_box
-            margin_factor = 0.85  # Less conservative default
-            safe_width = int(w * margin_factor)
-            safe_height = int(h * margin_factor)
+            safe_width = int(w * base_margin)
+            safe_height = int(h * base_margin)
             safe_x = x + (w - safe_width) // 2
             safe_y = y + (h - safe_height) // 2
             return safe_x, safe_y, safe_width, safe_height
         
-        try:
-            # Convert vertices to numpy array with correct dtype
-            vertices = np.array(region.vertices, dtype=np.int32)
-            hull = cv2.convexHull(vertices)
-            hull_area = cv2.contourArea(hull)
-            poly_area = cv2.contourArea(vertices)
-            
-            if poly_area > 0:
-                convexity = hull_area / poly_area
-            else:
-                convexity = 1.0
-            
-            # LESS CONSERVATIVE margins for better readability
-            if convexity < 0.85:  # Speech bubble with tail
-                margin_factor = 0.75
-                self._log(f"  Speech bubble detected, using 75% of area", "info")
-            elif convexity > 0.98:  # Rectangular
-                margin_factor = 0.9
-                self._log(f"  Rectangular bubble, using 90% of area", "info")
-            else:  # Regular bubble
-                margin_factor = 0.8
-                self._log(f"  Regular bubble, using 80% of area", "info")
-        except:
-            margin_factor = 0.95
+        # Calculate convexity for shape-aware adjustment (only for 'smart' algorithm)
+        margin_factor = base_margin
+        if font_algorithm == 'smart':
+            try:
+                # Convert vertices to numpy array with correct dtype
+                vertices = np.array(region.vertices, dtype=np.int32)
+                hull = cv2.convexHull(vertices)
+                hull_area = cv2.contourArea(hull)
+                poly_area = cv2.contourArea(vertices)
+                
+                if poly_area > 0:
+                    convexity = hull_area / poly_area
+                else:
+                    convexity = 1.0
+                
+                # Adjust margin based on bubble shape
+                if convexity < 0.85:  # Speech bubble with tail
+                    # More aggressive shrink for tailed bubbles (avoid the tail)
+                    margin_factor = base_margin - 0.10
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  Speech bubble with tail: {int(margin_factor*100)}% usable area", "debug")
+                elif convexity > 0.98:  # Rectangular/square
+                    # Less shrink for rectangular regions
+                    margin_factor = base_margin + 0.05
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  Rectangular region: {int(margin_factor*100)}% usable area", "debug")
+                else:  # Regular oval bubble
+                    # Use base margin
+                    margin_factor = base_margin
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  Regular bubble: {int(margin_factor*100)}% usable area", "debug")
+                
+                # Clamp margin factor
+                margin_factor = max(0.70, min(0.98, margin_factor))
+            except Exception:
+                margin_factor = base_margin
         
         # Convert vertices to numpy array for boundingRect
         vertices_np = np.array(region.vertices, dtype=np.int32)
@@ -8427,22 +8489,47 @@ class MangaTranslator:
         return safe_x, safe_y, safe_width, safe_height
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
-        """Find optimal font size using comic-translate's pil_word_wrap algorithm"""
+        """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments"""
         
-        # Get usable area
+        # Get font sizing settings
+        try:
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            font_sizing = manga_settings.get('font_sizing', {})
+            font_algorithm = font_sizing.get('algorithm', 'smart')
+            prefer_larger = font_sizing.get('prefer_larger', True)
+        except Exception:
+            font_algorithm = 'smart'
+            prefer_larger = True
+        
+        # Get usable area (now algorithm-aware via get_safe_text_area)
         if region and hasattr(region, 'vertices') and region.vertices:
             safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
             usable_width = safe_width
             usable_height = safe_height
         else:
-            # Use 85% of bubble area
-            margin = 0.85
+            # Fallback: use algorithm-aware margin
+            if font_algorithm == 'conservative':
+                margin = 0.85  # Comic-translate default
+            elif font_algorithm == 'aggressive':
+                margin = 0.95
+            else:  # smart
+                margin = 0.87
             usable_width = int(max_width * margin)
             usable_height = int(max_height * margin)
         
-        # Font size limits (GUI settings)
+        # Font size limits (GUI settings with algorithm adjustments)
         min_font_size = max(10, self.min_readable_size)
-        init_font_size = min(40, self.max_font_size_limit)
+        
+        # Adjust initial font size based on algorithm and prefer_larger
+        base_init = min(40, self.max_font_size_limit)
+        if font_algorithm == 'aggressive' and prefer_larger:
+            # Start higher for aggressive mode
+            init_font_size = min(int(base_init * 1.2), self.max_font_size_limit)
+        elif font_algorithm == 'conservative':
+            # Start lower for conservative mode
+            init_font_size = int(base_init * 0.9)
+        else:
+            init_font_size = base_init
         
         # Use comic-translate's pil_word_wrap algorithm
         wrapped_text, final_font_size = self._pil_word_wrap(
@@ -8457,6 +8544,10 @@ class MangaTranslator:
         
         # Convert wrapped text to lines
         lines = wrapped_text.split('\n') if wrapped_text else [text]
+        
+        # Log font algorithm used (debug)
+        if not getattr(self, 'concise_logs', False):
+            self._log(f"  Font algorithm: {font_algorithm}, init_size: {init_font_size}, final_size: {final_font_size}", "debug")
         
         # Apply multiplier if in multiplier mode
         if self.font_size_mode == 'multiplier':
