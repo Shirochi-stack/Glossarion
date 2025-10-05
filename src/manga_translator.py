@@ -623,7 +623,8 @@ class MangaTranslator:
             message = ' '.join(str(arg) for arg in args)
             
             # Check if this is one of the specific messages we want to capture
-            if any(marker in message for marker in ['🔍', '✅', '⏳', 'INFO:', 'ERROR:', 'WARNING:']):
+            # Added [FALLBACK and [MAIN markers to capture key attempts in GUI
+            if any(marker in message for marker in ['🔍', '✅', '⏳', '❌', '🔑', '[FALLBACK', '[MAIN', 'INFO:', 'ERROR:', 'WARNING:']):
                 if self.log_callback:
                     # Clean up the message
                     message = message.strip()

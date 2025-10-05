@@ -4125,7 +4125,9 @@ class UnifiedClient:
         
         try:
             configured_fallbacks = json.loads(fallback_keys_json)
-            print(f"[FALLBACK DIRECT] Loaded {len(configured_fallbacks)} fallback keys")
+            msg = f"[FALLBACK DIRECT] Loaded {len(configured_fallbacks)} fallback keys"
+            print(msg)
+            logger.info(msg)
             
             # Try each fallback key
             max_attempts = min(len(configured_fallbacks), 3)  # Limit attempts
@@ -4141,7 +4143,9 @@ class UnifiedClient:
                     print(f"[FALLBACK DIRECT {idx+1}] Invalid key data, skipping")
                     continue
                 
-                print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
+                msg = f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}"
+                print(msg)
+                logger.info(msg)
                 
                 try:
                     # Create temporary client for fallback key
@@ -4190,7 +4194,9 @@ class UnifiedClient:
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
                     
-                    print(f"[FALLBACK DIRECT {idx+1}] Sending request...")
+                    msg = f"[FALLBACK DIRECT {idx+1}] Sending request..."
+                    print(msg)
+                    logger.info(msg)
                     
                     # Use internal method to avoid nested retry loops
                     result = temp_client._send_internal(
@@ -4205,26 +4211,47 @@ class UnifiedClient:
                     )
                     
                     # Check the result
-                    print(f"[FALLBACK DIRECT {idx+1}] Result type: {type(result)}")
                     if result and isinstance(result, tuple):
                         content, finish_reason = result
-                        print(f"[FALLBACK DIRECT {idx+1}] Content length: {len(content) if content else 0}, finish_reason: {finish_reason}")
+                        
+                        # Context-aware length check:
+                        # - OCR/translation contexts can have very short valid responses (single punctuation)
+                        # - Other contexts should have longer responses to avoid error messages
+                        is_ocr_context = context and ('ocr' in context.lower() or 'translation' in context.lower())
+                        
+                        if is_ocr_context:
+                            # OCR can have single character responses (punctuation, etc.)
+                            min_length = 1
+                        elif finish_reason == 'stop':
+                            # Normal completion but not OCR - allow short but not empty
+                            min_length = 5
+                        else:
+                            # Error cases should be longer to be valid
+                            min_length = 50
                         
                         # Check if content is valid - reject if finish_reason indicates failure
                         if (content and 
                             "[AI RESPONSE UNAVAILABLE]" not in content and 
                             finish_reason not in ['content_filter', 'error', 'cancelled'] and
-                            len(content) > 50):
-                            print(f"[FALLBACK DIRECT {idx+1}] ✅ SUCCESS! Got valid content")
+                            len(content) >= min_length):
+                            msg = f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars"
+                            print(msg)
+                            logger.info(msg)
                             return content, finish_reason
                         else:
                             if finish_reason in ['content_filter', 'error', 'cancelled']:
-                                print(f"[FALLBACK DIRECT {idx+1}] ❌ Finish reason indicates failure: {finish_reason} - continuing to next key")
+                                msg = f"❌ Fallback key {idx+1} failed: {finish_reason} - trying next key"
+                            elif len(content) < min_length:
+                                msg = f"❌ Fallback key {idx+1} returned only {len(content)} chars - trying next key"
                             else:
-                                print(f"[FALLBACK DIRECT {idx+1}] ❌ Content invalid or too short - continuing to next key")
+                                msg = f"❌ Fallback key {idx+1} invalid response - trying next key"
+                            print(msg)
+                            logger.warning(msg)
                             continue
                     else:
-                        print(f"[FALLBACK DIRECT {idx+1}] ❌ Unexpected result format - continuing to next key")
+                        msg = f"❌ Fallback key {idx+1} unexpected result format - trying next key"
+                        print(msg)
+                        logger.warning(msg)
                         continue
                         
                 except Exception as e:
