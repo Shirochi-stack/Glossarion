@@ -44,6 +44,10 @@ def setup_other_settings_methods(gui_instance):
         'toggle_custom_endpoint_ui', 'toggle_more_endpoints',
         '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
         '_toggle_anti_duplicate_controls',
+        # Provider autocomplete methods
+        '_setup_provider_combobox_bindings', '_on_provider_combo_keyrelease',
+        '_commit_provider_autocomplete', '_scroll_provider_list_to_value',
+        '_validate_provider_selection',
         # Section creation methods
         '_create_context_management_section', '_create_response_handling_section',
         '_create_prompt_management_section', '_create_processing_options_section',
@@ -787,6 +791,148 @@ def toggle_extraction_workers(self):
         self._ensure_executor()
     except Exception:
         pass
+
+def _setup_provider_combobox_bindings(self):
+    """Setup bindings for OpenRouter provider combobox with autocomplete"""
+    try:
+        # Bind to key release events for live filtering and autofill
+        self.openrouter_provider_combo.bind('<KeyRelease>', self._on_provider_combo_keyrelease)
+        # Commit best match on Enter
+        self.openrouter_provider_combo.bind('<Return>', self._commit_provider_autocomplete)
+        # Also bind to FocusOut to validate selection
+        self.openrouter_provider_combo.bind('<FocusOut>', lambda e: self._validate_provider_selection())
+    except Exception:
+        pass  # Silently fail if combo doesn't exist
+
+def _on_provider_combo_keyrelease(self, event=None):
+    """Provider combobox type-to-search with autocomplete (reuses model dropdown logic)"""
+    try:
+        combo = self.openrouter_provider_combo
+        typed = combo.get()
+        prev = getattr(self, '_provider_prev_text', '')
+        keysym = (getattr(event, 'keysym', '') or '').lower()
+
+        # Navigation/commit keys: don't interfere
+        if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
+            return
+
+        # Ensure we have the full source list
+        source = getattr(self, '_provider_all_values', [])
+        if not source:
+            return
+
+        # Compute match set
+        first_match = None
+        if typed:
+            lowered = typed.lower()
+            # Prefix matches first
+            pref = [v for v in source if v.lower().startswith(lowered)]
+            # Contains matches second
+            cont = [v for v in source if lowered in v.lower() and v not in pref]
+            if pref:
+                first_match = pref[0]
+            elif cont:
+                first_match = cont[0]
+
+        # Decide whether to autofill
+        grew = len(typed) > len(prev) and typed.startswith(prev)
+        is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
+        try:
+            at_end = combo.index(tk.INSERT) == len(typed)
+        except Exception:
+            at_end = True
+        try:
+            has_selection = combo.selection_present()
+        except Exception:
+            has_selection = False
+
+        # Gentle autofill only when appending at the end
+        do_autofill_text = first_match is not None and grew and at_end and not has_selection and not is_deletion
+
+        if do_autofill_text:
+            # Only complete if it's a true prefix match
+            if first_match.lower().startswith(typed.lower()) and first_match != typed:
+                combo.set(first_match)
+                try:
+                    combo.icursor(len(typed))
+                    combo.selection_range(len(typed), len(first_match))
+                except Exception:
+                    pass
+
+        # If we have a match and the dropdown is open, scroll/highlight it
+        if first_match:
+            self._scroll_provider_list_to_value(first_match)
+
+        # Remember current text for next event
+        self._provider_prev_text = typed
+    except Exception:
+        pass  # Silently handle errors
+
+def _commit_provider_autocomplete(self, event=None):
+    """On Enter, commit to the best matching provider"""
+    try:
+        combo = self.openrouter_provider_combo
+        typed = combo.get()
+        source = getattr(self, '_provider_all_values', [])
+        match = None
+        if typed:
+            lowered = typed.lower()
+            pref = [v for v in source if v.lower().startswith(lowered)]
+            cont = [v for v in source if lowered in v.lower()] if not pref else []
+            match = pref[0] if pref else (cont[0] if cont else None)
+        if match and match != typed:
+            combo.set(match)
+        # Move cursor to end and clear any selection
+        try:
+            combo.icursor('end')
+            try:
+                combo.selection_clear()
+            except Exception:
+                combo.selection_range(0, 0)
+        except Exception:
+            pass
+        # Update prev text
+        self._provider_prev_text = combo.get()
+    except Exception:
+        pass
+    return "break"
+
+def _scroll_provider_list_to_value(self, value: str):
+    """If the provider combobox dropdown is open, scroll to and highlight the given value"""
+    try:
+        values = getattr(self, '_provider_all_values', [])
+        if value not in values:
+            return
+        index = values.index(value)
+        # Resolve the internal popdown listbox for this combobox
+        popdown = self.openrouter_provider_combo.tk.eval(
+            f'ttk::combobox::PopdownWindow {self.openrouter_provider_combo._w}'
+        )
+        listbox = f'{popdown}.f.l'
+        tkobj = self.openrouter_provider_combo.tk
+        # Scroll and highlight the item
+        tkobj.call(listbox, 'see', index)
+        tkobj.call(listbox, 'selection', 'clear', 0, 'end')
+        tkobj.call(listbox, 'selection', 'set', index)
+        tkobj.call(listbox, 'activate', index)
+    except Exception:
+        pass  # Dropdown may be closed or internals unavailable
+
+def _validate_provider_selection(self):
+    """Validate that the provider selection is from the list or default to Auto"""
+    try:
+        typed = self.openrouter_preferred_provider_var.get()
+        source = getattr(self, '_provider_all_values', [])
+        if typed and typed not in source:
+            # Find closest match or default to Auto
+            lowered = typed.lower()
+            matches = [v for v in source if lowered in v.lower()]
+            if matches:
+                self.openrouter_preferred_provider_var.set(matches[0])
+            else:
+                self.openrouter_preferred_provider_var.set('Auto')
+    except Exception:
+        pass
     
 def create_ai_hunter_section(self, parent_frame):
     """Create the AI Hunter configuration section - without redundant toggle"""
@@ -1339,16 +1485,94 @@ def _create_processing_options_section(self, parent):
             value=self.config.get('openrouter_preferred_provider', 'Auto')
         )
     
-    # List of common OpenRouter providers
-    provider_options = ['Auto', 'DeepInfra', 'OpenInference', 'Together', 'Fireworks', 'Lepton', 'Mancer']
+    # Comprehensive list of OpenRouter providers (alphabetically sorted, with Auto first)
+    provider_options = [
+        'Auto',
+        'AI21',
+        'AionLabs',
+        'Alibaba Cloud Int.',
+        'Amazon Bedrock',
+        'Anthropic',
+        'AtlasCloud',
+        'Atoma',
+        'Avian.io',
+        'Azure',
+        'Baseten',
+        'Cerebras',
+        'Chutes',
+        'Cloudflare',
+        'Cohere',
+        'CrofAI',
+        'Crusoe',
+        'DeepInfra',
+        'DeepSeek',
+        'Enfer',
+        'Featherless',
+        'Fireworks',
+        'Friendli',
+        'GMICloud',
+        'Google AI Studio',
+        'Google Vertex',
+        'Groq',
+        'Hyperbolic',
+        'Inception',
+        'inference.net',
+        'Infermatic',
+        'Inflection',
+        'kluster.ai',
+        'Lambda',
+        'Lepton',
+        'Leschde',
+        'Liquid',
+        'Mancer (private)',
+        'Meta',
+        'Minimax',
+        'Mistral',
+        'Moonshot AI',
+        'Morph',
+        'nCompass',
+        'Nebius AI Studio',
+        'NextBit',
+        'Nineteen',
+        'NovitAI',
+        'NVIDIA',
+        'OpenAI',
+        'OpenInference',
+        'Parasail',
+        'Perplexity',
+        'Phala',
+        'Relace',
+        'SambaNova',
+        'SiliconFlow',
+        'Stealth',
+        'Switchpoint',
+        'Targon',
+        'Together',
+        'Ubicloud',
+        'Venice',
+        'Weights & Biases',
+        'xAI',
+        'Z.AI'
+    ]
+    
+    # Create combobox with autocomplete support (not readonly)
     provider_combo = ttk.Combobox(
         provider_frame,
         textvariable=self.openrouter_preferred_provider_var,
         values=provider_options,
-        state="readonly",
-        width=15
+        state="normal",  # Changed from readonly to support typing
+        width=20
     )
     provider_combo.pack(side=tk.LEFT, padx=(10, 0))
+    
+    # Store reference and full list for autocomplete
+    self.openrouter_provider_combo = provider_combo
+    self._provider_all_values = provider_options
+    self._provider_prev_text = self.openrouter_preferred_provider_var.get()
+    
+    # Setup autocomplete bindings (reusing model dropdown logic)
+    self._setup_provider_combobox_bindings()
+    
     # Prevent accidental changes from mouse wheel while scrolling
     UIHelper.disable_spinbox_mousewheel(provider_combo)
     
