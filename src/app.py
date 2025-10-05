@@ -12,6 +12,12 @@ import tempfile
 import base64
 from pathlib import Path
 
+# CRITICAL: Set API delay IMMEDIATELY at module level before any other imports
+# This ensures unified_api_client reads the correct value when it's imported
+if 'SEND_INTERVAL_SECONDS' not in os.environ:
+    os.environ['SEND_INTERVAL_SECONDS'] = '0.5'
+print(f"🔧 Module-level API delay initialized: {os.environ['SEND_INTERVAL_SECONDS']}s")
+
 # Import API key encryption/decryption
 try:
     from api_key_encryption import APIKeyEncryption
@@ -104,6 +110,45 @@ class GlossarionWeb:
         self.decrypted_config = self.config.copy()
         if API_KEY_ENCRYPTION_AVAILABLE:
             self.decrypted_config = decrypt_config(self.decrypted_config)
+        
+        # CRITICAL: Initialize environment variables IMMEDIATELY after loading config
+        # This must happen before any UnifiedClient is created
+        
+        # Set API call delay
+        api_call_delay = self.decrypted_config.get('api_call_delay', 0.5)
+        if 'api_call_delay' not in self.config:
+            self.config['api_call_delay'] = 0.5
+            self.decrypted_config['api_call_delay'] = 0.5
+        os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
+        print(f"🔧 Initialized API call delay: {api_call_delay}s")
+        
+        # Set font algorithm and auto fit style if not present
+        if 'manga_settings' not in self.config:
+            self.config['manga_settings'] = {}
+        if 'font_sizing' not in self.config['manga_settings']:
+            self.config['manga_settings']['font_sizing'] = {}
+        if 'rendering' not in self.config['manga_settings']:
+            self.config['manga_settings']['rendering'] = {}
+        
+        if 'algorithm' not in self.config['manga_settings']['font_sizing']:
+            self.config['manga_settings']['font_sizing']['algorithm'] = 'smart'
+        if 'auto_fit_style' not in self.config['manga_settings']['rendering']:
+            self.config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
+        
+        # Also ensure they're in decrypted_config
+        if 'manga_settings' not in self.decrypted_config:
+            self.decrypted_config['manga_settings'] = {}
+        if 'font_sizing' not in self.decrypted_config['manga_settings']:
+            self.decrypted_config['manga_settings']['font_sizing'] = {}
+        if 'rendering' not in self.decrypted_config['manga_settings']:
+            self.decrypted_config['manga_settings']['rendering'] = {}
+        if 'algorithm' not in self.decrypted_config['manga_settings']['font_sizing']:
+            self.decrypted_config['manga_settings']['font_sizing']['algorithm'] = 'smart'
+        if 'auto_fit_style' not in self.decrypted_config['manga_settings']['rendering']:
+            self.decrypted_config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
+        
+        print(f"🎨 Initialized font algorithm: {self.config['manga_settings']['font_sizing']['algorithm']}")
+        print(f"🎨 Initialized auto fit style: {self.config['manga_settings']['rendering']['auto_fit_style']}")
         
         self.models = get_model_options() if TRANSLATION_AVAILABLE else ["gpt-4", "claude-3-5-sonnet"]
         print(f"🤖 Loaded {len(self.models)} models: {self.models[:5]}{'...' if len(self.models) > 5 else ''}")
@@ -252,20 +297,22 @@ class GlossarionWeb:
         return {
             'model': 'gpt-4-turbo',
             'api_key': '',
+            'api_call_delay': 0.5,  # Default 0.5 seconds between API calls
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
             'manga_font_size_mode': 'auto',
             'manga_font_size': 24,
             'manga_font_size_multiplier': 1.0,
-            'manga_max_font_size': 48,
-            'manga_text_color': [255, 255, 255],  # White text (like manga integration)
+            'manga_min_font_size': 10,
+            'manga_max_font_size': 40,
+            'manga_text_color': [102, 0, 0],  # Dark red text (manga_integration.py default)
             'manga_shadow_enabled': True,
-            'manga_shadow_color': [0, 0, 0],  # Black shadow (like manga integration)
+            'manga_shadow_color': [204, 128, 128],  # Light pink shadow (manga_integration.py default)
             'manga_shadow_offset_x': 2,  # Match manga integration
             'manga_shadow_offset_y': 2,  # Match manga integration
             'manga_shadow_blur': 0,  # Match manga integration (no blur)
-            'manga_bg_opacity': 180,
+            'manga_bg_opacity': 0,  # Transparent background by default
             'manga_bg_style': 'circle',
             'manga_settings': {
                 'ocr': {
@@ -296,8 +343,8 @@ class GlossarionWeb:
                     'save_intermediate': False
                 },
                 'rendering': {
-                    'auto_min_size': 12,
-                    'auto_max_size': 48,
+                    'auto_min_size': 10,
+                    'auto_max_size': 40,
                     'auto_fit_style': 'balanced'
                 },
                 'font_sizing': {
@@ -306,8 +353,8 @@ class GlossarionWeb:
                     'max_lines': 10,
                     'line_spacing': 1.3,
                     'bubble_size_factor': True,
-                    'min_size': 12,
-                    'max_size': 48
+                    'min_size': 10,
+                    'max_size': 40
                 },
                 'tiling': {
                     'enabled': False,
@@ -357,6 +404,9 @@ class GlossarionWeb:
     def set_all_environment_variables(self):
         """Set all environment variables from config for translation engines"""
         config = self.get_config_value
+        
+        # API Rate Limiting
+        os.environ['SEND_INTERVAL_SECONDS'] = str(config('api_call_delay', 0.5))
         
         # Chapter Processing Options
         os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if config('batch_translate_headers', False) else '0'
@@ -1873,7 +1923,8 @@ class GlossarionWeb:
                             self.val = val
                         def get(self):
                             return self.val
-                    self.delay_entry = MockVar(float(config.get('delay', 2.0)))
+                    # CRITICAL: delay_entry must read from api_call_delay (not 'delay')
+                    self.delay_entry = MockVar(float(config.get('api_call_delay', 0.5)))
                     self.trans_temp = MockVar(float(config.get('translation_temperature', 0.3)))
                     self.contextual_var = MockVar(bool(config.get('contextual', False)))
                     self.trans_history = MockVar(int(config.get('translation_history_limit', 2)))
@@ -1881,6 +1932,8 @@ class GlossarionWeb:
                     self.token_limit_disabled = bool(config.get('token_limit_disabled', False))
                     # IMPORTANT: token_limit_entry must return STRING because manga_translator calls .strip() on it
                     self.token_limit_entry = MockVar(str(config.get('token_limit', 200000)))
+                    # Batch translation settings
+                    self.batch_size_var = MockVar(int(config.get('batch_size', 10)))
                     # Add API key and model for custom-api OCR provider - ensure strings
                     self.api_key_entry = MockVar(str(api_key) if api_key else '')
                     self.model_var = MockVar(str(model) if model else '')
@@ -1900,6 +1953,33 @@ class GlossarionWeb:
                     default_model_path = self.get_config_value(model_path_key, '')
                     merged_config[model_path_key] = default_model_path
                     print(f"Set {model_path_key} to: {default_model_path}")
+            
+            # CRITICAL: Explicitly set environment variables before creating UnifiedClient
+            api_call_delay = merged_config.get('api_call_delay', 0.5)
+            os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
+            print(f"🔧 Manga translation: Set SEND_INTERVAL_SECONDS = {api_call_delay}s")
+            
+            # Set batch translation and batch size from proper config structure
+            batch_translation = merged_config.get('batch_translation', True)
+            batch_size = merged_config.get('batch_size', 10)
+            os.environ['BATCH_TRANSLATION'] = '1' if batch_translation else '0'
+            os.environ['BATCH_SIZE'] = str(batch_size)
+            
+            # Also ensure font algorithm and auto fit style are in config for manga_translator
+            if 'manga_settings' not in merged_config:
+                merged_config['manga_settings'] = {}
+            if 'font_sizing' not in merged_config['manga_settings']:
+                merged_config['manga_settings']['font_sizing'] = {}
+            if 'rendering' not in merged_config['manga_settings']:
+                merged_config['manga_settings']['rendering'] = {}
+            
+            if 'algorithm' not in merged_config['manga_settings']['font_sizing']:
+                merged_config['manga_settings']['font_sizing']['algorithm'] = 'smart'
+            if 'auto_fit_style' not in merged_config['manga_settings']['rendering']:
+                merged_config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
+            
+            print(f"📦 Batch: BATCH_TRANSLATION={batch_translation}, BATCH_SIZE={batch_size}")
+            print(f"🎨 Font: algorithm={merged_config['manga_settings']['font_sizing']['algorithm']}, auto_fit_style={merged_config['manga_settings']['rendering']['auto_fit_style']}")
             
             # Setup OCR configuration
             ocr_config = {
@@ -2193,8 +2273,21 @@ class GlossarionWeb:
                     final_status_lines.append(f"  📦 CBZ Archive: {os.path.basename(cbz_output_path)}")
                     final_status_lines.append(f"  📁 Location: {cbz_output_path}")
                 else:
-                    final_status_lines.append(f"  📁 Output directory: {output_dir}")
-                    final_status_lines.append("  🖼️ Individual images: Click on images in gallery above to download")
+                    # Create ZIP file for all images
+                    zip_path = os.path.join(output_dir, "translated_images.zip")
+                    try:
+                        import zipfile
+                        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            for img_path in translated_files:
+                                arcname = os.path.basename(img_path)
+                                zipf.write(img_path, arcname)
+                        final_status_lines.append(f"  📦 Download all images: translated_images.zip")
+                        final_status_lines.append(f"  📁 Output directory: {output_dir}")
+                        final_output_for_display = zip_path  # Set this so it can be downloaded
+                    except Exception as e:
+                        final_status_lines.append(f"  ❌ Failed to create ZIP: {str(e)}")
+                        final_status_lines.append(f"  📁 Output directory: {output_dir}")
+                        final_status_lines.append("  🖼️ Images saved individually in output directory")
             else:
                 final_status_lines.append("❌ Translation failed - no images were processed")
             
@@ -2216,15 +2309,27 @@ class GlossarionWeb:
                         gr.update(value=100)
                     )
                 else:
-                    yield (
-                        "\n".join(translation_logs), 
-                        gr.update(value=translated_files, visible=True),  # Show all images in gallery
-                        gr.update(visible=False),  # Hide CBZ component
-                        gr.update(value=final_status_text, visible=True),
-                        gr.update(visible=True),
-                        gr.update(value=final_progress_text),
-                        gr.update(value=100)
-                    )
+                    # Show ZIP file for download if it was created
+                    if final_output_for_display and os.path.exists(final_output_for_display):
+                        yield (
+                            "\n".join(translation_logs), 
+                            gr.update(value=translated_files, visible=True),  # Show all images in gallery
+                            gr.update(value=final_output_for_display, visible=True),  # ZIP file for download
+                            gr.update(value=final_status_text, visible=True),
+                            gr.update(visible=True),
+                            gr.update(value=final_progress_text),
+                            gr.update(value=100)
+                        )
+                    else:
+                        yield (
+                            "\n".join(translation_logs), 
+                            gr.update(value=translated_files, visible=True),  # Show all images in gallery
+                            gr.update(visible=False),  # Hide download component if ZIP failed
+                            gr.update(value=final_status_text, visible=True),
+                            gr.update(visible=True),
+                            gr.update(value=final_progress_text),
+                            gr.update(value=100)
+                        )
             else:
                 yield (
                     "\n".join(translation_logs), 
@@ -2606,17 +2711,18 @@ class GlossarionWeb:
                 """)
                 
                 
-                # Add save button at the top - COMMENTED OUT
-                with gr.Column(scale=0):
-                     save_config_btn = gr.Button(
-                         "💾 Save Config",
-                         variant="secondary",
-                         size="sm"
-                     )
-                     save_status_text = gr.Markdown(
-                         "",
-                         visible=False
-                     )
+                # SECURITY: Save Config button disabled for Hugging Face to prevent API key leakage
+                # Users should use localStorage (browser-based storage) instead
+                # with gr.Column(scale=0):
+                #     save_config_btn = gr.Button(
+                #         "💾 Save Config",
+                #         variant="secondary",
+                #         size="sm"
+                #     )
+                #     save_status_text = gr.Markdown(
+                #         "",
+                #         visible=False
+                #     )
                 
             with gr.Tabs() as main_tabs:
                 # EPUB Translation Tab
@@ -5097,6 +5203,12 @@ class GlossarionWeb:
                 self.config = self.load_config()
                 self.decrypted_config = decrypt_config(self.config.copy()) if API_KEY_ENCRYPTION_AVAILABLE else self.config.copy()
                 
+                # CRITICAL: Reload profiles from config after reloading config
+                self.profiles = self.default_prompts.copy()
+                config_profiles = self.config.get('prompt_profiles', {})
+                if config_profiles:
+                    self.profiles.update(config_profiles)
+                
                 # Helper function to convert RGB arrays to hex
                 def to_hex_color(color_value, default='#000000'):
                     if isinstance(color_value, (list, tuple)) and len(color_value) >= 3:
@@ -5183,58 +5295,59 @@ class GlossarionWeb:
                 ]
             
             
-            # Configure Save Config button now that all components exist - COMMENTED OUT
-            save_config_btn.click(
-                 fn=save_all_config,
-                 inputs=[
-                     # EPUB tab fields
-                     epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
-                     enable_image_translation, enable_auto_glossary, append_glossary,
-                     # Auto glossary settings
-                     auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
-                     auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
-                     enable_post_translation_scan,
-                     # Manual glossary extraction settings
-                     min_freq, max_names_slider, max_titles,
-                     max_text_size, max_sentences, translation_batch,
-                     chapter_split_threshold, filter_mode, strip_honorifics,
-                     fuzzy_threshold, extraction_prompt, format_instructions,
-                     use_legacy_csv,
-                     # QA Scanner settings
-                     min_foreign_chars, check_repetition, check_glossary_leakage,
-                     min_file_length, check_multiple_headers, check_missing_html,
-                     check_insufficient_paragraphs, min_paragraph_percentage,
-                     report_format, auto_save_report,
-                     # Chapter processing options
-                     batch_translate_headers, headers_per_batch, use_ncx_navigation,
-                     attach_css_to_chapters, retain_source_extension,
-                     use_conservative_batching, disable_gemini_safety,
-                     use_http_openrouter, disable_openrouter_compression,
-                     text_extraction_method, file_filtering_level,
-                     # Thinking mode settings
-                     enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
-                     enable_gemini_thinking, gemini_thinking_budget,
-                     # Manga tab fields  
-                     manga_model, manga_api_key, manga_profile,
-                     ocr_provider, azure_key, azure_endpoint,
-                     bubble_detection, inpainting,
-                     font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
-                     text_color_rgb, shadow_enabled, shadow_color,
-                     shadow_offset_x, shadow_offset_y, shadow_blur,
-                     bg_opacity, bg_style,
-                     parallel_panel_translation, panel_max_workers,
-                     # Advanced Settings fields
-                     detector_type, rtdetr_confidence, bubble_confidence,
-                     detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
-                     local_inpaint_method, webtoon_mode,
-                     inpaint_batch_size, inpaint_cache_enabled,
-                     parallel_processing, max_workers,
-                     preload_local_inpainting, panel_start_stagger,
-                     torch_precision, auto_cleanup_models,
-                     debug_mode, save_intermediate, concise_pipeline_logs
-                 ],
-                 outputs=[save_status_text]
-             )
+            # SECURITY: Save Config button DISABLED to prevent API keys from being saved to persistent storage on HF Spaces
+            # This is a critical security measure to prevent API key leakage in shared environments
+            # save_config_btn.click(
+            #     fn=save_all_config,
+            #     inputs=[
+            #         # EPUB tab fields
+            #         epub_model, epub_api_key, epub_profile, epub_temperature, epub_max_tokens,
+            #         enable_image_translation, enable_auto_glossary, append_glossary,
+            #         # Auto glossary settings
+            #         auto_glossary_min_freq, auto_glossary_max_names, auto_glossary_max_titles,
+            #         auto_glossary_batch_size, auto_glossary_filter_mode, auto_glossary_fuzzy_threshold,
+            #         enable_post_translation_scan,
+            #         # Manual glossary extraction settings
+            #         min_freq, max_names_slider, max_titles,
+            #         max_text_size, max_sentences, translation_batch,
+            #         chapter_split_threshold, filter_mode, strip_honorifics,
+            #         fuzzy_threshold, extraction_prompt, format_instructions,
+            #         use_legacy_csv,
+            #         # QA Scanner settings
+            #         min_foreign_chars, check_repetition, check_glossary_leakage,
+            #         min_file_length, check_multiple_headers, check_missing_html,
+            #         check_insufficient_paragraphs, min_paragraph_percentage,
+            #         report_format, auto_save_report,
+            #         # Chapter processing options
+            #         batch_translate_headers, headers_per_batch, use_ncx_navigation,
+            #         attach_css_to_chapters, retain_source_extension,
+            #         use_conservative_batching, disable_gemini_safety,
+            #         use_http_openrouter, disable_openrouter_compression,
+            #         text_extraction_method, file_filtering_level,
+            #         # Thinking mode settings
+            #         enable_gpt_thinking, gpt_thinking_effort, or_thinking_tokens,
+            #         enable_gemini_thinking, gemini_thinking_budget,
+            #         # Manga tab fields  
+            #         manga_model, manga_api_key, manga_profile,
+            #         ocr_provider, azure_key, azure_endpoint,
+            #         bubble_detection, inpainting,
+            #         font_size_mode, font_size, font_multiplier, min_font_size, max_font_size,
+            #         text_color_rgb, shadow_enabled, shadow_color,
+            #         shadow_offset_x, shadow_offset_y, shadow_blur,
+            #         bg_opacity, bg_style,
+            #         parallel_panel_translation, panel_max_workers,
+            #         # Advanced Settings fields
+            #         detector_type, rtdetr_confidence, bubble_confidence,
+            #         detect_text_bubbles, detect_empty_bubbles, detect_free_text, bubble_max_detections,
+            #         local_inpaint_method, webtoon_mode,
+            #         inpaint_batch_size, inpaint_cache_enabled,
+            #         parallel_processing, max_workers,
+            #         preload_local_inpainting, panel_start_stagger,
+            #         torch_precision, auto_cleanup_models,
+            #         debug_mode, save_intermediate, concise_pipeline_logs
+            #     ],
+            #     outputs=[save_status_text]
+            # )
             
             # Add load handler to restore settings on page load
             app.load(
