@@ -3399,7 +3399,11 @@ class UnifiedClient:
                     
                     # Try fallback keys for safety filter detection
                     if is_likely_safety_filter:
-                        if self._multi_key_mode:
+                        # PREVENT INFINITE LOOP: Don't attempt fallback if we're already a fallback client
+                        if getattr(self, '_is_retry_client', False):
+                            print(f"[RETRY CLIENT] Already in fallback, not recursing further")
+                            # Just finalize the empty response without trying more fallbacks
+                        elif self._multi_key_mode:
                             # Multi-key mode: try main key retry
                             if not main_key_attempted and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None):
                                 main_key_attempted = True
@@ -4201,22 +4205,32 @@ class UnifiedClient:
                     )
                     
                     # Check the result
+                    print(f"[FALLBACK DIRECT {idx+1}] Result type: {type(result)}")
                     if result and isinstance(result, tuple):
                         content, finish_reason = result
+                        print(f"[FALLBACK DIRECT {idx+1}] Content length: {len(content) if content else 0}, finish_reason: {finish_reason}")
                         
-                        # Check if content is valid
-                        if content and "[AI RESPONSE UNAVAILABLE]" not in content and len(content) > 50:
-                            print(f"[FALLBACK DIRECT {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
+                        # Check if content is valid - reject if finish_reason indicates failure
+                        if (content and 
+                            "[AI RESPONSE UNAVAILABLE]" not in content and 
+                            finish_reason not in ['content_filter', 'error', 'cancelled'] and
+                            len(content) > 50):
+                            print(f"[FALLBACK DIRECT {idx+1}] ✅ SUCCESS! Got valid content")
                             return content, finish_reason
                         else:
-                            print(f"[FALLBACK DIRECT {idx+1}] ❌ Content too short or error: {len(content) if content else 0} chars")
+                            if finish_reason in ['content_filter', 'error', 'cancelled']:
+                                print(f"[FALLBACK DIRECT {idx+1}] ❌ Finish reason indicates failure: {finish_reason} - continuing to next key")
+                            else:
+                                print(f"[FALLBACK DIRECT {idx+1}] ❌ Content invalid or too short - continuing to next key")
                             continue
                     else:
-                        print(f"[FALLBACK DIRECT {idx+1}] ❌ Unexpected result type: {type(result)}")
+                        print(f"[FALLBACK DIRECT {idx+1}] ❌ Unexpected result format - continuing to next key")
                         continue
                         
                 except Exception as e:
-                    print(f"[FALLBACK DIRECT {idx+1}] ❌ Failed: {e}")
+                    print(f"[FALLBACK DIRECT {idx+1}] ❌ Exception: {e}")
+                    import traceback
+                    print(f"[FALLBACK DIRECT {idx+1}] Traceback: {traceback.format_exc()[:200]}")
                     continue
             
             print(f"[FALLBACK DIRECT] All fallback keys failed")
