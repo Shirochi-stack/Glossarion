@@ -3945,7 +3945,7 @@ class MangaTranslator:
                 # For manga-ocr and similar providers, skip merging since regions already have bubble_bounds from OCR
                 # Only Azure and Google need merging because they return line-level OCR results
                 if self.ocr_provider in ['manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']:
-                    self._log("🎯 Skipping bubble detection merge for manga-ocr (regions already aligned with RT-DETR)")
+                    self._log("🎯 Skipping bubble detection merge (regions already aligned with RT-DETR)")
                     # Regions already have bubble_bounds set from OCR phase - no need to merge
                 else:
                     # Azure and Google return line-level results that need to be merged into bubbles
