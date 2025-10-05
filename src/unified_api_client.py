@@ -8602,6 +8602,17 @@ class UnifiedClient:
                                 extra_body["reasoning"] = reasoning
                         except Exception:
                             pass
+                        
+                        # Add provider preference if specified
+                        try:
+                            preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
+                            if preferred_provider and preferred_provider != 'Auto':
+                                extra_body["provider"] = {
+                                    "order": [preferred_provider]
+                                }
+                                print(f"🔀 OpenRouter: Requesting {preferred_provider} provider")
+                        except Exception:
+                            pass
                     
                     # Add safety parameters for providers that support them
                     # Note: Together AI doesn't support the 'moderation' parameter
@@ -8851,6 +8862,17 @@ class UnifiedClient:
                         data["reasoning"] = reasoning
                 except Exception:
                     pass
+                
+                # Add provider preference if specified
+                try:
+                    preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
+                    if preferred_provider and preferred_provider != 'Auto':
+                        data["provider"] = {
+                            "order": [preferred_provider]
+                        }
+                        print(f"🔀 OpenRouter: Requesting {preferred_provider} provider")
+                except Exception:
+                    pass
             
             # Add Perplexity-specific options for Sonar models
             if provider == 'perplexity' and 'sonar' in effective_model.lower():
@@ -8886,6 +8908,13 @@ class UnifiedClient:
                             reasoning.pop('max_tokens', None)
                             reasoning["effort"] = effort
                         cfg["reasoning"] = reasoning
+                except Exception:
+                    pass
+                # Persist provider preference
+                try:
+                    preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
+                    if preferred_provider and preferred_provider != 'Auto':
+                        cfg["preferred_provider"] = preferred_provider
                 except Exception:
                     pass
                 self._save_openrouter_config(cfg, response_name)

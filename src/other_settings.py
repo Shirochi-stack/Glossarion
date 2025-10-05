@@ -1249,14 +1249,15 @@ def _create_processing_options_section(self, parent):
     
     tb.Checkbutton(
         section_frame,
-        text="Disable Gemini API Safety Filters",
+        text="Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)",
         variable=self.disable_gemini_safety_var,
         bootstyle="round-toggle"
     ).pack(anchor=tk.W, pady=(5, 0))
     
     # Add warning text
-    warning_text = ("⚠️ Disables ALL content safety filters for Gemini models.\n"
-                   "This sets all harm categories to BLOCK_NONE.\n")
+    warning_text = ("⚠️ Disables content safety filters for supported providers.\n"
+                   "Gemini: Sets all harm categories to BLOCK_NONE.\n"
+                   "Groq/Fireworks: Disables moderation parameter.\n")
     tk.Label(
         section_frame,
         text=warning_text,
@@ -1268,11 +1269,11 @@ def _create_processing_options_section(self, parent):
     # Add note about affected models
     tk.Label(
         section_frame,
-        text="Does NOT affect ElectronHub Gemini models (eh/gemini-*)",
+        text="Does NOT affect ElectronHub Gemini models (eh/gemini-*) or Together AI",
         font=('TkDefaultFont', 8),
         fg='gray',
         justify=tk.LEFT
-    ).pack(anchor=tk.W, padx=(20, 0))
+    ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 8))
 
     # New: OpenRouter Transport Preference
     # Toggle to force HTTP-only path for OpenRouter (SDK bypass)
@@ -1311,6 +1312,39 @@ def _create_processing_options_section(self, parent):
         section_frame,
         text="Sends Accept-Encoding: identity to request uncompressed responses.\n"
              "Use if proxies/CDNs cause corrupted or non-JSON compressed bodies.",
+        font=('TkDefaultFont', 8),
+        fg='gray',
+        justify=tk.LEFT
+    ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 8))
+
+    # OpenRouter: Provider preference
+    provider_frame = tk.Frame(section_frame)
+    provider_frame.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+    
+    tk.Label(provider_frame, text="Preferred OpenRouter Provider:").pack(side=tk.LEFT)
+    
+    if not hasattr(self, 'openrouter_preferred_provider_var'):
+        self.openrouter_preferred_provider_var = tk.StringVar(
+            value=self.config.get('openrouter_preferred_provider', 'Auto')
+        )
+    
+    # List of common OpenRouter providers
+    provider_options = ['Auto', 'DeepInfra', 'OpenInference', 'Together', 'Fireworks', 'Lepton', 'Mancer']
+    provider_combo = ttk.Combobox(
+        provider_frame,
+        textvariable=self.openrouter_preferred_provider_var,
+        values=provider_options,
+        state="readonly",
+        width=15
+    )
+    provider_combo.pack(side=tk.LEFT, padx=(10, 0))
+    # Prevent accidental changes from mouse wheel while scrolling
+    UIHelper.disable_spinbox_mousewheel(provider_combo)
+    
+    tk.Label(
+        section_frame,
+        text="Specify which upstream provider OpenRouter should prefer for your requests.\n"
+             "'Auto' lets OpenRouter choose. Specific providers may have different availability.",
         font=('TkDefaultFont', 8),
         fg='gray',
         justify=tk.LEFT

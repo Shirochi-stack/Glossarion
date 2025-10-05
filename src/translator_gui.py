@@ -8957,6 +8957,7 @@ Provide translations in the same numbered format."""
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var.get() if self.enable_gpt_thinking_var.get() else '',
             'GPT_EFFORT': self.gpt_effort_var.get(),
             'OPENROUTER_EXCLUDE': '1',
+            'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
             'GROQ_API_URL': self.groq_base_url_var.get() if self.groq_base_url_var.get() else '',
@@ -13603,6 +13604,9 @@ Important rules:
             if hasattr(self, 'openrouter_accept_identity_var'):
                 self.config['openrouter_accept_identity'] = bool(self.openrouter_accept_identity_var.get())
                 os.environ['OPENROUTER_ACCEPT_IDENTITY'] = '1' if self.openrouter_accept_identity_var.get() else '0'
+            if hasattr(self, 'openrouter_preferred_provider_var'):
+                self.config['openrouter_preferred_provider'] = self.openrouter_preferred_provider_var.get()
+                os.environ['OPENROUTER_PREFERRED_PROVIDER'] = self.openrouter_preferred_provider_var.get()
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var.get()
