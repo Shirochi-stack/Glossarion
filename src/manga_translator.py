@@ -1408,12 +1408,16 @@ class MangaTranslator:
             bd = self._ensure_bubble_detector_ready(ocr_settings)
             if bd is None:
                 self._log("⚠️ Bubble detector unavailable after cleanup; falling back to proximity merge", "warning")
-                return self._merge_nearby_regions(regions)
+                # Use more conservative threshold for Azure/Google to avoid cross-bubble merging
+                threshold = 30 if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') else 50
+                return self._merge_nearby_regions(regions, threshold=threshold)
             
             # Check if bubble detection is enabled
             if not ocr_settings.get('bubble_detection_enabled', False):
                 self._log("📦 Bubble detection is disabled in settings", "info")
-                return self._merge_nearby_regions(regions)
+                # Use more conservative threshold for Azure/Google to avoid cross-bubble merging
+                threshold = 30 if getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') else 50
+                return self._merge_nearby_regions(regions, threshold=threshold)
             
             # Initialize thread-local detector
             bd = self._get_thread_bubble_detector()
@@ -1631,44 +1635,54 @@ class MangaTranslator:
                         used_indices.add(idx)
                 
                 if bubble_regions:
-                    merged_text = " ".join(r.text for r in bubble_regions)
+                    # CRITICAL: Check if this "bubble" actually contains multiple separate bubbles
+                    # This happens when RT-DETR detects one large bubble over stacked speech bubbles
+                    split_groups = self._split_bubble_if_needed(bubble_regions)
                     
-                    min_x = min(r.bounding_box[0] for r in bubble_regions)
-                    min_y = min(r.bounding_box[1] for r in bubble_regions)
-                    max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in bubble_regions)
-                    max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in bubble_regions)
-                    
-                    all_vertices = []
-                    for r in bubble_regions:
-                        if hasattr(r, 'vertices') and r.vertices:
-                            all_vertices.extend(r.vertices)
-                    
-                    if not all_vertices:
-                        all_vertices = [
-                            (min_x, min_y),
-                            (max_x, min_y),
-                            (max_x, max_y),
-                            (min_x, max_y)
-                        ]
-                    
-                    merged_region = TextRegion(
-                        text=merged_text,
-                        vertices=all_vertices,
-                        bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
-                        confidence=0.95,
-                        region_type='bubble_detected'
-                    )
-                    
-                    # Store original regions for masking
-                    merged_region.original_regions = bubble_regions
-                    merged_region.bubble_bounds = (bx, by, bw, bh)
-                    # Classify as text bubble for downstream rendering/masking
-                    merged_region.bubble_type = 'text_bubble'
-                    # Mark that this should be inpainted
-                    merged_region.should_inpaint = True
-                    
-                    merged_regions.append(merged_region)
-                    self._log(f"   Bubble {bubble_idx + 1}: Merged {len(bubble_regions)} text regions", "info")
+                    # Process each split group as a separate bubble
+                    for group_idx, group in enumerate(split_groups):
+                        merged_text = " ".join(r.text for r in group)
+                        
+                        min_x = min(r.bounding_box[0] for r in group)
+                        min_y = min(r.bounding_box[1] for r in group)
+                        max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in group)
+                        max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in group)
+                        
+                        all_vertices = []
+                        for r in group:
+                            if hasattr(r, 'vertices') and r.vertices:
+                                all_vertices.extend(r.vertices)
+                        
+                        if not all_vertices:
+                            all_vertices = [
+                                (min_x, min_y),
+                                (max_x, min_y),
+                                (max_x, max_y),
+                                (min_x, max_y)
+                            ]
+                        
+                        merged_region = TextRegion(
+                            text=merged_text,
+                            vertices=all_vertices,
+                            bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
+                            confidence=0.95,
+                            region_type='bubble_detected'
+                        )
+                        
+                        # Store original regions for masking
+                        merged_region.original_regions = group
+                        merged_region.bubble_bounds = (bx, by, bw, bh)
+                        # Classify as text bubble for downstream rendering/masking
+                        merged_region.bubble_type = 'text_bubble'
+                        # Mark that this should be inpainted
+                        merged_region.should_inpaint = True
+                        
+                        merged_regions.append(merged_region)
+                        
+                        if len(split_groups) > 1:
+                            self._log(f"   Bubble {bubble_idx + 1}.{group_idx + 1}: Merged {len(group)} text regions (split from {len(bubble_regions)} total)", "info")
+                        else:
+                            self._log(f"   Bubble {bubble_idx + 1}: Merged {len(group)} text regions", "info")
             
             # Handle text outside bubbles based on RT-DETR settings
             for idx, region in enumerate(regions):
@@ -6525,8 +6539,10 @@ class MangaTranslator:
                     base_dilation_size = 0
                     self._log(f"📏 Auto dilation (RT-DETR guided): 0px (using iterations only)", "info")
                 elif getattr(self, 'ocr_provider', '').lower() in ('azure', 'google'):
-                    base_dilation_size = 15
-                    self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size}px", "info")
+                    # CRITICAL: Without RT-DETR, Azure/Google OCR is very conservative
+                    # Use base dilation to expand masks to actual bubble size
+                    base_dilation_size = 15  # Base expansion for Azure/Google without RT-DETR
+                    self._log(f"📏 Auto dilation by provider ({self.ocr_provider}, no RT-DETR): {base_dilation_size}px", "info")
                 else:
                     base_dilation_size = 0
                     self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size}px", "info")
@@ -7996,21 +8012,23 @@ class MangaTranslator:
                 # Get original bounding box
                 x, y, w, h = region.bounding_box
                 
-                # Determine if we should use safe text area for positioning
-                # Use safe area if region has vertices (polygon-based detection)
-                use_safe_area = hasattr(region, 'vertices') and region.vertices
-                
-                if use_safe_area:
-                    # Get safe text area - use mask bounds if available for accurate rendering
+                # CRITICAL: Always prefer mask bounds when available (most accurate)
+                # Mask bounds are especially important for Azure/Google without RT-DETR,
+                # where OCR polygons are unreliable.
+                if use_mask_for_rendering and text_mask is not None:
+                    # Use mask bounds directly - most accurate method
                     safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
                         region, 
-                        use_mask_bounds=use_mask_for_rendering, 
+                        use_mask_bounds=True, 
                         full_mask=text_mask
                     )
-                    # Use safe area for both sizing and positioning
+                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                elif hasattr(region, 'vertices') and region.vertices:
+                    # Fallback: use polygon-based safe area (for RT-DETR regions)
+                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
                 else:
-                    # Simple bounding box - use original dimensions
+                    # Last resort: use simple bounding box
                     render_x, render_y, render_w, render_h = x, y, w, h
                 
                 # Fit text - use render dimensions for proper sizing
@@ -8140,18 +8158,23 @@ class MangaTranslator:
                 # Get original bounding box
                 x, y, w, h = region.bounding_box
                 
-                # Determine if we should use safe text area
-                use_safe_area = hasattr(region, 'vertices') and region.vertices
-                
-                if use_safe_area:
-                    # Get safe text area - use mask bounds if available for accurate rendering
+                # CRITICAL: Always prefer mask bounds when available (most accurate)
+                # Mask bounds are especially important for Azure/Google without RT-DETR,
+                # where OCR polygons are unreliable.
+                if use_mask_for_rendering and text_mask is not None:
+                    # Use mask bounds directly - most accurate method
                     safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
                         region,
-                        use_mask_bounds=use_mask_for_rendering,
+                        use_mask_bounds=True,
                         full_mask=text_mask
                     )
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                elif hasattr(region, 'vertices') and region.vertices:
+                    # Fallback: use polygon-based safe area (for RT-DETR regions)
+                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
                 else:
+                    # Last resort: use simple bounding box
                     render_x, render_y, render_w, render_h = x, y, w, h
                 
                 # Find optimal font size - use render dimensions for proper sizing
@@ -8980,6 +9003,98 @@ class MangaTranslator:
         return max(self.min_font_size, min(estimated_size, self.max_font_size))
 
 
+    def _split_bubble_if_needed(self, bubble_regions: List[TextRegion]) -> List[List[TextRegion]]:
+        """Split a detected bubble if it actually contains multiple separate speech bubbles
+        
+        This happens when RT-DETR detects one large bounding box over vertically or
+        horizontally stacked speech bubbles. We detect this by checking if text regions
+        within the bubble have LARGE gaps between them.
+        
+        This is intentionally CONSERVATIVE - we only split when there's a very clear separation.
+        
+        Returns:
+            List of region groups - each group represents a separate bubble
+        """
+        if len(bubble_regions) <= 1:
+            return [bubble_regions]  # Single region, no splitting needed
+        
+        # Sort regions by position (top-to-bottom, left-to-right)
+        sorted_regions = sorted(bubble_regions, key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        
+        # Group regions that should be together
+        groups = [[sorted_regions[0]]]
+        
+        for i in range(1, len(sorted_regions)):
+            current_region = sorted_regions[i]
+            cx, cy, cw, ch = current_region.bounding_box
+            placed = False
+            
+            # Try to place in an existing group
+            for group in groups:
+                # Check if current region should be in this group
+                # We look at the closest region in the group
+                min_gap = float('inf')
+                closest_region = None
+                
+                for group_region in group:
+                    gx, gy, gw, gh = group_region.bounding_box
+                    
+                    # Calculate gap between regions
+                    horizontal_gap = 0
+                    if gx + gw < cx:
+                        horizontal_gap = cx - (gx + gw)
+                    elif cx + cw < gx:
+                        horizontal_gap = gx - (cx + cw)
+                    
+                    vertical_gap = 0
+                    if gy + gh < cy:
+                        vertical_gap = cy - (gy + gh)
+                    elif cy + ch < gy:
+                        vertical_gap = gy - (cy + ch)
+                    
+                    # Use Euclidean distance as overall gap measure
+                    gap = (horizontal_gap ** 2 + vertical_gap ** 2) ** 0.5
+                    
+                    if gap < min_gap:
+                        min_gap = gap
+                        closest_region = group_region
+                
+                # BALANCED SPLIT CRITERIA:
+                # Split if gap is > 21px unless there's strong overlap (>62%)
+                if closest_region and min_gap < 21:  # Within 21px - likely same bubble
+                    group.append(current_region)
+                    placed = True
+                    break
+                elif closest_region:
+                    # Check if they have significant overlap despite the gap
+                    gx, gy, gw, gh = closest_region.bounding_box
+                    
+                    horizontal_overlap = min(gx + gw, cx + cw) - max(gx, cx)
+                    vertical_overlap = min(gy + gh, cy + ch) - max(gy, cy)
+                    
+                    min_width = min(gw, cw)
+                    min_height = min(gh, ch)
+                    
+                    # If they have strong overlap (>62%) in either direction, keep together
+                    if (horizontal_overlap > min_width * 0.62 or 
+                        vertical_overlap > min_height * 0.62):
+                        group.append(current_region)
+                        placed = True
+                        break
+            
+            # If not placed in any existing group, create a new group
+            if not placed:
+                groups.append([current_region])
+        
+        # Log if we split the bubble
+        if len(groups) > 1:
+            self._log(f"      🔪 SPLIT: Detected bubble actually contains {len(groups)} separate bubbles", "warning")
+            for idx, group in enumerate(groups):
+                group_texts = [r.text[:15] + '...' for r in group]
+                self._log(f"         Sub-bubble {idx + 1}: {len(group)} regions - {group_texts}", "info")
+        
+        return groups
+
     def _likely_different_bubbles(self, region1: TextRegion, region2: TextRegion) -> bool:
         """Detect if regions are likely in different speech bubbles based on spatial patterns"""
         x1, y1, w1, h1 = region1.bounding_box
@@ -9047,7 +9162,8 @@ class MangaTranslator:
         
         # Pattern 2: Stacked bubbles
         # Characteristics: Significant vertical gap, similar horizontal position
-        if vertical_gap > 25:  # Back to original threshold
+        # CRITICAL: Lower threshold to catch vertically stacked bubbles in manga
+        if vertical_gap > 15:  # Reduced from 25 to catch closer stacked bubbles
             horizontal_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
             min_width = min(w1, w2)
             
@@ -9150,7 +9266,8 @@ class MangaTranslator:
         
         # BUBBLE BOUNDARY CHECK: Use spatial patterns to detect different bubbles
         # But be less aggressive if gaps are small
-        if horizontal_gap < 20 and vertical_gap < 20:
+        # CRITICAL: Reduced threshold to allow bubble boundary detection for stacked bubbles
+        if horizontal_gap < 12 and vertical_gap < 12:
             # Very close regions are almost certainly in the same bubble
             self._log(f"   Regions very close, skipping bubble boundary check", "info")
         elif self._likely_different_bubbles(region1, region2):
