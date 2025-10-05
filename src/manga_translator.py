@@ -6416,56 +6416,48 @@ class MangaTranslator:
         return text
     
     def _sanitize_unicode_characters(self, text: str) -> str:
-        """Remove invalid Unicode characters, replacement characters, and box symbols.
-        Also more aggressively exclude square-like glyphs that leak as 'cubes' in some fonts.
+        """Remove invalid Unicode characters and replacement characters.
+        UPDATED: Now preserves symbols that can be rendered with Meiryo mixed font.
+        Only removes truly invalid characters and box-drawing that cause rendering issues.
         """
         if not text:
             return text
         
         import re
+        import unicodedata
         original = text
         
-        
-        # Remove Unicode replacement character (�) and similar invalid symbols
+        # Remove Unicode replacement character (�) - truly invalid
         text = text.replace('\ufffd', '')  # Unicode replacement character
         
-        # Geometric squares and variants (broad sweep)
-        geo_squares = [
-            '□','■','▢','▣','▤','▥','▦','▧','▨','▩','◻','⬛','⬜',
-            '\u25a1','\u25a0','\u2b1c','\u2b1b'
-        ]
-        for s in geo_squares:
-            text = text.replace(s, '')
+        # IMPORTANT: DO NOT remove geometric symbols that Meiryo can render!
+        # The old code removed ALL symbols in \u25A0-\u25FF range.
+        # Now we only remove specific problematic box-drawing characters.
+        
+        # Only remove box-drawing characters that cause actual rendering problems
+        # These are the box-drawing and block elements ranges (NOT symbols)
+        text = re.sub(r'[\u2500-\u257F]', '', text)  # Box Drawing range only
+        text = re.sub(r'[\u2580-\u259F]', '', text)  # Block Elements range only
+        
+        # DO NOT remove \u25A0-\u25FF anymore - those are geometric shapes Meiryo can render!
+        # This includes: ■ □ ▲ △ ▼ ▽ ○ ● etc.
         
         # Extra cube-like CJK glyphs commonly misrendered in non-CJK fonts
-        # (unconditionally removed per user request)
+        # Keep this list but understand these are specific problematic characters
         cube_likes = [
-            '口',  # U+53E3
-            '囗',  # U+56D7
-            '日',  # U+65E5 (often boxy)
-            '曰',  # U+66F0
-            '田',  # U+7530
-            '回',  # U+56DE
-            'ロ',  # U+30ED (Katakana RO)
-            'ﾛ',  # U+FF9B (Halfwidth RO)
-            'ㅁ',  # U+3141 (Hangul MIEUM)
-            '丨',  # U+4E28 (CJK radical two) tall bar
+            '口',  # U+53E3 - CJK mouth radical (renders as box)
+            '囗',  # U+56D7 - CJK enclosure
+            '日',  # U+65E5 - CJK sun/day (often boxy in wrong fonts)
+            '曰',  # U+66F0 - CJK say
+            '田',  # U+7530 - CJK field
+            '回',  # U+56DE - CJK return
+            'ロ',  # U+30ED - Katakana RO
+            'ﾛ',  # U+FF9B - Halfwidth Katakana RO
+            'ㅁ',  # U+3141 - Hangul MIEUM
+            '丨',  # U+4E28 - CJK radical
         ]
         for s in cube_likes:
             text = text.replace(s, '')
-        
-        # Remove entire ranges that commonly render as boxes/blocks
-        # Box Drawing, Block Elements, Geometric Shapes (full range), plus a common white/black large square range already handled
-        text = re.sub(r'[\u2500-\u257F\u2580-\u259F\u25A0-\u25FF]', '', text)
-        
-        # Optional debug: log culprits found in original text (before removal)
-        try:
-            culprits = re.findall(r'[\u2500-\u257F\u2580-\u259F\u25A0-\u25FF\u2B1B\u2B1C\u53E3\u56D7\u65E5\u66F0\u7530\u56DE\u30ED\uFF9B\u3141\u4E28]', original)
-            if culprits:
-                as_codes = [f'U+{ord(c):04X}' for c in culprits]
-                self._log(f"🧊 Removed box-like glyphs: {', '.join(as_codes)}", "debug")
-        except Exception:
-            pass
         
         # If line is mostly ASCII, strip any remaining single CJK ideographs that stand alone
         try:
@@ -6488,9 +6480,17 @@ class MangaTranslator:
         except UnicodeError:
             pass
         
-        if text != original:
+        # Log what we removed (only if changes were made)
+        if text != original and not getattr(self, 'concise_logs', False):
             try:
-                self._log(f"🔧 Sanitized Unicode: '{original}' → '{text}'", "debug")
+                # Show what was removed
+                removed = set(original) - set(text)
+                if removed:
+                    removed_list = sorted(removed, key=lambda x: ord(x))
+                    removed_with_codes = [f'{c}(U+{ord(c):04X})' for c in removed_list[:5]]  # Show first 5
+                    if len(removed_list) > 5:
+                        removed_with_codes.append('...')
+                    self._log(f"🔧 Sanitized: Removed {len(removed)} chars: {' '.join(removed_with_codes)}", "debug")
             except Exception:
                 pass
         
@@ -6552,7 +6552,9 @@ class MangaTranslator:
         # Additional cleanup for common encoding artifacts
         # Remove sequences that commonly appear from encoding errors
         text = re.sub(r'\ufffd+', '', text)  # Remove multiple replacement characters
-        text = re.sub(r'[\u25a0-\u25ff]+', '', text)  # Remove geometric shapes (common fallbacks)
+        
+        # UPDATED: DO NOT remove geometric shapes - Meiryo can render them!
+        # Old line removed: text = re.sub(r'[\u25a0-\u25ff]+', '', text)
         
         # Clean up double spaces and normalize whitespace
         text = re.sub(r'\s+', ' ', text).strip()
@@ -7918,10 +7920,11 @@ class MangaTranslator:
         
         return adjusted_regions
 
-    # Emote-only mixed font fallback (Meiryo) — primary font remains unchanged
+    # Symbol/Unicode mixed font fallback (Meiryo) — primary font remains unchanged
     def _get_emote_fallback_font(self, font_size: int):
         """Return a Meiryo Bold fallback font if available (preferred), else Meiryo.
-        Does not change the primary font; used only for emote glyphs.
+        Does not change the primary font; used for symbols, special characters, 
+        and invalid unicode that don't render well in the primary font.
         """
         try:
             from PIL import ImageFont as _ImageFont
@@ -7943,18 +7946,66 @@ class MangaTranslator:
             return None
 
     def _is_emote_char(self, ch: str) -> bool:
-        # Strict whitelist of emote-like symbols to render with Meiryo
-        EMOTES = set([
-            '\u2661', # ♡
-            '\u2665', # ♥
-            '\u2764', # ❤
-            '\u2605', # ★
-            '\u2606', # ☆
-            '\u266A', # ♪
-            '\u266B', # ♫
-            '\u203B', # ※
+        """Check if character should use Meiryo font (symbols + invalid unicode).
+        Now uses a broader detection approach for all symbols and special characters.
+        """
+        import unicodedata
+        
+        # Try to get the character's unicode category
+        try:
+            category = unicodedata.category(ch)
+        except (ValueError, TypeError):
+            # Invalid unicode - use Meiryo
+            return True
+        
+        # Symbol categories that should use Meiryo:
+        # So = Other Symbol (includes ♥, ★, ✓, etc.)
+        # Sm = Math Symbol  
+        # Sc = Currency Symbol
+        # Sk = Modifier Symbol
+        # Ps/Pe/Pi/Pf = Special punctuation that might not render well
+        symbol_categories = {'So', 'Sm', 'Sc', 'Sk'}
+        
+        if category in symbol_categories:
+            return True
+        
+        # Additionally, explicit whitelist for specific symbols that might be miscategorized
+        # or for symbols we definitely want in Meiryo
+        EXPLICIT_SYMBOLS = set([
+            '\u2661', # ♡ White Heart Suit
+            '\u2665', # ♥ Black Heart Suit
+            '\u2764', # ❤ Heavy Black Heart
+            '\u2605', # ★ Black Star
+            '\u2606', # ☆ White Star
+            '\u266A', # ♪ Eighth Note
+            '\u266B', # ♫ Beamed Eighth Notes
+            '\u203B', # ※ Reference Mark
+            '\u2713', # ✓ Check Mark
+            '\u2714', # ✔ Heavy Check Mark
+            '\u2715', # ✕ Multiplication X
+            '\u2716', # ✖ Heavy Multiplication X
+            '\u2717', # ✗ Ballot X
+            '\u2718', # ✘ Heavy Ballot X
+            '\u2022', # • Bullet
+            '\u25CF', # ● Black Circle
+            '\u25CB', # ○ White Circle
+            '\u25A0', # ■ Black Square
+            '\u25A1', # □ White Square
+            '\u25B2', # ▲ Black Up-Pointing Triangle
+            '\u25B3', # △ White Up-Pointing Triangle
+            '\u25BC', # ▼ Black Down-Pointing Triangle
+            '\u25BD', # ▽ White Down-Pointing Triangle
+            '\u2190', # ← Leftwards Arrow
+            '\u2191', # ↑ Upwards Arrow
+            '\u2192', # → Rightwards Arrow
+            '\u2193', # ↓ Downwards Arrow
+            '\u21D2', # ⇒ Rightwards Double Arrow
+            '\u21D4', # ⇔ Left Right Double Arrow
+            '\u2026', # … Horizontal Ellipsis (sometimes renders poorly)
+            '\u3000', # 　Japanese Full-Width Space (sometimes needs special handling)
         ])
-        return ch in EMOTES
+        
+        return ch in EXPLICIT_SYMBOLS
 
     def _line_width_emote_mixed(self, draw, text: str, primary_font, emote_font) -> int:
         if not emote_font:
