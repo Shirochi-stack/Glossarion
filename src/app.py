@@ -131,6 +131,32 @@ class GlossarionWeb:
             self.decrypted_config['batch_size'] = 10
         print(f"📦 Initialized batch translation: {self.config['batch_translation']}, batch size: {self.config['batch_size']}")
         
+        # CRITICAL: Ensure extraction method and filtering level are initialized
+        if 'text_extraction_method' not in self.config:
+            self.config['text_extraction_method'] = 'standard'
+            self.decrypted_config['text_extraction_method'] = 'standard'
+        if 'file_filtering_level' not in self.config:
+            self.config['file_filtering_level'] = 'smart'
+            self.decrypted_config['file_filtering_level'] = 'smart'
+        if 'indefinitely_retry_rate_limit' not in self.config:
+            self.config['indefinitely_retry_rate_limit'] = False
+            self.decrypted_config['indefinitely_retry_rate_limit'] = False
+        if 'thread_submission_delay' not in self.config:
+            self.config['thread_submission_delay'] = 0.1
+            self.decrypted_config['thread_submission_delay'] = 0.1
+        if 'enhanced_preserve_structure' not in self.config:
+            self.config['enhanced_preserve_structure'] = True
+            self.decrypted_config['enhanced_preserve_structure'] = True
+        if 'force_bs_for_traditional' not in self.config:
+            self.config['force_bs_for_traditional'] = True
+            self.decrypted_config['force_bs_for_traditional'] = True
+        print(f"🔍 Initialized extraction method: {self.config['text_extraction_method']}")
+        print(f"📋 Initialized filtering level: {self.config['file_filtering_level']}")
+        print(f"🔁 Initialized rate limit retry: {self.config['indefinitely_retry_rate_limit']}")
+        print(f"⏱️ Initialized threading delay: {self.config['thread_submission_delay']}s")
+        print(f"🔧 Enhanced preserve structure: {self.config['enhanced_preserve_structure']}")
+        print(f"🔧 Force BS for traditional: {self.config['force_bs_for_traditional']}")
+        
         # Set font algorithm and auto fit style if not present
         if 'manga_settings' not in self.config:
             self.config['manga_settings'] = {}
@@ -309,6 +335,14 @@ class GlossarionWeb:
             'api_call_delay': 0.5,  # Default 0.5 seconds between API calls
             'batch_translation': True,  # Enable batch translation by default
             'batch_size': 10,  # Default batch size
+            'text_extraction_method': 'standard',  # CRITICAL: Default extraction method (standard=BeautifulSoup, enhanced=html2text)
+            'file_filtering_level': 'smart',  # CRITICAL: Default filtering level (smart/comprehensive/full)
+            'enhanced_preserve_structure': True,  # Preserve HTML structure in enhanced mode
+            'force_bs_for_traditional': True,  # CRITICAL: Force BeautifulSoup for traditional extraction
+            'indefinitely_retry_rate_limit': False,  # CRITICAL: Default to False for rate limit retry
+            'thread_submission_delay': 0.1,  # CRITICAL: Default threading delay
+            'prompt_profiles': {},  # Will be populated from default_prompts in __init__
+            'active_profile': 'korean',  # Default active profile
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
@@ -430,9 +464,32 @@ class GlossarionWeb:
         os.environ['USE_HTTP_OPENROUTER'] = '1' if config('use_http_openrouter', False) else '0'
         os.environ['DISABLE_OPENROUTER_COMPRESSION'] = '1' if config('disable_openrouter_compression', False) else '0'
         
-        # Chapter Extraction Settings
-        os.environ['TEXT_EXTRACTION_METHOD'] = config('text_extraction_method', 'standard')
-        os.environ['FILE_FILTERING_LEVEL'] = config('file_filtering_level', 'smart')
+        # Chapter Extraction Settings  
+        # TEXT_EXTRACTION_METHOD: 'standard' (BeautifulSoup) or 'enhanced' (html2text)
+        text_extraction_method = config('text_extraction_method', 'standard')
+        file_filtering_level = config('file_filtering_level', 'smart')
+        
+        os.environ['TEXT_EXTRACTION_METHOD'] = text_extraction_method
+        os.environ['FILE_FILTERING_LEVEL'] = file_filtering_level
+        
+        # EXTRACTION_MODE: Use file_filtering_level unless text_extraction_method is 'enhanced'
+        # If enhanced mode, EXTRACTION_MODE = 'enhanced', otherwise use filtering level
+        if text_extraction_method == 'enhanced':
+            os.environ['EXTRACTION_MODE'] = 'enhanced'
+        else:
+            os.environ['EXTRACTION_MODE'] = file_filtering_level
+        
+        # ENHANCED_FILTERING: Only relevant for enhanced mode, but set for all modes
+        os.environ['ENHANCED_FILTERING'] = file_filtering_level
+        
+        # ENHANCED_PRESERVE_STRUCTURE: Preserve HTML structure in enhanced mode
+        os.environ['ENHANCED_PRESERVE_STRUCTURE'] = '1' if config('enhanced_preserve_structure', True) else '0'
+        
+        # FORCE_BS_FOR_TRADITIONAL: Force BeautifulSoup for traditional/standard extraction
+        os.environ['FORCE_BS_FOR_TRADITIONAL'] = '1' if config('force_bs_for_traditional', True) else '0'
+        
+        # Rate Limit Retry Settings
+        os.environ['INDEFINITELY_RETRY_RATE_LIMIT'] = '1' if config('indefinitely_retry_rate_limit', False) else '0'
         
         # Thinking Mode Settings
         os.environ['ENABLE_GPT_THINKING'] = '1' if config('enable_gpt_thinking', True) else '0'
@@ -450,7 +507,8 @@ class GlossarionWeb:
         os.environ['BATCH_TRANSLATION'] = '1' if config('batch_translation', True) else '0'
         os.environ['BATCH_SIZE'] = str(config('batch_size', 10))
         os.environ['THREAD_SUBMISSION_DELAY'] = str(config('thread_submission_delay', 0.1))
-        os.environ['DELAY'] = str(config('delay', 1))
+        # DELAY is kept for backwards compatibility, but reads from api_call_delay
+        os.environ['DELAY'] = str(config('api_call_delay', 0.5))
         os.environ['CHAPTER_RANGE'] = config('chapter_range', '')
         os.environ['TOKEN_LIMIT'] = str(config('token_limit', 200000))
         os.environ['TOKEN_LIMIT_DISABLED'] = '1' if config('token_limit_disabled', False) else '0'
@@ -677,7 +735,7 @@ class GlossarionWeb:
             sys.argv = ['glossarion_web.py', input_path]
             
             # Set environment variables for TransateKRtoEN.main()
-            os.environ['INPUT_PATH'] = input_path
+            os.environ['input_path'] = input_path
             os.environ['MODEL'] = model
             os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
             os.environ['MAX_OUTPUT_TOKENS'] = str(max_tokens)
@@ -693,9 +751,13 @@ class GlossarionWeb:
             os.environ['EMERGENCY_PARAGRAPH_RESTORE'] = '0'  # DISABLED
             os.environ['REMOVE_AI_ARTIFACTS'] = '1'  # ENABLED
             
-            # Debug: Verify settings
+            # Debug: Verify ALL critical settings
             translation_logs.append(f"\n🔧 Debug: EMERGENCY_PARAGRAPH_RESTORE = '{os.environ.get('EMERGENCY_PARAGRAPH_RESTORE', 'NOT SET')}'")
             translation_logs.append(f"🔧 Debug: REMOVE_AI_ARTIFACTS = '{os.environ.get('REMOVE_AI_ARTIFACTS', 'NOT SET')}'")
+            translation_logs.append(f"🔍 Debug: TEXT_EXTRACTION_METHOD = '{os.environ.get('TEXT_EXTRACTION_METHOD', 'NOT SET')}'")
+            translation_logs.append(f"🔍 Debug: EXTRACTION_MODE = '{os.environ.get('EXTRACTION_MODE', 'NOT SET')}'")
+            translation_logs.append(f"📋 Debug: FILE_FILTERING_LEVEL = '{os.environ.get('FILE_FILTERING_LEVEL', 'NOT SET')}'")
+            translation_logs.append(f"🔧 Debug: FORCE_BS_FOR_TRADITIONAL = '{os.environ.get('FORCE_BS_FOR_TRADITIONAL', 'NOT SET')}'")
             yield None, None, gr.update(visible=True), "\n".join(translation_logs), gr.update(visible=True), "Configuration set...", 10
             
             # Set API key environment variable
@@ -836,19 +898,58 @@ class GlossarionWeb:
                 translation_logs.append(f"\n✅ Translation complete: {os.path.basename(compiled_epub)}")
                 translation_logs.append(f"🔗 File path: {compiled_epub}")
                 translation_logs.append(f"📏 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-                translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your file")
-                final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
                 
-                yield (
-                    compiled_epub,
-                    gr.update(value="### ✅ Translation Complete!", visible=True),
-                    gr.update(visible=False),
-                    "\n".join(translation_logs),
-                    gr.update(value=final_status, visible=True),
-                    final_status,
-                    100
-                )
-                return
+                # Create ZIP file containing the entire output folder
+                import zipfile
+                # Get the output folder (where the EPUB is located)
+                output_folder = os.path.dirname(compiled_epub)
+                folder_name = os.path.basename(output_folder) if output_folder else epub_base
+                zip_path = os.path.join(os.path.dirname(output_folder) if output_folder else os.getcwd(), f"{folder_name}.zip")
+                translation_logs.append(f"📦 Creating ZIP archive of output folder...")
+                
+                try:
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        # Walk through the output folder and add all files
+                        for root, dirs, files in os.walk(output_folder):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                # Create relative path for the archive
+                                arcname = os.path.relpath(file_path, os.path.dirname(output_folder))
+                                zipf.write(file_path, arcname)
+                                translation_logs.append(f"  Added: {arcname}")
+                    
+                    zip_size = os.path.getsize(zip_path)
+                    translation_logs.append(f"✅ ZIP created: {os.path.basename(zip_path)}")
+                    translation_logs.append(f"📏 ZIP size: {zip_size:,} bytes ({zip_size/1024/1024:.2f} MB)")
+                    translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your ZIP file")
+                    
+                    final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
+                    
+                    yield (
+                        zip_path,
+                        gr.update(value="### ✅ Translation Complete!", visible=True),
+                        gr.update(visible=False),
+                        "\n".join(translation_logs),
+                        gr.update(value=final_status, visible=True),
+                        final_status,
+                        100
+                    )
+                    return
+                except Exception as zip_error:
+                    translation_logs.append(f"⚠️ Could not create ZIP: {zip_error}")
+                    translation_logs.append(f"📥 Returning original {file_type} file instead")
+                    final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
+                    
+                    yield (
+                        compiled_epub,
+                        gr.update(value="### ✅ Translation Complete!", visible=True),
+                        gr.update(visible=False),
+                        "\n".join(translation_logs),
+                        gr.update(value=final_status, visible=True),
+                        final_status,
+                        100
+                    )
+                    return
             
             # Determine output extension based on input file type
             output_ext = ".epub" if file_ext == ".epub" else ".txt"
@@ -923,21 +1024,58 @@ class GlossarionWeb:
                     translation_logs.append(f"✅ Translation complete: {os.path.basename(compiled_epub)}")
                     translation_logs.append(f"🔗 File path: {compiled_epub}")
                     translation_logs.append(f"📏 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-                    translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your file")
-                    # Make the file component visible with the translated file
-                    final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
                     
-                    # Return the actual file path WITH visibility update
-                    yield (
-                        compiled_epub,  # epub_output - The file path (Gradio will handle it)
-                        gr.update(value="### ✅ Translation Complete!", visible=True),  # epub_status_message
-                        gr.update(visible=False),  # epub_progress_group
-                        "\n".join(translation_logs),  # epub_logs
-                        gr.update(value=final_status, visible=True),  # epub_status
-                        final_status,  # epub_progress_text
-                        100  # epub_progress_bar
-                    )
-                    return
+                    # Create ZIP file containing the entire output folder
+                    import zipfile
+                    # Get the output folder (where the EPUB is located)
+                    output_folder = os.path.dirname(compiled_epub)
+                    folder_name = os.path.basename(output_folder) if output_folder else epub_base
+                    zip_path = os.path.join(os.path.dirname(output_folder) if output_folder else os.getcwd(), f"{folder_name}.zip")
+                    translation_logs.append(f"📦 Creating ZIP archive of output folder...")
+                    
+                    try:
+                        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            # Walk through the output folder and add all files
+                            for root, dirs, files in os.walk(output_folder):
+                                for file in files:
+                                    file_path = os.path.join(root, file)
+                                    # Create relative path for the archive
+                                    arcname = os.path.relpath(file_path, os.path.dirname(output_folder))
+                                    zipf.write(file_path, arcname)
+                                    translation_logs.append(f"  Added: {arcname}")
+                        
+                        zip_size = os.path.getsize(zip_path)
+                        translation_logs.append(f"✅ ZIP created: {os.path.basename(zip_path)}")
+                        translation_logs.append(f"📏 ZIP size: {zip_size:,} bytes ({zip_size/1024/1024:.2f} MB)")
+                        translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your ZIP file")
+                        
+                        final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
+                        
+                        yield (
+                            zip_path,
+                            gr.update(value="### ✅ Translation Complete!", visible=True),
+                            gr.update(visible=False),
+                            "\n".join(translation_logs),
+                            gr.update(value=final_status, visible=True),
+                            final_status,
+                            100
+                        )
+                        return
+                    except Exception as zip_error:
+                        translation_logs.append(f"⚠️ Could not create ZIP: {zip_error}")
+                        translation_logs.append(f"📥 Returning original {file_type} file instead")
+                        final_status = "Translation complete!" if not translation_error[0] else "Translation completed with warnings"
+                        
+                        yield (
+                            compiled_epub,
+                            gr.update(value="### ✅ Translation Complete!", visible=True),
+                            gr.update(visible=False),
+                            "\n".join(translation_logs),
+                            gr.update(value=final_status, visible=True),
+                            final_status,
+                            100
+                        )
+                        return
                 else:
                     translation_logs.append(f"⚠️ File found but not accessible: {compiled_epub}")
                     compiled_epub = None  # Force search
@@ -988,18 +1126,55 @@ class GlossarionWeb:
                     translation_logs.append(f"✅ Found output file: {os.path.basename(compiled_epub)}")
                     translation_logs.append(f"🔗 File path: {compiled_epub}")
                     translation_logs.append(f"📏 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-                    translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your file")
-                    # Return the actual file path directly
-                    yield (
-                        compiled_epub,  # epub_output - Just the file path
-                        gr.update(value="### ✅ Translation Complete!", visible=True),  # epub_status_message
-                        gr.update(visible=False),  # epub_progress_group
-                        "\n".join(translation_logs),  # epub_logs
-                        gr.update(value="Translation complete!", visible=True),  # epub_status
-                        "Translation complete!",  # epub_progress_text
-                        100  # epub_progress_bar
-                    )
-                    return
+                    
+                    # Create ZIP file containing the entire output folder
+                    import zipfile
+                    # Get the output folder (where the EPUB is located)
+                    output_folder = os.path.dirname(compiled_epub)
+                    folder_name = os.path.basename(output_folder) if output_folder else epub_base
+                    zip_path = os.path.join(os.path.dirname(output_folder) if output_folder else os.getcwd(), f"{folder_name}.zip")
+                    translation_logs.append(f"📦 Creating ZIP archive of output folder...")
+                    
+                    try:
+                        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            # Walk through the output folder and add all files
+                            for root, dirs, files in os.walk(output_folder):
+                                for file in files:
+                                    file_path = os.path.join(root, file)
+                                    # Create relative path for the archive
+                                    arcname = os.path.relpath(file_path, os.path.dirname(output_folder))
+                                    zipf.write(file_path, arcname)
+                                    translation_logs.append(f"  Added: {arcname}")
+                        
+                        zip_size = os.path.getsize(zip_path)
+                        translation_logs.append(f"✅ ZIP created: {os.path.basename(zip_path)}")
+                        translation_logs.append(f"📏 ZIP size: {zip_size:,} bytes ({zip_size/1024/1024:.2f} MB)")
+                        translation_logs.append(f"📥 Click 'Download Translated {file_type}' below to save your ZIP file")
+                        
+                        yield (
+                            zip_path,
+                            gr.update(value="### ✅ Translation Complete!", visible=True),
+                            gr.update(visible=False),
+                            "\n".join(translation_logs),
+                            gr.update(value="Translation complete!", visible=True),
+                            "Translation complete!",
+                            100
+                        )
+                        return
+                    except Exception as zip_error:
+                        translation_logs.append(f"⚠️ Could not create ZIP: {zip_error}")
+                        translation_logs.append(f"📥 Returning original {file_type} file instead")
+                        
+                        yield (
+                            compiled_epub,
+                            gr.update(value="### ✅ Translation Complete!", visible=True),
+                            gr.update(visible=False),
+                            "\n".join(translation_logs),
+                            gr.update(value="Translation complete!", visible=True),
+                            "Translation complete!",
+                            100
+                        )
+                        return
             
             # Still couldn't find output - report failure
             translation_logs.append("❌ Could not locate translated output file")
@@ -4900,10 +5075,11 @@ class GlossarionWeb:
                             api_delay = gr.Slider(
                                 minimum=0,
                                 maximum=10,
-                                value=self.get_config_value('delay', 1),
-                                step=0.5,
-                                label="API call delay (s)",
-                                interactive=True
+                                value=self.get_config_value('api_call_delay', 0.5),
+                                step=0.1,
+                                label="API call delay (s) [SEND_INTERVAL_SECONDS]",
+                                interactive=True,
+                                info="Delay between API calls to avoid rate limits"
                             )
                             
                             chapter_range = gr.Textbox(
@@ -5028,7 +5204,8 @@ class GlossarionWeb:
                                 choices=["standard", "enhanced"],
                                 value=self.get_config_value('text_extraction_method', 'standard'),
                                 label="",
-                                info="Standard uses BeautifulSoup, Enhanced uses html2text"
+                                info="Standard uses BeautifulSoup, Enhanced uses html2text",
+                                interactive=True
                             )
                             
                             gr.Markdown("• **Standard (BeautifulSoup)** - Traditional HTML parsing, fast and reliable")
@@ -5037,10 +5214,11 @@ class GlossarionWeb:
                         with gr.Column():
                             gr.Markdown("**File Filtering Level:**")
                             file_filtering_level = gr.Radio(
-                                choices=["smart", "moderate", "full"],
+                                choices=["smart", "comprehensive", "full"],
                                 value=self.get_config_value('file_filtering_level', 'smart'),
                                 label="",
-                                info="Controls which files are extracted from EPUBs"
+                                info="Controls which files are extracted from EPUBs",
+                                interactive=True
                             )
                             
                             gr.Markdown("• **Smart (Aggressive Filtering)** - Skips navigation, TOC, copyright files")
@@ -5119,7 +5297,7 @@ class GlossarionWeb:
                             
                             # Update settings
                             current_config['thread_submission_delay'] = float(thread_delay_val)
-                            current_config['delay'] = float(api_delay_val)
+                            current_config['api_call_delay'] = float(api_delay_val)
                             current_config['chapter_range'] = str(chapter_range_val)
                             current_config['token_limit'] = int(token_limit_val)
                             current_config['token_limit_disabled'] = bool(disable_token_limit_val)
@@ -5129,6 +5307,12 @@ class GlossarionWeb:
                             current_config['translation_history_rolling'] = bool(rolling_history_val)
                             current_config['batch_translation'] = bool(batch_translation_val)
                             current_config['batch_size'] = int(batch_size_val)
+                            
+                            # CRITICAL: Update environment variables immediately
+                            os.environ['SEND_INTERVAL_SECONDS'] = str(api_delay_val)
+                            os.environ['THREAD_SUBMISSION_DELAY'] = str(thread_delay_val)
+                            print(f"✅ Updated SEND_INTERVAL_SECONDS = {api_delay_val}s")
+                            print(f"✅ Updated THREAD_SUBMISSION_DELAY = {thread_delay_val}s")
                             
                             # Save to file
                             self.save_config(current_config)
