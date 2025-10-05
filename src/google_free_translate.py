@@ -10,12 +10,17 @@ import json
 import requests
 from typing import Optional, Dict, Any
 import urllib.parse
+import random
 
 class GoogleFreeTranslateNew:
-    """Google Translate API for free translation using web endpoint."""
+    """Google Translate API for free translation using public web endpoints.
+    
+    Uses the same endpoints as the Google Translate web interface and mobile apps.
+    No API key or Google Cloud credentials required!
+    """
     name = 'Google(Free)New'
     free = True
-    endpoint: str = 'https://translate-pa.googleapis.com/v1/translate'
+    endpoint: str = 'https://translate.googleapis.com/translate_a/single'
     
     def __init__(self, source_language: str = "auto", target_language: str = "en", logger=None):
         self.source_language = source_language
@@ -26,6 +31,16 @@ class GoogleFreeTranslateNew:
         self.request_lock = threading.Lock()
         self.last_request_time = 0
         self.rate_limit = 0.5  # 500ms between requests to avoid rate limiting
+        
+        # Multiple user agents to rotate through (helps avoid 403)
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+        ]
         
     def _get_source_code(self):
         """Get the source language code."""
@@ -49,15 +64,13 @@ class GoogleFreeTranslateNew:
         return lang_map.get(self.target_language, self.target_language)
 
     def get_headers(self):
-        """Get request headers that mimic a browser."""
+        """Get request headers that mimic a browser with random user agent."""
         return {
             'Accept': '*/*',
             'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Language': 'en-US,en;q=0.9',
             'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                         'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 '
-                         'Safari/537.36',
+            'User-Agent': random.choice(self.user_agents),  # Random user agent to avoid detection
             'Referer': 'https://translate.google.com/',
             'Origin': 'https://translate.google.com',
         }
@@ -107,20 +120,24 @@ class GoogleFreeTranslateNew:
             source_lang = self._get_source_code()
             target_lang = self._get_target_code()
             
-            # Try multiple endpoint formats
+            # Try multiple FREE endpoint formats (no credentials needed)
+            # These are public endpoints used by the web interface and mobile apps
+            # Ordered from most reliable to least reliable based on common usage
             endpoints_to_try = [
-                'https://translate-pa.googleapis.com/v1/translate',
-                'https://translate.googleapis.com/translate_a/single',
+                'https://translate.googleapis.com/translate_a/single',  # Most reliable public endpoint
+                'https://clients5.google.com/translate_a/t',  # Mobile client endpoint
+                'https://translate.google.com/translate_a/single',  # Direct web endpoint
+                'https://clients5.google.com/translate_a/single',  # Alternative client5
             ]
             
             for endpoint_url in endpoints_to_try:
                 try:
-                    if 'translate_a' in endpoint_url:
-                        # Use the older public API format
-                        result = self._translate_via_single_api(text, source_lang, target_lang, endpoint_url)
+                    if 'clients5.google.com/translate_a/t' in endpoint_url:
+                        # Use mobile client API format
+                        result = self._translate_via_mobile_api(text, source_lang, target_lang, endpoint_url)
                     else:
-                        # Use the newer pa API format  
-                        result = self._translate_via_pa_api(text, source_lang, target_lang, endpoint_url)
+                        # Use the public translate_a/single API format
+                        result = self._translate_via_single_api(text, source_lang, target_lang, endpoint_url)
                         
                     if result:
                         # Cache successful result
@@ -151,48 +168,39 @@ class GoogleFreeTranslateNew:
                 'error': str(e)
             }
     
-    def _translate_via_pa_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
-        """Translate using the translate-pa.googleapis.com endpoint."""
-        data = {
-            'q': text,
-            'source': source_lang,
-            'target': target_lang,
-            'format': 'text'
-        }
-        
-        response = requests.post(
-            endpoint_url,
-            data=data,
-            headers=self.get_headers(),
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            try:
-                json_response = response.json()
-                if 'data' in json_response and 'translations' in json_response['data']:
-                    translations = json_response['data']['translations']
-                    if translations:
-                        translation = translations[0]
-                        return {
-                            'translatedText': translation.get('translatedText', text),
-                            'detectedSourceLanguage': translation.get('detectedSourceLanguage', source_lang)
-                        }
-            except (json.JSONDecodeError, KeyError, IndexError) as e:
-                self.logger.warning(f"Failed to parse PA API response: {e}")
-                
-        return None
-    
     def _translate_via_single_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
         """Translate using the translate_a/single endpoint (older format)."""
-        params = {
-            'client': 'gtx',
-            'sl': source_lang,
-            'tl': target_lang,
-            'dt': 't',
-            'q': text
-        }
+        # Try multiple client types to avoid 403 errors
+        client_types = ['gtx', 'webapp', 't', 'dict-chrome-ex', 'android']
         
+        for client_type in client_types:
+            params = {
+                'client': client_type,
+                'sl': source_lang,
+                'tl': target_lang,
+                'dt': 't',
+                'q': text
+            }
+            
+            # Add additional parameters for certain clients
+            if client_type == 'webapp':
+                params['dj'] = '1'  # Return JSON format
+                params['dt'] = ['t', 'bd', 'ex', 'ld', 'md', 'qca', 'rw', 'rm', 'ss', 'at']
+            elif client_type == 'dict-chrome-ex':
+                params['dt'] = ['t', 'bd']
+            
+            try:
+                result = self._try_single_api_request(params, endpoint_url, client_type)
+                if result:
+                    return result
+            except Exception as e:
+                self.logger.debug(f"Client type {client_type} failed: {e}")
+                continue
+        
+        return None
+    
+    def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
+        """Try a single API request with given parameters."""
         response = requests.get(
             endpoint_url,
             params=params,
@@ -202,9 +210,26 @@ class GoogleFreeTranslateNew:
         
         if response.status_code == 200:
             try:
-                # This endpoint returns a JSON array
                 result = response.json()
-                if isinstance(result, list) and len(result) > 0:
+                
+                # Handle webapp format (dj=1 returns different structure)
+                if client_type == 'webapp' and isinstance(result, dict):
+                    if 'sentences' in result:
+                        translated_parts = []
+                        for sentence in result['sentences']:
+                            if 'trans' in sentence:
+                                translated_parts.append(sentence['trans'])
+                        
+                        translated_text = ''.join(translated_parts)
+                        detected_lang = result.get('src', params.get('sl', 'auto'))
+                        
+                        return {
+                            'translatedText': translated_text,
+                            'detectedSourceLanguage': detected_lang
+                        }
+                
+                # Handle standard array format
+                elif isinstance(result, list) and len(result) > 0:
                     # Extract translated text
                     translated_parts = []
                     for item in result[0]:
@@ -214,7 +239,7 @@ class GoogleFreeTranslateNew:
                     translated_text = ''.join(translated_parts)
                     
                     # Try to detect source language from response
-                    detected_lang = source_lang
+                    detected_lang = params.get('sl', 'auto')
                     if len(result) > 2 and isinstance(result[2], str):
                         detected_lang = result[2]
                     
@@ -223,7 +248,54 @@ class GoogleFreeTranslateNew:
                         'detectedSourceLanguage': detected_lang
                     }
             except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-                self.logger.warning(f"Failed to parse single API response: {e}")
+                self.logger.warning(f"Failed to parse single API response with client {client_type}: {e}")
+                
+        return None
+    
+    def _translate_via_mobile_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
+        """Translate using the mobile client endpoint (clients5.google.com/translate_a/t)."""
+        params = {
+            'client': 't',  # Mobile client
+            'sl': source_lang,
+            'tl': target_lang,
+            'q': text
+        }
+        
+        # Use different headers for mobile endpoint
+        mobile_headers = {
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'GoogleTranslate/6.29.59279 (Linux; U; Android 11; Pixel 5)',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+        
+        response = requests.post(
+            endpoint_url,
+            data=params,
+            headers=mobile_headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            try:
+                # This endpoint returns a simple JSON array
+                result = response.json()
+                if isinstance(result, list) and len(result) > 0:
+                    # Extract translated text from first element
+                    if isinstance(result[0], str):
+                        translated_text = result[0]
+                    elif isinstance(result[0], list) and len(result[0]) > 0:
+                        translated_text = result[0][0]
+                    else:
+                        return None
+                    
+                    return {
+                        'translatedText': translated_text,
+                        'detectedSourceLanguage': source_lang
+                    }
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+                self.logger.warning(f"Failed to parse mobile API response: {e}")
                 
         return None
 
