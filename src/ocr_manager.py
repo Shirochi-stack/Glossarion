@@ -207,8 +207,8 @@ class CustomAPIProvider(OCRProvider):
         
         # Use existing temperature and token settings  
         self.temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.01'))
-        # Don't hardcode to 8192 - get fresh value when actually used
-        self.max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4096'))
+        # NOTE: max_tokens is NOT cached here - it's read fresh from environment in detect_text()
+        # to ensure we always get the latest value from the GUI
         
         # Image settings from existing compression variables
         self.image_format = 'jpeg' if os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') != 'png' else 'png'
@@ -456,7 +456,7 @@ class CustomAPIProvider(OCRProvider):
         
         try:
             # Get fresh max_tokens from environment - GUI will have set this
-            max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4096'))
+            max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
             if not self.is_loaded:
                 if not self.load_model():
                     return results

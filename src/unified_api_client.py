@@ -4484,14 +4484,15 @@ class UnifiedClient:
         if total_chars == 0:
             return False, "Empty request content"
         
-        # Handle None max_tokens
+        # Handle None max_tokens - read from environment
         if max_tokens is None:
-            max_tokens = getattr(self, 'max_tokens', 8192)  # Use instance default or 8192
+            max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
         
         # Estimate tokens (rough approximation)
         estimated_tokens = total_chars / 4
-        if estimated_tokens > max_tokens * 2:
-            print(f"Request might be too long: ~{estimated_tokens} tokens vs {max_tokens} max")
+        # Only warn if we exceed 150% of the max_tokens limit (more lenient)
+        if estimated_tokens > max_tokens * 1.5:
+            print(f"⚠️ Request might be too long: ~{estimated_tokens:.1f} tokens vs {max_tokens} max")
         
         # Check for valid roles
         valid_roles = {'system', 'user', 'assistant'}
@@ -5549,10 +5550,15 @@ class UnifiedClient:
                         })
                 
                 # Create message with Anthropic client
+                # max_tokens should ALWAYS be provided by the caller
+                # If not provided, use the environment variable or a reasonable default
+                if max_tokens is None:
+                    max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
+                
                 kwargs = {
                     "model": model_name,
                     "messages": anthropic_messages,
-                    "max_tokens": max_tokens or 4096,
+                    "max_tokens": max_tokens,
                     "temperature": temperature,
                 }
                 

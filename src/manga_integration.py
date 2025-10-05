@@ -7845,7 +7845,7 @@ class MangaTranslationTab:
                                     # Log warning if completion rate is less than 100%
                                     if completion_rate < 1.0:
                                         self._log(f"⚠️ Partial translation: {translated_count}/{detected_count} regions translated ({completion_rate*100:.1f}%)", "warning")
-                                        self._log(f"   This may indicate bubble detector or inpainter issues", "warning")
+                                        self._log(f"   API may have skipped some regions (sound effects, symbols, or cleaning removed content)", "warning")
                                     
                                     # Only consider successful if at least 50% of regions translated
                                     # This prevents marking completely failed images as successful

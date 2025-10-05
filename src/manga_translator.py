@@ -6216,15 +6216,16 @@ class MangaTranslator:
 
             # Clean all translation values to remove quotes
             # CRITICAL: Also clean the keys in the dictionary to maintain correct mapping
+            # CRITICAL FIX: Always keep the key even if value becomes empty after cleaning
+            # This prevents misalignment between detected regions and API translations
             cleaned_translations = {}
             for key, value in translations.items():
                 cleaned_key = key
                 cleaned_value = self._clean_translation_text(value)
-                # Only add if the cleaned value is not empty (avoid misalignment)
-                if cleaned_value:
-                    cleaned_translations[cleaned_key] = cleaned_value
-                else:
-                    self._log(f"🔍 Skipping empty translation after cleaning: '{key}' → ''", "debug")
+                # ALWAYS add the key to maintain alignment, even if value is empty
+                cleaned_translations[cleaned_key] = cleaned_value
+                if not cleaned_value:
+                    self._log(f"🔍 Keeping empty translation to maintain alignment: '{key}' → '' (original: '{value}')", "debug")
             
             # Replace original dict with cleaned version
             translations = cleaned_translations
@@ -6491,6 +6492,13 @@ class MangaTranslator:
         
         # Remove leading and trailing whitespace
         text = text.strip()
+        
+        # CRITICAL: If the text is ONLY punctuation (dots, ellipsis, exclamations, etc.),
+        # don't clean it at all - these are valid sound effects/reactions in manga
+        import re
+        if re.match(r'^[.!?…~♡♥★☆\s]+$', text):
+            self._log(f"🎯 Preserving punctuation-only text: '{text}'", "debug")
+            return text
         
         # Remove ALL types of quotes and dots from start/end
         # Keep removing until no more quotes/dots at edges
