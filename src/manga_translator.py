@@ -48,6 +48,7 @@ class TextRegion:
     confidence: float
     region_type: str  # 'text_block' from Cloud Vision
     translated_text: Optional[str] = None
+    bubble_bounds: Optional[Tuple[int, int, int, int]] = None  # RT-DETR bubble bounds for rendering
     
     def to_dict(self):
         return {
@@ -1666,18 +1667,25 @@ class MangaTranslator:
                             vertices=all_vertices,
                             bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
                             confidence=0.95,
-                            region_type='bubble_detected'
+                            region_type='bubble_detected',
+                            bubble_bounds=(bx, by, bw, bh)  # Pass bubble_bounds in constructor
                         )
                         
                         # Store original regions for masking
                         merged_region.original_regions = group
-                        merged_region.bubble_bounds = (bx, by, bw, bh)
                         # Classify as text bubble for downstream rendering/masking
                         merged_region.bubble_type = 'text_bubble'
                         # Mark that this should be inpainted
                         merged_region.should_inpaint = True
                         
                         merged_regions.append(merged_region)
+                        
+                        # DEBUG: Verify bubble_bounds was set
+                        if not getattr(self, 'concise_logs', False):
+                            has_bb = hasattr(merged_region, 'bubble_bounds') and merged_region.bubble_bounds is not None
+                            self._log(f"   🔍 Merged region has bubble_bounds: {has_bb}", "debug")
+                            if has_bb:
+                                self._log(f"      bubble_bounds = {merged_region.bubble_bounds}", "debug")
                         
                         if len(split_groups) > 1:
                             self._log(f"   Bubble {bubble_idx + 1}.{group_idx + 1}: Merged {len(group)} text regions (split from {len(bubble_regions)} total)", "info")
@@ -1699,16 +1707,31 @@ class MangaTranslator:
                             try:
                                 cx = region.bounding_box[0] + region.bounding_box[2] / 2
                                 cy = region.bounding_box[1] + region.bounding_box[3] / 2
-                                if _point_in_free_text(cx, cy, free_text_bboxes):
-                                    region.bubble_type = 'free_text'
-                                    self._log(f"   Free text region INCLUDED: '{region.text[:30]}...'", "debug")
-                                else:
+                                # Find which free text bbox this region belongs to (if any)
+                                found_free_text_box = False
+                                for fx, fy, fw, fh in free_text_bboxes:
+                                    if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                                        region.bubble_type = 'free_text'
+                                        # CRITICAL: Set bubble_bounds to the RT-DETR free text detection box
+                                        # This ensures rendering uses the full RT-DETR bounds, not just OCR polygon
+                                        if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
+                                            region.bubble_bounds = (fx, fy, fw, fh)
+                                        found_free_text_box = True
+                                        self._log(f"   Free text region INCLUDED: '{region.text[:30]}...'", "debug")
+                                        break
+                                
+                                if not found_free_text_box:
                                     # Text outside bubbles but not in free text box - still mark as free text
                                     region.bubble_type = 'free_text'
+                                    # Use region's own bbox if no RT-DETR free text box found
+                                    if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
+                                        region.bubble_bounds = region.bounding_box
                                     self._log(f"   Text outside bubbles INCLUDED (as free text): '{region.text[:30]}...'", "debug")
                             except Exception:
                                 # Default to free text if check fails
                                 region.bubble_type = 'free_text'
+                                if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
+                                    region.bubble_bounds = region.bounding_box
                         else:
                             region.should_inpaint = False
                             self._log(f"   Text outside bubbles EXCLUDED (Free Text unchecked): '{region.text[:30]}...'", "info")
@@ -3536,6 +3559,9 @@ class MangaTranslator:
                                     if result and len(result) > 0 and result[0].text.strip():
                                         result[0].bbox = (x, y, w, h)
                                         result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        # CRITICAL: Store RT-DETR bubble bounds for rendering
+                                        # The bbox/vertices are the small OCR polygon, but bubble_bounds is the full RT-DETR bubble
+                                        result[0].bubble_bounds = (x, y, w, h)
                                         ocr_results.append(result[0])
                                         self._log(f"🔍 Processing region {i+1}/{len(all_regions)} with manga-ocr...")
                                         self._log(f"✅ Detected text: {result[0].text[:50]}...")
@@ -3885,18 +3911,30 @@ class MangaTranslator:
                         continue
                     
                     # Create TextRegion (use cleaned text)
-                    region = TextRegion(
-                        text=cleaned_result_text,  # Use cleaned text instead of original
-                        vertices=result.vertices if result.vertices else [
+                    # CRITICAL: Preserve bubble_bounds if it was set during OCR (e.g., manga-ocr with RT-DETR)
+                    region_kwargs = {
+                        'text': cleaned_result_text,  # Use cleaned text instead of original
+                        'vertices': result.vertices if result.vertices else [
                             (result.bbox[0], result.bbox[1]),
                             (result.bbox[0] + result.bbox[2], result.bbox[1]),
                             (result.bbox[0] + result.bbox[2], result.bbox[1] + result.bbox[3]),
                             (result.bbox[0], result.bbox[1] + result.bbox[3])
                         ],
-                        bounding_box=result.bbox,
-                        confidence=result.confidence,
-                        region_type='text_block'
-                    )
+                        'bounding_box': result.bbox,
+                        'confidence': result.confidence,
+                        'region_type': 'text_block'
+                    }
+                    # Preserve bubble_bounds from OCR result if present
+                    if hasattr(result, 'bubble_bounds') and result.bubble_bounds is not None:
+                        region_kwargs['bubble_bounds'] = result.bubble_bounds
+                        self._log(f"   🔍 Preserved bubble_bounds from OCR: {result.bubble_bounds}", "debug")
+                    else:
+                        if hasattr(result, 'bubble_bounds'):
+                            self._log(f"   ⚠️ OCR result has bubble_bounds but it's None!", "debug")
+                        else:
+                            self._log(f"   ℹ️ OCR result has no bubble_bounds attribute", "debug")
+                    
+                    region = TextRegion(**region_kwargs)
                     regions.append(region)
                     if not getattr(self, 'concise_logs', False):
                         self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
@@ -3904,8 +3942,15 @@ class MangaTranslator:
             # MERGING SECTION (applies to all providers)
             # Check if bubble detection is enabled
             if ocr_settings.get('bubble_detection_enabled', False):
-                self._log("🤖 Using AI bubble detection for merging")
-                regions = self._merge_with_bubble_detection(regions, image_path)
+                # For manga-ocr and similar providers, skip merging since regions already have bubble_bounds from OCR
+                # Only Azure and Google need merging because they return line-level OCR results
+                if self.ocr_provider in ['manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']:
+                    self._log("🎯 Skipping bubble detection merge for manga-ocr (regions already aligned with RT-DETR)")
+                    # Regions already have bubble_bounds set from OCR phase - no need to merge
+                else:
+                    # Azure and Google return line-level results that need to be merged into bubbles
+                    self._log("🤖 Using AI bubble detection for merging")
+                    regions = self._merge_with_bubble_detection(regions, image_path)
             else:
                 # Traditional merging
                 merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
@@ -3931,10 +3976,8 @@ class MangaTranslator:
             
             self._log(f"✅ Detected {len(regions)} text regions after merging")
             
-            # Save debug images only if 'Save intermediate images' is enabled
-            advanced_settings = manga_settings.get('advanced', {})
-            if advanced_settings.get('save_intermediate', False):
-                self._save_debug_image(image_path, regions)
+            # NOTE: Debug images are saved in process_image() with correct output_dir
+            # Removed duplicate save here to avoid creating unexpected 'translated_images' folders
             
             return regions
             
@@ -3998,6 +4041,8 @@ class MangaTranslator:
                     # Adjust coordinates to full image space
                     result[0].bbox = (x, y, w, h)
                     result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                    # CRITICAL: Store RT-DETR bubble bounds for rendering (for non-Azure/Google providers)
+                    result[0].bubble_bounds = (x, y, w, h)
                     return (index, result[0])
                 return (index, None)
                 
@@ -8132,6 +8177,7 @@ class MangaTranslator:
             for ov in overlays:
                 if ov is not None:
                     pil_image = Image.alpha_composite(pil_image, ov)
+                    region_count += 1
 
             # Convert back to RGB
             pil_image = pil_image.convert('RGB')
@@ -8523,25 +8569,41 @@ class MangaTranslator:
         
         return mutable_message, int(font_size)
     
-    def get_mask_bounds(self, region: TextRegion, full_mask: np.ndarray = None) -> Tuple[int, int, int, int]:
-        """Get bounding box from the actual mask region.
+    def get_mask_bounds(self, region: TextRegion, full_mask: np.ndarray) -> Tuple[int, int, int, int]:
+        """Extract the actual mask boundaries for a region.
         
-        If full_mask is provided, extract the mask area for this region and get its bounds.
-        Otherwise, falls back to polygon-based calculation.
-        
-        Returns:
-            (x, y, width, height) of the mask area for this region
+        For non-Azure/Google OCR providers (manga-ocr, etc.), use RT-DETR bubble_bounds directly.
+        For Azure/Google, extract from the mask overlap to handle full-page OCR.
         """
+        # PRIORITY 1: For manga-ocr and other RT-DETR-guided OCR providers, use bubble_bounds directly
+        # These providers already OCR within RT-DETR bubbles, so bubble_bounds IS the correct render area
+        is_azure_google = getattr(self, 'ocr_provider', '').lower() in ('azure', 'google')
+        if not is_azure_google and hasattr(region, 'bubble_bounds') and region.bubble_bounds:
+            # Use the RT-DETR bubble bounds directly - this is the full bubble area
+            bx, by, bw, bh = region.bubble_bounds
+            if not getattr(self, 'concise_logs', False):
+                self._log(f"  ✅ Using RT-DETR bubble_bounds for mask: {int(bw)}×{int(bh)} at ({int(bx)}, {int(by)})", "debug")
+            return int(bx), int(by), int(bw), int(bh)
+        elif not is_azure_google:
+            # Debug: Why are we not using bubble_bounds?
+            if not getattr(self, 'concise_logs', False):
+                has_attr = hasattr(region, 'bubble_bounds')
+                is_none = getattr(region, 'bubble_bounds', None) is None if has_attr else True
+                self._log(f"  ⚠️ manga-ocr but NO bubble_bounds (has_attr={has_attr}, is_none={is_none})", "warning")
+        
+        # PRIORITY 2: For Azure/Google or when bubble_bounds not available, extract from mask
         if full_mask is not None:
             try:
-                # Create a mask for just this region
-                region_mask = np.zeros(full_mask.shape[:2], dtype=np.uint8)
+                import cv2
+                import numpy as np
                 
-                # Fill the mask based on region's vertices or bbox
+                # Create a blank mask for this region
+                region_mask = np.zeros(full_mask.shape, dtype=np.uint8)
+                
+                # Fill the region's area in the mask
                 if hasattr(region, 'vertices') and region.vertices:
-                    pts = np.array(region.vertices, np.int32)
-                    pts = pts.reshape((-1, 1, 2))
-                    cv2.fillPoly(region_mask, [pts], 255)
+                    vertices_np = np.array(region.vertices, dtype=np.int32)
+                    cv2.fillPoly(region_mask, [vertices_np], 255)
                 else:
                     x, y, w, h = region.bounding_box
                     cv2.rectangle(region_mask, (int(x), int(y)), (int(x+w), int(y+h)), 255, -1)
@@ -9010,11 +9072,17 @@ class MangaTranslator:
         horizontally stacked speech bubbles. We detect this by checking if text regions
         within the bubble have LARGE gaps between them.
         
-        This is intentionally CONSERVATIVE - we only split when there's a very clear separation.
+        For manga-ocr and other non-Google/Azure OCR providers, RT-DETR detection is trusted
+        completely and splitting is disabled.
         
         Returns:
             List of region groups - each group represents a separate bubble
         """
+        # For manga-ocr and other providers that use RT-DETR regions directly, trust RT-DETR
+        # Splitting is only needed for Google/Azure which do full-page OCR
+        if hasattr(self, 'ocr_provider') and self.ocr_provider not in ('google', 'azure'):
+            return [bubble_regions]  # Trust RT-DETR completely for these providers
+        
         if len(bubble_regions) <= 1:
             return [bubble_regions]  # Single region, no splitting needed
         
@@ -9034,6 +9102,8 @@ class MangaTranslator:
                 # Check if current region should be in this group
                 # We look at the closest region in the group
                 min_gap = float('inf')
+                min_vertical_gap = float('inf')
+                min_horizontal_gap = float('inf')
                 closest_region = None
                 
                 for group_region in group:
@@ -9058,10 +9128,37 @@ class MangaTranslator:
                     if gap < min_gap:
                         min_gap = gap
                         closest_region = group_region
+                        # Store individual gaps for aggressive vertical splitting
+                        min_vertical_gap = vertical_gap
+                        min_horizontal_gap = horizontal_gap
                 
+                # AGGRESSIVE SPLIT for MANGA: Check for large vertical gaps first
+                # Manga often has vertically stacked speech bubbles that RT-DETR detects as one
+                if closest_region and min_vertical_gap > 50:
+                    # Large vertical gap (>50px) - likely separate bubbles stacked vertically
+                    # Check if there's NO vertical overlap (completely separate)
+                    gx, gy, gw, gh = closest_region.bounding_box
+                    vertical_overlap = min(gy + gh, cy + ch) - max(gy, cy)
+                    
+                    if vertical_overlap <= 0:
+                        # No vertical overlap at all - definitely separate bubbles
+                        # Create new group (don't merge)
+                        pass  # Will create new group below
+                    else:
+                        # Some overlap despite gap - check other criteria
+                        horizontal_overlap = min(gx + gw, cx + cw) - max(gx, cx)
+                        min_width = min(gw, cw)
+                        min_height = min(gh, ch)
+                        
+                        # Only merge if there's very strong overlap (>75%)
+                        if (horizontal_overlap > min_width * 0.75 or 
+                            vertical_overlap > min_height * 0.75):
+                            group.append(current_region)
+                            placed = True
+                            break
                 # BALANCED SPLIT CRITERIA:
                 # Split if gap is > 21px unless there's strong overlap (>62%)
-                if closest_region and min_gap < 21:  # Within 21px - likely same bubble
+                elif closest_region and min_gap < 21:  # Within 21px - likely same bubble
                     group.append(current_region)
                     placed = True
                     break

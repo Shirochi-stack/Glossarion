@@ -61,7 +61,7 @@ class SplashManager:
             self._load_icon(layout)
             
             # Title
-            title_label = QLabel("Glossarion v5.0.2")
+            title_label = QLabel("Glossarion v5.0.3")
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title_font = QFont("Arial", 20, QFont.Weight.Bold)
             title_label.setFont(title_font)
