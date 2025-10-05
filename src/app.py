@@ -302,7 +302,7 @@ class GlossarionWeb:
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
             'manga_font_size_mode': 'auto',
-            'manga_font_size': 24,
+            'manga_font_size': 0,
             'manga_font_size_multiplier': 1.0,
             'manga_min_font_size': 10,
             'manga_max_font_size': 40,
