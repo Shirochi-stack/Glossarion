@@ -1944,7 +1944,8 @@ class GlossarionWeb:
                     # IMPORTANT: token_limit_entry must return STRING because manga_translator calls .strip() on it
                     self.token_limit_entry = MockVar(str(config.get('token_limit', 200000)))
                     # Batch translation settings
-                    self.batch_size_var = MockVar(int(config.get('batch_size', 10)))
+                    self.batch_translation_var = MockVar(bool(config.get('batch_translation', True)))
+                    self.batch_size_var = MockVar(str(config.get('batch_size', '10')))
                     # Add API key and model for custom-api OCR provider - ensure strings
                     self.api_key_entry = MockVar(str(api_key) if api_key else '')
                     self.model_var = MockVar(str(model) if model else '')
@@ -1953,6 +1954,11 @@ class GlossarionWeb:
             # Get max_output_tokens from config or use from web app config
             web_max_tokens = merged_config.get('max_output_tokens', 16000)
             mock_gui = MockGUI(simple_config.config, profile_name, system_prompt, web_max_tokens, api_key, model)
+            
+            # CRITICAL: Set batch environment variables from mock_gui variables
+            os.environ['BATCH_TRANSLATION'] = '1' if mock_gui.batch_translation_var.get() else '0'
+            os.environ['BATCH_SIZE'] = str(mock_gui.batch_size_var.get())
+            print(f"📦 Set BATCH_TRANSLATION={os.environ['BATCH_TRANSLATION']}, BATCH_SIZE={os.environ['BATCH_SIZE']}")
             
             # Ensure model path is in config for local inpainting
             if enable_inpainting:
@@ -1970,11 +1976,8 @@ class GlossarionWeb:
             os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
             print(f"🔧 Manga translation: Set SEND_INTERVAL_SECONDS = {api_call_delay}s")
             
-            # Set batch translation and batch size from proper config structure
-            batch_translation = merged_config.get('batch_translation', True)
-            batch_size = merged_config.get('batch_size', 10)
-            os.environ['BATCH_TRANSLATION'] = '1' if batch_translation else '0'
-            os.environ['BATCH_SIZE'] = str(batch_size)
+            # Set batch translation and batch size from MockGUI variables (after MockGUI is created)
+            # Will be set after mock_gui is created below
             
             # Also ensure font algorithm and auto fit style are in config for manga_translator
             if 'manga_settings' not in merged_config:
@@ -1989,7 +1992,7 @@ class GlossarionWeb:
             if 'auto_fit_style' not in merged_config['manga_settings']['rendering']:
                 merged_config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
             
-            print(f"📦 Batch: BATCH_TRANSLATION={batch_translation}, BATCH_SIZE={batch_size}")
+            print(f"📦 Batch: BATCH_TRANSLATION={os.environ.get('BATCH_TRANSLATION')}, BATCH_SIZE={os.environ.get('BATCH_SIZE')}")
             print(f"🎨 Font: algorithm={merged_config['manga_settings']['font_sizing']['algorithm']}, auto_fit_style={merged_config['manga_settings']['rendering']['auto_fit_style']}")
             
             # Setup OCR configuration
