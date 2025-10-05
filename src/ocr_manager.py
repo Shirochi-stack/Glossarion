@@ -173,24 +173,36 @@ class CustomAPIProvider(OCRProvider):
         # OCR prompt - use system prompt or a dedicated OCR prompt variable
         self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
             os.environ.get('SYSTEM_PROMPT', 
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
+            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+            "ABSOLUTE RULES:\n"
+            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
+            "2. NEVER TRANSLATE OR MODIFY\n"
+            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
+            "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
+            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
+            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
+            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
+            "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
+            "LANGUAGE PRESERVATION:\n"
+            "- Korean text → Output in Korean\n"
+            "- Japanese text → Output in Japanese\n"
+            "- Chinese text → Output in Chinese\n"
+            "- English text → Output in English\n\n"
+            "FORMATTING:\n"
+            "- Preserve natural line breaks only\n"
+            "- For vertical text, transcribe as continuous lines\n"
+            "- Do NOT add breaks between every character\n\n"
+            "FORBIDDEN RESPONSES:\n"
+            "- \"I can see this appears to be...\"\n"
+            "- \"I cannot make out any clear text...\"\n"
+            "- \"This appears to be blank...\"\n"
+            "- \"If there is text present...\"\n"
+            "- ANY explanatory text\n\n"
+            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
+            "If image has a dot → Output: .\n"
+            "If image has two dots → Output: . .\n"
+            "If image has text → Output: [that text]\n"
+            "If image is truly blank → Output: [empty/no response]"
             ))
         
         # Use existing temperature and token settings  
@@ -528,7 +540,7 @@ class CustomAPIProvider(OCRProvider):
             attempt = 0
             last_error = None
 
-            # Common refusal/error phrases that indicate a non-OCR response
+            # Common refusal/error phrases that indicate a non-OCR response (expanded list)
             refusal_phrases = [
                 "I can't extract", "I cannot extract",
                 "I'm sorry", "I am sorry",
@@ -536,7 +548,23 @@ class CustomAPIProvider(OCRProvider):
                 "cannot process images",
                 "I can't help with that",
                 "cannot view images",
-                "no text in the image"
+                "no text in the image",
+                "I can see this appears",
+                "I cannot make out",
+                "appears to be blank",
+                "appears to be a mostly blank",
+                "mostly blank or white image",
+                "If there is text present",
+                "too small, faint, or unclear",
+                "cannot accurately extract",
+                "may be too",
+                "However, I cannot",
+                "I don't see any",
+                "no clear text",
+                "no visible text",
+                "does not contain",
+                "doesn't contain",
+                "I do not see"
             ]
 
             while attempt < max_attempts:
@@ -915,26 +943,38 @@ class Qwen2VL(OCRProvider):
         self.model = None
         self.tokenizer = None
         
-        # Get OCR prompt from environment or use default
+        # Get OCR prompt from environment or use default (UPDATED: Improved prompt)
         self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
-            "YOU ARE AN OCR SYSTEM. YOUR ONLY JOB IS TEXT EXTRACTION.\n\n"
-            "CRITICAL RULES:\n"
-            "1. DO NOT TRANSLATE ANYTHING\n"
-            "2. DO NOT MODIFY THE TEXT\n"
-            "3. DO NOT EXPLAIN OR COMMENT\n"
-            "4. ONLY OUTPUT THE EXACT TEXT YOU SEE\n"
-            "5. PRESERVE NATURAL TEXT FLOW - DO NOT ADD UNNECESSARY LINE BREAKS\n\n"
-            "If you see Korean text, output it in Korean.\n"
-            "If you see Japanese text, output it in Japanese.\n"
-            "If you see Chinese text, output it in Chinese.\n"
-            "If you see English text, output it in English.\n\n"
-            "IMPORTANT: Only use line breaks where they naturally occur in the original text "
-            "(e.g., between dialogue lines or paragraphs). Do not break text mid-sentence or "
-            "between every word/character.\n\n"
-            "For vertical text common in manga/comics, transcribe it as a continuous line unless "
-            "there are clear visual breaks.\n\n"
-            "NEVER translate. ONLY extract exactly what is written.\n"
-            "Output ONLY the raw text, nothing else."
+            "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+            "ABSOLUTE RULES:\n"
+            "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
+            "2. NEVER TRANSLATE OR MODIFY\n"
+            "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
+            "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
+            "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
+            "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
+            "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
+            "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
+            "LANGUAGE PRESERVATION:\n"
+            "- Korean text → Output in Korean\n"
+            "- Japanese text → Output in Japanese\n"
+            "- Chinese text → Output in Chinese\n"
+            "- English text → Output in English\n\n"
+            "FORMATTING:\n"
+            "- Preserve natural line breaks only\n"
+            "- For vertical text, transcribe as continuous lines\n"
+            "- Do NOT add breaks between every character\n\n"
+            "FORBIDDEN RESPONSES:\n"
+            "- \"I can see this appears to be...\"\n"
+            "- \"I cannot make out any clear text...\"\n"
+            "- \"This appears to be blank...\"\n"
+            "- \"If there is text present...\"\n"
+            "- ANY explanatory text\n\n"
+            "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
+            "If image has a dot → Output: .\n"
+            "If image has two dots → Output: . .\n"
+            "If image has text → Output: [that text]\n"
+            "If image is truly blank → Output: [empty/no response]"
         )
     
     def set_ocr_prompt(self, prompt: str):

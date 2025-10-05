@@ -1482,7 +1482,7 @@ def _create_processing_options_section(self, parent):
     
     if not hasattr(self, 'openrouter_preferred_provider_var'):
         self.openrouter_preferred_provider_var = tk.StringVar(
-            value=self.config.get('openrouter_preferred_provider', 'Auto')
+            value=self.config.get('openrouter_preferred_provider', 'DeepInfra')
         )
     
     # Comprehensive list of OpenRouter providers (alphabetically sorted, with Auto first)
@@ -1537,7 +1537,7 @@ def _create_processing_options_section(self, parent):
         'NovitAI',
         'NVIDIA',
         'OpenAI',
-        'OpenInference',
+        'Open Inference',
         'Parasail',
         'Perplexity',
         'Phala',
