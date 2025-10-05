@@ -7502,7 +7502,8 @@ class MangaTranslationTab:
                         model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
                     
                     # Preload one shared instance plus spares for parallel panel processing
-                    desired_inp = effective_workers
+                    # Constrain to actual number of files (no need for more workers than files)
+                    desired_inp = min(int(effective_workers), max(1, int(len(self.selected_files) or 1)))
                     self._log(f"🧰 Preloading {desired_inp} local inpainting instance(s) for panel workers...", "info")
                     try:
                         import time as _time
