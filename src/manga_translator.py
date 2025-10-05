@@ -7359,6 +7359,16 @@ class MangaTranslator:
                                 loaded_ok = inp_shared.load_model_with_retry(local_method, model_path, force_reload=True)
                                 if loaded_ok and getattr(inp_shared, 'model_loaded', False):
                                     self._log(f"✅ Model loaded successfully on retry", "info")
+                                    # CRITICAL: Update the pool record so future requests don't need to retry
+                                    key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
+                                    try:
+                                        with MangaTranslator._inpaint_pool_lock:
+                                            rec = MangaTranslator._inpaint_pool.get(key)
+                                            if rec:
+                                                rec['loaded'] = True
+                                                self._log(f"🔄 Updated pool record: loaded=True", "debug")
+                                    except Exception as e:
+                                        self._log(f"⚠️ Failed to update pool record: {e}", "debug")
                                     return True
                                 else:
                                     self._log(f"❌ Model still not loaded after retry", "error")
