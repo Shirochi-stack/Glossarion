@@ -5912,41 +5912,45 @@ class MangaTranslator:
                 import re
                 import json
                 
-                # Method 1: Find JSON object directly (most reliable)
-                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                if json_match:
-                    json_text = json_match.group(0)
-                    try:
-                        translations = json.loads(json_text)
-                        self._log(f"✅ Successfully parsed {len(translations)} translations (direct extraction)")
-                    except json.JSONDecodeError:
-                        # Try to fix the extracted JSON
-                        json_text = self._fix_json_response(json_text)
-                        translations = json.loads(json_text)
-                        self._log(f"✅ Successfully parsed {len(translations)} translations (after fix)")
-                else:
-                    # Method 2: Try stripping markdown if no JSON found
-                    cleaned = response_text
+                # CRITICAL: Strip markdown code blocks FIRST, before attempting JSON extraction
+                cleaned = response_text
+                
+                # Remove markdown code blocks (handles ```json, ``json, ```, ``, etc.)
+                if '```' in cleaned or '``' in cleaned:
+                    patterns = [
+                        r'```json\s*\n?(.*?)```',
+                        r'``json\s*\n?(.*?)``',
+                        r'```\s*\n?(.*?)```',
+                        r'``\s*\n?(.*?)``'
+                    ]
                     
-                    # Remove markdown code blocks
-                    if '```' in cleaned:
-                        # This pattern handles ```json, ``json, ``` or ``
-                        patterns = [
-                            r'```json\s*\n?(.*?)```',
-                            r'``json\s*\n?(.*?)``',
-                            r'```\s*\n?(.*?)```',
-                            r'``\s*\n?(.*?)``'
-                        ]
-                        
-                        for pattern in patterns:
-                            match = re.search(pattern, cleaned, re.DOTALL)
-                            if match:
-                                cleaned = match.group(1).strip()
-                                break
-                    
-                    # Try to parse the cleaned text
+                    for pattern in patterns:
+                        match = re.search(pattern, cleaned, re.DOTALL)
+                        if match:
+                            cleaned = match.group(1).strip()
+                            self._log(f"🔧 Stripped markdown wrapper using pattern: {pattern[:20]}...")
+                            break
+                
+                # Method 1: Try to parse the cleaned text directly
+                try:
                     translations = json.loads(cleaned)
-                    self._log(f"✅ Successfully parsed {len(translations)} translations (after markdown strip)")
+                    self._log(f"✅ Successfully parsed {len(translations)} translations (direct parse)")
+                except json.JSONDecodeError:
+                    # Method 2: Extract JSON object if direct parse failed
+                    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                    if json_match:
+                        json_text = json_match.group(0)
+                        try:
+                            translations = json.loads(json_text)
+                            self._log(f"✅ Successfully parsed {len(translations)} translations (regex extraction)")
+                        except json.JSONDecodeError:
+                            # Try to fix the extracted JSON
+                            json_text = self._fix_json_response(json_text)
+                            translations = json.loads(json_text)
+                            self._log(f"✅ Successfully parsed {len(translations)} translations (after fix)")
+                    else:
+                        # No JSON object found
+                        raise json.JSONDecodeError("No JSON object found", cleaned, 0)
                 
                 # Handle different response formats
                 if isinstance(translations, list):
