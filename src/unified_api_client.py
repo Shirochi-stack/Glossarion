@@ -3396,16 +3396,38 @@ class UnifiedClient:
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
                     is_likely_safety_filter = self._detect_safety_filter(messages, extracted_content, finish_reason, response, getattr(self, 'client_type', 'unknown'))
-                    if is_likely_safety_filter and not main_key_attempted and self._multi_key_mode and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None):
-                        main_key_attempted = True
-                        try:
-                            retry_res = self._retry_with_main_key(messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data)
-                            if retry_res:
-                                content, fr = retry_res
-                                if content and content.strip() and len(content) > 10:
-                                    return content, fr
-                        except Exception:
-                            pass
+                    
+                    # Try fallback keys for safety filter detection
+                    if is_likely_safety_filter:
+                        if self._multi_key_mode:
+                            # Multi-key mode: try main key retry
+                            if not main_key_attempted and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None):
+                                main_key_attempted = True
+                                try:
+                                    retry_res = self._retry_with_main_key(messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data)
+                                    if retry_res:
+                                        content, fr = retry_res
+                                        if content and content.strip() and len(content) > 10:
+                                            return content, fr
+                                except Exception:
+                                    pass
+                        else:
+                            # Single-key mode: try fallback keys if enabled
+                            use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                            if use_fallback_keys:
+                                print(f"[FALLBACK DIRECT] Safety filter detected in empty response - trying fallback keys")
+                                try:
+                                    retry_res = self._try_fallback_keys_direct(
+                                        messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                                    )
+                                    if retry_res:
+                                        res_content, res_fr = retry_res
+                                        if res_content and res_content.strip():
+                                            print(f"✅ Fallback key succeeded for safety filter")
+                                            return res_content, res_fr
+                                except Exception as e:
+                                    print(f"❌ Fallback key retry failed: {e}")
+                    
                     # Finalize empty handling
                     req_type = 'image' if image_data else 'text'
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
