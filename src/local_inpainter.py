@@ -1098,6 +1098,9 @@ class LocalInpainter:
             logger.debug(f"✅ ONNX session created - Inputs: {self.onnx_input_names}, Outputs: {self.onnx_output_names}")
             
             self.use_onnx = True
+            # CRITICAL: Set model_loaded flag when ONNX session is successfully created
+            # This ensures preloaded spares are recognized as valid loaded instances
+            self.model_loaded = True
             return True
             
         except Exception as e:

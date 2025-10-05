@@ -117,7 +117,19 @@ class MangaTranslator:
                     checked_out = rec['checked_out']
                     if self._checked_out_inpainter in checked_out:
                         checked_out.remove(self._checked_out_inpainter)
-                        self._log(f"🔄 Returned inpainter to pool ({len(checked_out)}/{len(rec.get('spares', []))} still in use)", "info")
+                        # ENHANCED: Show checked_out count vs total spares count
+                        spares_list = rec.get('spares', [])
+                        total_spares = len(spares_list)
+                        checked_out_count = len(checked_out)
+                        # Debug: count how many spares are actually valid
+                        valid_spares = sum(1 for s in spares_list if s and getattr(s, 'model_loaded', False))
+                        # Also log the pool key for debugging path mismatches
+                        try:
+                            method, path = key
+                            path_basename = os.path.basename(path) if path else 'None'
+                            self._log(f"🔄 Returned inpainter to pool [key: {method}/{path_basename}] ({checked_out_count}/{total_spares} still in use, {valid_spares} valid)", "info")
+                        except:
+                            self._log(f"🔄 Returned inpainter to pool ({checked_out_count}/{total_spares} still in use, {valid_spares} valid)", "info")
             # Clear the references
             self._checked_out_inpainter = None
             self._inpainter_pool_key = None
@@ -4030,12 +4042,68 @@ class MangaTranslator:
                     self._log(f"⚠️ Skipping region {index} - invalid crop", "warning")
                     return
                 
-                # Run OCR on this region
-                result = self.ocr_manager.detect_text(
-                    cropped, 
-                    provider,
-                    confidence=confidence_threshold
-                )
+                # Run OCR on this region with retry logic for failures
+                result = None
+                # Get max_retries from config (default 7 means 1 initial + 7 retries = 8 total attempts)
+                # Subtract 1 because the initial attempt counts as the first try
+                try:
+                    max_retries = int(self.main_gui.config.get('max_retries', 7)) if hasattr(self, 'main_gui') else 2
+                except Exception:
+                    max_retries = 2  # Fallback to 2 retries (3 total attempts)
+                
+                for attempt in range(max_retries + 1):
+                    result = self.ocr_manager.detect_text(
+                        cropped, 
+                        provider,
+                        confidence=confidence_threshold
+                    )
+                    
+                    # Check if result indicates a failure
+                    if result and len(result) > 0 and result[0].text.strip():
+                        text = result[0].text.strip()
+                        
+                        # Check for content blocked - should trigger fallback, not retry
+                        # The unified API client should handle this, but if it reaches here, skip this region
+                        if "[CONTENT BLOCKED" in text:
+                            self._log(f"⚠️ Region {index+1} content blocked by API safety filters", "warning")
+                            return (index, None)  # Skip this region, fallback already attempted
+                        
+                        # Check for retryable failure markers (transient errors)
+                        failure_markers = [
+                            "[TRANSLATION FAILED",
+                            "[ORIGINAL TEXT PRESERVED]",
+                            "[IMAGE TRANSLATION FAILED]",
+                            "[EXTRACTION FAILED",
+                            "[RATE LIMITED"
+                        ]
+                        
+                        has_failure = any(marker in text for marker in failure_markers)
+                        
+                        if has_failure and attempt < max_retries:
+                            # Retry this region
+                            self._log(f"⚠️ Region {index+1} OCR failed (attempt {attempt + 1}/{max_retries + 1}), retrying...", "warning")
+                            import time
+                            time.sleep(1 * (attempt + 1))  # Progressive delay: 1s, 2s
+                            result = None
+                            continue
+                        elif has_failure:
+                            # All retries exhausted
+                            self._log(f"❌ Region {index+1} OCR failed after {max_retries + 1} attempts", "error")
+                            return (index, None)
+                        else:
+                            # Success - break retry loop
+                            break
+                    else:
+                        # No result or empty text
+                        if attempt < max_retries:
+                            self._log(f"⚠️ Region {index+1} returned empty (attempt {attempt + 1}/{max_retries + 1}), retrying...", "warning")
+                            import time
+                            time.sleep(1 * (attempt + 1))
+                            result = None
+                            continue
+                        else:
+                            # All retries exhausted, no valid result
+                            return (index, None)
                 
                 if result and len(result) > 0 and result[0].text.strip():
                     # Adjust coordinates to full image space
@@ -6831,7 +6899,8 @@ class MangaTranslator:
                     if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
                         # Mark as checked out
                         checked_out.append(spare)
-                        self._log(f"🧰 Checked out spare inpainter ({len(checked_out)}/{len(spares)} in use)", "info")
+                        available = len(spares) - len(checked_out)
+                        self._log(f"🧰 Checked out spare inpainter ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
                         # Store reference for later return
                         self._checked_out_inpainter = spare
                         self._inpainter_pool_key = key
@@ -6853,8 +6922,8 @@ class MangaTranslator:
                 # Already loaded - do NOT force reload!
                 return rec['inpainter']
             if not rec:
-                # Register loading record
-                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event()}
+                # Register loading record with spares list initialized
+                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
                 is_loader = True
             else:
@@ -7004,6 +7073,12 @@ class MangaTranslator:
         key = (local_method, model_path or '')
         created = 0
         
+        # Debug: Log the preload key for tracking
+        try:
+            self._log(f"🔑 Preload using pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'} (normalized)", "debug")
+        except:
+            pass
+        
         # FIRST: Ensure the shared instance is initialized and ready
         # This prevents race conditions when spare instances run out
         with MangaTranslator._inpaint_pool_lock:
@@ -7071,7 +7146,15 @@ class MangaTranslator:
                         resolved = None
                 if resolved and os.path.exists(resolved):
                     ok = inp.load_model_with_retry(local_method, resolved, force_reload=False)
-                    if ok and getattr(inp, 'model_loaded', False):
+                    # CRITICAL: Verify model_loaded attribute after load
+                    model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
+                    if not model_actually_loaded:
+                        # Debug why model wasn't loaded
+                        self._log(f"🔍 Preload check: load_model_with_retry={ok}, model_loaded={getattr(inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
+                        if hasattr(inp, 'session'):
+                            self._log(f"   Inpainter has session: {inp.session is not None}", "debug")
+                    
+                    if model_actually_loaded:
                         with MangaTranslator._inpaint_pool_lock:
                             rec = MangaTranslator._inpaint_pool.get(key) or {'spares': []}
                             if 'spares' not in rec or rec['spares'] is None:
@@ -7079,10 +7162,12 @@ class MangaTranslator:
                             rec['spares'].append(inp)
                             MangaTranslator._inpaint_pool[key] = rec
                         created += 1
-                    elif ok and not getattr(inp, 'model_loaded', False):
-                        self._log(f"⚠️ Preload: load_model_with_retry returned True but model_loaded is False", "warning")
-                    elif not ok:
-                        self._log(f"⚠️ Preload: load_model_with_retry returned False", "warning")
+                        self._log(f"✅ Preloaded spare {created}: model_loaded={getattr(inp, 'model_loaded', False)}", "debug")
+                    else:
+                        if ok:
+                            self._log(f"⚠️ Preload: load_model_with_retry returned True but model_loaded is False or missing", "warning")
+                        else:
+                            self._log(f"⚠️ Preload: load_model_with_retry returned False", "warning")
                 else:
                     self._log("⚠️ Preload skipped: no model path available", "warning")
             except Exception as e:
@@ -7107,7 +7192,21 @@ class MangaTranslator:
         except Exception:
             self._log("❌ Local inpainter module not available for preloading", "error")
             return 0
+        
+        # CRITICAL: Normalize model path to match _get_or_init_shared_local_inpainter and sequential preload
+        if model_path:
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass
+        
         key = (local_method, model_path or '')
+        
+        # Debug: Log the preload key for tracking
+        try:
+            self._log(f"🔑 Concurrent preload using pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'} (normalized)", "debug")
+        except:
+            pass
         # Determine desired number based on existing spares
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
@@ -7160,7 +7259,9 @@ class MangaTranslator:
                 inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
                 if resolved_path and os.path.exists(resolved_path):
                     ok = inp.load_model_with_retry(local_method, resolved_path, force_reload=False)
-                    if ok and getattr(inp, 'model_loaded', False):
+                    # CRITICAL: Verify model_loaded attribute
+                    model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
+                    if model_actually_loaded:
                         with MangaTranslator._inpaint_pool_lock:
                             rec2 = MangaTranslator._inpaint_pool.get(key) or {'spares': []}
                             if 'spares' not in rec2 or rec2['spares'] is None:
@@ -7168,6 +7269,12 @@ class MangaTranslator:
                             rec2['spares'].append(inp)
                             MangaTranslator._inpaint_pool[key] = rec2
                         return True
+                    else:
+                        # Log why it failed for debugging
+                        try:
+                            self._log(f"🔍 Concurrent preload check: load_model_with_retry={ok}, model_loaded={getattr(inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
+                        except:
+                            pass
             except Exception as e:
                 self._log(f"⚠️ Concurrent preload error: {e}", "warning")
             return False
@@ -9954,31 +10061,31 @@ class MangaTranslator:
                                         # Store references for later return
                                         self._checked_out_bubble_detector = spare
                                         self._bubble_detector_pool_key = key
-                                        self._log(f"🤖 Checked out bubble detector from pool ({len(checked_out)}/{len(spares)} in use)", "info")
+                                        available = len(spares) - len(checked_out)
+                                        self._log(f"🤖 Checked out bubble detector from pool ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
                                         break
                 except Exception:
                     pass
                 # If still not set, create a fresh detector and store it for future use
                 if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
                     self._thread_local.bubble_detector = BubbleDetector()
-                    self._log("🤖 Created thread-local bubble detector", "debug")
+                    self._log("🤖 Created thread-local bubble detector (NOT added to pool spares to avoid leak)", "debug")
                     
-                    # Store this new detector in the pool for future reuse
+                    # IMPORTANT: Do NOT add dynamically created detectors to the pool spares list
+                    # This was causing the pool to grow beyond preloaded count (e.g. 9/5, 10/5)
+                    # Only preloaded detectors should be in spares list for proper tracking
+                    # Just mark it as checked out for return tracking if needed
                     try:
                         with MangaTranslator._detector_pool_lock:
-                            if key not in MangaTranslator._detector_pool:
-                                MangaTranslator._detector_pool[key] = {'spares': [], 'checked_out': []}
-                            # Add this new detector to spares and immediately check it out
-                            rec = MangaTranslator._detector_pool[key]
-                            if 'spares' not in rec:
-                                rec['spares'] = []
-                            if 'checked_out' not in rec:
-                                rec['checked_out'] = []
-                            rec['spares'].append(self._thread_local.bubble_detector)
-                            rec['checked_out'].append(self._thread_local.bubble_detector)
-                            # Store references for later return
-                            self._checked_out_bubble_detector = self._thread_local.bubble_detector
-                            self._bubble_detector_pool_key = key
+                            if key in MangaTranslator._detector_pool:
+                                rec = MangaTranslator._detector_pool[key]
+                                if 'checked_out' not in rec:
+                                    rec['checked_out'] = []
+                                # Only track in checked_out, NOT in spares
+                                rec['checked_out'].append(self._thread_local.bubble_detector)
+                                # Store references for later return
+                                self._checked_out_bubble_detector = self._thread_local.bubble_detector
+                                self._bubble_detector_pool_key = key
                     except Exception:
                         pass
             return self._thread_local.bubble_detector
