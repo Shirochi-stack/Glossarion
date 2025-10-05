@@ -4893,6 +4893,33 @@ class MangaTranslator:
                             except:
                                 pass  # Skip if get_safe_text_area fails
                     
+                    # Add legend to explain colors
+                    legend_bg = polygon_img.copy()
+                    legend_height = 140
+                    legend_width = 370
+                    cv2.rectangle(legend_bg, (10, 10), (10 + legend_width, 10 + legend_height), (0, 0, 0), -1)
+                    cv2.addWeighted(legend_bg, 0.8, polygon_img, 0.2, 0, polygon_img)
+                    
+                    # Add legend items
+                    # Note: OpenCV uses BGR format, so (255, 0, 0) = Blue, (0, 0, 255) = Red
+                    legend_items = [
+                        ("Blue outline: OCR polygon (detected text)", (255, 0, 0)),
+                        ("Yellow fill: Mask area (will be inpainted)", (0, 255, 255)),
+                        ("Green rect: Safe text area (algorithm-based)", (0, 255, 0)),
+                        ("Magenta rect: Mask bounds (actual render area)", (255, 0, 255))
+                    ]
+                    
+                    for i, (text, color) in enumerate(legend_items):
+                        y_pos = 30 + i * 30
+                        # Draw color sample
+                        if i == 1:  # Yellow fill
+                            cv2.rectangle(polygon_img, (20, y_pos - 8), (35, y_pos + 8), color, -1)
+                        else:
+                            cv2.rectangle(polygon_img, (20, y_pos - 8), (35, y_pos + 8), color, 2)
+                        # Draw text
+                        cv2.putText(polygon_img, text, (45, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX,
+                                   0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                    
                     polygon_path = os.path.join(debug_dir, f"{base_name}_polygons.png")
                     cv2.imwrite(polygon_path, polygon_img)
                     self._log(f"   🔷 Saved polygon visualization: {polygon_path}")
@@ -7895,7 +7922,19 @@ class MangaTranslator:
         pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         
         # Get image dimensions for boundary checking
-        image_height, image_width = image.shape[:2]  # <-- Add this line
+        image_height, image_width = image.shape[:2]
+        
+        # Create text mask to get accurate render boundaries
+        # This represents what will actually be inpainted
+        try:
+            text_mask = self.create_text_mask(image, regions)
+            use_mask_for_rendering = True
+            self._log(f"  🎭 Created text mask for accurate render boundaries", "info")
+        except Exception as e:
+            text_mask = None
+            use_mask_for_rendering = False
+            if not getattr(self, 'concise_logs', False):
+                self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
         
         # Only adjust overlapping regions if constraining to bubbles
         if self.constrain_to_bubble:
@@ -7953,27 +7992,68 @@ class MangaTranslator:
                 tr_text = region.translated_text or ''
                 if self.force_caps_lock:
                     tr_text = tr_text.upper()
+                
+                # Get original bounding box
                 x, y, w, h = region.bounding_box
-                # Fit text
+                
+                # Determine if we should use safe text area for positioning
+                # Use safe area if region has vertices (polygon-based detection)
+                use_safe_area = hasattr(region, 'vertices') and region.vertices
+                
+                if use_safe_area:
+                    # Get safe text area - use mask bounds if available for accurate rendering
+                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
+                        region, 
+                        use_mask_bounds=use_mask_for_rendering, 
+                        full_mask=text_mask
+                    )
+                    # Use safe area for both sizing and positioning
+                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                else:
+                    # Simple bounding box - use original dimensions
+                    render_x, render_y, render_w, render_h = x, y, w, h
+                
+                # Fit text - use render dimensions for proper sizing
                 if self.custom_font_size:
                     font_size = self.custom_font_size
-                    if hasattr(region, 'vertices') and region.vertices:
-                        _, _, safe_w, safe_h = self.get_safe_text_area(region)
-                        lines = self._wrap_text(tr_text, self._get_font(font_size), safe_w, draw)
-                    else:
-                        lines = self._wrap_text(tr_text, self._get_font(font_size), int(w*0.8), draw)
+                    lines = self._wrap_text(tr_text, self._get_font(font_size), render_w, draw)
                 elif self.font_size_mode == 'multiplier':
-                    font_size, lines = self._fit_text_to_region(tr_text, w, h, draw, region)
+                    # Pass use_as_is=True since render dimensions are already safe area
+                    font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
                 else:
-                    font_size, lines = self._fit_text_to_region(tr_text, w, h, draw, region)
+                    # Pass use_as_is=True since render dimensions are already safe area
+                    font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
                 # Fonts
                 font = self._get_font(font_size)
                 emote_font = self._get_emote_fallback_font(font_size)
-                # Layout
+                # Layout - use render dimensions (safe area if available)
+                # CRITICAL: Use actual text bbox height for accurate positioning
                 line_height = font_size * 1.2
+                
+                # Calculate actual total height using text bbox for first line as reference
+                if lines:
+                    sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
+                    actual_line_height = sample_bbox[3] - sample_bbox[1]
+                    # Use the larger of: computed line_height or actual_line_height
+                    line_height = max(line_height, actual_line_height * 1.1)
+                
                 total_height = len(lines) * line_height
-                start_y = y + (h - total_height) // 2
-                # BG
+                
+                # Ensure text doesn't overflow vertically - constrain start_y
+                ideal_start_y = render_y + (render_h - total_height) // 2
+                # Make sure text starts within render area and doesn't extend past bottom
+                max_start_y = render_y + render_h - total_height
+                start_y = max(render_y, min(ideal_start_y, max_start_y))
+                
+                # Debug logging for vertical constraint
+                if not getattr(self, 'concise_logs', False):
+                    end_y = start_y + total_height
+                    render_end_y = render_y + render_h
+                    overflow = max(0, end_y - render_end_y)
+                    if overflow > 0:
+                        self._log(f"  ⚠️ Text would overflow by {overflow}px, constrained to render area", "debug")
+                    self._log(f"  📏 Render area: y={render_y}-{render_end_y} (h={render_h}), Text: y={start_y}-{end_y} (h={total_height:.0f})", "debug")
+                # BG - use render dimensions
                 draw_bg = self.text_bg_opacity > 0
                 try:
                     if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
@@ -7981,15 +8061,15 @@ class MangaTranslator:
                 except Exception:
                     pass
                 if draw_bg:
-                    self._draw_text_background(draw, x, y, w, h, lines, font, font_size, start_y, emote_font)
-                # Text
+                    self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, font_size, start_y, emote_font)
+                # Text - use render dimensions for centering
                 for i, line in enumerate(lines):
                     if emote_font is not None:
                         text_width = self._line_width_emote_mixed(draw, line, font, emote_font)
                     else:
                         tb = draw.textbbox((0,0), line, font=font)
                         text_width = tb[2]-tb[0]
-                    tx = x + (w - text_width)//2
+                    tx = render_x + (render_w - text_width)//2
                     ty = start_y + i*line_height
                     ow = max(1, font_size // self.outline_width_factor)
                     if emote_font is not None:
@@ -8057,28 +8137,58 @@ class MangaTranslator:
                 region_count += 1
                 self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
                 
+                # Get original bounding box
                 x, y, w, h = region.bounding_box
                 
-                # Find optimal font size
+                # Determine if we should use safe text area
+                use_safe_area = hasattr(region, 'vertices') and region.vertices
+                
+                if use_safe_area:
+                    # Get safe text area - use mask bounds if available for accurate rendering
+                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
+                        region,
+                        use_mask_bounds=use_mask_for_rendering,
+                        full_mask=text_mask
+                    )
+                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                else:
+                    render_x, render_y, render_w, render_h = x, y, w, h
+                
+                # Find optimal font size - use render dimensions for proper sizing
                 if self.custom_font_size:
                     font_size = self.custom_font_size
                     lines = self._wrap_text(region.translated_text, 
                                           self._get_font(font_size), 
-                                          int(w * 0.8), draw)
+                                          render_w, draw)
                 else:
+                    # Pass use_as_is=True since render dimensions are already safe area
                     font_size, lines = self._fit_text_to_region(
-                        region.translated_text, w, h, draw
+                        region.translated_text, render_w, render_h, draw, region, use_as_is=True
                     )
                 
                 # Load font
                 font = self._get_font(font_size)
                 
-                # Calculate text layout
+                # Calculate text layout - use render dimensions
+                # CRITICAL: Use actual text bbox height for accurate positioning
                 line_height = font_size * 1.2
-                total_height = len(lines) * line_height
-                start_y = y + (h - total_height) // 2
                 
-                # Draw opaque background (optionally only for free text)
+                # Calculate actual total height using text bbox for first line as reference
+                if lines:
+                    sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
+                    actual_line_height = sample_bbox[3] - sample_bbox[1]
+                    # Use the larger of: computed line_height or actual_line_height
+                    line_height = max(line_height, actual_line_height * 1.1)
+                
+                total_height = len(lines) * line_height
+                
+                # Ensure text doesn't overflow vertically - constrain start_y
+                ideal_start_y = render_y + (render_h - total_height) // 2
+                # Make sure text starts within render area and doesn't extend past bottom
+                max_start_y = render_y + render_h - total_height
+                start_y = max(render_y, min(ideal_start_y, max_start_y))
+                
+                # Draw opaque background (optionally only for free text) - use render dimensions
                 draw_bg = self.text_bg_opacity > 0
                 try:
                     if draw_bg and getattr(self, 'free_text_only_bg_opacity', False):
@@ -8086,16 +8196,16 @@ class MangaTranslator:
                 except Exception:
                     pass
                 if draw_bg:
-                    self._draw_text_background(draw, x, y, w, h, lines, font, 
+                    self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, 
                                              font_size, start_y)
                 
-                # Draw text
+                # Draw text - use render dimensions
                 for i, line in enumerate(lines):
                     # Mixed fallback not supported in legacy path; keep primary measurement
                     text_bbox = draw.textbbox((0, 0), line, font=font)
                     text_width = text_bbox[2] - text_bbox[0]
                     
-                    text_x = x + (w - text_width) // 2
+                    text_x = render_x + (render_w - text_width) // 2
                     text_y = start_y + i * line_height
                     
                     if self.shadow_enabled:
@@ -8268,17 +8378,28 @@ class MangaTranslator:
         font_size = init_font_size
         
         def eval_metrics(txt, font):
-            """Calculate width/height of multiline text."""
+            """Calculate width/height of multiline text.
+            
+            CRITICAL: Must match the rendering logic exactly to prevent overflow.
+            Rendering uses font_size * 1.2 as line_height, so we must do the same here.
+            """
             lines = txt.split('\n')
+            if not lines:
+                return (0, 0)
+            
             max_width = 0
-            total_height = 0
             
             for line in lines:
-                bbox = draw.textbbox((0, 0), line, font=font)
+                bbox = draw.textbbox((0, 0), line if line else "A", font=font)
                 line_width = bbox[2] - bbox[0]
-                line_height = bbox[3] - bbox[1]
                 max_width = max(max_width, line_width)
-                total_height += line_height
+            
+            # Calculate height using same logic as rendering:
+            # line_height = max(font_size * 1.2, actual_bbox_height * 1.1)
+            sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
+            actual_line_height = sample_bbox[3] - sample_bbox[1]
+            line_height = max(font_size * 1.2, actual_line_height * 1.1)
+            total_height = len(lines) * line_height
             
             return (max_width, total_height)
         
@@ -8379,7 +8500,50 @@ class MangaTranslator:
         
         return mutable_message, int(font_size)
     
-    def get_safe_text_area(self, region: TextRegion) -> Tuple[int, int, int, int]:
+    def get_mask_bounds(self, region: TextRegion, full_mask: np.ndarray = None) -> Tuple[int, int, int, int]:
+        """Get bounding box from the actual mask region.
+        
+        If full_mask is provided, extract the mask area for this region and get its bounds.
+        Otherwise, falls back to polygon-based calculation.
+        
+        Returns:
+            (x, y, width, height) of the mask area for this region
+        """
+        if full_mask is not None:
+            try:
+                # Create a mask for just this region
+                region_mask = np.zeros(full_mask.shape[:2], dtype=np.uint8)
+                
+                # Fill the mask based on region's vertices or bbox
+                if hasattr(region, 'vertices') and region.vertices:
+                    pts = np.array(region.vertices, np.int32)
+                    pts = pts.reshape((-1, 1, 2))
+                    cv2.fillPoly(region_mask, [pts], 255)
+                else:
+                    x, y, w, h = region.bounding_box
+                    cv2.rectangle(region_mask, (int(x), int(y)), (int(x+w), int(y+h)), 255, -1)
+                
+                # Find where this region overlaps with the full mask
+                overlap = cv2.bitwise_and(region_mask, full_mask)
+                
+                # Get bounding box of the overlap
+                contours, _ = cv2.findContours(overlap, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    # Get the largest contour (should be the main text region)
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    x, y, w, h = cv2.boundingRect(largest_contour)
+                    
+                    if w > 0 and h > 0:
+                        return x, y, w, h
+            except Exception as e:
+                if not getattr(self, 'concise_logs', False):
+                    self._log(f"  ⚠️ Failed to extract mask bounds: {e}, falling back", "debug")
+        
+        # Fallback to original bounding box
+        x, y, w, h = region.bounding_box
+        return int(x), int(y), int(w), int(h)
+    
+    def get_safe_text_area(self, region: TextRegion, use_mask_bounds: bool = False, full_mask: np.ndarray = None) -> Tuple[int, int, int, int]:
         """Get safe text area with algorithm-aware shrink strategy.
         
         Respects font_algorithm and auto_fit_style settings:
@@ -8388,6 +8552,11 @@ class MangaTranslator:
         - aggressive: Minimal 5% shrink (95% usable)
         
         Also applies OCR-specific adjustments for Azure/Google without RT-DETR guidance.
+        
+        Args:
+            region: The text region to calculate safe area for
+            use_mask_bounds: If True, use actual mask boundaries instead of shrinking from polygon
+            full_mask: The complete mask image (required if use_mask_bounds=True)
         """
         # Get font sizing settings from config
         try:
@@ -8431,7 +8600,27 @@ class MangaTranslator:
             base_margin = min(0.98, base_margin + 0.08)
             self._log(f"  🎯 Azure/Google non-RT-DETR mode: Using aggressive {int(base_margin*100)}% margin", "debug")
         
-        # Handle regions without vertices (simple bounding box)
+        # OPTION 1: Use mask boundaries directly (most accurate)
+        if use_mask_bounds and full_mask is not None:
+            mask_x, mask_y, mask_w, mask_h = self.get_mask_bounds(region, full_mask)
+            # Use the FULL mask bounds directly - the mask already represents the accurate
+            # inpainted area from the inpainting process. The inpainting itself already includes
+            # padding/margins, so we don't need to shrink further. Using 100% maximizes text
+            # utilization and prevents the "text too small" issue.
+            
+            # CRITICAL: Use 100% of mask area for maximum text utilization
+            # The inpainting mask already has built-in margins from the mask generation process
+            safe_x, safe_y, safe_w, safe_h = mask_x, mask_y, mask_w, mask_h
+            
+            if not getattr(self, 'concise_logs', False):
+                self._log(f"  📐 Using FULL mask bounds: {mask_w}×{mask_h} (100% utilization)", "debug")
+                self._log(f"     Mask position: ({mask_x}, {mask_y})", "debug")
+                if hasattr(region, 'bounding_box'):
+                    orig_x, orig_y, orig_w, orig_h = region.bounding_box
+                    self._log(f"     Original bbox: {orig_w}×{orig_h} at ({orig_x}, {orig_y})", "debug")
+            return safe_x, safe_y, safe_w, safe_h
+        
+        # OPTION 2: Handle regions without vertices (simple bounding box)
         if not hasattr(region, 'vertices') or not region.vertices:
             x, y, w, h = region.bounding_box
             safe_width = int(w * base_margin)
@@ -8488,8 +8677,17 @@ class MangaTranslator:
         
         return safe_x, safe_y, safe_width, safe_height
     
-    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
-        """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments"""
+    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None, use_as_is: bool = False) -> Tuple[int, List[str]]:
+        """Find optimal font size using comic-translate's pil_word_wrap algorithm with algorithm-aware adjustments
+        
+        Args:
+            text: Text to fit
+            max_width: Maximum width available
+            max_height: Maximum height available  
+            draw: PIL ImageDraw object
+            region: Optional TextRegion for safe area calculation
+            use_as_is: If True, use max_width/max_height directly without further shrinking
+        """
         
         # Get font sizing settings
         try:
@@ -8501,8 +8699,13 @@ class MangaTranslator:
             font_algorithm = 'smart'
             prefer_larger = True
         
-        # Get usable area (now algorithm-aware via get_safe_text_area)
-        if region and hasattr(region, 'vertices') and region.vertices:
+        # Get usable area
+        if use_as_is:
+            # Dimensions are already safe area - use them directly (no double shrinking)
+            usable_width = max_width
+            usable_height = max_height
+        elif region and hasattr(region, 'vertices') and region.vertices:
+            # Calculate safe area from region
             safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
             usable_width = safe_width
             usable_height = safe_height
