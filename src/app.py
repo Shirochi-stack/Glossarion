@@ -259,12 +259,12 @@ class GlossarionWeb:
             'manga_font_size': 24,
             'manga_font_size_multiplier': 1.0,
             'manga_max_font_size': 48,
-            'manga_text_color': [255, 255, 255],
+            'manga_text_color': [255, 255, 255],  # White text (like manga integration)
             'manga_shadow_enabled': True,
-            'manga_shadow_color': [0, 0, 0],
-            'manga_shadow_offset_x': 1,
-            'manga_shadow_offset_y': 1,
-            'manga_shadow_blur': 2,
+            'manga_shadow_color': [0, 0, 0],  # Black shadow (like manga integration)
+            'manga_shadow_offset_x': 2,  # Match manga integration
+            'manga_shadow_offset_y': 2,  # Match manga integration
+            'manga_shadow_blur': 0,  # Match manga integration (no blur)
             'manga_bg_opacity': 180,
             'manga_bg_style': 'circle',
             'manga_settings': {
@@ -377,10 +377,10 @@ class GlossarionWeb:
         os.environ['ENABLE_GPT_THINKING'] = '1' if config('enable_gpt_thinking', True) else '0'
         os.environ['GPT_THINKING_EFFORT'] = config('gpt_thinking_effort', 'medium')
         os.environ['OR_THINKING_TOKENS'] = str(config('or_thinking_tokens', 2000))
-        os.environ['ENABLE_GEMINI_THINKING'] = '1' if config('enable_gemini_thinking', True) else '0'
-        os.environ['GEMINI_THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
+        os.environ['ENABLE_GEMINI_THINKING'] = '1' if config('enable_gemini_thinking', False) else '0'
+        os.environ['GEMINI_THINKING_BUDGET'] = str(config('gemini_thinking_budget', 0))
         # IMPORTANT: Also set THINKING_BUDGET for unified_api_client compatibility
-        os.environ['THINKING_BUDGET'] = str(config('gemini_thinking_budget', -1))
+        os.environ['THINKING_BUDGET'] = str(config('gemini_thinking_budget', 0))
         
         # Translation Settings
         os.environ['CONTEXTUAL'] = '1' if config('contextual', False) else '0'
@@ -3089,7 +3089,7 @@ class GlossarionWeb:
                                 
                                 text_color_rgb = gr.ColorPicker(
                                     label="Font Color",
-                                    value=to_hex_color(self.get_config_value('manga_text_color', '#000000'), '#000000')
+                                    value=to_hex_color(self.get_config_value('manga_text_color', [255, 255, 255]), '#FFFFFF')  # Default white
                                 )
                                 
                                 gr.Markdown("### Shadow Settings")
@@ -3101,7 +3101,7 @@ class GlossarionWeb:
                                 
                                 shadow_color = gr.ColorPicker(
                                     label="Shadow Color",
-                                    value=to_hex_color(self.get_config_value('manga_shadow_color', '#FFFFFF'), '#FFFFFF')
+                                    value=to_hex_color(self.get_config_value('manga_shadow_color', [0, 0, 0]), '#000000')  # Default black
                                 )
                                 
                                 shadow_offset_x = gr.Slider(
@@ -3511,12 +3511,12 @@ class GlossarionWeb:
                                 config.get('manga_font_multiplier', 1.0),
                                 config.get('manga_min_font_size', 12),
                                 config.get('manga_max_font_size', 48),
-                                config.get('manga_text_color', '#FFFFFF'),
+                                config.get('manga_text_color', [255, 255, 255]),  # Default white text
                                 config.get('manga_shadow_enabled', True),
-                                config.get('manga_shadow_color', '#000000'),
-                                config.get('manga_shadow_offset_x', 1),
-                                config.get('manga_shadow_offset_y', 1),
-                                config.get('manga_shadow_blur', 2),
+                                config.get('manga_shadow_color', [0, 0, 0]),  # Default black shadow
+                                config.get('manga_shadow_offset_x', 2),
+                                config.get('manga_shadow_offset_y', 2),
+                                config.get('manga_shadow_blur', 0),
                                 config.get('manga_bg_opacity', 180),
                                 config.get('manga_bg_style', 'auto'),
                                 config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
@@ -3540,12 +3540,12 @@ class GlossarionWeb:
                                 1.0,  # font_multiplier
                                 12,  # min_font_size
                                 48,  # max_font_size
-                                '#FFFFFF',  # text_color
+                                '#FFFFFF',  # text_color - white
                                 True,  # shadow_enabled
-                                '#000000',  # shadow_color
-                                1,  # shadow_offset_x
-                                1,  # shadow_offset_y
-                                2,  # shadow_blur
+                                '#000000',  # shadow_color - black
+                                2,  # shadow_offset_x
+                                2,  # shadow_offset_y
+                                0,  # shadow_blur
                                 180,  # bg_opacity
                                 'auto',  # bg_style
                                 False,  # parallel_panel_translation
@@ -4961,19 +4961,21 @@ class GlossarionWeb:
                             gr.Markdown("**Gemini Thinking Mode**")
                             enable_gemini_thinking = gr.Checkbox(
                                 label="Enable Gemini Thinking",
-                                value=self.get_config_value('enable_gemini_thinking', True),
-                                info="Control Gemini's thinking process"
+                                value=self.get_config_value('enable_gemini_thinking', False),
+                                info="Control Gemini's thinking process",
+                                interactive=True
                             )
                             
                             gemini_thinking_budget = gr.Number(
                                 label="Budget",
-                                value=self.get_config_value('gemini_thinking_budget', -1),
-                                minimum=-1,
+                                value=self.get_config_value('gemini_thinking_budget', 0),
+                                minimum=0,
                                 maximum=50000,
-                                info="tokens (-1 = dynamic/auto)"
+                                info="tokens (0 = disabled)",
+                                interactive=True
                             )
                             
-                            gr.Markdown("*0 = disabled, 512-24576 = limited thinking, -1 = dynamic (auto)*", elem_classes=["markdown-small"])
+                            gr.Markdown("*0 = disabled, 512-24576 = limited thinking*", elem_classes=["markdown-small"])
                     
                     gr.Markdown("---")
                     gr.Markdown("🔒 **API keys are encrypted** when saved to config using AES encryption.")
@@ -5150,8 +5152,8 @@ class GlossarionWeb:
                     self.get_config_value('enable_gpt_thinking', True),  # enable_gpt_thinking
                     self.get_config_value('gpt_thinking_effort', 'medium'),  # gpt_thinking_effort
                     self.get_config_value('or_thinking_tokens', 2000),  # or_thinking_tokens
-                    self.get_config_value('enable_gemini_thinking', True),  # enable_gemini_thinking
-                    self.get_config_value('gemini_thinking_budget', -1),  # gemini_thinking_budget
+                    self.get_config_value('enable_gemini_thinking', False),  # enable_gemini_thinking - disabled by default
+                    self.get_config_value('gemini_thinking_budget', 0),  # gemini_thinking_budget - 0 = disabled
                     # Manga settings
                     self.get_config_value('model', 'gpt-4-turbo'),  # manga_model
                     self.get_config_value('api_key', ''),  # manga_api_key
@@ -5167,10 +5169,10 @@ class GlossarionWeb:
                     self.get_config_value('manga_font_multiplier', 1.0),  # font_multiplier
                     self.get_config_value('manga_min_font_size', 12),  # min_font_size
                     self.get_config_value('manga_max_font_size', 48),  # max_font_size
-                    # Convert colors to hex format if they're stored as RGB arrays
-                    to_hex_color(self.get_config_value('manga_text_color', '#000000'), '#000000'),  # text_color_rgb
+                    # Convert colors to hex format if they're stored as RGB arrays (white text, black shadow like manga integration)
+                    to_hex_color(self.get_config_value('manga_text_color', [255, 255, 255]), '#FFFFFF'),  # text_color_rgb - default white
                     self.get_config_value('manga_shadow_enabled', True),  # shadow_enabled
-                    to_hex_color(self.get_config_value('manga_shadow_color', '#FFFFFF'), '#FFFFFF'),  # shadow_color
+                    to_hex_color(self.get_config_value('manga_shadow_color', [0, 0, 0]), '#000000'),  # shadow_color - default black
                     self.get_config_value('manga_shadow_offset_x', 2),  # shadow_offset_x
                     self.get_config_value('manga_shadow_offset_y', 2),  # shadow_offset_y
                     self.get_config_value('manga_shadow_blur', 0),  # shadow_blur
