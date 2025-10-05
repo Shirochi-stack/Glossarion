@@ -109,27 +109,53 @@ class MangaTranslator:
         if not hasattr(self, '_checked_out_inpainter') or not hasattr(self, '_inpainter_pool_key'):
             return  # Nothing checked out
         
+        # Also check if the key is None
+        if self._inpainter_pool_key is None or self._checked_out_inpainter is None:
+            return
+        
         try:
             with MangaTranslator._inpaint_pool_lock:
                 key = self._inpainter_pool_key
+                
+                # DEBUG: Log the key we're returning to and all keys in pool
+                try:
+                    method, path = key
+                    path_basename = os.path.basename(path) if path else 'None'
+                    self._log(f"🔑 Return key: {method}/{path_basename}", "info")
+                    
+                    # Show all keys in pool for comparison
+                    all_keys = list(MangaTranslator._inpaint_pool.keys())
+                    self._log(f"📊 Pool has {len(all_keys)} key(s)", "info")
+                    for pool_method, pool_path in all_keys:
+                        pool_rec = MangaTranslator._inpaint_pool.get((pool_method, pool_path))
+                        pool_spares = len(pool_rec.get('spares', [])) if pool_rec else 0
+                        pool_checked = len(pool_rec.get('checked_out', [])) if pool_rec else 0
+                        pool_path_basename = os.path.basename(pool_path) if pool_path else 'None'
+                        self._log(f"   - {pool_method}/{pool_path_basename}: {pool_spares} spares, {pool_checked} checked out", "info")
+                except Exception as e:
+                    self._log(f"   Debug error: {e}", "info")
+                
                 rec = MangaTranslator._inpaint_pool.get(key)
                 if rec and 'checked_out' in rec:
                     checked_out = rec['checked_out']
                     if self._checked_out_inpainter in checked_out:
                         checked_out.remove(self._checked_out_inpainter)
-                        # ENHANCED: Show checked_out count vs total spares count
+                        # The spares list stays static - it contains all preloaded instances
+                        # We only track which ones are checked out, not which are available
+                        # Available = spares not in checked_out
                         spares_list = rec.get('spares', [])
                         total_spares = len(spares_list)
                         checked_out_count = len(checked_out)
+                        available_count = total_spares - checked_out_count
                         # Debug: count how many spares are actually valid
                         valid_spares = sum(1 for s in spares_list if s and getattr(s, 'model_loaded', False))
                         # Also log the pool key for debugging path mismatches
                         try:
                             method, path = key
                             path_basename = os.path.basename(path) if path else 'None'
-                            self._log(f"🔄 Returned inpainter to pool [key: {method}/{path_basename}] ({checked_out_count}/{total_spares} still in use, {valid_spares} valid)", "info")
+                            self._log(f"🔄 Returned inpainter to pool [key: {method}/{path_basename}] ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
                         except:
-                            self._log(f"🔄 Returned inpainter to pool ({checked_out_count}/{total_spares} still in use, {valid_spares} valid)", "info")
+                            self._log(f"🔄 Returned inpainter to pool ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
             # Clear the references
             self._checked_out_inpainter = None
             self._inpainter_pool_key = None
@@ -145,6 +171,10 @@ class MangaTranslator:
         if not hasattr(self, '_checked_out_bubble_detector') or not hasattr(self, '_bubble_detector_pool_key'):
             return  # Nothing checked out
         
+        # Also check if the key is None
+        if self._bubble_detector_pool_key is None or self._checked_out_bubble_detector is None:
+            return
+        
         try:
             with MangaTranslator._detector_pool_lock:
                 key = self._bubble_detector_pool_key
@@ -153,7 +183,10 @@ class MangaTranslator:
                     checked_out = rec['checked_out']
                     if self._checked_out_bubble_detector in checked_out:
                         checked_out.remove(self._checked_out_bubble_detector)
-                        self._log(f"🔄 Returned bubble detector to pool ({len(checked_out)}/{len(rec.get('spares', []))} still in use)", "info")
+                        # The spares list stays static - only track checked_out
+                        spares_list = rec.get('spares', [])
+                        available_count = len(spares_list) - len(checked_out)
+                        self._log(f"🔄 Returned bubble detector to pool ({len(checked_out)}/{len(spares_list)} in use, {available_count} available)", "info")
             # Clear the references
             self._checked_out_bubble_detector = None
             self._bubble_detector_pool_key = None
@@ -6887,6 +6920,16 @@ class MangaTranslator:
         # Don't pop it - instead mark it as 'in use' so it stays in memory
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
+            # DEBUG: Log current pool state at checkout time - USE PRINT TO BYPASS LOGGING
+            if rec:
+                spares_count = len(rec.get('spares', []))
+                checked_out_count = len(rec.get('checked_out', []))
+                print(f"[CHECKOUT] Found pool record with {spares_count} spares, {checked_out_count} checked out")
+                self._log(f"🔍 CHECKOUT DEBUG: Found pool record with {spares_count} spares, {checked_out_count} checked out", "info")
+            else:
+                print(f"[CHECKOUT] No pool record found for key")
+                self._log(f"🔍 CHECKOUT DEBUG: No pool record found for key", "info")
+            
             if rec and rec.get('spares'):
                 spares = rec.get('spares') or []
                 # Initialize checked_out list if it doesn't exist
@@ -7086,7 +7129,7 @@ class MangaTranslator:
             if not rec or not rec.get('loaded') or not rec.get('inpainter'):
                 # Need to create the shared instance
                 if not rec:
-                    rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                    rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
                     MangaTranslator._inpaint_pool[key] = rec
                     need_init_shared = True
                 else:
@@ -7118,8 +7161,13 @@ class MangaTranslator:
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
-                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
+                self._log(f"🔍 PRELOAD DEBUG: Created new pool record, spares=[], checked_out=[]", "info")
+            else:
+                current_spares_count = len(rec.get('spares', []))
+                current_checked_out_count = len(rec.get('checked_out', []))
+                self._log(f"🔍 PRELOAD DEBUG: Existing pool record found: {current_spares_count} spares, {current_checked_out_count} checked out", "info")
             if 'spares' not in rec or rec['spares'] is None:
                 rec['spares'] = []
             spares = rec.get('spares')
@@ -7156,11 +7204,16 @@ class MangaTranslator:
                     
                     if model_actually_loaded:
                         with MangaTranslator._inpaint_pool_lock:
-                            rec = MangaTranslator._inpaint_pool.get(key) or {'spares': []}
+                            rec = MangaTranslator._inpaint_pool.get(key)
+                            if not rec:
+                                # Pool record doesn't exist - create it
+                                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
+                                MangaTranslator._inpaint_pool[key] = rec
+                            # Ensure spares list exists
                             if 'spares' not in rec or rec['spares'] is None:
                                 rec['spares'] = []
+                            # Append to existing spares list (don't replace the record!)
                             rec['spares'].append(inp)
-                            MangaTranslator._inpaint_pool[key] = rec
                         created += 1
                         self._log(f"✅ Preloaded spare {created}: model_loaded={getattr(inp, 'model_loaded', False)}", "debug")
                     else:
@@ -7211,7 +7264,7 @@ class MangaTranslator:
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
-                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
+                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
             spares = (rec.get('spares') or [])
         desired = max(0, int(count) - len(spares))
@@ -7263,11 +7316,16 @@ class MangaTranslator:
                     model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
                     if model_actually_loaded:
                         with MangaTranslator._inpaint_pool_lock:
-                            rec2 = MangaTranslator._inpaint_pool.get(key) or {'spares': []}
+                            rec2 = MangaTranslator._inpaint_pool.get(key)
+                            if not rec2:
+                                # Pool record doesn't exist - create it
+                                rec2 = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
+                                MangaTranslator._inpaint_pool[key] = rec2
+                            # Ensure spares list exists
                             if 'spares' not in rec2 or rec2['spares'] is None:
                                 rec2['spares'] = []
+                            # Append to existing spares list (don't replace the record!)
                             rec2['spares'].append(inp)
-                            MangaTranslator._inpaint_pool[key] = rec2
                         return True
                     else:
                         # Log why it failed for debugging
@@ -10110,20 +10168,37 @@ class MangaTranslator:
             tl.local_inpainters = {}
         key = (local_method or 'anime', model_path or '')
         if key not in tl.local_inpainters or tl.local_inpainters[key] is None:
-            # First, try to use a preloaded spare instance from the shared pool
+            # First, try to check out a preloaded spare instance from the shared pool
+            # DO NOT pop from spares - use the checkout mechanism to track usage properly
             try:
-                rec = MangaTranslator._inpaint_pool.get(key)
-                if rec and isinstance(rec, dict):
-                    spares = rec.get('spares') or []
-                    if spares:
-                        tl.local_inpainters[key] = spares.pop(0)
-                        self._log("🎨 Using preloaded local inpainting instance", "info")
-                        return tl.local_inpainters[key]
-                    # If there's a fully loaded shared instance but no spares, use it as a last resort
-                    if rec.get('loaded') and rec.get('inpainter') is not None:
-                        tl.local_inpainters[key] = rec.get('inpainter')
-                        self._log("🎨 Using shared preloaded inpainting instance", "info")
-                        return tl.local_inpainters[key]
+                with MangaTranslator._inpaint_pool_lock:
+                    rec = MangaTranslator._inpaint_pool.get(key)
+                    if rec and isinstance(rec, dict):
+                        spares = rec.get('spares') or []
+                        # Initialize checked_out list if it doesn't exist
+                        if 'checked_out' not in rec:
+                            rec['checked_out'] = []
+                        checked_out = rec['checked_out']
+                        
+                        # Look for an available spare (not already checked out)
+                        if spares:
+                            for spare in spares:
+                                if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                    # Mark as checked out (don't remove from spares!)
+                                    checked_out.append(spare)
+                                    tl.local_inpainters[key] = spare
+                                    # Store reference for later return
+                                    self._checked_out_inpainter = spare
+                                    self._inpainter_pool_key = key
+                                    available = len(spares) - len(checked_out)
+                                    self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                    return tl.local_inpainters[key]
+                        
+                        # If there's a fully loaded shared instance but no available spares, use it as a last resort
+                        if rec.get('loaded') and rec.get('inpainter') is not None:
+                            tl.local_inpainters[key] = rec.get('inpainter')
+                            self._log("🎨 Using shared preloaded inpainting instance", "info")
+                            return tl.local_inpainters[key]
             except Exception:
                 pass
             
