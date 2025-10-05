@@ -7402,7 +7402,87 @@ class MangaTranslator:
                     return shared_inp.inpaint(image, mask)
             except Exception:
                 pass
-            self._log("   ⚠️ Local inpainting model not loaded; returning original image", "warning")
+            
+            # RETRY LOGIC: Attempt to reload model with multiple strategies
+            self._log("   ⚠️ Local inpainting model not loaded; attempting retry...", "warning")
+            
+            retry_attempts = [
+                {'force_reload': True, 'desc': 'force reload'},
+                {'force_reload': True, 'desc': 'force reload with delay', 'delay': 1.0},
+                {'force_reload': False, 'desc': 'standard reload'},
+            ]
+            
+            for attempt_num, retry_config in enumerate(retry_attempts, 1):
+                try:
+                    self._log(f"   🔄 Retry attempt {attempt_num}/{len(retry_attempts)}: {retry_config['desc']}", "info")
+                    
+                    # Apply delay if specified
+                    if retry_config.get('delay'):
+                        import time
+                        time.sleep(retry_config['delay'])
+                    
+                    # Try to get or create a fresh inpainter instance
+                    retry_inp = self._get_or_init_shared_local_inpainter(
+                        local_method, 
+                        model_path, 
+                        force_reload=retry_config['force_reload']
+                    )
+                    
+                    if retry_inp:
+                        # Check if model is loaded
+                        if getattr(retry_inp, 'model_loaded', False):
+                            self._log(f"   ✅ Model loaded successfully on retry attempt {attempt_num}", "info")
+                            return retry_inp.inpaint(image, mask)
+                        else:
+                            # Model exists but not loaded - try loading it directly
+                            self._log(f"   🔧 Model not loaded, attempting direct load...", "info")
+                            if model_path and os.path.exists(model_path):
+                                try:
+                                    loaded_ok = retry_inp.load_model_with_retry(
+                                        local_method, 
+                                        model_path, 
+                                        force_reload=True
+                                    )
+                                    if loaded_ok and getattr(retry_inp, 'model_loaded', False):
+                                        self._log(f"   ✅ Direct load successful on attempt {attempt_num}", "info")
+                                        return retry_inp.inpaint(image, mask)
+                                    else:
+                                        self._log(f"   ⚠️ Direct load returned {loaded_ok}, model_loaded={getattr(retry_inp, 'model_loaded', False)}", "warning")
+                                except Exception as load_err:
+                                    self._log(f"   ⚠️ Direct load failed: {load_err}", "warning")
+                            else:
+                                if not model_path:
+                                    self._log(f"   ⚠️ No model path configured", "warning")
+                                elif not os.path.exists(model_path):
+                                    self._log(f"   ⚠️ Model file does not exist: {model_path}", "warning")
+                    else:
+                        self._log(f"   ⚠️ Failed to get inpainter instance on attempt {attempt_num}", "warning")
+                        
+                except Exception as retry_err:
+                    self._log(f"   ⚠️ Retry attempt {attempt_num} failed: {retry_err}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "debug")
+            
+            # All retries exhausted - provide detailed diagnostic information
+            self._log("   ❌ All retry attempts exhausted. Diagnostics:", "error")
+            self._log(f"      Method: {local_method}", "error")
+            if model_path:
+                self._log(f"      Model path: {model_path}", "error")
+                if os.path.exists(model_path):
+                    try:
+                        size_mb = os.path.getsize(model_path) / (1024 * 1024)
+                        self._log(f"      File size: {size_mb:.2f} MB", "error")
+                        if size_mb < 1:
+                            self._log(f"      ⚠️ File may be corrupted (too small)", "error")
+                    except Exception:
+                        self._log(f"      ⚠️ Cannot read model file", "error")
+                else:
+                    self._log(f"      ⚠️ Model file does not exist", "error")
+            else:
+                self._log(f"      ⚠️ No model path configured", "error")
+            
+            self._log("   💡 Suggestion: Check Manga Settings and download the model if needed", "error")
+            self._log("   ⚠️ Returning original image without inpainting", "warning")
             return image.copy()
             
     def _cloud_inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
