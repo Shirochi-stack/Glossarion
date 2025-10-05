@@ -1840,7 +1840,7 @@ class ChapterExtractor:
         print(f"✅ Using {extraction_mode.capitalize()} extraction mode")
         
         # Get number of workers from environment or use default
-        max_workers = int(os.getenv("EXTRACTION_WORKERS", "4"))
+        max_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
         print(f"🔧 Using {max_workers} workers for parallel processing")
         
         extracted_resources = self._extract_all_resources(zf, output_dir)
@@ -1939,8 +1939,8 @@ class ChapterExtractor:
                             chapters_info.append(result)
                         completed += 1
                         
-                        # Yield to GUI periodically
-                        if completed % 5 == 0:
+                        # Yield to GUI periodically (can be disabled for max speed)
+                        if completed % 5 == 0 and os.getenv("ENABLE_GUI_YIELD", "1") == "1":
                             time.sleep(0.001)
                         
                         # Progress updates
@@ -2052,7 +2052,10 @@ class ChapterExtractor:
         total_resources = len(file_list)
         extracted_count = 0
         
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        # Use same worker count as chapter processing
+        resource_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
+        
+        with ThreadPoolExecutor(max_workers=resource_workers) as executor:
             futures = {executor.submit(extract_single_resource, file_path): file_path 
                       for file_path in file_list}
             
@@ -2067,8 +2070,8 @@ class ChapterExtractor:
                 if extracted_count % 20 == 0 and self.progress_callback:
                     self.progress_callback(f"Extracting resources: {extracted_count}/{total_resources}")
                 
-                # Yield to GUI periodically
-                if extracted_count % 10 == 0:
+                # Yield to GUI periodically (can be disabled for max speed)
+                if extracted_count % 10 == 0 and os.getenv("ENABLE_GUI_YIELD", "1") == "1":
                     time.sleep(0.001)
                     
                 result = future.result()
@@ -2158,9 +2161,10 @@ class ChapterExtractor:
                 print("❌ Chapter extraction stopped by user")
                 return [], 'unknown'
             
-            # Yield to GUI every 50 files
+            # Yield to GUI every 50 files (can be disabled for max speed)
             if idx % 50 == 0 and idx > 0:
-                time.sleep(0.001)  # Brief yield to GUI
+                if os.getenv("ENABLE_GUI_YIELD", "1") == "1":
+                    time.sleep(0.001)  # Brief yield to GUI
                 if self.progress_callback and total_files > 100:
                     self.progress_callback(f"Scanning files: {idx}/{total_files}")
                 
@@ -2637,10 +2641,12 @@ class ChapterExtractor:
         use_parallel = len(files_to_process) > 10
         
         if use_parallel:
-            print("📦 Using parallel processing for better performance...")
+            # Get worker count from environment variable
+            max_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
+            print(f"📦 Using parallel processing with {max_workers} workers...")
             
             # Process files in parallel
-            with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all files for processing
                 future_to_file = {
                     executor.submit(process_single_html_file, file_path, idx): (file_path, idx)
@@ -2724,8 +2730,8 @@ class ChapterExtractor:
             unnumbered_chapters = []
             
             for idx, chapter in enumerate(candidate_chapters):
-                # Yield periodically during categorization
-                if idx % 10 == 0 and idx > 0:
+                # Yield periodically during categorization (can be disabled for max speed)
+                if idx % 10 == 0 and idx > 0 and os.getenv("ENABLE_GUI_YIELD", "1") == "1":
                     time.sleep(0.001)
                     
                 if chapter["num"] is not None:

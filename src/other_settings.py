@@ -394,6 +394,17 @@ def _create_response_handling_section(self, parent):
     tk.Label(section_frame, text="Speed up EPUB extraction using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)",
            font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
     
+    # GUI Yield Toggle (below parallel extraction)
+    gui_yield_frame = tk.Frame(section_frame)
+    gui_yield_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+    
+    tb.Checkbutton(gui_yield_frame, text="Enable GUI Responsiveness Yield", 
+                  variable=self.enable_gui_yield_var,
+                  bootstyle="round-toggle").pack(side=tk.LEFT)
+    
+    tk.Label(section_frame, text="Adds small delays during extraction to keep GUI responsive.\n⚠️ Disable for maximum extraction speed (GUI may freeze temporarily)",
+           font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
+    
     # Add separator after extraction workers
     ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
     

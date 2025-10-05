@@ -1411,6 +1411,8 @@ class TranslatorGUI:
         # Initialize the variables with default values
         self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
         self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 2))
+        # GUI yield toggle - disabled by default for maximum speed
+        self.enable_gui_yield_var = tk.BooleanVar(value=self.config.get('enable_gui_yield', False))
 
         # Set initial environment variable and ensure executor
         if self.enable_parallel_extraction_var.get():
@@ -1423,6 +1425,11 @@ class TranslatorGUI:
         else:
             os.environ["EXTRACTION_WORKERS"] = "1"
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "0"
+        
+        # Set GUI yield environment variable (disabled by default for maximum speed)
+        os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var.get() else '0'
+        print(f"⚡ GUI yield: {'ENABLED (responsive)' if self.enable_gui_yield_var.get() else 'DISABLED (maximum speed)'}")
+        
         # Initialize the executor based on current settings
         try:
             self._ensure_executor()
@@ -13671,6 +13678,10 @@ Important rules:
             # Save extraction worker settings
             self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
             self.config['extraction_workers'] = self.extraction_workers_var.get()
+            # Save GUI yield setting and set environment variable
+            if hasattr(self, 'enable_gui_yield_var'):
+                self.config['enable_gui_yield'] = self.enable_gui_yield_var.get()
+                os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var.get() else '0'
             self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
             self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var.get()
             self.config['glossary_filter_mode'] = self.glossary_filter_mode_var.get()

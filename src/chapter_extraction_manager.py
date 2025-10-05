@@ -98,6 +98,9 @@ class ChapterExtractionManager:
             env['PYTHONIOENCODING'] = 'utf-8'
             env['PYTHONLEGACYWINDOWSSTDIO'] = '0'  # Use new Windows console API
             
+            # Set default worker count if not already set
+            env.setdefault('EXTRACTION_WORKERS', '2')
+            
             self._log(f"🚀 Starting chapter extraction subprocess...")
             self._log(f"📚 EPUB: {os.path.basename(epub_path)}")
             self._log(f"📂 Output: {output_dir}")

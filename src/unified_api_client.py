@@ -8696,6 +8696,30 @@ class UnifiedClient:
                             'total_tokens': resp.usage.total_tokens
                         }
                     
+                    # Log OpenRouter provider information from response (SDK path)
+                    if provider == 'openrouter':
+                        try:
+                            # Try to extract provider info from raw response
+                            raw_dict = None
+                            if hasattr(resp, 'model_dump'):
+                                raw_dict = resp.model_dump()
+                            elif hasattr(resp, 'dict'):
+                                raw_dict = resp.dict()
+                            elif hasattr(resp, '__dict__'):
+                                raw_dict = resp.__dict__
+                            
+                            if raw_dict:
+                                # Check for model field which often contains provider info
+                                response_model = raw_dict.get('model', '')
+                                if response_model:
+                                    print(f"✅ OpenRouter Response Model: {response_model}")
+                                
+                                # Some SDKs expose headers
+                                if 'headers' in raw_dict or hasattr(resp, '_raw_response'):
+                                    print("📋 OpenRouter: Provider info may be in HTTP headers (use HTTP-only mode for full logging)")
+                        except Exception as log_err:
+                            pass  # Silent fail for logging
+                    
                     self._save_response(content, response_name)
                     
                     return UnifiedResponse(
@@ -8755,6 +8779,15 @@ class UnifiedClient:
                                     body["reasoning"] = reasoning
                             except Exception:
                                 pass
+                            # Add provider preference if specified (fallback path)
+                            try:
+                                preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
+                                if preferred_provider and preferred_provider != 'Auto':
+                                    body["provider"] = {
+                                        "order": [preferred_provider]
+                                    }
+                            except Exception:
+                                pass
                             # Make HTTP request
                             endpoint = "/chat/completions"
                             http_headers["Idempotency-Key"] = self._get_idempotency_key()
@@ -8773,6 +8806,18 @@ class UnifiedClient:
                             if not choices:
                                 raise UnifiedClientError("OpenRouter (HTTP) returned no choices")
                             content, finish_reason, usage = self._extract_openai_json(json_resp)
+                            
+                            # Log OpenRouter provider information (fallback HTTP path)
+                            try:
+                                provider_header = resp.headers.get('x-or-provider', resp.headers.get('X-OR-Provider', ''))
+                                if provider_header:
+                                    print(f"✅ OpenRouter Provider (from header, fallback): {provider_header}")
+                                response_model = json_resp.get('model', '')
+                                if response_model:
+                                    print(f"📋 OpenRouter Response Model (fallback): {response_model}")
+                            except Exception:
+                                pass
+                            
                             return UnifiedResponse(
                                 content=content,
                                 finish_reason=finish_reason,
@@ -8976,6 +9021,31 @@ class UnifiedClient:
             if not choices:
                 raise UnifiedClientError(f"{provider} API returned no choices")
             content, finish_reason, usage = self._extract_openai_json(json_resp)
+            
+            # Log OpenRouter provider information from response headers and body (HTTP path)
+            if provider == 'openrouter':
+                try:
+                    # Extract provider from response headers
+                    provider_header = resp.headers.get('x-or-provider', resp.headers.get('X-OR-Provider', ''))
+                    if provider_header:
+                        print(f"✅ OpenRouter Provider (from header): {provider_header}")
+                    
+                    # Extract model info from response body
+                    response_model = json_resp.get('model', '')
+                    if response_model:
+                        print(f"📋 OpenRouter Response Model: {response_model}")
+                    
+                    # Extract generation ID for reference
+                    generation_id = json_resp.get('id', '')
+                    if generation_id:
+                        print(f"🆔 OpenRouter Generation ID: {generation_id}")
+                    
+                    # Log all OpenRouter-specific headers for debugging
+                    or_headers = {k: v for k, v in resp.headers.items() if k.lower().startswith('x-or-') or k.lower().startswith('x-openrouter-')}
+                    if or_headers:
+                        print(f"📊 OpenRouter Headers: {or_headers}")
+                except Exception as log_err:
+                    pass  # Silent fail for logging
             # ElectronHub truncation detection
             if provider == "electronhub" and content:
                 if len(content) < 50 and "cannot" in content.lower():
