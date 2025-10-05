@@ -6495,22 +6495,22 @@ class MangaTranslator:
         
         # CRITICAL: If the text is ONLY punctuation (dots, ellipsis, exclamations, etc.),
         # don't clean it at all - these are valid sound effects/reactions in manga
+        # This includes: . ! ? … ~ ♡ ♥ ★ ☆ · • ・ and whitespace
         import re
-        if re.match(r'^[.!?…~♡♥★☆\s]+$', text):
+        if re.match(r'^[.!?…~♡♥★☆·•・\s]+$', text):
             self._log(f"🎯 Preserving punctuation-only text: '{text}'", "debug")
             return text
         
-        # Remove ALL types of quotes and dots from start/end
-        # Keep removing until no more quotes/dots at edges
+        # Remove quotes from start/end but be VERY CAREFUL with dots/punctuation
+        # Only strip quotes and decorative punctuation, NOT dots that are part of the content
         while len(text) > 0:
             old_len = len(text)
             
-            # Remove from start
-            text = text.lstrip('"\'`''""「」『』【】《》〈〉.·•°')
+            # Remove ONLY quotes from start, NOT dots (dots are often part of sound effects)
+            text = text.lstrip('"\'`''""「」『』【】《》〈〉')
             
-            # Remove from end (but preserve ... and !!)
-            if not text.endswith('...') and not text.endswith('!!'):
-                text = text.rstrip('"\'`''""「」『』【】《》〈〉.·•°')
+            # Remove ONLY quotes from end, NOT dots
+            text = text.rstrip('"\'`''""「」『』【】《》〈〉')
             
             # If nothing changed, we're done
             if len(text) == old_len:
