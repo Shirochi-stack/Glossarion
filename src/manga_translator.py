@@ -5965,7 +5965,7 @@ class MangaTranslator:
                 
             except Exception as e:
                 self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
-                self._log(f"Response preview: {response_text[:500]}...", "warning")
+                self._log(f"Response preview: {response_text[:5000]}...", "warning")
                 
                 # CRITICAL: Check if this is a refusal message BEFORE regex fallback
                 # OpenAI and other APIs refuse certain content with text responses instead of JSON
@@ -6783,7 +6783,35 @@ class MangaTranslator:
         The instance will stay assigned to this translator until cleanup.
         """
         from local_inpainter import LocalInpainter
+        
+        # Normalize model path to avoid cache misses due to path differences
+        # (e.g., ~/.cache/inpainting/anime-manga-big-lama.pt vs models/anime-manga-big-lama.pt)
+        if model_path:
+            try:
+                # Resolve to absolute path and normalize
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass  # Keep original path if normalization fails
+        
         key = (local_method, model_path or '')
+        
+        # Debug: Log pool key and current pool state for troubleshooting
+        try:
+            self._log(f"🔑 Inpainter pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'}", "debug")
+            # Show what's currently in the pool
+            with MangaTranslator._inpaint_pool_lock:
+                pool_keys = list(MangaTranslator._inpaint_pool.keys())
+                if pool_keys:
+                    self._log(f"📋 Pool contains {len(pool_keys)} key(s):", "debug")
+                    for pk_method, pk_path in pool_keys:
+                        pk_rec = MangaTranslator._inpaint_pool.get((pk_method, pk_path))
+                        spares_count = len(pk_rec.get('spares', [])) if pk_rec else 0
+                        loaded = pk_rec.get('loaded', False) if pk_rec else False
+                        self._log(f"   - {pk_method}, {os.path.basename(pk_path) if pk_path else 'None'}: {spares_count} spares, loaded={loaded}", "debug")
+                else:
+                    self._log(f"📋 Pool is empty", "debug")
+        except Exception as e:
+            self._log(f"   Debug logging error: {e}", "debug")
         
         # FIRST: Try to check out a spare instance if available (for true parallelism)
         # Don't pop it - instead mark it as 'in use' so it stays in memory
@@ -6801,11 +6829,15 @@ class MangaTranslator:
                     if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
                         # Mark as checked out
                         checked_out.append(spare)
-                        self._log(f"🧰 Checked out spare inpainter ({len(checked_out)}/{len(spares)} in use)", "debug")
+                        self._log(f"🧰 Checked out spare inpainter ({len(checked_out)}/{len(spares)} in use)", "info")
                         # Store reference for later return
                         self._checked_out_inpainter = spare
                         self._inpainter_pool_key = key
                         return spare
+                
+                # No available spares - all are checked out
+                if spares:
+                    self._log(f"⏳ All {len(spares)} spare inpainters are in use, will use shared instance", "debug")
         
         # FALLBACK: Use the shared instance
         rec = MangaTranslator._inpaint_pool.get(key)
@@ -6959,6 +6991,14 @@ class MangaTranslator:
         except Exception:
             self._log("❌ Local inpainter module not available for preloading", "error")
             return 0
+        
+        # Normalize model path to match _get_or_init_shared_local_inpainter
+        if model_path:
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass
+        
         key = (local_method, model_path or '')
         created = 0
         

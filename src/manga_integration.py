@@ -8350,6 +8350,30 @@ class MangaTranslationTab:
             # Immediately reset UI state to re-enable start button
             self._reset_ui_state()
             self._log("\n⏹️ Translation stopped by user", "warning")
+            
+            # Scroll to bottom to show the stop message
+            try:
+                from PySide6.QtGui import QTextCursor
+                from PySide6.QtCore import QTimer
+                
+                def scroll_to_bottom():
+                    try:
+                        if hasattr(self, 'log_text') and self.log_text:
+                            self.log_text.moveCursor(QTextCursor.End)
+                            self.log_text.ensureCursorVisible()
+                            # Also scroll the parent scroll area if it exists
+                            if hasattr(self, 'scroll_area') and self.scroll_area:
+                                scrollbar = self.scroll_area.verticalScrollBar()
+                                if scrollbar:
+                                    scrollbar.setValue(scrollbar.maximum())
+                    except Exception:
+                        pass
+                
+                # Schedule scroll with a small delay to ensure the stop message is rendered
+                QTimer.singleShot(50, scroll_to_bottom)
+                QTimer.singleShot(150, scroll_to_bottom)  # Second attempt to be sure
+            except Exception:
+                pass
     
     def _reset_ui_state(self):
         """Reset UI to ready state - with widget existence checks (PySide6)"""
