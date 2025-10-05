@@ -2008,6 +2008,9 @@ class MangaTranslationTab:
         self._build_pyside6_interface(main_layout)
     
     def _build_pyside6_interface(self, main_layout):
+        # Import QSizePolicy for layout management
+        from PySide6.QtWidgets import QSizePolicy
+        
         # Apply global stylesheet for checkboxes and radio buttons
         checkbox_radio_style = """
             QCheckBox {
@@ -2341,7 +2344,8 @@ class MangaTranslationTab:
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(provider_values)
         self.provider_combo.setCurrentText(self.ocr_provider_value)
-        self.provider_combo.setMinimumWidth(150)
+        self.provider_combo.setMinimumWidth(120)  # Reduced for better fit
+        self.provider_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.provider_combo.currentTextChanged.connect(self._on_ocr_provider_change)
         self._disable_combobox_mousewheel(self.provider_combo)  # Disable mousewheel scrolling
         ocr_provider_layout.addWidget(self.provider_combo)
@@ -2350,7 +2354,8 @@ class MangaTranslationTab:
         self.provider_status_label = QLabel("")
         status_font = QFont("Arial", 9)
         self.provider_status_label.setFont(status_font)
-        self.provider_status_label.setMinimumWidth(300)
+        self.provider_status_label.setWordWrap(True)  # Allow text wrapping
+        self.provider_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         ocr_provider_layout.addWidget(self.provider_status_label)
 
         # Setup/Install button for non-cloud providers
@@ -2428,7 +2433,8 @@ class MangaTranslationTab:
         
         self.azure_key_entry = QLineEdit()
         self.azure_key_entry.setEchoMode(QLineEdit.Password)
-        self.azure_key_entry.setMinimumWidth(250)
+        self.azure_key_entry.setMinimumWidth(150)  # Reduced for better fit
+        self.azure_key_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         azure_key_layout.addWidget(self.azure_key_entry)
 
         # Show/Hide button for Azure key
@@ -2450,7 +2456,8 @@ class MangaTranslationTab:
         azure_endpoint_layout.addWidget(azure_endpoint_label)
         
         self.azure_endpoint_entry = QLineEdit()
-        self.azure_endpoint_entry.setMinimumWidth(350)
+        self.azure_endpoint_entry.setMinimumWidth(150)  # Reduced for better fit
+        self.azure_endpoint_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         azure_endpoint_layout.addWidget(self.azure_endpoint_entry)
         azure_endpoint_layout.addStretch()
         azure_frame_layout.addWidget(azure_endpoint_frame)
@@ -2901,7 +2908,8 @@ class MangaTranslationTab:
         self.local_model_path_value = self.main_gui.config.get(f'manga_{self.local_model_type_value}_model_path', '')
         self.local_model_entry = QLineEdit(self.local_model_path_value)
         self.local_model_entry.setReadOnly(True)
-        self.local_model_entry.setMinimumWidth(300)
+        self.local_model_entry.setMinimumWidth(100)  # Reduced for better fit
+        self.local_model_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.local_model_entry.setStyleSheet(
             "QLineEdit { background-color: #2b2b2b; color: #ffffff; }"
         )
@@ -3507,7 +3515,8 @@ class MangaTranslationTab:
         self.font_combo = QComboBox()
         self.font_combo.addItems(self._get_available_fonts())
         self.font_combo.setCurrentText(self.font_style_value)
-        self.font_combo.setMinimumWidth(300)
+        self.font_combo.setMinimumWidth(120)  # Reduced for better fit
+        self.font_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.font_combo.currentTextChanged.connect(lambda: (self._on_font_selected(), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_combobox_mousewheel(self.font_combo)  # Disable mousewheel scrolling
         font_style_layout.addWidget(self.font_combo)
@@ -3819,14 +3828,20 @@ class MangaTranslationTab:
         left_column_layout.addStretch()
         right_column_layout.addStretch()
         
-        # Set size policies to make columns expand properly
-        from PySide6.QtWidgets import QSizePolicy
-        left_column.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        right_column.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # Set size policies to make columns expand and shrink properly
+        left_column.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        right_column.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        
+        # Set minimum widths for columns to allow shrinking
+        left_column.setMinimumWidth(300)
+        right_column.setMinimumWidth(300)
         
         # Add columns to container with equal stretch factors
         columns_layout.addWidget(left_column, stretch=1)
         columns_layout.addWidget(right_column, stretch=1)
+        
+        # Make the columns container itself have proper size policy
+        columns_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
         # Add columns container to main layout
         main_layout.addWidget(columns_container)
