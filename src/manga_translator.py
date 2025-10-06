@@ -4316,13 +4316,23 @@ class MangaTranslator:
             # MERGING SECTION (applies to all providers)
             # Check if bubble detection is enabled
             if ocr_settings.get('bubble_detection_enabled', False):
-                # For manga-ocr and similar providers, skip merging since regions already have bubble_bounds from OCR
-                # Only Azure and Google need merging because they return line-level OCR results
-                if self.ocr_provider in ['manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']:
+                # Build list of providers that should skip merging
+                skip_merge_providers = ['rapidocr', 'manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']
+                
+                # If RT-DETR guidance is enabled for cloud providers, they also skip merging
+                # (they process regions individually, not full image line-by-line)
+                use_rtdetr_guidance = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                if use_rtdetr_guidance:
+                    if self.ocr_provider in ['google', 'azure']:
+                        skip_merge_providers.extend(['google', 'azure'])
+                
+                if self.ocr_provider in skip_merge_providers:
                     self._log("🎯 Skipping bubble detection merge (regions already aligned with RT-DETR)")
-                    # Regions already have bubble_bounds set from OCR phase - no need to merge
+                    # RapidOCR: Already matched to RT-DETR blocks via comic-translate approach
+                    # Google/Azure (with RT-DETR guidance): Processed regions individually, already aligned
+                    # Others: Regions already have bubble_bounds set from OCR phase - no need to merge
                 else:
-                    # Azure and Google return line-level results that need to be merged into bubbles
+                    # Azure and Google (without RT-DETR guidance) return full-image line-level results that need merging
                     self._log("🤖 Using AI bubble detection for merging")
                     regions = self._merge_with_bubble_detection(regions, image_path)
             else:
