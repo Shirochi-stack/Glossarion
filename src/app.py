@@ -262,10 +262,11 @@ class GlossarionWeb:
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Keep original Japanese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
-            ), 
+            ),
             "Manga_KR": (
                 "You are a professional Korean to English Manhwa translator.\n"
                 "You have both the image of the Manhwa panel and the extracted text to work with.\n"
@@ -283,10 +284,11 @@ class GlossarionWeb:
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (“ ”, ‘ ‘, 「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
-            ), 
+            ),
             "Manga_CN": (
                 "You are a professional Chinese to English Manga translator.\n"
                 "You have both the image of the Manga panel and the extracted text to work with.\n"
@@ -297,14 +299,15 @@ class GlossarionWeb:
                 "- Consider the scene's mood and atmosphere.\n"
                 "- Note any action or movement depicted.\n"
                 "- Use visual cues to determine the appropriate tone and emotion.\n"
-                "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n"
+                "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
 
                 "DIALOGUE REQUIREMENTS:\n"
                 "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),
