@@ -148,11 +148,58 @@ class ChapterExtractionManager:
                 
                 # Parse output based on prefix
                 if line.startswith("[PROGRESS]"):
-                    # Progress update
+                    # Progress update - format as progress bar
                     message = line[10:].strip()
-                    if progress_callback:
-                        progress_callback(message)
-                    self._log(f"📊 {message}")
+                    
+                    # Try to format as progress bar
+                    import re
+                    match = re.search(r'(\d+)/(\d+)', message)
+                    if match:
+                        current = int(match.group(1))
+                        total = int(match.group(2))
+                        percent = int(100 * current / total)
+                        
+                        # Determine prefix and track last percent for this type
+                        if "Scanning files" in message:
+                            prefix = "📂 Scanning files"
+                            prog_type = "scan"
+                        elif "Extracting resources" in message:
+                            prefix = "📦 Extracting resources"
+                            prog_type = "extract"
+                        elif "Processing chapters" in message:
+                            prefix = "📚 Processing chapters"
+                            prog_type = "process"
+                        elif "Processed" in message:
+                            prefix = "📊 Processing metadata"
+                            prog_type = "processed"
+                        else:
+                            prefix = "📊 Progress"
+                            prog_type = "other"
+                        
+                        # Only show progress every 10% or at completion
+                        if not hasattr(self, '_last_percent'):
+                            self._last_percent = {}
+                        
+                        last_percent = self._last_percent.get(prog_type, -1)
+                        
+                        # Show if: crossed a 10% threshold, or reached 100%
+                        should_show = (percent // 10 > last_percent // 10) or (percent == 100)
+                        
+                        if should_show:
+                            self._last_percent[prog_type] = percent
+                            
+                            # Create progress bar
+                            bar_length = 20
+                            filled = int(bar_length * current / total)
+                            bar = '█' * filled + '░' * (bar_length - filled)
+                            
+                            formatted_message = f"{prefix}: [{bar}] {current}/{total} ({percent}%)"
+                            
+                            # Only log once - _log will call log_callback if it exists
+                            self._log(formatted_message)
+                    else:
+                        # Not a progress message with numbers
+                        self._log(f"📊 {message}")
                     
                 elif line.startswith("[INFO]"):
                     # Information message

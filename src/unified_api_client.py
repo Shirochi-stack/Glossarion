@@ -7027,8 +7027,9 @@ class UnifiedClient:
                 break
         else:
             # No prefix found - this shouldn't happen if routing worked correctly
-            print(f"No ElectronHub prefix found in model '{self.model}', using as-is")
-            print(f"⚠️ ElectronHub: No prefix found in '{self.model}', using as-is")
+            #print(f"No ElectronHub prefix found in model '{self.model}', using as-is")
+            #print(f"⚠️ ElectronHub: No prefix found in '{self.model}', using as-is")
+            pass
         
         # Log the API call details
         logger.info(f"Sending to ElectronHub API: model='{actual_model}', endpoint='{base_url}'")

@@ -28,6 +28,7 @@ def get_model_options() -> List[str]:
         "grok-4-0709", "grok-4-fast", "grok-4-fast-reasoning",  "grok-4-fast-reasoning-latest", "grok-3", "grok-3-mini",
         
         # Vertex AI Model Garden - Claude models (confirmed)
+        "claude-sonnet-4-5-20250929",
         "claude-4-opus@20250514",
         "claude-4-sonnet@20250514",
         "claude-opus-4@20250514",
@@ -118,9 +119,23 @@ def get_model_options() -> List[str]:
         "or/google/gemma-3-27b-it:free",
         
         # For ElectronHub, prefix with 'eh/'
+        "eh/claude-sonnet-4-5-20250929", "eh/claude-sonnet-4-5-20250929-thinking",        
+        "eh/claude-sonnet-4-20250514:aws-bedrock", "eh/claude-sonnet-4-20250514-thinking:aws-bedrock",
+        "eh/claude-sonnet-4-20250514", "eh/claude-sonnet-4-20250514-thinking",       
+        "eh/claude-opus-4-1-20250805-thinking","eh/claude-opus-4-1-20250805:aws-bedrock",
+        "eh/claude-opus-4-1-20250805", "eh/claude-opus-4-20250514:aws-bedrock",
+        "eh/gpt-5-chat-latest:free","eh/gpt-5-high","eh/gpt-5-low","eh/gpt-5-chat-latest","eh/gpt-5-minimal", 
+        "eh/gpt-5-mini:free","eh/gpt-5-mini-minimal","eh/gpt-5-nano:free","eh/gpt-4o",
         "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
-        "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
-        "eh/gemini-pro", "eh/deepseek-coder-33b",
+        "eh/gemini-2.5-flash","eh/gemini-2.5-flash-thinking", "eh/gemini-2.5-flash-preview-05-20",
+        "eh/gemini-2.5-flash-preview-05-20-thinking","eh/gemini-2.5-flash-preview-09-2025",
+        "eh/gemini-2.5-flash-lite", "eh/gemini-2.5-pro","eh/gemini-2.5-pro-thinking",
+        "eh/gemini-2.5-pro-preview-06-05","eh/gemini-2.5-pro-preview-05-06", "eh/gemini-2.5-pro-preview-03-25",
+        "eh/gemini-2.0-flash-001","eh/gemini-2.0-flash-exp","eh/gemini-2.0-flash-thinking-exp", "eh/grok-4-fast",
+        "eh/grok-4-0709", "eh/grok-3", "eh/grok-3-mini-fast", "eh/grok-3-mini", "eh/grok-3-fast",
+        "eh/grok-code-fast-1","eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large", "eh/deepseek-v3-0324:free",
+        "eh/deepseek-v3.1:free", "eh/deepseek-v3.1", "eh/deepseek-v3.2-exp:free", "eh/deepseek-v3.2-exp" , "eh/deepseek-v3.2-exp-thinking" ,
+        "eh/gemini-pro", "eh/deepseek-coder-33b",       
         
         # Last Resort
         "deepl",  # Will use DeepL API

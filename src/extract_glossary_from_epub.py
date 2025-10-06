@@ -1671,10 +1671,12 @@ def main(log_callback=None, stop_callback=None):
             if range_start is not None and range_end is not None:
                 chapter_num = idx + 1  # 1-based chapter numbering
                 if not (range_start <= chapter_num <= range_end):
-                    # Check if this is from a text file
+                    # Track skipped chapters for summary (don't print individually)
+                    if not hasattr(extract_glossary_from_epub, '_skipped_chapters'):
+                        extract_glossary_from_epub._skipped_chapters = []
                     is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
                     terminology = "Section" if is_text_chapter else "Chapter"
-                    print(f"[SKIP] {terminology} {chapter_num} - outside range filter")
+                    extract_glossary_from_epub._skipped_chapters.append((chapter_num, terminology))
                     continue
                 
             if idx in completed:
@@ -2038,7 +2040,20 @@ def main(log_callback=None, stop_callback=None):
                     print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
                     return
     
-    print(f"Done. Glossary saved to {args.output}")
+    # Print skip summary if any chapters were skipped
+    if hasattr(extract_glossary_from_epub, '_skipped_chapters') and extract_glossary_from_epub._skipped_chapters:
+        skipped = extract_glossary_from_epub._skipped_chapters
+        print(f"\n📊 Skipped {len(skipped)} chapters outside range {range_start}-{range_end}")
+        if len(skipped) <= 10:
+            chapter_list = ', '.join([f"{term} {num}" for num, term in skipped])
+            print(f"   Skipped: {chapter_list}")
+        else:
+            chapter_nums = [num for num, _ in skipped]
+            print(f"   Range: {min(chapter_nums)} to {max(chapter_nums)}")
+        # Clear the list
+        extract_glossary_from_epub._skipped_chapters = []
+    
+    print(f"\nDone. Glossary saved to {args.output}")
     
     # Also save as CSV format for compatibility
     try:

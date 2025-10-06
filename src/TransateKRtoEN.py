@@ -115,6 +115,45 @@ def _process_sentence_batch_for_extraction(args):
     return local_word_freq, local_important, local_seen, batch_idx
 from tqdm import tqdm
 
+class ProgressBar:
+    """Simple in-place progress bar for terminal output"""
+    _last_line_length = 0
+    
+    @classmethod
+    def update(cls, current, total, prefix="Progress", bar_length=30):
+        """Update progress bar in-place
+        
+        Args:
+            current: Current progress value
+            total: Total value for 100% completion
+            prefix: Text to show before the bar
+            bar_length: Length of the progress bar in characters
+        """
+        if total == 0:
+            return
+            
+        percent = min(100, int(100 * current / total))
+        filled = int(bar_length * current / total)
+        bar = '█' * filled + '░' * (bar_length - filled)
+        
+        # Build the line
+        line = f"\r{prefix}: [{bar}] {current}/{total} ({percent}%)"
+        
+        # Pad with spaces to clear previous line if it was longer
+        if len(line) < cls._last_line_length:
+            line += ' ' * (cls._last_line_length - len(line))
+        
+        cls._last_line_length = len(line)
+        
+        # Print without newline
+        print(line, end='', flush=True)
+    
+    @classmethod
+    def finish(cls):
+        """Finish progress bar and move to next line"""
+        print()  # Move to next line
+        cls._last_line_length = 0
+
 def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
     return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
@@ -1945,13 +1984,19 @@ class ChapterExtractor:
                         
                         # Progress updates
                         if completed % 10 == 0 or completed == len(chapters):
-                            progress_msg = f"Processed {completed}/{len(chapters)} chapters"
-                            print(f"   📊 {progress_msg}")
                             if self.progress_callback:
+                                progress_msg = f"Processed {completed}/{len(chapters)} chapters"
                                 self.progress_callback(progress_msg)
+                            else:
+                                # Show progress bar in terminal
+                                ProgressBar.update(completed, len(chapters), prefix="📊 Processing metadata")
                 except Exception as e:
                     chapter = future_to_chapter[future]
                     print(f"   ❌ Error processing chapter {chapter['num']}: {e}")
+        
+        # Finish progress bar
+        if not self.progress_callback:
+            ProgressBar.finish()
         
         # Sort chapters_info by chapter number to maintain order
         chapters_info.sort(key=lambda x: x['num'])
@@ -2016,7 +2061,9 @@ class ChapterExtractor:
         for resource_type in ['css', 'fonts', 'images']:
             os.makedirs(os.path.join(output_dir, resource_type), exist_ok=True)
         
-        print(f"📦 Extracting resources in parallel...")
+        # Only print if no callback (avoid duplicates in subprocess)
+        if not self.progress_callback:
+            print(f"📦 Extracting resources in parallel...")
         
         # Get list of files to process
         file_list = [f for f in zf.namelist() if not f.endswith('/') and os.path.basename(f)]
@@ -2067,8 +2114,12 @@ class ChapterExtractor:
                 extracted_count += 1
                 
                 # Progress update every 20 files
-                if extracted_count % 20 == 0 and self.progress_callback:
-                    self.progress_callback(f"Extracting resources: {extracted_count}/{total_resources}")
+                if extracted_count % 20 == 0:
+                    if self.progress_callback:
+                        self.progress_callback(f"Extracting resources: {extracted_count}/{total_resources}")
+                    else:
+                        # Print progress bar in terminal
+                        ProgressBar.update(extracted_count, total_resources, prefix="📦 Extracting resources")
                 
                 # Yield to GUI periodically (can be disabled for max speed)
                 if extracted_count % 10 == 0 and os.getenv("ENABLE_GUI_YIELD", "1") == "1":
@@ -2154,6 +2205,9 @@ class ChapterExtractor:
         # Update progress for file collection
         if self.progress_callback and total_files > 100:
             self.progress_callback(f"Scanning {total_files} files in EPUB...")
+        elif total_files > 100 and not self.progress_callback:
+            # Print initial message for progress bar (only if no callback)
+            print(f"📂 Scanning {total_files} files in EPUB...")
         
         for idx, name in enumerate(file_list):
             # Check stop while collecting files
@@ -2165,8 +2219,12 @@ class ChapterExtractor:
             if idx % 50 == 0 and idx > 0:
                 if os.getenv("ENABLE_GUI_YIELD", "1") == "1":
                     time.sleep(0.001)  # Brief yield to GUI
-                if self.progress_callback and total_files > 100:
-                    self.progress_callback(f"Scanning files: {idx}/{total_files}")
+                if total_files > 100:
+                    if self.progress_callback:
+                        self.progress_callback(f"Scanning files: {idx}/{total_files}")
+                    else:
+                        # Print progress bar in terminal
+                        ProgressBar.update(idx, total_files, prefix="📂 Scanning files")
                 
             if name.lower().endswith(('.xhtml', '.html', '.htm')):
                 # Skip cover files by default unless override is enabled
@@ -2201,6 +2259,10 @@ class ChapterExtractor:
                 # else: full mode - no filtering at all (except cover which is filtered above)
                 
                 html_files.append(name)
+        
+        # Finish progress bar if we were using it
+        if total_files > 100 and not self.progress_callback:
+            ProgressBar.finish()
         
         # Update mode description to include enhanced mode
         mode_description = {
@@ -2316,9 +2378,13 @@ class ChapterExtractor:
             with processed_count_lock:
                 processed_count += 1
                 current_count = processed_count
-                if self.progress_callback and current_count % 5 == 0:
-                    progress_msg = f"Processing chapters: {current_count}/{total_files} ({current_count*100//total_files}%)"
-                    self.progress_callback(progress_msg)
+                if current_count % 5 == 0:
+                    if self.progress_callback:
+                        progress_msg = f"Processing chapters: {current_count}/{total_files} ({current_count*100//total_files}%)"
+                        self.progress_callback(progress_msg)
+                    else:
+                        # Print progress bar in terminal
+                        ProgressBar.update(current_count, total_files, prefix="📚 Processing chapters")
             
             try:
                 # Read file data
@@ -2477,7 +2543,11 @@ class ChapterExtractor:
                 # Skip truly empty files in smart mode
                 # BUT: Never skip anything when merging is disabled (to ensure section files are processed)
                 if effective_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
-                    print(f"[SKIP] Nearly empty file: {file_path} ({len(content_text)} chars)")
+                    # Increment skip counter instead of printing (will be summarized later)
+                    with processed_count_lock:
+                        if not hasattr(process_single_html_file, 'skipped_files'):
+                            process_single_html_file.skipped_files = []
+                        process_single_html_file.skipped_files.append((file_path, 'empty', len(content_text)))
                     return None
                 
                 # Get actual chapter number based on original position
@@ -2628,11 +2698,11 @@ class ChapterExtractor:
                 return None
         
         # Process files in parallel or sequentially based on file count
-        print(f"🚀 Processing {len(files_to_process)} HTML files...")
+        # Only print if no callback (avoid duplicates)
+        if not self.progress_callback:
+            print(f"🚀 Processing {len(files_to_process)} HTML files...")
         
-        # Initial progress
-        if self.progress_callback:
-            self.progress_callback(f"Processing {len(files_to_process)} chapters...")
+        # Initial progress - no message needed, progress bar will show
         
         candidate_chapters = []  # For smart mode
         chapters_direct = []      # For other modes
@@ -2694,9 +2764,24 @@ class ChapterExtractor:
                     else:
                         chapters_direct.append(chapter_info)
         
-        # Final progress update
-        if self.progress_callback:
+        # Final progress update and cleanup progress bar
+        if not self.progress_callback:
+            ProgressBar.finish()
+        else:
             self.progress_callback(f"Chapter processing complete: {len(candidate_chapters) + len(chapters_direct)} chapters")
+        
+        # Print skip summary if any files were skipped
+        if hasattr(process_single_html_file, 'skipped_files') and process_single_html_file.skipped_files:
+            skipped = process_single_html_file.skipped_files
+            print(f"\n📊 Skipped {len(skipped)} files during processing:")
+            empty_count = sum(1 for _, reason, _ in skipped if reason == 'empty')
+            if empty_count > 0:
+                print(f"   • {empty_count} nearly empty files")
+            # Show first 3 examples if debug enabled
+            if os.getenv('DEBUG_SKIP_MESSAGES', '0') == '1' and skipped:
+                print("   Examples:")
+                for path, reason, size in skipped[:3]:
+                    print(f"     - {os.path.basename(path)} ({size} chars)")
         
         # Sort direct chapters by file index to maintain order
         chapters_direct.sort(key=lambda x: x["file_index"])
@@ -2778,7 +2863,10 @@ class ChapterExtractor:
                             
                         # Check if it's very small (might be a separator or note)
                         if chapter["file_size"] < 200:
-                            print(f"    [SKIP] Very small file: {chapter['filename']} ({chapter['file_size']} chars)")
+                            # Collect for summary instead of printing
+                            if not hasattr(self, '_smart_mode_skips'):
+                                self._smart_mode_skips = []
+                            self._smart_mode_skips.append(('small', chapter['filename'], chapter['file_size']))
                             continue
                         
                         # Check if it has similar size to existing chapters (might be duplicate)
@@ -2787,8 +2875,10 @@ class ChapterExtractor:
                                           if abs(c["file_size"] - size) < 50]
                         
                         if similar_chapters:
-                            # Might be a duplicate, skip it
-                            print(f"    [SKIP] Possible duplicate: {chapter['filename']} (similar size to {len(similar_chapters)} chapters)")
+                            # Might be a duplicate, skip it (collect for summary)
+                            if not hasattr(self, '_smart_mode_skips'):
+                                self._smart_mode_skips = []
+                            self._smart_mode_skips.append(('duplicate', chapter['filename'], len(similar_chapters)))
                             continue
                         
                         # Otherwise, add as appendix
@@ -2802,6 +2892,26 @@ class ChapterExtractor:
         else:
             # For other modes or smart mode with merging disabled
             chapters = chapters_direct
+        
+        # Print smart mode skip summary if any
+        if hasattr(self, '_smart_mode_skips') and self._smart_mode_skips:
+            print(f"\n📊 Smart mode filtering summary:")
+            small_count = sum(1 for reason, _, _ in self._smart_mode_skips if reason == 'small')
+            dup_count = sum(1 for reason, _, _ in self._smart_mode_skips if reason == 'duplicate')
+            if small_count > 0:
+                print(f"   • Skipped {small_count} very small files")
+            if dup_count > 0:
+                print(f"   • Skipped {dup_count} possible duplicates")
+            # Show examples if debug enabled
+            if os.getenv('DEBUG_SKIP_MESSAGES', '0') == '1':
+                print("   Examples:")
+                for reason, filename, detail in self._smart_mode_skips[:3]:
+                    if reason == 'small':
+                        print(f"     - {filename} ({detail} chars)")
+                    else:
+                        print(f"     - {filename} (similar to {detail} chapters)")
+            # Clear the list
+            self._smart_mode_skips = []
         
         # Sort chapters by number
         chapters.sort(key=lambda x: x["num"])
@@ -9536,11 +9646,44 @@ def main(log_callback=None, stop_callback=None):
     progress_manager = ProgressManager(payloads_dir)
     
     # Create ChapterExtractor with progress callback if available
+    # Filter to show only every 10% progress update
     chapter_progress_callback = None
+    _progress_state = {}  # Track last shown percentage for each progress type
+    
     if log_callback:
-        # Create a wrapper that formats progress messages for the log
         def chapter_progress_callback(msg):
-            log_callback(f"📊 {msg}")
+            # Check if this is a progress message with percentage
+            import re
+            
+            # Try to extract percentage from formatted progress bars
+            percent_match = re.search(r'\((\d+)%\)', msg)
+            if percent_match:
+                percent = int(percent_match.group(1))
+                
+                # Determine progress type from message
+                if '📂' in msg or 'Scanning' in msg:
+                    prog_type = 'scan'
+                elif '📦' in msg or 'Extracting' in msg:
+                    prog_type = 'extract'
+                elif '📚' in msg or 'Processing chapters' in msg:
+                    prog_type = 'process'
+                elif '📊' in msg or 'metadata' in msg.lower():
+                    prog_type = 'metadata'
+                else:
+                    prog_type = 'other'
+                
+                # Get last shown percentage for this type
+                last_percent = _progress_state.get(prog_type, -1)
+                
+                # Show if: crossed a 10% threshold, or reached 100%
+                should_show = (percent // 10 > last_percent // 10) or (percent == 100)
+                
+                if should_show:
+                    _progress_state[prog_type] = percent
+                    log_callback(msg)
+            else:
+                # Not a progress percentage message, always show
+                log_callback(msg)
     
     chapter_extractor = ChapterExtractor(progress_callback=chapter_progress_callback)
     glossary_manager = GlossaryManager()
@@ -10450,10 +10593,12 @@ def main(log_callback=None, stop_callback=None):
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
 
-
         if start is not None:
             if not (start <= c['actual_chapter_num'] <= end):
-                #print(f"[SKIP] Chapter {c['actual_chapter_num']} outside range {start}-{end}")
+                # Track skipped chapters for summary (don't print individually)
+                if not hasattr(config, '_range_skipped_chapters'):
+                    config._range_skipped_chapters = []
+                config._range_skipped_chapters.append(c['actual_chapter_num'])
                 continue
                 
         needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
@@ -10504,6 +10649,15 @@ def main(log_callback=None, stop_callback=None):
         chunks_per_chapter[idx] = len(chunks)
         total_chunks_needed += chunks_per_chapter[idx]
             
+    # Print range skip summary if any chapters were skipped
+    if hasattr(config, '_range_skipped_chapters') and config._range_skipped_chapters:
+        skipped = config._range_skipped_chapters
+        print(f"📊 Skipped {len(skipped)} chapters outside range {start}-{end}")
+        if len(skipped) <= 10:
+            print(f"   Skipped: {', '.join(map(str, sorted(skipped)))}")
+        else:
+            print(f"   Range: {min(skipped)} to {max(skipped)}")
+    
     terminology = "Sections" if is_text_file else "Chapters"
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
     print(f"📚 {terminology} to process: {chapters_to_process}")
@@ -10591,13 +10745,12 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()
                     
             if not needs_translation:
-                # Modify skip_reason to use appropriate terminology
+                # Track skips for summary instead of printing each one
+                if not hasattr(config, '_batch_skipped_chapters'):
+                    config._batch_skipped_chapters = []
                 is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                 terminology = "Section" if is_text_source else "Chapter"
-                
-                # Replace "Chapter" with appropriate terminology in skip_reason
-                skip_reason_modified = skip_reason.replace("Chapter", terminology)
-                print(f"[SKIP] {skip_reason_modified}")
+                config._batch_skipped_chapters.append((actual_num, terminology, skip_reason))
                 chapters_completed += 1
                 continue
             
@@ -10628,6 +10781,14 @@ def main(log_callback=None, stop_callback=None):
             
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
+        
+        # Print skip summary for batch mode
+        if hasattr(config, '_batch_skipped_chapters') and config._batch_skipped_chapters:
+            skipped = config._batch_skipped_chapters
+            print(f"\n📊 Skipped {len(skipped)} already completed chapters")
+            if os.getenv('DEBUG_SKIP_MESSAGES', '0') == '1' and len(skipped) <= 5:
+                for num, term, reason in skipped[:5]:
+                    print(f"   • {term} {num}: {reason.split('(')[0].strip()}")
         
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
         
@@ -10873,7 +11034,7 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             if start is not None and not (start <= actual_num <= end):
-                #print(f"[SKIP] Chapter {actual_num} (file: {c.get('original_basename', 'unknown')}) outside range {start}-{end}")
+                # Skip silently (already summarized in earlier pass)
                 continue
             
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
@@ -10890,13 +11051,12 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.update(idx, actual_num, content_hash, None, status="file_missing")
                     progress_manager.save() 
             if not needs_translation:
-                # Modify skip_reason to use appropriate terminology
+                # Track skips for summary (already printed in batch mode section above)
+                if not hasattr(config, '_sequential_skipped_chapters'):
+                    config._sequential_skipped_chapters = []
                 is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                 terminology = "Section" if is_text_source else "Chapter"
-                
-                # Replace "Chapter" with appropriate terminology in skip_reason
-                skip_reason_modified = skip_reason.replace("Chapter", terminology)
-                print(f"[SKIP] {skip_reason_modified}")
+                config._sequential_skipped_chapters.append((actual_num, terminology, skip_reason))
                 continue
 
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
@@ -11523,7 +11683,9 @@ def main(log_callback=None, stop_callback=None):
                     f.write(text_content)
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                # Don't print individual "Processed" messages - these are redundant with the main progress display
+                if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
+                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
             else:
                 # For EPUB files, keep original HTML behavior
@@ -11531,7 +11693,9 @@ def main(log_callback=None, stop_callback=None):
                     f.write(cleaned)
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                # Don't print individual "Processed" messages - these are redundant with the main progress display
+                if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
+                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
             # Determine status based on comprehensive failure detection
             if is_qa_failed_response(cleaned):
