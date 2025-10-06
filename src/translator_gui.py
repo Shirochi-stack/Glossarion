@@ -1765,11 +1765,12 @@ Text to analyze:
                 "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
 
                 "DIALOGUE REQUIREMENTS:\n"
-                "- Match the translation tone to the character’s expression.\n"
+                "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
-                "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+                "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Keep original Japanese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ), 
@@ -1786,11 +1787,12 @@ Text to analyze:
                 "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
 
                 "DIALOGUE REQUIREMENTS:\n"
-                "- Match the translation tone to the character’s expression.\n"
+                "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
-                "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+                "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ), 
@@ -1807,11 +1809,12 @@ Text to analyze:
                 "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n"
 
                 "DIALOGUE REQUIREMENTS:\n"
-                "- Match the translation tone to the character’s expression.\n"
+                "- Match the translation tone to the character's expression.\n"
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
-                "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+                "- Keep speech patterns consistent with the character's appearance and demeanor.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),   
