@@ -3592,7 +3592,7 @@ class MangaSettingsDialog(QDialog):
         panels_layout.addWidget(self.panels_label)
         
         self.panel_max_workers_spinbox = QSpinBox()
-        self.panel_max_workers_spinbox.setRange(1, 12)
+        self.panel_max_workers_spinbox.setRange(1, 999)
         self.panel_max_workers_spinbox.setValue(self.settings.get('advanced', {}).get('panel_max_workers', 2))
         panels_layout.addWidget(self.panel_max_workers_spinbox)
         panels_layout.addStretch()
