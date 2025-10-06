@@ -1681,7 +1681,9 @@ class UnifiedClient:
                                  self.current_key_use_individual_endpoint and 
                                  self.current_key_azure_endpoint)
         
+        print(f"[DEBUG] _apply_individual_key_endpoint_if_needed: has_individual_endpoint={has_individual_endpoint}")
         if has_individual_endpoint:
+            print(f"[DEBUG] Individual endpoint: {self.current_key_azure_endpoint}")
             # Use individual endpoint - works independently of global custom endpoint toggle
             individual_endpoint = self.current_key_azure_endpoint
             
@@ -1736,8 +1738,10 @@ class UnifiedClient:
                         base_url=individual_endpoint
                     )
                 
-                # Set flag to prevent _setup_client from overriding this client
+                # Set flags to prevent _setup_client and _send_openai_compatible from overriding
                 self._individual_endpoint_applied = True
+                self._skip_global_custom_endpoint = True
+                print(f"[DEBUG] Individual non-Azure endpoint applied: {individual_endpoint}")
                 
                 # CRITICAL: Update thread-local storage with our correct client
                 tls = self._get_thread_local_client()
@@ -2807,8 +2811,18 @@ class UnifiedClient:
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
         
+        # CRITICAL: Skip global custom endpoint if this key has an individual endpoint enabled
+        has_individual_endpoint = (hasattr(self, 'current_key_use_individual_endpoint') and 
+                                  self.current_key_use_individual_endpoint)
+        
+        # Debug: Show individual endpoint status
+        if self._multi_key_mode:
+            print(f"[DEBUG] _setup_client: has_individual_endpoint={has_individual_endpoint}, "
+                  f"current_key_use_individual_endpoint={getattr(self, 'current_key_use_individual_endpoint', 'NOT SET')}")
+        
         # Apply custom endpoint logic when enabled - override any model type (except Gemini which has its own toggle)
-        if custom_base_url and custom_base_url != 'https://api.openai.com/v1' and use_custom_endpoint:
+        # BUT: Skip if this key has its own individual endpoint configured
+        if custom_base_url and custom_base_url != 'https://api.openai.com/v1' and use_custom_endpoint and not has_individual_endpoint:
             if not self.client_type:
                 # No prefix matched - assume it's a custom model that should use OpenAI endpoint
                 self.client_type = 'openai'
@@ -8512,7 +8526,9 @@ class UnifiedClient:
         is_local_endpoint = False
         
         # Never override OpenRouter base_url with custom endpoint
-        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter"):
+        # CRITICAL: Also skip if individual endpoint was already applied
+        skip_custom = getattr(self, '_skip_global_custom_endpoint', False)
+        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter") and not skip_custom:
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
                 # Check if it's Azure
