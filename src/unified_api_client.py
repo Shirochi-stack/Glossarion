@@ -3967,6 +3967,8 @@ class UnifiedClient:
                             'google_credentials': fb.get('google_credentials'),
                             'azure_endpoint': fb.get('azure_endpoint'),
                             'google_region': fb.get('google_region'),
+                            'azure_api_version': fb.get('azure_api_version'),
+                            'use_individual_endpoint': fb.get('use_individual_endpoint', False),
                             'label': 'FALLBACK KEY'
                         })
                 except Exception as e:
@@ -3985,6 +3987,8 @@ class UnifiedClient:
                 fallback_google_creds = fallback_data.get('google_credentials')
                 fallback_azure_endpoint = fallback_data.get('azure_endpoint')
                 fallback_google_region = fallback_data.get('google_region')
+                fallback_azure_api_version = fallback_data.get('azure_api_version')
+                use_individual_endpoint = fallback_data.get('use_individual_endpoint', False)
                 
                 print(f"[{label} {idx+1}/{max_attempts}] Trying {fallback_model}")
                 print(f"[{label} {idx+1}] Failed multi-key model was: {self.model}")
@@ -4007,12 +4011,15 @@ class UnifiedClient:
                         temp_client.current_key_google_region = fallback_google_region
                         print(f"[{label} {idx+1}] Using fallback Google region: {fallback_google_region}")
                     
-                    if fallback_azure_endpoint:
+                    # Only apply individual endpoint if the toggle is enabled
+                    if use_individual_endpoint and fallback_azure_endpoint:
                         temp_client.current_key_azure_endpoint = fallback_azure_endpoint
+                        temp_client.current_key_use_individual_endpoint = True
+                        temp_client.current_key_azure_api_version = fallback_azure_api_version or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
                         # Set up Azure-specific configuration
                         temp_client.is_azure = True
                         temp_client.azure_endpoint = fallback_azure_endpoint
-                        temp_client.azure_api_version = os.getenv('AZURE_API_VERSION', '2024-08-01-preview')
+                        temp_client.azure_api_version = temp_client.current_key_azure_api_version
                         print(f"[{label} {idx+1}] Using fallback Azure endpoint: {fallback_azure_endpoint}")
                         print(f"[{label} {idx+1}] Azure API version: {temp_client.azure_api_version}")
 
@@ -4192,6 +4199,7 @@ class UnifiedClient:
                 fallback_azure_endpoint = fb.get('azure_endpoint')
                 fallback_google_region = fb.get('google_region')
                 fallback_azure_api_version = fb.get('azure_api_version')
+                use_individual_endpoint = fb.get('use_individual_endpoint', False)
                 
                 if not fallback_key or not fallback_model:
                     print(f"[FALLBACK DIRECT {idx+1}] Invalid key data, skipping")
@@ -4227,13 +4235,15 @@ class UnifiedClient:
                         temp_client.current_key_google_region = fallback_google_region
                         print(f"[FALLBACK DIRECT {idx+1}] Using Google region: {fallback_google_region}")
                     
-                    if fallback_azure_endpoint:
+                    # Only apply individual endpoint if the toggle is enabled
+                    if use_individual_endpoint and fallback_azure_endpoint:
                         temp_client.current_key_azure_endpoint = fallback_azure_endpoint
+                        temp_client.current_key_use_individual_endpoint = True
+                        temp_client.current_key_azure_api_version = fallback_azure_api_version or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
                         # Set up Azure-specific configuration
                         temp_client.is_azure = True
                         temp_client.azure_endpoint = fallback_azure_endpoint
-                        # Use per-key Azure API version, fallback to environment, then default
-                        temp_client.azure_api_version = fallback_azure_api_version or os.getenv('AZURE_API_VERSION', '2025-01-01-preview')
+                        temp_client.azure_api_version = temp_client.current_key_azure_api_version
                         print(f"[FALLBACK DIRECT {idx+1}] Using Azure endpoint: {fallback_azure_endpoint}")
                         print(f"[FALLBACK DIRECT {idx+1}] Azure API version: {temp_client.azure_api_version}")
                     
