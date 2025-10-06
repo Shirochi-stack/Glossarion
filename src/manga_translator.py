@@ -6528,16 +6528,16 @@ class MangaTranslator:
             self._log(f"🎯 Preserving punctuation-only text: '{text}'", "debug")
             return text
         
-        # Remove quotes from start/end but be VERY CAREFUL with dots/punctuation
-        # Only strip quotes and decorative punctuation, NOT dots that are part of the content
+        # Remove quotes from start/end but PRESERVE CJK quotation marks
+        # CJK quotation marks (「」『』【】《》〈〉) are now rendered with Meiryo font
+        # Only strip Western quotes that don't render well
         while len(text) > 0:
             old_len = len(text)
             
-            # Remove ONLY quotes from start, NOT dots (dots are often part of sound effects)
-            text = text.lstrip('"\'`''""「」『』【】《》〈〉')
-            
-            # Remove ONLY quotes from end, NOT dots
-            text = text.rstrip('"\'`''""「」『』【】《》〈〉')
+            # Remove ONLY Western-style quotes from start/end
+            # Preserve CJK quotation marks for proper Meiryo rendering
+            text = text.lstrip('"\'`‘’“”')
+            text = text.rstrip('"\'`‘’“”')
             
             # If nothing changed, we're done
             if len(text) == old_len:
