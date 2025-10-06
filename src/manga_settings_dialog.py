@@ -2248,29 +2248,42 @@ class MangaSettingsDialog(QDialog):
         ocr_layout = QVBoxLayout(ocr_group)
         content_layout.addWidget(ocr_group)
         
-        # Confidence threshold
+        # Cloud OCR Confidence threshold (for Google/Azure only)
         conf_widget = QWidget()
         conf_layout = QHBoxLayout(conf_widget)
         conf_layout.setContentsMargins(0, 0, 0, 0)
         ocr_layout.addWidget(conf_widget)
         
-        conf_label = QLabel("Confidence Threshold:")
+        conf_label = QLabel("☁️ Cloud OCR Confidence:")
         conf_label.setMinimumWidth(180)
+        conf_label.setToolTip("Applies to Google Cloud Vision and Azure OCR only.\nLocal OCR (RapidOCR, PaddleOCR, etc.) uses RT-DETR confidence only (comic-translate approach).")
         conf_layout.addWidget(conf_label)
+        
+        # Get cloud OCR confidence (fallback to old setting for migration)
+        cloud_conf = self.settings['ocr'].get('cloud_ocr_confidence', self.settings['ocr'].get('confidence_threshold', 0.0))
         
         self.confidence_threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.confidence_threshold_slider.setRange(0, 100)
-        self.confidence_threshold_slider.setValue(int(self.settings['ocr']['confidence_threshold'] * 100))
+        self.confidence_threshold_slider.setValue(int(cloud_conf * 100))
         self.confidence_threshold_slider.setMinimumWidth(250)
+        self.confidence_threshold_slider.setToolTip("0 = accept all (recommended, like comic-translate)\nHigher values filter low-confidence cloud OCR results")
         conf_layout.addWidget(self.confidence_threshold_slider)
         
-        self.confidence_threshold_label = QLabel(f"{self.settings['ocr']['confidence_threshold']:.2f}")
+        self.confidence_threshold_label = QLabel(f"{cloud_conf:.2f}")
         self.confidence_threshold_label.setMinimumWidth(50)
         self.confidence_threshold_slider.valueChanged.connect(
             lambda v: self.confidence_threshold_label.setText(f"{v/100:.2f}")
         )
         conf_layout.addWidget(self.confidence_threshold_label)
         conf_layout.addStretch()
+        
+        # Add info label below slider
+        conf_info = QLabel("ℹ️ Local OCR providers (RapidOCR, PaddleOCR, EasyOCR, DocTR) don't use this - they rely on RT-DETR confidence only")
+        conf_info_font = QFont('Arial', 9)
+        conf_info.setFont(conf_info_font)
+        conf_info.setStyleSheet("color: gray; font-style: italic; padding-left: 10px;")
+        conf_info.setWordWrap(True)
+        ocr_layout.addWidget(conf_info)
         
         # Detection mode
         mode_widget = QWidget()
@@ -3398,40 +3411,9 @@ class MangaSettingsDialog(QDialog):
         debug_layout.setContentsMargins(8, 8, 8, 6)
         debug_layout.setSpacing(4)
         
-        self.debug_mode_checkbox = self._create_styled_checkbox("Enable debug mode (verbose logging + bubble_bounds diagnostics)")
+        self.debug_mode_checkbox = self._create_styled_checkbox("Enable debug mode (verbose logging)")
         self.debug_mode_checkbox.setChecked(self.settings['advanced']['debug_mode'])
-        # Connect handler to also update concise_logs when debug mode changes
-        def _on_debug_mode_changed():
-            try:
-                debug_enabled = self.debug_mode_checkbox.isChecked()
-                # When debug mode is ON, automatically disable concise logs for full verbosity
-                # When debug mode is OFF, enable concise logs to reduce noise
-                if hasattr(self, 'concise_logs_checkbox'):
-                    self.concise_logs_checkbox.setChecked(not debug_enabled)
-                # Save both settings
-                if 'advanced' not in self.settings:
-                    self.settings['advanced'] = {}
-                self.settings['advanced']['debug_mode'] = debug_enabled
-                self.settings['advanced']['concise_logs'] = not debug_enabled
-                if hasattr(self, 'config'):
-                    self.config['manga_settings'] = self.settings
-                if hasattr(self.main_gui, 'save_config'):
-                    self.main_gui.save_config(show_message=False)
-            except Exception:
-                pass
-        self.debug_mode_checkbox.toggled.connect(_on_debug_mode_changed)
         debug_layout.addWidget(self.debug_mode_checkbox)
-        
-        # Add info label explaining what debug mode does
-        debug_info = QLabel(
-            "When enabled: Shows detailed bubble_bounds propagation, OCR diagnostics, and rendering decisions.\n"
-            "Automatically enables verbose logging for full diagnostic output."
-        )
-        debug_info_font = QFont('Arial', 9)
-        debug_info.setFont(debug_info_font)
-        debug_info.setStyleSheet("color: gray;")
-        debug_info.setWordWrap(True)
-        debug_layout.addWidget(debug_info)
         
         # New: Concise pipeline logs (reduce noise)
         self.concise_logs_checkbox = self._create_styled_checkbox("Concise pipeline logs (reduce noise)")
@@ -4204,7 +4186,10 @@ class MangaSettingsDialog(QDialog):
             
             # OCR settings
             self.settings['ocr']['language_hints'] = [code for code, checkbox in self.lang_checkboxes.items() if checkbox.isChecked()]
-            self.settings['ocr']['confidence_threshold'] = self.confidence_threshold_slider.value() / 100.0
+            # Save as cloud_ocr_confidence (applies to Google/Azure only)
+            self.settings['ocr']['cloud_ocr_confidence'] = self.confidence_threshold_slider.value() / 100.0
+            # Keep old setting for backward compatibility
+            self.settings['ocr']['confidence_threshold'] = self.settings['ocr']['cloud_ocr_confidence']
             self.settings['ocr']['text_detection_mode'] = self.detection_mode_combo.currentText()
             self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold_spinbox.value()
             self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation_checkbox.isChecked()

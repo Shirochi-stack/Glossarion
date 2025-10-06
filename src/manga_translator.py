@@ -14,7 +14,7 @@ import traceback
 import cv2
 from PIL import ImageEnhance, ImageFilter
 from typing import List, Dict, Tuple, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from PIL import Image, ImageDraw, ImageFont
@@ -48,10 +48,22 @@ class TextRegion:
     confidence: float
     region_type: str  # 'text_block' from Cloud Vision
     translated_text: Optional[str] = None
-    bubble_bounds: Optional[Tuple[int, int, int, int]] = field(default=None)  # RT-DETR bubble bounds for rendering
+    bubble_bounds: Optional[Tuple[int, int, int, int]] = None  # RT-DETR bubble bounds for rendering
+    
+    @property
+    def center(self) -> Tuple[float, float]:
+        """Get the center point of the text region"""
+        x, y, w, h = self.bounding_box
+        return (x + w / 2, y + h / 2)
+    
+    @property
+    def xyxy(self) -> Tuple[int, int, int, int]:
+        """Convert bounding box to (x1, y1, x2, y2) format"""
+        x, y, w, h = self.bounding_box
+        return (x, y, x + w, y + h)
     
     def to_dict(self):
-        result = {
+        return {
             'text': self.text,
             'vertices': self.vertices,
             'bounding_box': self.bounding_box,
@@ -59,13 +71,207 @@ class TextRegion:
             'region_type': self.region_type,
             'translated_text': self.translated_text
         }
-        # CRITICAL: Preserve bubble_bounds if present (needed for RT-DETR guided rendering)
-        if hasattr(self, 'bubble_bounds') and self.bubble_bounds is not None:
-            result['bubble_bounds'] = self.bubble_bounds
-        # CRITICAL: Preserve bubble_type if present (needed for proper masking)
-        if hasattr(self, 'bubble_type'):
-            result['bubble_type'] = self.bubble_type
-        return result
+
+def does_rectangle_fit(bigger_rect: Tuple, smaller_rect: Tuple) -> bool:
+    """
+    Check if smaller_rect fits entirely inside bigger_rect.
+    Based on comic-translate's implementation.
+    
+    Args:
+        bigger_rect: (x1, y1, x2, y2) or (x, y, w, h) format
+        smaller_rect: (x1, y1, x2, y2) or (x, y, w, h) format
+    
+    Returns:
+        True if smaller_rect fits inside bigger_rect
+    """
+    # Handle both (x,y,w,h) and (x1,y1,x2,y2) formats
+    if len(bigger_rect) == 4:
+        # Assume (x, y, w, h) if w,h seem reasonable, else (x1,y1,x2,y2)
+        b_x1, b_y1, b_val3, b_val4 = bigger_rect
+        if b_val3 > b_x1 and b_val4 > b_y1:  # Likely (x1,y1,x2,y2)
+            b_x2, b_y2 = b_val3, b_val4
+        else:  # Likely (x, y, w, h)
+            b_x2, b_y2 = b_x1 + b_val3, b_y1 + b_val4
+            
+        s_x1, s_y1, s_val3, s_val4 = smaller_rect
+        if s_val3 > s_x1 and s_val4 > s_y1:  # Likely (x1,y1,x2,y2)
+            s_x2, s_y2 = s_val3, s_val4
+        else:  # Likely (x, y, w, h)
+            s_x2, s_y2 = s_x1 + s_val3, s_y1 + s_val4
+    else:
+        return False
+    
+    # Normalize coordinates
+    left1, top1 = min(b_x1, b_x2), min(b_y1, b_y2)
+    right1, bottom1 = max(b_x1, b_x2), max(b_y1, b_y2)
+    left2, top2 = min(s_x1, s_x2), min(s_y1, s_y2)
+    right2, bottom2 = max(s_x1, s_x2), max(s_y1, s_y2)
+    
+    # Check containment
+    fits_horizontally = left1 <= left2 and right1 >= right2
+    fits_vertically = top1 <= top2 and bottom1 >= bottom2
+    
+    return fits_horizontally and fits_vertically
+
+def is_mostly_contained(bigger_rect: Tuple, smaller_rect: Tuple, threshold: float = 0.5) -> bool:
+    """
+    Check if most of smaller_rect is contained in bigger_rect.
+    Based on comic-translate's implementation.
+    
+    Args:
+        bigger_rect: (x1, y1, x2, y2) or (x, y, w, h) format
+        smaller_rect: (x1, y1, x2, y2) or (x, y, w, h) format  
+        threshold: Minimum overlap ratio (default 0.5 = 50%)
+    
+    Returns:
+        True if overlap ratio >= threshold
+    """
+    # Convert to (x1, y1, x2, y2) format
+    def to_xyxy(rect):
+        x1, y1, val3, val4 = rect
+        if val3 > x1 and val4 > y1:  # Already (x1,y1,x2,y2)
+            return x1, y1, val3, val4
+        else:  # (x, y, w, h)
+            return x1, y1, x1 + val3, y1 + val4
+    
+    b_x1, b_y1, b_x2, b_y2 = to_xyxy(bigger_rect)
+    s_x1, s_y1, s_x2, s_y2 = to_xyxy(smaller_rect)
+    
+    # Calculate intersection
+    ix1 = max(b_x1, s_x1)
+    iy1 = max(b_y1, s_y1)
+    ix2 = min(b_x2, s_x2)
+    iy2 = min(b_y2, s_y2)
+    
+    if ix2 <= ix1 or iy2 <= iy1:
+        return False  # No intersection
+    
+    intersection_area = (ix2 - ix1) * (iy2 - iy1)
+    smaller_area = (s_x2 - s_x1) * (s_y2 - s_y1)
+    
+    if smaller_area == 0:
+        return False
+    
+    overlap_ratio = intersection_area / smaller_area
+    return overlap_ratio >= threshold
+
+def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], source_lang: str = 'ja') -> List[Dict]:
+    """
+    Match OCR text lines to RT-DETR detected blocks (comic-translate approach).
+    
+    Args:
+        ocr_lines: List of OCR results, each with .bbox (x,y,w,h) and .text
+        rtdetr_blocks: List of RT-DETR blocks as (x, y, w, h) tuples
+        source_lang: Source language for text joining (ja/zh use no spaces)
+    
+    Returns:
+        List of dicts with {'bbox': (x,y,w,h), 'text': str} for each RT-DETR block
+    """
+    right_to_left = source_lang in ['ja', 'ar', 'he']
+    results = []
+    
+    # For each RT-DETR block, find OCR lines that belong to it
+    for block_bbox in rtdetr_blocks:
+        matched_lines = []
+        
+        # Check each OCR line
+        for ocr_line in ocr_lines:
+            # Get OCR line bbox (x, y, w, h)
+            line_bbox = ocr_line.bbox if hasattr(ocr_line, 'bbox') else None
+            if not line_bbox:
+                continue
+            
+            # Check if line fits in or is mostly contained by block
+            if does_rectangle_fit(block_bbox, line_bbox):
+                matched_lines.append((line_bbox, ocr_line.text))
+            elif is_mostly_contained(block_bbox, line_bbox, threshold=0.5):
+                matched_lines.append((line_bbox, ocr_line.text))
+        
+        if not matched_lines:
+            # No text found in this block
+            results.append({'bbox': block_bbox, 'text': '', 'lines': []})
+            continue
+        
+        # Sort matched lines by reading order within this block
+        # Sort by y_center first (top to bottom), then by x_center (right-to-left or left-to-right)
+        sorted_lines = sorted(matched_lines, key=lambda item: (
+            item[0][1] + item[0][3] / 2,  # y_center
+            -(item[0][0] + item[0][2] / 2) if right_to_left else (item[0][0] + item[0][2] / 2)  # x_center
+        ))
+        
+        # Join text (no space for CJK, space for others)
+        if source_lang in ['ja', 'zh', 'ko']:
+            joined_text = ''.join(text for _, text in sorted_lines)
+        else:
+            joined_text = ' '.join(text for _, text in sorted_lines)
+        
+        results.append({
+            'bbox': block_bbox,
+            'text': joined_text,
+            'lines': sorted_lines  # Keep individual lines for debugging
+        })
+    
+    return results
+
+def sort_regions_by_reading_order(regions: List[TextRegion], right_to_left: bool = True) -> List[TextRegion]:
+    """
+    Sort text regions by manga reading order (right-to-left, top-to-bottom).
+    Based on comic-translate's sort_blk_list algorithm.
+    
+    Algorithm:
+    1. Sort regions by Y coordinate (top to bottom)
+    2. For regions on the same horizontal band:
+       - If right_to_left (manga/Japanese): sort by X descending (right to left)
+       - Otherwise: sort by X ascending (left to right)
+    
+    Args:
+        regions: List of TextRegion objects to sort
+        right_to_left: True for manga reading order (Japanese), False for Western
+    
+    Returns:
+        Sorted list of TextRegion objects in reading order
+    """
+    if not regions:
+        return []
+    
+    sorted_regions = []
+    
+    # First pass: sort by Y position (top to bottom)
+    for region in sorted(regions, key=lambda r: r.center[1]):
+        # Find where to insert this region
+        inserted = False
+        for i, sorted_region in enumerate(sorted_regions):
+            region_center_y = region.center[1]
+            sorted_xyxy = sorted_region.xyxy
+            
+            # If current region's center is below the sorted region's bottom, continue
+            if region_center_y > sorted_xyxy[3]:
+                continue
+            
+            # If current region's center is above the sorted region's top, insert after
+            if region_center_y < sorted_xyxy[1]:
+                sorted_regions.insert(i + 1, region)
+                inserted = True
+                break
+            
+            # Y center of region is within sorted_region's vertical bounds
+            # Sort by X based on reading direction
+            if right_to_left and region.center[0] > sorted_region.center[0]:
+                # Manga: higher X (more right) comes first
+                sorted_regions.insert(i, region)
+                inserted = True
+                break
+            elif not right_to_left and region.center[0] < sorted_region.center[0]:
+                # Western: lower X (more left) comes first
+                sorted_regions.insert(i, region)
+                inserted = True
+                break
+        
+        # If not inserted yet, append to end
+        if not inserted:
+            sorted_regions.append(region)
+    
+    return sorted_regions
 
 class MangaTranslator:
     """Main class for manga translation pipeline using Google Cloud Vision + API Key"""
@@ -1734,17 +1940,11 @@ class MangaTranslator:
                         merged_regions.append(merged_region)
                         
                         # DEBUG: Verify bubble_bounds was set
-                        debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False) if hasattr(self, 'manga_settings') else False
-                        if debug_mode or not getattr(self, 'concise_logs', False):
+                        if not getattr(self, 'concise_logs', False):
                             has_bb = hasattr(merged_region, 'bubble_bounds') and merged_region.bubble_bounds is not None
-                            has_bt = hasattr(merged_region, 'bubble_type')
-                            bt = getattr(merged_region, 'bubble_type', None) if has_bt else None
-                            self._log(f"   🔍 Merged region verification:", "debug")
-                            self._log(f"      has bubble_bounds: {has_bb}", "debug")
+                            self._log(f"   🔍 Merged region has bubble_bounds: {has_bb}", "debug")
                             if has_bb:
                                 self._log(f"      bubble_bounds = {merged_region.bubble_bounds}", "debug")
-                            self._log(f"      has bubble_type: {has_bt}, value: {bt}", "debug")
-                            self._log(f"      Text preview: '{merged_text[:50]}...'", "debug")
                         
                         if len(split_groups) > 1:
                             self._log(f"   Bubble {bubble_idx + 1}.{group_idx + 1}: Merged {len(group)} text regions (split from {len(bubble_regions)} total)", "info")
@@ -2218,7 +2418,15 @@ class MangaTranslator:
             # Get text filtering settings
             min_text_length = ocr_settings.get('min_text_length', 2)
             exclude_english = ocr_settings.get('exclude_english_text', True)
-            confidence_threshold = ocr_settings.get('confidence_threshold', 0.1)
+            
+            # Confidence threshold: Cloud providers (Google/Azure) vs Local OCR
+            # Comic-translate approach: Local OCR uses RT-DETR confidence only (no OCR filtering)
+            if self.ocr_provider in ['google', 'azure']:
+                # Cloud providers: use configurable threshold (default 0.0 like comic-translate)
+                confidence_threshold = ocr_settings.get('cloud_ocr_confidence', 0.0)
+            else:
+                # Local OCR (RapidOCR, PaddleOCR, etc.): no filtering (trust RT-DETR regions)
+                confidence_threshold = 0.0
             
             # Load and preprocess image if enabled
             if preprocessing.get('enabled', False):
@@ -3706,6 +3914,17 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
                             self._log(f"📊 Processing {len(all_regions)} text regions with Custom API")
                             
                             # Clear detections after extracting regions
@@ -3778,6 +3997,17 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
                             self._log(f"📊 Processing {len(all_regions)} text regions with EasyOCR")
                             
                             # Check if parallel processing is enabled
@@ -3841,6 +4071,17 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
                             self._log(f"📊 Processing {len(all_regions)} text regions with PaddleOCR")
                             
                             # Check if parallel processing is enabled
@@ -3888,6 +4129,17 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # Sort regions by manga reading order (comic-translate style)
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
                             self._log(f"📊 Processing {len(all_regions)} text regions with DocTR")
                             
                             # Check if parallel processing is enabled
@@ -3919,231 +4171,92 @@ class MangaTranslator:
                     use_recognition = self.main_gui.config.get('rapidocr_use_recognition', True)
                     language = self.main_gui.config.get('rapidocr_language', 'auto')
                     detection_mode = self.main_gui.config.get('rapidocr_detection_mode', 'document')
-                    # Wire to existing debug settings: debug_mode OR save_intermediate
-                    debug_ocr = manga_settings.get('advanced', {}).get('debug_mode', False) or manga_settings.get('advanced', {}).get('save_intermediate', False)
                     
                     self._log(f"⚡ RapidOCR - Recognition: {'Full' if use_recognition else 'Detection Only'}")
-                    if debug_ocr:
-                        self._log(f"🔍 [RapidOCR DEBUG MODE ENABLED]")
-                        self._log(f"   Language: {language}")
-                        self._log(f"   Detection mode: {detection_mode}")
-                        self._log(f"   Confidence threshold: {confidence_threshold}")
                     
                     # Check if we should use bubble detection for regions
                     if ocr_settings.get('bubble_detection_enabled', False):
-                        self._log("📝 Using RT-DETR bubbles + RapidOCR full-image detection...")
+                        self._log("🎯 Using comic-translate approach: RapidOCR full image → match to RT-DETR blocks")
                         
                         # Run bubble detection to get regions (thread-local)
                         _ = self._get_thread_bubble_detector()
                         
-                        # Get RT-DETR bubble detections
+                        # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
-                        
                         if rtdetr_detections:
-                            if debug_ocr:
-                                self._log(f"🔍 [RT-DETR] Detection results:")
-                                self._log(f"   Text bubbles: {len(rtdetr_detections.get('text_bubbles', []))}")
-                                self._log(f"   Free text: {len(rtdetr_detections.get('text_free', []))}")
-                                self._log(f"   Empty bubbles: {len(rtdetr_detections.get('bubbles', []))}")
-                            
-                            # STRATEGY: Let RapidOCR process full image to get text in correct reading order,
-                            # then match those results to RT-DETR bubbles for better bounds
-                            self._log(f"📊 Running RapidOCR on full image for proper text ordering...")
-                            
-                            # Run RapidOCR on full image
-                            rapid_results = self.ocr_manager.detect_text(
-                                image,
-                                'rapidocr',
-                                confidence=confidence_threshold,
-                                use_recognition=use_recognition,
-                                language=language,
-                                detection_mode=detection_mode,
-                                debug=debug_ocr
-                            )
-                            
-                            if debug_ocr:
-                                self._log(f"   RapidOCR found {len(rapid_results)} text regions")
-                            
-                            # CRITICAL: Sort RapidOCR results by manga reading order (right-to-left, top-to-bottom)
-                            # RapidOCR's natural order doesn't match manga reading conventions
-                            rapid_results.sort(key=lambda r: (r.bbox[1], -r.bbox[0]))  # Sort by y, then by -x
-                            
-                            if debug_ocr:
-                                self._log(f"   ✅ Sorted by manga reading order (top→bottom, right→left)")
-                            
-                            # Collect all RT-DETR bubbles with their types
-                            rtdetr_bubbles = []
-                            bubble_types = {}
-                            idx = 0
+                            # Get all text-containing regions
+                            all_regions = []
                             if 'text_bubbles' in rtdetr_detections:
-                                for bbox in rtdetr_detections.get('text_bubbles', []):
-                                    rtdetr_bubbles.append(bbox)
-                                    bubble_types[idx] = 'text_bubble'
-                                    idx += 1
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
                             if 'text_free' in rtdetr_detections:
-                                for bbox in rtdetr_detections.get('text_free', []):
-                                    rtdetr_bubbles.append(bbox)
-                                    bubble_types[idx] = 'free_text'
-                                    idx += 1
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
                             
-                            # Match each RapidOCR result to the best RT-DETR bubble
-                            self._log(f"🔗 Matching {len(rapid_results)} RapidOCR regions to {len(rtdetr_bubbles)} RT-DETR bubbles...")
-                            
-                            # Group RapidOCR results by which bubble they belong to
-                            # IMPORTANT: Track original order so we can preserve RapidOCR's reading order
-                            bubble_to_results = {}  # bubble_idx -> list of (order, rapid_result)
-                            
-                            for order, rapid_result in enumerate(rapid_results):
-                                # Get center of RapidOCR detection
-                                rx, ry, rw, rh = rapid_result.bbox
-                                center_x = rx + rw / 2
-                                center_y = ry + rh / 2
+                            if not all_regions:
+                                self._log("⚠️ No RT-DETR text regions found")
+                            else:
+                                # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
+                                self._log(f"📊 Step 1: Running RapidOCR on full image to detect text lines")
+                                full_image_ocr = self.ocr_manager.detect_text(
+                                    image,
+                                    'rapidocr',
+                                    confidence=confidence_threshold,
+                                    use_recognition=use_recognition,
+                                    language=language,
+                                    detection_mode=detection_mode
+                                )
                                 
-                                # Find which RT-DETR bubble contains this text
-                                best_bubble_idx = -1
-                                
-                                for bubble_idx, (bx, by, bw, bh) in enumerate(rtdetr_bubbles):
-                                    # Check if center is inside this bubble
-                                    if (bx <= center_x <= bx + bw and by <= center_y <= by + bh):
-                                        best_bubble_idx = bubble_idx
-                                        break
-                                
-                                # Group by bubble index, tracking original order
-                                if best_bubble_idx not in bubble_to_results:
-                                    bubble_to_results[best_bubble_idx] = []
-                                bubble_to_results[best_bubble_idx].append((order, rapid_result))
-                                
-                                if debug_ocr:
-                                    bubble_type = bubble_types.get(best_bubble_idx, 'text_bubble') if best_bubble_idx >= 0 else 'free_text'
-                                    if best_bubble_idx == -1:
-                                        self._log(f"   ⚠️ No RT-DETR bubble for text at ({int(center_x)},{int(center_y)}), using RapidOCR bounds")
-                                    else:
-                                        self._log(f"   ✅ Matched '{rapid_result.text[:30]}...' to bubble #{best_bubble_idx} ({bubble_type})")
-                            
-                            # Now merge multiple RapidOCR results that belong to the same bubble
-                            from ocr_manager import OCRResult
-                            matched_results = []
-                            
-                            # IMPORTANT: Process bubbles in order of first text appearance (preserves reading order)
-                            # Sort by the minimum order value in each bubble's results
-                            bubbles_by_first_appearance = sorted(
-                                bubble_to_results.items(),
-                                key=lambda item: min(order for order, _ in item[1])
-                            )
-                            
-                            # Filter out text that's not in any bubble (decorative/background text)
-                            # Only process text that matched to actual RT-DETR bubbles
-                            for bubble_idx, ordered_results in bubbles_by_first_appearance:
-                                # Extract results from (order, result) tuples
-                                results = [result for _, result in ordered_results]
-                                
-                                # Skip text that didn't match any RT-DETR bubble
-                                if bubble_idx == -1:
-                                    if debug_ocr:
-                                        text_preview = ' '.join([r.text[:20] for r in results])[:50]
-                                        self._log(f"   ❌ Skipping {len(results)} unbubbled text regions: '{text_preview}...'")
-                                    continue
-                                
-                                if len(results) == 1:
-                                    # Single result for this bubble - use as is
-                                    result = results[0]
-                                    if bubble_idx >= 0:
-                                        best_bubble = rtdetr_bubbles[bubble_idx]
-                                        best_bubble_type = bubble_types.get(bubble_idx, 'text_bubble')
-                                    else:
-                                        best_bubble = result.bbox
-                                        best_bubble_type = 'free_text'
+                                if full_image_ocr:
+                                    self._log(f"✅ RapidOCR detected {len(full_image_ocr)} text lines in full image")
                                     
-                                    matched_result = OCRResult(
-                                        text=result.text,
-                                        bbox=best_bubble,
-                                        confidence=result.confidence,
-                                        vertices=[(best_bubble[0], best_bubble[1]),
-                                                 (best_bubble[0] + best_bubble[2], best_bubble[1]),
-                                                 (best_bubble[0] + best_bubble[2], best_bubble[1] + best_bubble[3]),
-                                                 (best_bubble[0], best_bubble[1] + best_bubble[3])]
-                                    )
-                                    matched_result.bubble_bounds = best_bubble
-                                    matched_result.bubble_type = best_bubble_type
-                                    matched_results.append(matched_result)
+                                    # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
+                                    self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
+                                    source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang)
+                                    
+                                    # Convert matched blocks to OCR results
+                                    ocr_results = []
+                                    for block_data in matched_blocks:
+                                        if block_data['text'].strip():  # Only include blocks with text
+                                            # Create a fake OCR result object
+                                            class OCRResult:
+                                                def __init__(self, text, bbox):
+                                                    self.text = text
+                                                    self.bbox = bbox
+                                                    self.vertices = [(bbox[0], bbox[1]), (bbox[0]+bbox[2], bbox[1]),
+                                                                   (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
+                                                    self.confidence = 0.9  # High confidence since RT-DETR detected it
+                                                    self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                            
+                                            result = OCRResult(block_data['text'], block_data['bbox'])
+                                            ocr_results.append(result)
+                                    
+                                    self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
+                                    for i, result in enumerate(ocr_results, 1):
+                                        line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
+                                        self._log(f"   Block {i}: {line_count} lines → '{result.text[:50]}...'")
                                 else:
-                                    # Multiple results for same bubble - merge them
-                                    if debug_ocr:
-                                        self._log(f"   🔗 Merging {len(results)} RapidOCR regions in bubble #{bubble_idx}")
-                                    
-                                    # Combine text from all results (they're already in reading order from RapidOCR)
-                                    combined_text = ' '.join([r.text for r in results])
-                                    avg_confidence = sum(r.confidence for r in results) / len(results)
-                                    
-                                    if bubble_idx >= 0:
-                                        best_bubble = rtdetr_bubbles[bubble_idx]
-                                        best_bubble_type = bubble_types.get(bubble_idx, 'text_bubble')
-                                    else:
-                                        # For unbubbled text, use combined bbox
-                                        all_x = [r.bbox[0] for r in results]
-                                        all_y = [r.bbox[1] for r in results]
-                                        all_x2 = [r.bbox[0] + r.bbox[2] for r in results]
-                                        all_y2 = [r.bbox[1] + r.bbox[3] for r in results]
-                                        min_x, min_y = min(all_x), min(all_y)
-                                        max_x, max_y = max(all_x2), max(all_y2)
-                                        best_bubble = (min_x, min_y, max_x - min_x, max_y - min_y)
-                                        best_bubble_type = 'free_text'
-                                    
-                                    matched_result = OCRResult(
-                                        text=combined_text,
-                                        bbox=best_bubble,
-                                        confidence=avg_confidence,
-                                        vertices=[(best_bubble[0], best_bubble[1]),
-                                                 (best_bubble[0] + best_bubble[2], best_bubble[1]),
-                                                 (best_bubble[0] + best_bubble[2], best_bubble[1] + best_bubble[3]),
-                                                 (best_bubble[0], best_bubble[1] + best_bubble[3])]
-                                    )
-                                    matched_result.bubble_bounds = best_bubble
-                                    matched_result.bubble_type = best_bubble_type
-                                    matched_results.append(matched_result)
-                                    
-                                    if debug_ocr:
-                                        self._log(f"   ✅ Created merged region: '{combined_text[:50]}...'")
+                                    self._log("⚠️ RapidOCR found no text lines in full image")
                             
-                            ocr_results = matched_results
-                            self._log(f"✅ Successfully matched and merged into {len(ocr_results)} final regions")
-                            
-                            # All done - ocr_results now contains matched regions
+                            # Clear detections
+                            rtdetr_detections = None
+                            all_regions = None
                     else:
                         # Process full image without bubble detection
-                        self._log("📊 Processing full image with RapidOCR (NO RT-DETR GUIDANCE)")
-                        if debug_ocr:
-                            self._log(f"   ⚠️ WARNING: RT-DETR guidance disabled - OCR quality may be degraded")
-                            self._log(f"   Full image size: {image.shape[1]}×{image.shape[0]}")
-                        
+                        self._log("📊 Processing full image with RapidOCR")
                         ocr_results = self.ocr_manager.detect_text(
                             image, 
                             'rapidocr',
                             confidence=confidence_threshold,
                             use_recognition=use_recognition,
                             language=language,
-                            detection_mode=detection_mode,
-                            debug=debug_ocr
+                            detection_mode=detection_mode
                         )
-                        
-                        if debug_ocr:
-                            self._log(f"   Full image OCR found {len(ocr_results)} text regions")
 
                 else:
                     # Default processing for any other providers
                     ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
 
                 # Convert OCR results to TextRegion format
-                # CRITICAL: Debug entry into conversion loop
-                if ocr_results:
-                    self._log(f"🔍 [CONVERSION] Converting {len(ocr_results)} OCR results to TextRegions...", "info")
-                    # Check first result for bubble_bounds
-                    if len(ocr_results) > 0:
-                        first = ocr_results[0]
-                        has_bb = hasattr(first, 'bubble_bounds')
-                        bb_val = getattr(first, 'bubble_bounds', None) if has_bb else None
-                        self._log(f"   First OCR result: has_bubble_bounds={has_bb}, value={bb_val}", "warning")
-                
                 for result in ocr_results:
                     # CLEAN ORIGINAL OCR TEXT - Fix cube characters and encoding issues
                     original_ocr_text = result.text
@@ -4186,52 +4299,16 @@ class MangaTranslator:
                         'region_type': 'text_block'
                     }
                     # Preserve bubble_bounds from OCR result if present
-                    debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False) if hasattr(self, 'manga_settings') else False
                     if hasattr(result, 'bubble_bounds') and result.bubble_bounds is not None:
                         region_kwargs['bubble_bounds'] = result.bubble_bounds
-                        # Note: bubble_type is NOT in TextRegion constructor, set as attribute after creation
-                        if debug_mode or not getattr(self, 'concise_logs', False):
-                            bt = getattr(result, 'bubble_type', 'N/A')
-                            self._log(f"   🔍 Preserved bubble_bounds from OCR: {result.bubble_bounds}, type: {bt}", "debug")
+                        self._log(f"   🔍 Preserved bubble_bounds from OCR: {result.bubble_bounds}", "debug")
                     else:
-                        # CRITICAL: Always log when bubble_bounds is None - this is a bug we're tracking
                         if hasattr(result, 'bubble_bounds'):
-                            self._log(f"   ⚠️ CRITICAL: OCR result has bubble_bounds attribute but value is None! (text: '{cleaned_result_text[:30]}...')", "warning")
-                            self._log(f"      OCR result type: {type(result)}, bbox: {result.bbox}", "warning")
+                            self._log(f"   ⚠️ OCR result has bubble_bounds but it's None!", "debug")
                         else:
-                            if debug_mode:
-                                self._log(f"   ℹ️ OCR result has no bubble_bounds attribute (text: '{cleaned_result_text[:30]}...')", "debug")
-                    
-                    # CRITICAL DEBUG: Show what's in region_kwargs before creating TextRegion
-                    saved_bubble_bounds = None
-                    if 'bubble_bounds' in region_kwargs:
-                        saved_bubble_bounds = region_kwargs['bubble_bounds']
-                        self._log(f"   ✅ region_kwargs HAS bubble_bounds: {saved_bubble_bounds}", "warning")
-                    else:
-                        self._log(f"   ❌ region_kwargs MISSING bubble_bounds!", "warning")
+                            self._log(f"   ℹ️ OCR result has no bubble_bounds attribute", "debug")
                     
                     region = TextRegion(**region_kwargs)
-                    
-                    # WORKAROUND: Explicitly set bubble_bounds as attribute after creation
-                    # This ensures it doesn't get lost during dataclass initialization
-                    if saved_bubble_bounds is not None:
-                        region.bubble_bounds = saved_bubble_bounds
-                        # Store object ID for tracking
-                        region._debug_id = id(region)
-                        self._log(f"   🔧 Explicitly set bubble_bounds after creation: {region.bubble_bounds} (obj_id={id(region)})", "warning")
-                    
-                    # Set bubble_type as attribute if present in OCR result (not in constructor)
-                    if hasattr(result, 'bubble_type'):
-                        region.bubble_type = result.bubble_type
-                    
-                    # VERIFY: Check if bubble_bounds propagated to TextRegion
-                    if debug_mode:
-                        has_bb_after = hasattr(region, 'bubble_bounds')
-                        bb_after = getattr(region, 'bubble_bounds', None) if has_bb_after else None
-                        has_bt_after = hasattr(region, 'bubble_type')
-                        bt_after = getattr(region, 'bubble_type', None) if has_bt_after else None
-                        self._log(f"   ✅ TextRegion created: has_bubble_bounds={has_bb_after}, value={bb_after}, has_bubble_type={has_bt_after}, value={bt_after}", "debug")
-                    
                     regions.append(region)
                     if not getattr(self, 'concise_logs', False):
                         self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
@@ -4241,7 +4318,7 @@ class MangaTranslator:
             if ocr_settings.get('bubble_detection_enabled', False):
                 # For manga-ocr and similar providers, skip merging since regions already have bubble_bounds from OCR
                 # Only Azure and Google need merging because they return line-level OCR results
-                if self.ocr_provider in ['manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr', 'rapidocr']:
+                if self.ocr_provider in ['manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']:
                     self._log("🎯 Skipping bubble detection merge (regions already aligned with RT-DETR)")
                     # Regions already have bubble_bounds set from OCR phase - no need to merge
                 else:
@@ -4272,6 +4349,17 @@ class MangaTranslator:
                 regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
             
             self._log(f"✅ Detected {len(regions)} text regions after merging")
+            
+            # Apply manga reading order sorting (comic-translate style)
+            # This ensures proper translation mapping for all providers
+            if regions:
+                # Determine reading direction based on source language
+                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                right_to_left = source_lang in ['ja', 'ar', 'he']  # Japanese, Arabic, Hebrew
+                
+                regions = sort_regions_by_reading_order(regions, right_to_left=right_to_left)
+                direction_label = "right→left" if right_to_left else "left→right"
+                self._log(f"📖 Sorted {len(regions)} regions by manga reading order (top→bottom, {direction_label})")
             
             # NOTE: Debug images are saved in process_image() with correct output_dir
             # Removed duplicate save here to avoid creating unexpected 'translated_images' folders
@@ -4307,12 +4395,8 @@ class MangaTranslator:
         
         return languages
 
-    def _parallel_ocr_regions(self, image: np.ndarray, regions: List, provider: str, confidence_threshold: float, region_types: Dict = None) -> List:
-        """Process multiple regions in parallel using ThreadPoolExecutor
-        
-        Args:
-            region_types: Optional dict mapping region index to type ('text_bubble', 'free_text', 'empty_bubble')
-        """
+    def _parallel_ocr_regions(self, image: np.ndarray, regions: List, provider: str, confidence_threshold: float) -> List:
+        """Process multiple regions in parallel using ThreadPoolExecutor"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         
@@ -4322,7 +4406,6 @@ class MangaTranslator:
         def process_single_region(index: int, bbox: Tuple[int, int, int, int]):
             """Process a single region with OCR"""
             x, y, w, h = bbox
-            region_type = region_types.get(index, 'text_bubble') if region_types else 'text_bubble'
             try:
                 # Use the safe crop method
                 cropped = self._safe_crop_region(image, x, y, w, h)
@@ -4395,32 +4478,13 @@ class MangaTranslator:
                             # All retries exhausted, no valid result
                             return (index, None)
                 
-                # CRITICAL: For RapidOCR with RT-DETR, combine all text and use RT-DETR boundaries
-                if result and len(result) > 0:
-                    if provider == 'rapidocr':
-                        # Combine all RapidOCR detections into one region with RT-DETR boundaries
-                        combined_text = ' '.join([r.text.strip() for r in result if r.text.strip()])
-                        if combined_text:
-                            avg_confidence = sum(r.confidence for r in result) / len(result)
-                            from ocr_manager import OCRResult
-                            combined_result = OCRResult(
-                                text=combined_text,
-                                bbox=(x, y, w, h),  # Use RT-DETR region
-                                confidence=avg_confidence,
-                                vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                            )
-                            combined_result.bubble_bounds = (x, y, w, h)
-                            # CRITICAL: Attach RT-DETR region type for proper masking/rendering
-                            combined_result.bubble_type = region_type
-                            return (index, combined_result)
-                    else:
-                        # For other providers, use first result with RT-DETR boundaries
-                        if result[0].text.strip():
-                            result[0].bbox = (x, y, w, h)
-                            result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                            result[0].bubble_bounds = (x, y, w, h)
-                            result[0].bubble_type = region_type
-                            return (index, result[0])
+                if result and len(result) > 0 and result[0].text.strip():
+                    # Adjust coordinates to full image space
+                    result[0].bbox = (x, y, w, h)
+                    result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                    # CRITICAL: Store RT-DETR bubble bounds for rendering (for non-Azure/Google providers)
+                    result[0].bubble_bounds = (x, y, w, h)
+                    return (index, result[0])
                 return (index, None)
                 
             except Exception as e:
@@ -4450,19 +4514,10 @@ class MangaTranslator:
             # Collect results
             results_dict = {}
             completed = 0
-            debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False) if hasattr(self, 'manga_settings') else False
             for future in as_completed(future_to_index):
                 try:
                     index, result = future.result(timeout=30)
                     if result:
-                        # DEBUG: Check bubble_bounds right after collecting from parallel worker
-                        if debug_mode:
-                            has_bb = hasattr(result, 'bubble_bounds')
-                            bb_value = getattr(result, 'bubble_bounds', None) if has_bb else None
-                            has_bt = hasattr(result, 'bubble_type')
-                            bt_value = getattr(result, 'bubble_type', None) if has_bt else None
-                            self._log(f"🔍 [Parallel collect] Region {index}: bb={bb_value}, type={bt_value}", "debug")
-                        
                         results_dict[index] = result
                         completed += 1
                         self._log(f"✅ [{completed}/{len(regions)}] Processed region {index+1}")
@@ -4472,24 +4527,9 @@ class MangaTranslator:
             # Sort results by index to maintain order
             for i in range(len(regions)):
                 if i in results_dict:
-                    result = results_dict[i]
-                    # DEBUG: Verify bubble_bounds before adding to final list
-                    if debug_mode:
-                        has_bb = hasattr(result, 'bubble_bounds')
-                        bb_value = getattr(result, 'bubble_bounds', None) if has_bb else None
-                        self._log(f"🔍 [Parallel append] Region {i}: bb={bb_value}", "debug")
-                    ocr_results.append(result)
+                    ocr_results.append(results_dict[i])
         
         self._log(f"📊 Parallel OCR complete: {len(ocr_results)}/{len(regions)} regions extracted")
-        
-        # DEBUG: Final verification of all results
-        if debug_mode and ocr_results:
-            self._log(f"🔍 [Parallel final] Verifying {len(ocr_results)} results:", "debug")
-            for idx, result in enumerate(ocr_results[:3]):  # Show first 3
-                has_bb = hasattr(result, 'bubble_bounds')
-                bb_value = getattr(result, 'bubble_bounds', None) if has_bb else None
-                self._log(f"   Result {idx}: bb={bb_value}", "debug")
-        
         return ocr_results
     
     def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
@@ -8351,15 +8391,8 @@ class MangaTranslator:
                 confidence=region.confidence,
                 region_type=region.region_type
             )
-            # CRITICAL: Preserve all dynamic attributes
             if hasattr(region, 'translated_text'):
                 adjusted_region.translated_text = region.translated_text
-            # CRITICAL: Preserve bubble_bounds for RT-DETR guided rendering
-            if hasattr(region, 'bubble_bounds') and region.bubble_bounds is not None:
-                adjusted_region.bubble_bounds = region.bubble_bounds
-            # CRITICAL: Preserve bubble_type for proper masking
-            if hasattr(region, 'bubble_type'):
-                adjusted_region.bubble_type = region.bubble_type
             
             # IMPORTANT: Preserve original index to maintain text mapping
             adjusted_region.original_index = idx
@@ -8606,12 +8639,6 @@ class MangaTranslator:
     
     def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Enhanced text rendering with customizable backgrounds and styles"""
-        # CRITICAL DEBUG: Check bubble_bounds on regions at rendering entry
-        for i, r in enumerate(regions[:3]):  # Check first 3
-            has_bb = hasattr(r, 'bubble_bounds')
-            bb_val = getattr(r, 'bubble_bounds', None) if has_bb else None
-            self._log(f"🔍 [RENDER ENTRY] Region {i}: has_bb={has_bb}, value={bb_val}", "warning")
-        
         self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
         self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
         self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
@@ -8700,21 +8727,6 @@ class MangaTranslator:
                 # Get original bounding box
                 x, y, w, h = region.bounding_box
                 
-                # DEBUG: Show region attributes before rendering decision
-                debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False) if hasattr(self, 'manga_settings') else False
-                if debug_mode:
-                    has_bb = hasattr(region, 'bubble_bounds')
-                    bb_value = getattr(region, 'bubble_bounds', None) if has_bb else None
-                    has_bt = hasattr(region, 'bubble_type')
-                    bt_value = getattr(region, 'bubble_type', None) if has_bt else None
-                    text_preview = (tr_text[:30] + '...') if len(tr_text) > 30 else tr_text
-                    self._log(f"\n🖼️ [render_one] Region {idx} rendering decision:", "debug")
-                    self._log(f"   Text: '{text_preview}'", "debug")
-                    self._log(f"   Original bbox: {w}×{h} at ({x}, {y})", "debug")
-                    self._log(f"   has bubble_bounds: {has_bb}, value: {bb_value}", "debug")
-                    self._log(f"   has bubble_type: {has_bt}, value: {bt_value}", "debug")
-                    self._log(f"   use_mask_for_rendering: {use_mask_for_rendering}", "debug")
-                
                 # CRITICAL: Always prefer mask bounds when available (most accurate)
                 # Mask bounds are especially important for Azure/Google without RT-DETR,
                 # where OCR polygons are unreliable.
@@ -8726,19 +8738,13 @@ class MangaTranslator:
                         full_mask=text_mask
                     )
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
-                    if debug_mode:
-                        self._log(f"   ✅ Using mask bounds: {render_w}×{render_h} at ({render_x}, {render_y})", "debug")
                 elif hasattr(region, 'vertices') and region.vertices:
                     # Fallback: use polygon-based safe area (for RT-DETR regions)
                     safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
-                    if debug_mode:
-                        self._log(f"   ⚙️ Using polygon-based safe area: {render_w}×{render_h} at ({render_x}, {render_y})", "debug")
                 else:
                     # Last resort: use simple bounding box
                     render_x, render_y, render_w, render_h = x, y, w, h
-                    if debug_mode:
-                        self._log(f"   ⚠️ Using simple bbox (fallback): {render_w}×{render_h} at ({render_x}, {render_y})", "warning")
                 
                 # Fit text - use render dimensions for proper sizing
                 if self.custom_font_size:
@@ -9242,40 +9248,18 @@ class MangaTranslator:
         # PRIORITY 1: For manga-ocr and other RT-DETR-guided OCR providers, use bubble_bounds directly
         # These providers already OCR within RT-DETR bubbles, so bubble_bounds IS the correct render area
         is_azure_google = getattr(self, 'ocr_provider', '').lower() in ('azure', 'google')
-        
-        # DEBUG: Show region attributes at entry
-        debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False) if hasattr(self, 'manga_settings') else False
-        if debug_mode:
-            has_bb = hasattr(region, 'bubble_bounds')
-            bb_value = getattr(region, 'bubble_bounds', None) if has_bb else None
-            has_bt = hasattr(region, 'bubble_type')
-            bt_value = getattr(region, 'bubble_type', None) if has_bt else None
-            bbox = getattr(region, 'bounding_box', None)
-            text_preview = (region.text[:30] + '...') if hasattr(region, 'text') and len(region.text) > 30 else getattr(region, 'text', 'NO TEXT')
-            self._log(f"\n🔍 [get_mask_bounds] Region analysis:", "debug")
-            self._log(f"   Text: '{text_preview}'", "debug")
-            self._log(f"   has bubble_bounds: {has_bb}, value: {bb_value}", "debug")
-            self._log(f"   has bubble_type: {has_bt}, value: {bt_value}", "debug")
-            self._log(f"   bounding_box: {bbox}", "debug")
-            self._log(f"   OCR provider: {getattr(self, 'ocr_provider', 'unknown')}", "debug")
-        
         if not is_azure_google and hasattr(region, 'bubble_bounds') and region.bubble_bounds:
             # Use the RT-DETR bubble bounds directly - this is the full bubble area
             bx, by, bw, bh = region.bubble_bounds
-            if debug_mode or not getattr(self, 'concise_logs', False):
+            if not getattr(self, 'concise_logs', False):
                 self._log(f"  ✅ Using RT-DETR bubble_bounds for mask: {int(bw)}×{int(bh)} at ({int(bx)}, {int(by)})", "debug")
             return int(bx), int(by), int(bw), int(bh)
         elif not is_azure_google:
             # Debug: Why are we not using bubble_bounds?
-            if debug_mode or not getattr(self, 'concise_logs', False):
+            if not getattr(self, 'concise_logs', False):
                 has_attr = hasattr(region, 'bubble_bounds')
                 is_none = getattr(region, 'bubble_bounds', None) is None if has_attr else True
-                obj_id = id(region)
-                debug_id = getattr(region, '_debug_id', 'NOT_SET')
-                self._log(f"  ⚠️ NOT using bubble_bounds (has_attr={has_attr}, is_none={is_none}, obj_id={obj_id}, debug_id={debug_id})", "warning")
-                # Check if this is the same object that was created earlier
-                if debug_id != 'NOT_SET' and debug_id != obj_id:
-                    self._log(f"     🚨 OBJECT WAS COPIED! Original ID: {debug_id}, Current ID: {obj_id}", "warning")
+                #self._log(f"  ⚠️ manga-ocr but NO bubble_bounds (has_attr={has_attr}, is_none={is_none})", "warning")
         
         # PRIORITY 2: For Azure/Google or when bubble_bounds not available, extract from mask
         if full_mask is not None:
