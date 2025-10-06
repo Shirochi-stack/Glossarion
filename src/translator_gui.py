@@ -4,7 +4,7 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()
 
 # Standard Library
-import io, json, logging, math, os, shutil, sys, threading, time, re, concurrent.futures
+import io, json, logging, math, os, shutil, sys, threading, time, re, concurrent.futures, signal
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
@@ -179,6 +179,27 @@ def _setup_file_logging():
                     _FAULT_LOG_FH.close()
             except Exception:
                 pass
+        
+        # Add aggressive cleanup for GIL issues
+        @atexit.register 
+        def _emergency_thread_cleanup():
+            """Emergency cleanup to prevent GIL issues on shutdown"""
+            try:
+                # Force garbage collection
+                import gc
+                gc.collect()
+                
+                # Try to stop any remaining daemon threads
+                import threading
+                for thread in threading.enumerate():
+                    if thread != threading.current_thread() and thread.daemon:
+                        try:
+                            # Don't wait, just mark for cleanup
+                            pass
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         # Log uncaught exceptions as critical errors
         def _log_excepthook(exc_type, exc_value, exc_tb):
@@ -204,14 +225,15 @@ def _setup_file_logging():
 _setup_file_logging()
 
 # Start a lightweight background memory usage logger so we can track RAM over time
-try:
-    from memory_usage_reporter import start_global_memory_logger
-    start_global_memory_logger()
-except Exception as _e:
-    try:
-        logging.getLogger(__name__).warning("Memory usage logger failed to start: %s", _e)
-    except Exception:
-        pass
+# TEMPORARILY DISABLED to fix GIL issue
+# try:
+#     from memory_usage_reporter import start_global_memory_logger
+#     start_global_memory_logger()
+# except Exception as _e:
+#     try:
+#         logging.getLogger(__name__).warning("Memory usage logger failed to start: %s", _e)
+#     except Exception:
+#         pass
 
 # Apply a safety patch for tqdm to avoid shutdown-time AttributeError without disabling tqdm
 try:
@@ -14527,8 +14549,55 @@ if __name__ == "__main__":
         
         print("✅ Ready to use!")
         
-        # Start main loop
-        root.mainloop()
+        # Add cleanup handler for graceful shutdown
+        def on_closing():
+            """Handle application shutdown gracefully to avoid GIL issues"""
+            try:
+                # Stop any background threads before destroying GUI
+                if hasattr(app, 'stop_all_operations'):
+                    app.stop_all_operations()
+                
+                # Give threads a moment to stop
+                import time
+                time.sleep(0.1)
+                
+                # Destroy window
+                root.quit()
+                root.destroy()
+            except Exception:
+                # Force exit if cleanup fails
+                import os
+                os._exit(0)
+        
+        # Set the window close handler
+        root.protocol("WM_DELETE_WINDOW", on_closing)
+        
+        # Add signal handlers for clean shutdown
+        def signal_handler(signum, frame):
+            """Handle system signals gracefully"""
+            print(f"Received signal {signum}, shutting down gracefully...")
+            try:
+                on_closing()
+            except Exception:
+                os._exit(1)
+        
+        # Register signal handlers (Windows-safe)
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, signal_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Start main loop with error handling
+        try:
+            root.mainloop()
+        except Exception as e:
+            print(f"Main loop error: {e}")
+        finally:
+            # Ensure cleanup even if mainloop fails
+            try:
+                on_closing()
+            except Exception:
+                pass
         
     except Exception as e:
         print(f"❌ Failed to start application: {e}")

@@ -146,21 +146,27 @@ def _collect_stats(proc) -> dict:
 
 
 def _worker(interval_sec: float, include_tracemalloc: bool):
-    log = _make_logger()
-    proc = _get_process()
-
-    # Optional tracemalloc
-    if include_tracemalloc:
-        try:
-            import tracemalloc
-            if not tracemalloc.is_tracing():
-                tracemalloc.start()
-            tm_enabled = True
-        except Exception:
+    """Memory usage monitoring worker - runs in background thread."""
+    try:
+        log = _make_logger()
+        proc = _get_process()
+        
+        # Optional tracemalloc
+        if include_tracemalloc:
+            try:
+                import tracemalloc
+                if not tracemalloc.is_tracing():
+                    tracemalloc.start()
+                tm_enabled = True
+            except Exception:
+                tm_enabled = False
+        else:
             tm_enabled = False
-    else:
-        tm_enabled = False
+    except Exception:
+        # If initialization fails, exit thread gracefully
+        return
 
+    # Main monitoring loop with additional safety
     while not _GLOBAL_STOP.is_set():
         try:
             st = _collect_stats(proc)
@@ -188,11 +194,13 @@ def _worker(interval_sec: float, include_tracemalloc: bool):
             except Exception:
                 pass
         finally:
-            # Sleep in small chunks to react faster to stop
-            for _ in range(int(max(1, interval_sec * 10))):
-                if _GLOBAL_STOP.is_set():
-                    break
-                time.sleep(0.1)
+            # Use a single sleep with timeout instead of multiple small sleeps
+            # This reduces thread switching overhead that can cause GIL issues
+            try:
+                _GLOBAL_STOP.wait(timeout=interval_sec)
+            except Exception:
+                # Fallback to regular sleep if wait fails
+                time.sleep(interval_sec)
 
 
 def start_global_memory_logger(interval_sec: float = 3.0, include_tracemalloc: bool = False) -> None:
@@ -202,17 +210,28 @@ def start_global_memory_logger(interval_sec: float = 3.0, include_tracemalloc: b
     include_tracemalloc: if True, also log tracemalloc current/peak
     """
     global _GLOBAL_THREAD
-    if _GLOBAL_THREAD and _GLOBAL_THREAD.is_alive():
-        return
-
-    _GLOBAL_STOP.clear()
-    t = threading.Thread(target=_worker, args=(interval_sec, include_tracemalloc), name="mem-logger", daemon=True)
-    _GLOBAL_THREAD = t
-    try:
-        t.start()
-    except Exception:
-        # Do not raise to avoid breaking GUI startup
-        pass
+    
+    # Thread-safe check
+    with threading.Lock():
+        if _GLOBAL_THREAD and _GLOBAL_THREAD.is_alive():
+            return
+        
+        # Clear stop event before starting
+        _GLOBAL_STOP.clear()
+        
+        try:
+            t = threading.Thread(
+                target=_worker, 
+                args=(interval_sec, include_tracemalloc), 
+                name="mem-logger", 
+                daemon=True
+            )
+            t.start()
+            _GLOBAL_THREAD = t
+        except Exception:
+            # Do not raise to avoid breaking GUI startup
+            _GLOBAL_THREAD = None
+            pass
 
 
 def stop_global_memory_logger() -> None:

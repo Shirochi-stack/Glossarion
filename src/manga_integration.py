@@ -4415,9 +4415,9 @@ class MangaTranslationTab:
             "- Chinese text → Output in Chinese\n"
             "- English text → Output in English\n\n"
             "FORMATTING:\n"
-            "- Preserve natural line breaks only\n"
-            "- For vertical text, transcribe as continuous lines\n"
-            "- Do NOT add breaks between every character\n\n"
+            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+            "- Keep natural spacing as it appears in the image\n"
+            "- NEVER use \\n or line breaks in your output\n\n"
             "FORBIDDEN RESPONSES:\n"
             "- \"I can see this appears to be...\"\n"
             "- \"I cannot make out any clear text...\"\n"
@@ -4723,9 +4723,9 @@ class MangaTranslationTab:
                 "- Chinese text → Output in Chinese\n"
                 "- English text → Output in English\n\n"
                 "FORMATTING:\n"
-                "- Preserve natural line breaks only\n"
-                "- For vertical text, transcribe as continuous lines\n"
-                "- Do NOT add breaks between every character\n\n"
+                "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+                "- Keep natural spacing as it appears in the image\n"
+                "- NEVER use \\n or line breaks in your output\n\n"
                 "FORBIDDEN RESPONSES:\n"
                 "- \"I can see this appears to be...\"\n"
                 "- \"I cannot make out any clear text...\"\n"
@@ -5605,8 +5605,7 @@ class MangaTranslationTab:
             pass
 
     def _try_load_model(self, method: str, model_path: str):
-        """Try to load a model and update status (runs loading on a background thread)."""
-        from PySide6.QtCore import QTimer, QMetaObject, Qt, Q_ARG, QThread
+        """Try to load a model and update status without threading for now."""
         from PySide6.QtWidgets import QApplication
         
         try:
@@ -5615,46 +5614,37 @@ class MangaTranslationTab:
             self.local_model_status_label.setStyleSheet("color: orange;")
             QApplication.processEvents()  # Process pending events to update UI
             self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
-
-            def do_load():
-                from local_inpainter import LocalInpainter
-                success = False
-                try:
-                    test_inpainter = LocalInpainter()
-                    success = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
-                    print(f"DEBUG: Model loading completed, success={success}")
-                except Exception as e:
-                    print(f"DEBUG: Model loading exception: {e}")
-                    self.main_gui.append_log(f"❌ Error loading model: {e}")
-                    success = False
-                
-                # Update UI directly from thread (works in PySide6/Qt6)
-                print(f"DEBUG: Updating UI, success={success}")
-                try:
-                    if success:
-                        self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
-                        self.local_model_status_label.setStyleSheet("color: green;")
-                        self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
-                        if hasattr(self, 'translator') and self.translator:
-                            for attr in ('local_inpainter', '_last_local_method', '_last_local_model_path'):
-                                if hasattr(self.translator, attr):
-                                    try:
-                                        delattr(self.translator, attr)
-                                    except Exception:
-                                        pass
-                    else:
-                        self.local_model_status_label.setText("⚠️ Model file found but failed to load")
-                        self.local_model_status_label.setStyleSheet("color: orange;")
-                        self.main_gui.append_log("⚠️ Model file found but failed to load")
-                    print(f"DEBUG: UI update completed")
-                except Exception as e:
-                    print(f"ERROR updating UI after load: {e}")
-                    import traceback
-                    traceback.print_exc()
             
-            # Fire background loader
-            threading.Thread(target=do_load, daemon=True).start()
-            return True
+            from local_inpainter import LocalInpainter
+            success = False
+            try:
+                test_inpainter = LocalInpainter()
+                success = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
+                print(f"DEBUG: Model loading completed, success={success}")
+            except Exception as e:
+                print(f"DEBUG: Model loading exception: {e}")
+                self.main_gui.append_log(f"❌ Error loading model: {e}")
+                success = False
+            
+            # Update UI directly on main thread
+            print(f"DEBUG: Updating UI, success={success}")
+            if success:
+                self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
+                self.local_model_status_label.setStyleSheet("color: green;")
+                self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
+                if hasattr(self, 'translator') and self.translator:
+                    for attr in ('local_inpainter', '_last_local_method', '_last_local_model_path'):
+                        if hasattr(self.translator, attr):
+                            try:
+                                delattr(self.translator, attr)
+                            except Exception:
+                                pass
+            else:
+                self.local_model_status_label.setText("⚠️ Model file found but failed to load")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+                self.main_gui.append_log("⚠️ Model file found but failed to load")
+            print(f"DEBUG: UI update completed")
+            return success
         except Exception as e:
             try:
                 self.local_model_status_label.setText(f"❌ Error: {str(e)[:50]}")
@@ -5835,7 +5825,7 @@ class MangaTranslationTab:
                                 speed_mb = speed / (1024 * 1024)
                                 progress = (downloaded / total_size) * 100
                                 
-                                # Direct widget updates work in PySide6 from threads
+                                # Direct widget updates
                                 try:
                                     progress_bar.setValue(int(progress))
                                     status_label.setText(f"{progress:.1f}% - {speed_mb:.2f} MB/s")
@@ -5845,7 +5835,7 @@ class MangaTranslationTab:
                                     cancel_download['value'] = True
                                     return
                 
-                # Success - direct call (works in PySide6/Qt6)
+                # Success - direct call
                 try:
                     progress_dialog.close()
                     self._download_complete(save_path, model_name)
@@ -6791,6 +6781,15 @@ class MangaTranslationTab:
             
             # Early feedback
             self._log("⏳ Preparing configuration...", "info")
+            
+            # Reload OCR prompt from config (in case it was edited in the dialog)
+            if 'manga_ocr_prompt' in self.main_gui.config:
+                self.ocr_prompt = self.main_gui.config['manga_ocr_prompt']
+                self._log(f"✅ Loaded OCR prompt from config ({len(self.ocr_prompt)} chars)", "info")
+                self._log(f"OCR Prompt preview: {self.ocr_prompt[:100]}...", "debug")
+            else:
+                self._log("⚠️ manga_ocr_prompt not found in config, using default", "warning")
+            
             # Build OCR configuration
             ocr_config = {'provider': self.ocr_provider_value}
 
@@ -6955,21 +6954,27 @@ class MangaTranslationTab:
                 self.translator.reset_history_manager()
 
             # Set environment variables for custom-api provider
-                if ocr_config['provider'] == 'custom-api':
-                    import os  # Import os for environment variables
-                    env_vars = self.main_gui._get_environment_variables(
-                        epub_path='',  # Not needed for manga
-                        api_key=api_key
-                    )
-                    
-                    # Apply all environment variables EXCEPT SYSTEM_PROMPT
-                    for key, value in env_vars.items():
-                        if key == 'SYSTEM_PROMPT':
-                            # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
-                            continue
-                        os.environ[key] = str(value)
-                    
-                    # Set a VERY EXPLICIT OCR prompt that models can't ignore (UPDATED: Improved prompt)
+            if ocr_config['provider'] == 'custom-api':
+                import os  # Import os for environment variables
+                env_vars = self.main_gui._get_environment_variables(
+                    epub_path='',  # Not needed for manga
+                    api_key=api_key
+                )
+                
+                # Apply all environment variables EXCEPT SYSTEM_PROMPT
+                for key, value in env_vars.items():
+                    if key == 'SYSTEM_PROMPT':
+                        # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
+                        continue
+                    os.environ[key] = str(value)
+                
+                # Use custom OCR prompt from GUI if available, otherwise use default
+                if hasattr(self, 'ocr_prompt') and self.ocr_prompt:
+                    os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
+                    self._log(f"✅ Using custom OCR prompt from GUI ({len(self.ocr_prompt)} chars)", "info")
+                    self._log(f"OCR Prompt being set: {self.ocr_prompt[:150]}...", "debug")
+                else:
+                    # Fallback to default OCR prompt
                     os.environ['OCR_SYSTEM_PROMPT'] = (
                     "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
                     "ABSOLUTE RULES:\n"
@@ -6987,9 +6992,9 @@ class MangaTranslationTab:
                     "- Chinese text → Output in Chinese\n"
                     "- English text → Output in English\n\n"
                     "FORMATTING:\n"
-                    "- Preserve natural line breaks only\n"
-                    "- For vertical text, transcribe as continuous lines\n"
-                    "- Do NOT add breaks between every character\n\n"
+                    "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+                    "- Keep natural spacing as it appears in the image\n"
+                    "- NEVER use \\n or line breaks in your output\n\n"
                     "FORBIDDEN RESPONSES:\n"
                     "- \"I can see this appears to be...\"\n"
                     "- \"I cannot make out any clear text...\"\n"
@@ -7002,31 +7007,32 @@ class MangaTranslationTab:
                     "If image has text → Output: [that text]\n"
                     "If image is truly blank → Output: [empty/no response]"
                     )
+                    self._log("✅ Using default OCR prompt", "info")
+                
+                self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
+                
+                # Respect user settings: only set default detector values when bubble detection is OFF.
+                try:
+                    ms = self.main_gui.config.setdefault('manga_settings', {})
+                    ocr_set = ms.setdefault('ocr', {})
+                    changed = False
+                    bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
                     
-                    self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)")
-
-                    # Respect user settings: only set default detector values when bubble detection is OFF.
-                    try:
-                        ms = self.main_gui.config.setdefault('manga_settings', {})
-                        ocr_set = ms.setdefault('ocr', {})
-                        changed = False
-                        bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
-
-                        if not bubble_enabled:
-                            # User has bubble detection OFF -> set non-intrusive defaults only
-                            if 'detector_type' not in ocr_set:
-                                ocr_set['detector_type'] = 'rtdetr_onnx'
-                                changed = True
-                            if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
-                                # Default HF repo (detector.onnx lives here)
-                                ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
-                                changed = True
-                            if changed and hasattr(self.main_gui, 'save_config'):
-                                self.main_gui.save_config(show_message=False)
-                        # Do not preload bubble detector for custom-api here; it will load on use or via panel preloading
-                        self._preloaded_bd = None
-                    except Exception:
-                        self._preloaded_bd = None
+                    if not bubble_enabled:
+                        # User has bubble detection OFF -> set non-intrusive defaults only
+                        if 'detector_type' not in ocr_set:
+                            ocr_set['detector_type'] = 'rtdetr_onnx'
+                            changed = True
+                        if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                            # Default HF repo (detector.onnx lives here)
+                            ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                            changed = True
+                        if changed and hasattr(self.main_gui, 'save_config'):
+                            self.main_gui.save_config(show_message=False)
+                    # Do not preload bubble detector for custom-api here; it will load on use or via panel preloading
+                    self._preloaded_bd = None
+                except Exception:
+                    self._preloaded_bd = None
         except Exception as e:
             # Surface any startup error and reset UI so the app doesn't look stuck
             try:

@@ -5710,9 +5710,12 @@ class MangaTranslator:
             text_list = []
             for i, region in enumerate(regions):
                 # Use index-based key to handle duplicate texts
-                key = f"[{i}] {region.text}"
+                # CRITICAL: Normalize whitespace and newlines for consistent key matching
+                # The API might normalize "\n\n" to spaces, so we need to do the same
+                normalized_text = ' '.join(region.text.split())
+                key = f"[{i}] {normalized_text}"
                 all_texts[key] = region.text
-                text_list.append(f"{key}")
+                text_list.append(f"[{i}] {region.text}")  # Send original with newlines to API
                 
             # CHECK 3: Before image processing
             if self._check_stop():
@@ -6283,6 +6286,11 @@ class MangaTranslator:
             # Key-based mapping (prioritize indexed format as requested in prompt)
             self._log(f"📋 Mapping {len(translations)} translations to {len(regions)} regions")
             
+            # DEBUG: Log all translation keys for inspection
+            self._log(f"🔍 Available translation keys:", "debug")
+            for key in list(translations.keys())[:20]:  # Show first 20
+                self._log(f"   '{key}'", "debug")
+            
             for i, region in enumerate(regions):
                 if i % 10 == 0 and self._check_stop():
                     self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
@@ -6291,15 +6299,33 @@ class MangaTranslator:
                 # Get translation using multiple strategies (indexed format is most reliable)
                 translated = ""
                 
+                # CRITICAL: Normalize whitespace in region text for key matching
+                # API might normalize newlines to spaces, so we match against normalized keys
+                normalized_region_text = ' '.join(region.text.split())
+                
                 # Strategy 1: Indexed key format "[N] original_text" (NEW STANDARD - most reliable)
+                # Try both normalized and original keys
                 key = f"[{i}] {region.text}"
+                key_normalized = f"[{i}] {normalized_region_text}"
+                
+                # DEBUG: Log the keys we're trying
+                self._log(f"  🔎 Region {i}: '{region.text[:30]}...'", "debug")
+                self._log(f"     Original key: '{key[:50]}...'", "debug")
+                self._log(f"     Normalized key: '{key_normalized[:50]}...'", "debug")
+                
                 if key in translations:
                     translated = translations[key]
                     self._log(f"  ✅ Matched indexed key: '{key[:40]}...'", "debug")
+                elif key_normalized in translations:
+                    translated = translations[key_normalized]
+                    self._log(f"  ✅ Matched normalized indexed key: '{key_normalized[:40]}...'", "debug")
                 # Strategy 2: Direct key match without index (backward compatibility)
                 elif region.text in translations:
                     translated = translations[region.text]
                     self._log(f"  ✅ Matched direct key: '{region.text[:40]}...'", "debug")
+                elif normalized_region_text in translations:
+                    translated = translations[normalized_region_text]
+                    self._log(f"  ✅ Matched normalized direct key: '{normalized_region_text[:40]}...'", "debug")
                 # Strategy 3: Position-based fallback (least reliable, only if counts match exactly)
                 elif i < len(translation_values) and len(translation_values) == len(regions):
                     translated = translation_values[i]
@@ -6496,8 +6522,9 @@ class MangaTranslator:
         # CRITICAL: If the text is ONLY punctuation (dots, ellipsis, exclamations, etc.),
         # don't clean it at all - these are valid sound effects/reactions in manga
         # This includes: . ! ? … ~ ♡ ♥ ★ ☆ · • ・ and whitespace
+        # Also preserve sequences like '. . .' or '...' with or without spaces
         import re
-        if re.match(r'^[.!?…~♡♥★☆·•・\s]+$', text):
+        if re.match(r'^[\\.!?…~♡♥★☆·•・、。，！？\\s]+$', text):
             self._log(f"🎯 Preserving punctuation-only text: '{text}'", "debug")
             return text
         
@@ -6570,11 +6597,14 @@ class MangaTranslator:
             text = text.replace(s, '')
         
         # If line is mostly ASCII, strip any remaining single CJK ideographs that stand alone
+        # BUT: Preserve CJK punctuation marks (U+3000-U+303F) as they're valid in mixed content
         try:
             ascii_count = sum(1 for ch in text if ord(ch) < 128)
             ratio = ascii_count / max(1, len(text))
             if ratio >= 0.8:
-                text = re.sub(r'(?:(?<=\s)|^)[\u3000-\u303F\u3040-\u30FF\u3400-\u9FFF\uFF00-\uFFEF](?=(?:\s)|$)', '', text)
+                # Only remove CJK ideographs, NOT punctuation
+                # Exclude U+3000-U+303F (CJK Symbols and Punctuation) from removal
+                text = re.sub(r'(?:(?<=\\s)|^)[\\u3040-\\u30FF\\u3400-\\u9FFF\\uFF00-\\uFFEF](?=(?:\\s)|$)', '', text)
         except Exception:
             pass
         
@@ -8130,8 +8160,8 @@ class MangaTranslator:
             return None
 
     def _is_emote_char(self, ch: str) -> bool:
-        """Check if character should use Meiryo font (symbols + invalid unicode).
-        Now uses a broader detection approach for all symbols and special characters.
+        """Check if character should use Meiryo font (symbols + CJK + invalid unicode).
+        Now uses a broader detection approach for all symbols, CJK characters, and special characters.
         """
         import unicodedata
         
@@ -8140,6 +8170,27 @@ class MangaTranslator:
             category = unicodedata.category(ch)
         except (ValueError, TypeError):
             # Invalid unicode - use Meiryo
+            return True
+        
+        # Check if character is in CJK Unicode ranges
+        # These characters render better with Japanese fonts like Meiryo
+        code_point = ord(ch)
+        
+        # CJK Unicode ranges:
+        # U+3000-U+303F: CJK Symbols and Punctuation (includes 　, 、, 。, ・)
+        # U+3040-U+309F: Hiragana
+        # U+30A0-U+30FF: Katakana (includes ・)
+        # U+3400-U+4DBF: CJK Unified Ideographs Extension A
+        # U+4E00-U+9FFF: CJK Unified Ideographs
+        # U+F900-U+FAFF: CJK Compatibility Ideographs
+        # U+FF00-U+FFEF: Halfwidth and Fullwidth Forms
+        if (0x3000 <= code_point <= 0x303F or   # CJK Symbols and Punctuation
+            0x3040 <= code_point <= 0x309F or   # Hiragana
+            0x30A0 <= code_point <= 0x30FF or   # Katakana
+            0x3400 <= code_point <= 0x4DBF or   # CJK Extension A
+            0x4E00 <= code_point <= 0x9FFF or   # CJK Unified Ideographs
+            0xF900 <= code_point <= 0xFAFF or   # CJK Compatibility
+            0xFF00 <= code_point <= 0xFFEF):    # Fullwidth Forms
             return True
         
         # Symbol categories that should use Meiryo:
@@ -8155,15 +8206,16 @@ class MangaTranslator:
         
         # Additionally, explicit whitelist for specific symbols that might be miscategorized
         # or for symbols we definitely want in Meiryo
+        # Note: CJK characters are already covered by the range check above
         EXPLICIT_SYMBOLS = set([
-            '\u2661', # ♡ White Heart Suit
-            '\u2665', # ♥ Black Heart Suit
-            '\u2764', # ❤ Heavy Black Heart
-            '\u2605', # ★ Black Star
-            '\u2606', # ☆ White Star
-            '\u266A', # ♪ Eighth Note
-            '\u266B', # ♫ Beamed Eighth Notes
-            '\u203B', # ※ Reference Mark
+            '\\u2661', # ♡ White Heart Suit
+            '\\u2665', # ♥ Black Heart Suit
+            '\\u2764', # ❤ Heavy Black Heart
+            '\\u2605', # ★ Black Star
+            '\\u2606', # ☆ White Star
+            '\\u266A', # ♪ Eighth Note
+            '\\u266B', # ♫ Beamed Eighth Notes
+            '\\u203B', # ※ Reference Mark
             '\u2713', # ✓ Check Mark
             '\u2714', # ✔ Heavy Check Mark
             '\u2715', # ✕ Multiplication X

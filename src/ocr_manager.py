@@ -189,9 +189,9 @@ class CustomAPIProvider(OCRProvider):
             "- Chinese text → Output in Chinese\n"
             "- English text → Output in English\n\n"
             "FORMATTING:\n"
-            "- Preserve natural line breaks only\n"
-            "- For vertical text, transcribe as continuous lines\n"
-            "- Do NOT add breaks between every character\n\n"
+            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+            "- Keep natural spacing as it appears in the image\n"
+            "- NEVER use \\n or line breaks in your output\n\n"
             "FORBIDDEN RESPONSES:\n"
             "- \"I can see this appears to be...\"\n"
             "- \"I cannot make out any clear text...\"\n"
@@ -455,6 +455,10 @@ class CustomAPIProvider(OCRProvider):
         results = []
         
         try:
+            # CRITICAL: Reload OCR prompt from environment before each detection
+            # This ensures we use the latest prompt set by manga_integration.py
+            self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', self.ocr_prompt)
+            
             # Get fresh max_tokens from environment - GUI will have set this
             max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '8192'))
             if not self.is_loaded:
@@ -961,9 +965,9 @@ class Qwen2VL(OCRProvider):
             "- Chinese text → Output in Chinese\n"
             "- English text → Output in English\n\n"
             "FORMATTING:\n"
-            "- Preserve natural line breaks only\n"
-            "- For vertical text, transcribe as continuous lines\n"
-            "- Do NOT add breaks between every character\n\n"
+            "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+            "- Keep natural spacing as it appears in the image\n"
+            "- NEVER use \\n or line breaks in your output\n\n"
             "FORBIDDEN RESPONSES:\n"
             "- \"I can see this appears to be...\"\n"
             "- \"I cannot make out any clear text...\"\n"
