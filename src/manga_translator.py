@@ -590,12 +590,12 @@ class MangaTranslator:
         elif self.ocr_provider == 'azure':
             # Import Azure libraries
             try:
-                from azure.cognitiveservices.vision.computervision import ComputerVisionClient
-                from msrest.authentication import CognitiveServicesCredentials
-                self.azure_cv = ComputerVisionClient
-                self.azure_creds = CognitiveServicesCredentials
+                from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                from azure.core.credentials import AzureKeyCredential
+                self.azure_client_class = ImageAnalysisClient
+                self.azure_cred_class = AzureKeyCredential
             except ImportError:
-                raise ImportError("Azure Computer Vision required. Install with: pip install azure-cognitiveservices-vision-computervision")
+                raise ImportError("Azure Computer Vision required. Install with: pip install azure-ai-vision-imageanalysis")
             
             azure_key = ocr_config.get('azure_key')
             azure_endpoint = ocr_config.get('azure_endpoint')
@@ -603,9 +603,9 @@ class MangaTranslator:
             if not azure_key or not azure_endpoint:
                 raise ValueError("Azure key and endpoint required")
                 
-            self.vision_client = self.azure_cv(
-                azure_endpoint,
-                self.azure_creds(azure_key)
+            self.vision_client = self.azure_client_class(
+                endpoint=azure_endpoint,
+                credential=self.azure_cred_class(azure_key)
             )
         else:
             # New OCR providers handled by OCR manager
@@ -2338,8 +2338,8 @@ class MangaTranslator:
     def _ensure_azure_client(self):
         try:
             if getattr(self, 'vision_client', None) is None:
-                from azure.cognitiveservices.vision.computervision import ComputerVisionClient
-                from msrest.authentication import CognitiveServicesCredentials
+                from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                from azure.core.credentials import AzureKeyCredential
                 key = None
                 endpoint = None
                 try:
@@ -2353,7 +2353,7 @@ class MangaTranslator:
                     endpoint = self.main_gui.config.get('azure_vision_endpoint', '') if hasattr(self, 'main_gui') else None
                 if not key or not endpoint:
                     raise ValueError("Azure credentials missing for client init")
-                self.vision_client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(key))
+                self.vision_client = ImageAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
                 self._log("✅ Reinitialized Azure Computer Vision client", "debug")
         except Exception as e:
             self._log(f"❌ Failed to initialize Azure CV client: {e}", "error")
@@ -2938,8 +2938,6 @@ class MangaTranslator:
                 except Exception:
                     pass
                 import io
-                import time
-                from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
                 
                 # Check if we should use RT-DETR for text region detection (NEW FEATURE)
                 if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
@@ -2976,12 +2974,6 @@ class MangaTranslator:
                                 self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
                             else:
                                 ocr_results = []
-                                
-                                # Get Azure settings
-                                azure_reading_order = ocr_settings.get('azure_reading_order', 'natural')
-                                azure_model_version = ocr_settings.get('azure_model_version', 'latest')
-                                azure_max_wait = ocr_settings.get('azure_max_wait', 60)
-                                azure_poll_interval = ocr_settings.get('azure_poll_interval', 1.0)
                                 
                                 # Define worker function for concurrent OCR
                                 def ocr_region_azure(region_data):
@@ -3027,56 +3019,40 @@ class MangaTranslator:
                                         _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
                                         region_image_bytes = encoded.tobytes()
                                         
-                                        # Call Azure Read API
-                                        read_response = self.vision_client.read_in_stream(
-                                            io.BytesIO(region_image_bytes),
-                                            language=ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja',
-                                            model_version=azure_model_version,
-                                            reading_order=azure_reading_order,
-                                            raw=True
+                                        # Call Azure Image Analysis API (synchronous)
+                                        from azure.ai.vision.imageanalysis.models import VisualFeatures
+                                        
+                                        result = self.vision_client.analyze(
+                                            image_data=region_image_bytes,
+                                            visual_features=[VisualFeatures.READ]
                                         )
                                         
-                                        # Get operation location
-                                        operation_location = read_response.headers['Operation-Location']
-                                        operation_id = operation_location.split('/')[-1]
-                                        
-                                        # Poll for result
-                                        start_time = time.time()
-                                        while True:
-                                            result = self.vision_client.get_read_result(operation_id)
-                                            if result.status not in [OperationStatusCodes.not_started, OperationStatusCodes.running]:
-                                                break
-                                            if time.time() - start_time > azure_max_wait:
-                                                self._log(f"⚠️ Azure timeout for region {i}", "warning")
-                                                break
-                                            time.sleep(azure_poll_interval)
-                                        
-                                        if result.status == OperationStatusCodes.succeeded:
-                                            # Extract text from result
-                                            region_text = ""
-                                            for text_result in result.analyze_result.read_results:
-                                                for line in text_result.lines:
+                                        # Extract text from result
+                                        region_text = ""
+                                        if result.read and result.read.blocks:
+                                            for block in result.read.blocks:
+                                                for line in block.lines:
                                                     region_text += line.text + "\n"
+                                        
+                                        region_text = region_text.strip()
+                                        if region_text:
+                                            # Clean the text
+                                            region_text = self._fix_encoding_issues(region_text)
+                                            region_text = self._sanitize_unicode_characters(region_text)
                                             
-                                            region_text = region_text.strip()
-                                            if region_text:
-                                                # Clean the text
-                                                region_text = self._fix_encoding_issues(region_text)
-                                                region_text = self._sanitize_unicode_characters(region_text)
-                                                
-                                                # Create TextRegion with original image coordinates
-                                                region = TextRegion(
-                                                    text=region_text,
-                                                    vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
-                                                    bounding_box=(x, y, w, h),
-                                                    confidence=0.9,  # RT-DETR confidence
-                                                    region_type='text_block'
-                                                )
-                                                # Assign bubble_type from RT-DETR detection
-                                                region.bubble_type = region_types.get(region_idx, 'text_bubble')
-                                                if not getattr(self, 'concise_logs', False):
-                                                    self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
-                                                return region
+                                            # Create TextRegion with original image coordinates
+                                            region = TextRegion(
+                                                text=region_text,
+                                                vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+                                                bounding_box=(x, y, w, h),
+                                                confidence=0.9,  # RT-DETR confidence
+                                                region_type='text_block'
+                                            )
+                                            # Assign bubble_type from RT-DETR detection
+                                            region.bubble_type = region_types.get(region_idx, 'text_bubble')
+                                            if not getattr(self, 'concise_logs', False):
+                                                self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
+                                            return region
                                         return None
                                     
                                     except Exception as e:
@@ -3391,67 +3367,30 @@ class MangaTranslator:
                         except Exception:
                             pass
                 
-                # Create stream from image data
-                image_stream = io.BytesIO(processed_image_data)
+                # Use Azure Image Analysis API (synchronous, no polling needed)
+                from azure.ai.vision.imageanalysis.models import VisualFeatures
+                import time
                 
-                # Get Azure-specific settings
-                reading_order = ocr_settings.get('azure_reading_order', 'natural')
-                model_version = ocr_settings.get('azure_model_version', 'latest')
-                max_wait = ocr_settings.get('azure_max_wait', 60)
-                poll_interval = ocr_settings.get('azure_poll_interval', 0.5)
+                self._log("   Using Azure Image Analysis API for OCR")
                 
-                # Map language hints to Azure language codes
-                language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
-                
-                # Build parameters dictionary
-                read_params = {
-                    'raw': True,
-                    'readingOrder': reading_order
-                }
-                
-                # Add model version if not using latest
-                if model_version != 'latest':
-                    read_params['model-version'] = model_version
-                
-                # Use language parameter only if single language is selected
-                if len(language_hints) == 1:
-                    azure_lang = language_hints[0]
-                    # Map to Azure language codes
-                    lang_mapping = {
-                        'zh': 'zh-Hans',
-                        'zh-TW': 'zh-Hant',
-                        'zh-CN': 'zh-Hans',
-                        'ja': 'ja',
-                        'ko': 'ko',
-                        'en': 'en'
-                    }
-                    azure_lang = lang_mapping.get(azure_lang, azure_lang)
-                    read_params['language'] = azure_lang
-                    self._log(f"   Using Azure Read API with language: {azure_lang}, order: {reading_order}")
-                else:
-                    self._log(f"   Using Azure Read API (auto-detect for {len(language_hints)} languages, order: {reading_order})")
-                
-                # Start Read operation with error handling and rate limit retry
-                # Use max_retries from config (default 7, configurable in Other Settings)
+                # Retry logic for rate limiting
                 max_retries = self.main_gui.config.get('max_retries', 7)
-                retry_delay = 60  # Start with 60 seconds for rate limits
-                read_response = None
+                retry_delay = 60  # 60 seconds for rate limits
+                result = None
                 
                 for retry_attempt in range(max_retries):
                     try:
-                        # Ensure client is alive before starting
+                        # Ensure client is alive
                         if getattr(self, 'vision_client', None) is None:
-                            self._log("⚠️ Azure client missing before read; reinitializing...", "warning")
+                            self._log("⚠️ Azure client missing; reinitializing...", "warning")
                             self._ensure_azure_client()
                         if getattr(self, 'vision_client', None) is None:
-                            raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-cognitiveservices-vision-computervision installation.")
-
-                        # Reset stream position for retry
-                        image_stream.seek(0)
+                            raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-ai-vision-imageanalysis installation.")
                         
-                        read_response = self.vision_client.read_in_stream(
-                            image_stream,
-                            **read_params
+                        # Call synchronous analyze API
+                        result = self.vision_client.analyze(
+                            image_data=processed_image_data,
+                            visual_features=[VisualFeatures.READ]
                         )
                         # Success! Break out of retry loop
                         break
@@ -3462,94 +3401,36 @@ class MangaTranslator:
                         # Handle rate limit errors with fixed 60s wait
                         if 'Too Many Requests' in error_msg or '429' in error_msg:
                             if retry_attempt < max_retries - 1:
-                                wait_time = retry_delay  # Fixed 60s wait each time
+                                wait_time = retry_delay
                                 self._log(f"⚠️ Azure rate limit hit. Waiting {wait_time}s before retry {retry_attempt + 1}/{max_retries}...", "warning")
                                 time.sleep(wait_time)
                                 continue
                             else:
                                 self._log(f"❌ Azure rate limit: Exhausted {max_retries} retries", "error")
                                 raise
-                        
-                        # Handle bad request errors
-                        elif 'Bad Request' in error_msg:
-                            self._log("⚠️ Azure Read API Bad Request - likely invalid image format or too small. Retrying without language parameter...", "warning")
-                            # Retry without language parameter
-                            image_stream.seek(0)
-                            read_params.pop('language', None)
-                            if getattr(self, 'vision_client', None) is None:
-                                self._ensure_azure_client()
-                            read_response = self.vision_client.read_in_stream(
-                                image_stream,
-                                **read_params
-                            )
-                            break
                         else:
+                            # Other error, don't retry
                             raise
                 
-                if read_response is None:
-                    raise RuntimeError("Failed to get response from Azure Read API after retries")
+                if result is None:
+                    raise RuntimeError("Failed to get response from Azure Image Analysis API after retries")
                 
-                # Get operation ID
-                operation_location = read_response.headers.get("Operation-Location") if hasattr(read_response, 'headers') else None
-                if not operation_location:
-                    raise RuntimeError("Azure Read API did not return Operation-Location header")
-                operation_id = operation_location.split("/")[-1]
+                # Process results
+                total_lines = 0
                 
-                # Poll for results with configurable timeout
-                self._log(f"   Waiting for Azure OCR to complete (max {max_wait}s)...")
-                wait_time = 0
-                last_status = None
-                result = None
-                
-                while wait_time < max_wait:
-                    try:
-                        if getattr(self, 'vision_client', None) is None:
-                            # Client got cleaned up mid-poll; reinitialize and continue
-                            self._log("⚠️ Azure client became None during polling; reinitializing...", "warning")
-                            self._ensure_azure_client()
-                            if getattr(self, 'vision_client', None) is None:
-                                raise AttributeError("Azure client lost and could not be reinitialized")
-                        result = self.vision_client.get_read_result(operation_id)
-                    except AttributeError as e:
-                        # Defensive: reinitialize once and retry this iteration
-                        self._log(f"⚠️ {e} — reinitializing Azure client and retrying once", "warning")
-                        self._ensure_azure_client()
-                        if getattr(self, 'vision_client', None) is None:
-                            raise
-                        result = self.vision_client.get_read_result(operation_id)
-                    
-                    # Log status changes
-                    if result.status != last_status:
-                        self._log(f"   Status: {result.status}")
-                        last_status = result.status
-                    
-                    if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
-                        break
-                    
-                    time.sleep(poll_interval)
-                    self._log("💤 Azure OCR polling pausing briefly for stability", "debug")
-                    wait_time += poll_interval
-                
-                if not result:
-                    raise RuntimeError("Azure Read API polling did not return a result")
-                if result.status == OperationStatusCodes.succeeded:
-                    # Track statistics
-                    total_lines = 0
-                    handwritten_lines = 0
-                    
-                    for page_num, page in enumerate(result.analyze_result.read_results):
-                        if len(result.analyze_result.read_results) > 1:
-                            self._log(f"   Processing page {page_num + 1}/{len(result.analyze_result.read_results)}")
-                        
-                        for line in page.lines:
-                            # CLEAN ORIGINAL OCR TEXT FOR AZURE - Fix cube characters and encoding issues
-                            original_azure_text = line.text
-                            cleaned_line_text = self._fix_encoding_issues(line.text)
+                if result.read and result.read.blocks:
+                    for block in result.read.blocks:
+                        for line in block.lines:
+                            # Extract text
+                            line_text = line.text
+                            
+                            # Clean text
+                            cleaned_line_text = self._fix_encoding_issues(line_text)
                             cleaned_line_text = self._sanitize_unicode_characters(cleaned_line_text)
                             
                             # Log cleaning if changes were made
-                            if cleaned_line_text != original_azure_text:
-                                self._log(f"🧹 Cleaned Azure OCR text: '{original_azure_text[:30]}...' → '{cleaned_line_text[:30]}...'", "debug")
+                            if cleaned_line_text != line_text:
+                                self._log(f"🧹 Cleaned Azure OCR text: '{line_text[:30]}...' → '{cleaned_line_text[:30]}...'", "debug")
                             
                             # TEXT FILTERING FOR AZURE
                             # Skip if text is too short (after cleaning)
@@ -3558,103 +3439,76 @@ class MangaTranslator:
                                     self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
                                 continue
                             
-                            # Skip if primarily English and exclude_english is enabled (use cleaned text)
+                            # Skip if primarily English and exclude_english is enabled
                             if exclude_english and self._is_primarily_english(cleaned_line_text):
                                 if not getattr(self, 'concise_logs', False):
                                     self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
                                 continue
                             
-                            # Azure provides 8-point bounding box
-                            bbox = line.bounding_box
-                            vertices = [
-                                (bbox[0], bbox[1]),
-                                (bbox[2], bbox[3]),
-                                (bbox[4], bbox[5]),
-                                (bbox[6], bbox[7])
-                            ]
+                            # Extract bounding polygon (new API format)
+                            vertices = []
+                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                for vertex in line.bounding_polygon:
+                                    if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                        vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x, 
+                                                       vertex['y'] if isinstance(vertex, dict) else vertex.y))
                             
-                            # Calculate rectangular bounding box
-                            xs = [v[0] for v in vertices]
-                            ys = [v[1] for v in vertices]
-                            x_min, x_max = min(xs), max(xs)
-                            y_min, y_max = min(ys), max(ys)
+                            # If we have vertices, use them; otherwise create rectangle from words
+                            if len(vertices) >= 2:
+                                # Calculate rectangular bounding box from vertices
+                                xs = [v[0] for v in vertices]
+                                ys = [v[1] for v in vertices]
+                                x_min, x_max = min(xs), max(xs)
+                                y_min, y_max = min(ys), max(ys)
+                            else:
+                                # Fallback: try to get bbox from words
+                                if hasattr(line, 'words') and line.words:
+                                    all_word_vertices = []
+                                    for word in line.words:
+                                        if hasattr(word, 'bounding_polygon') and word.bounding_polygon:
+                                            for vertex in word.bounding_polygon:
+                                                if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                                    all_word_vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
+                                                                            vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                                    if all_word_vertices:
+                                        vertices = all_word_vertices
+                                        xs = [v[0] for v in vertices]
+                                        ys = [v[1] for v in vertices]
+                                        x_min, x_max = min(xs), max(xs)
+                                        y_min, y_max = min(ys), max(ys)
+                                    else:
+                                        # Skip if no bbox available
+                                        continue
+                                else:
+                                    # Skip if no bbox available
+                                    continue
                             
-                            # Calculate confidence from word-level data
-                            confidence = 0.95  # Default high confidence
-                            
-                            if hasattr(line, 'words') and line.words:
-                                # Calculate average confidence from words
-                                confidences = []
-                                for word in line.words:
-                                    if hasattr(word, 'confidence'):
-                                        confidences.append(word.confidence)
-                                
-                                if confidences:
-                                    confidence = sum(confidences) / len(confidences)
-                                    if not getattr(self, 'concise_logs', False):
-                                        self._log(f"   Line has {len(line.words)} words, avg confidence: {confidence:.3f}")
-                            
-                            # Check for handwriting style (if available)
-                            style = 'print'  # Default
-                            style_confidence = None
-                            
-                            if hasattr(line, 'appearance') and line.appearance:
-                                if hasattr(line.appearance, 'style'):
-                                    style_info = line.appearance.style
-                                    if hasattr(style_info, 'name'):
-                                        style = style_info.name
-                                        if style == 'handwriting':
-                                            handwritten_lines += 1
-                                    if hasattr(style_info, 'confidence'):
-                                        style_confidence = style_info.confidence
-                                        if not getattr(self, 'concise_logs', False):
-                                            self._log(f"   Style: {style} (confidence: {style_confidence:.2f})")
+                            # Default high confidence (new API doesn't expose confidence scores)
+                            confidence = 0.95
                             
                             # Apply confidence threshold filtering
                             if confidence >= confidence_threshold:
                                 region = TextRegion(
-                                    text=cleaned_line_text,  # Use cleaned text instead of original
-                                    vertices=vertices,
+                                    text=cleaned_line_text,
+                                    vertices=vertices if len(vertices) >= 4 else [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)],
                                     bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
                                     confidence=confidence,
                                     region_type='text_line'
                                 )
                                 
-                                # Add extra attributes for Azure-specific info
-                                region.style = style
-                                region.style_confidence = style_confidence
-                                
                                 regions.append(region)
                                 total_lines += 1
                                 
-                                # More detailed logging (use cleaned text)
+                                # More detailed logging
                                 if not getattr(self, 'concise_logs', False):
-                                    if style == 'handwriting':
-                                        self._log(f"   Found handwritten text ({confidence:.2f}): {cleaned_line_text[:50]}...")
-                                    else:
-                                        self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
+                                    self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
                             else:
                                 if not getattr(self, 'concise_logs', False):
                                     self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
-                    
-                    # Log summary statistics
-                    if total_lines > 0 and not getattr(self, 'concise_logs', False):
-                        self._log(f"   Total lines detected: {total_lines}")
-                        if handwritten_lines > 0:
-                            self._log(f"   Handwritten lines: {handwritten_lines} ({handwritten_lines/total_lines*100:.1f}%)")
-                    
-                elif result.status == OperationStatusCodes.failed:
-                    # More detailed error handling
-                    error_msg = "Azure OCR failed"
-                    if hasattr(result, 'message'):
-                        error_msg += f": {result.message}"
-                    if hasattr(result.analyze_result, 'errors') and result.analyze_result.errors:
-                        for error in result.analyze_result.errors:
-                            self._log(f"   Error: {error}", "error")
-                    raise Exception(error_msg)
-                else:
-                    # Timeout or other status
-                    raise Exception(f"Azure OCR ended with status: {result.status} after {wait_time}s")
+                
+                # Log summary statistics
+                if total_lines > 0 and not getattr(self, 'concise_logs', False):
+                    self._log(f"   Total lines detected: {total_lines}")
                     
             else:
                 # === NEW OCR PROVIDERS ===
@@ -4896,24 +4750,13 @@ class MangaTranslator:
         return results
 
     def _azure_ocr_rois_concurrent(self, rois: List[Dict[str, Any]], ocr_settings: Dict, max_workers: int, page_hash: str) -> List[TextRegion]:
-        """Concurrent ROI OCR for Azure Read API. Each ROI is sent as a separate call.
+        """Concurrent ROI OCR for Azure Image Analysis API. Each ROI is sent as a separate call.
         Concurrency is bounded by max_workers. Consults/updates cache.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+        from azure.ai.vision.imageanalysis.models import VisualFeatures
         import io
         results: List[TextRegion] = []
-
-        # Read settings
-        reading_order = ocr_settings.get('azure_reading_order', 'natural')
-        model_version = ocr_settings.get('azure_model_version', 'latest')
-        language_hints = ocr_settings.get('language_hints', ['ja'])
-        read_params = {'raw': True, 'readingOrder': reading_order}
-        if model_version != 'latest':
-            read_params['model-version'] = model_version
-        if len(language_hints) == 1:
-            lang_mapping = {'zh': 'zh-Hans', 'zh-TW': 'zh-Hant', 'zh-CN': 'zh-Hans', 'ja': 'ja', 'ko': 'ko', 'en': 'en'}
-            read_params['language'] = lang_mapping.get(language_hints[0], language_hints[0])
 
         min_text_length = int(ocr_settings.get('min_text_length', 2))
         exclude_english = bool(ocr_settings.get('exclude_english_text', True))
@@ -4923,8 +4766,8 @@ class MangaTranslator:
         work_rois: List[Dict[str, Any]] = []
         for roi in rois:
             x, y, w, h = roi['bbox']
-            # Include region type in cache key to prevent mismapping
-            cache_key = ("azure", page_hash, x, y, w, h, reading_order, roi.get('type', 'unknown'))
+            # Include region type in cache key to prevent mismapping (simplified for new API)
+            cache_key = ("azure_v2", page_hash, x, y, w, h, roi.get('type', 'unknown'))
             # THREAD-SAFE: Use lock for cache access in parallel panel translation
             with self._cache_lock:
                 text_cached = self.ocr_roi_cache.get(cache_key)
@@ -4987,32 +4830,22 @@ class MangaTranslator:
                         data = buf2.getvalue()
                 except Exception:
                     pass
-                stream = io.BytesIO(data)
-                read_response = self.vision_client.read_in_stream(stream, **read_params)
-                op_loc = read_response.headers.get('Operation-Location') if hasattr(read_response, 'headers') else None
-                if not op_loc:
-                    return None
-                op_id = op_loc.split('/')[-1]
-                # Poll
-                import time
-                waited = 0.0
-                poll_interval = float(ocr_settings.get('azure_poll_interval', 0.5))
-                max_wait = float(ocr_settings.get('azure_max_wait', 60))
-                while waited < max_wait:
-                    result = self.vision_client.get_read_result(op_id)
-                    if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
-                        break
-                    time.sleep(poll_interval)
-                    waited += poll_interval
-                if result.status != OperationStatusCodes.succeeded:
-                    return None
+                
+                # Call synchronous Azure Image Analysis API
+                result = self.vision_client.analyze(
+                    image_data=data,
+                    visual_features=[VisualFeatures.READ]
+                )
+                
                 # Aggregate text lines
                 texts = []
-                for page in result.analyze_result.read_results:
-                    for line in page.lines:
-                        t = self._sanitize_unicode_characters(self._fix_encoding_issues(line.text or ''))
-                        if t:
-                            texts.append(t)
+                if result.read and result.read.blocks:
+                    for block in result.read.blocks:
+                        for line in block.lines:
+                            t = self._sanitize_unicode_characters(self._fix_encoding_issues(line.text or ''))
+                            if t:
+                                texts.append(t)
+                
                 text_all = ' '.join(texts).strip()
                 if len(text_all) < min_text_length:
                     return None
@@ -5058,46 +4891,31 @@ class MangaTranslator:
         return results
 
     def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
-        """Detect text using Azure Computer Vision"""
-        import io
-        from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+        """Detect text using Azure Image Analysis API"""
+        from azure.ai.vision.imageanalysis.models import VisualFeatures
         
-        stream = io.BytesIO(image_data)
-        
-        # Use Read API for better manga text detection
-        read_result = self.vision_client.read_in_stream(
-            stream,
-            raw=True,
-            language='ja'  # or from ocr_settings
+        # Use synchronous Image Analysis API
+        result = self.vision_client.analyze(
+            image_data=image_data,
+            visual_features=[VisualFeatures.READ]
         )
         
-        # Get operation ID from headers
-        operation_location = read_result.headers["Operation-Location"]
-        operation_id = operation_location.split("/")[-1]
-        
-        # Wait for completion
-        import time
-        while True:
-            result = self.vision_client.get_read_result(operation_id)
-            if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
-                break
-            time.sleep(0.1)  # Brief pause for stability
-            logger.debug("💤 Azure text detection pausing briefly for stability")
-        
         regions = []
-        confidence_threshold = ocr_settings.get('confidence_threshold', 0.6)
+        confidence_threshold = ocr_settings.get('confidence_threshold', 0.0)
         
-        if result.status == OperationStatusCodes.succeeded:
-            for page in result.analyze_result.read_results:
-                for line in page.lines:
-                    # Azure returns bounding box as 8 coordinates
-                    bbox = line.bounding_box
-                    vertices = [
-                        (bbox[0], bbox[1]),
-                        (bbox[2], bbox[3]),
-                        (bbox[4], bbox[5]),
-                        (bbox[6], bbox[7])
-                    ]
+        if result.read and result.read.blocks:
+            for block in result.read.blocks:
+                for line in block.lines:
+                    # Extract bounding polygon
+                    vertices = []
+                    if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                        for vertex in line.bounding_polygon:
+                            if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
+                                               vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                    
+                    if len(vertices) < 2:
+                        continue
                     
                     xs = [v[0] for v in vertices]
                     ys = [v[1] for v in vertices]
@@ -7078,11 +6896,14 @@ class MangaTranslator:
                     bubble_detection_enabled and use_rtdetr_guide):
                     base_dilation_size = 0
                     self._log(f"📏 Auto dilation (RT-DETR guided): 0px (using iterations only)", "info")
-                elif getattr(self, 'ocr_provider', '').lower() in ('azure', 'google'):
-                    # CRITICAL: Without RT-DETR, Azure/Google OCR is very conservative
-                    # Use base dilation to expand masks to actual bubble size
-                    base_dilation_size = 15  # Base expansion for Azure/Google without RT-DETR
-                    self._log(f"📏 Auto dilation by provider ({self.ocr_provider}, no RT-DETR): {base_dilation_size}px", "info")
+                elif getattr(self, 'ocr_provider', '').lower() == 'azure':
+                    # New Azure API is more accurate, only needs minimal expansion
+                    base_dilation_size = 5
+                    self._log(f"📏 Auto dilation by provider (Azure, no RT-DETR): {base_dilation_size}px", "info")
+                elif getattr(self, 'ocr_provider', '').lower() == 'google':
+                    # Google still needs more expansion to catch full bubble regions
+                    base_dilation_size = 15
+                    self._log(f"📏 Auto dilation by provider (Google, no RT-DETR): {base_dilation_size}px", "info")
                 else:
                     base_dilation_size = 0
                     self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size}px", "info")

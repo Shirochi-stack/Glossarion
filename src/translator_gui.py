@@ -157,6 +157,10 @@ def _setup_file_logging():
             root_logger.addHandler(handler)
         root_logger.setLevel(logging.INFO)
 
+        # Suppress verbose Azure SDK HTTP logging
+        logging.getLogger('azure.core.pipeline.policies.http_logging_policy').setLevel(logging.WARNING)
+        logging.getLogger('azure').setLevel(logging.WARNING)
+
         # Capture warnings via logging
         logging.captureWarnings(True)
 

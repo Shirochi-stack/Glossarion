@@ -90,11 +90,8 @@ class MangaSettingsDialog(QDialog):
                 'detect_text_bubbles': True,
                 'detect_free_text': True,
                 'rtdetr_model_url': '',
-                'use_rtdetr_for_ocr_regions': True,
-                'azure_reading_order': 'natural',
-                'azure_model_version': 'latest',
-                'azure_max_wait': 60,
-                'azure_poll_interval': 0.5,
+                'use_rtdetr_for_ocr_regions': True,  # On by default for best accuracy
+                # Azure settings removed - new API is synchronous, no polling/version settings needed
                 'min_text_length': 0,
                 'exclude_english_text': False,
                 'english_exclude_threshold': 0.7,
@@ -2430,12 +2427,12 @@ class MangaSettingsDialog(QDialog):
         filter_help.setContentsMargins(0, 10, 0, 0)
         filter_layout.addWidget(filter_help)
 
-        # Azure-specific OCR settings
+        # Azure-specific OCR settings (simplified - new API is synchronous)
         azure_ocr_group = QGroupBox("Azure OCR Settings")
         azure_ocr_layout = QVBoxLayout(azure_ocr_group)
         content_layout.addWidget(azure_ocr_group)
 
-        # Azure merge multiplier
+        # Azure merge multiplier (kept for backward compatibility)
         merge_mult_widget = QWidget()
         merge_mult_layout = QHBoxLayout(merge_mult_widget)
         merge_mult_layout.setContentsMargins(0, 0, 0, 0)
@@ -2465,102 +2462,10 @@ class MangaSettingsDialog(QDialog):
         merge_mult_layout.addWidget(merge_mult_desc)
         merge_mult_layout.addStretch()
 
-        # Reading order
-        reading_order_widget = QWidget()
-        reading_order_layout = QHBoxLayout(reading_order_widget)
-        reading_order_layout.setContentsMargins(0, 0, 0, 0)
-        azure_ocr_layout.addWidget(reading_order_widget)
-        
-        reading_order_label = QLabel("Reading Order:")
-        reading_order_label.setMinimumWidth(180)
-        reading_order_layout.addWidget(reading_order_label)
-
-        self.azure_reading_order_combo = QComboBox()
-        self.azure_reading_order_combo.addItems(['basic', 'natural'])
-        self.azure_reading_order_combo.setCurrentText(self.settings['ocr'].get('azure_reading_order', 'natural'))
-        reading_order_layout.addWidget(self.azure_reading_order_combo)
-
-        reading_order_desc = QLabel("(natural = better for complex layouts)")
-        reading_order_desc_font = QFont('Arial', 9)
-        reading_order_desc.setFont(reading_order_desc_font)
-        reading_order_desc.setStyleSheet("color: gray;")
-        reading_order_layout.addWidget(reading_order_desc)
-        reading_order_layout.addStretch()
-
-        # Model version
-        model_version_widget = QWidget()
-        model_version_layout = QHBoxLayout(model_version_widget)
-        model_version_layout.setContentsMargins(0, 0, 0, 0)
-        azure_ocr_layout.addWidget(model_version_widget)
-        
-        model_version_label = QLabel("Model Version:")
-        model_version_label.setMinimumWidth(180)
-        model_version_layout.addWidget(model_version_label)
-
-        self.azure_model_version_combo = QComboBox()
-        self.azure_model_version_combo.addItems(['latest', '2022-04-30', '2022-01-30', '2021-09-30'])
-        self.azure_model_version_combo.setCurrentText(self.settings['ocr'].get('azure_model_version', 'latest'))
-        self.azure_model_version_combo.setEditable(True)
-        model_version_layout.addWidget(self.azure_model_version_combo)
-
-        model_version_desc = QLabel("(use 'latest' for newest features)")
-        model_version_desc_font = QFont('Arial', 9)
-        model_version_desc.setFont(model_version_desc_font)
-        model_version_desc.setStyleSheet("color: gray;")
-        model_version_layout.addWidget(model_version_desc)
-        model_version_layout.addStretch()
-
-        # Timeout settings
-        timeout_widget = QWidget()
-        timeout_layout = QHBoxLayout(timeout_widget)
-        timeout_layout.setContentsMargins(0, 0, 0, 0)
-        azure_ocr_layout.addWidget(timeout_widget)
-
-        timeout_label = QLabel("Max Wait Time:")
-        timeout_label.setMinimumWidth(180)
-        timeout_layout.addWidget(timeout_label)
-
-        self.azure_max_wait_spinbox = QSpinBox()
-        self.azure_max_wait_spinbox.setRange(10, 120)
-        self.azure_max_wait_spinbox.setSingleStep(5)
-        self.azure_max_wait_spinbox.setValue(self.settings['ocr'].get('azure_max_wait', 60))
-        timeout_layout.addWidget(self.azure_max_wait_spinbox)
-        
-        timeout_unit = QLabel("seconds")
-        timeout_layout.addWidget(timeout_unit)
-        timeout_layout.addStretch()
-
-        # Poll interval
-        poll_widget = QWidget()
-        poll_layout = QHBoxLayout(poll_widget)
-        poll_layout.setContentsMargins(0, 0, 0, 0)
-        azure_ocr_layout.addWidget(poll_widget)
-
-        poll_label = QLabel("Poll Interval:")
-        poll_label.setMinimumWidth(180)
-        poll_layout.addWidget(poll_label)
-
-        self.azure_poll_interval_slider = QSlider(Qt.Orientation.Horizontal)
-        self.azure_poll_interval_slider.setRange(0, 200)
-        self.azure_poll_interval_slider.setValue(int(self.settings['ocr'].get('azure_poll_interval', 0.5) * 100))
-        self.azure_poll_interval_slider.setMinimumWidth(200)
-        poll_layout.addWidget(self.azure_poll_interval_slider)
-
-        self.azure_poll_interval_label = QLabel(f"{self.settings['ocr'].get('azure_poll_interval', 0.5):.2f}")
-        self.azure_poll_interval_label.setMinimumWidth(50)
-        self.azure_poll_interval_slider.valueChanged.connect(
-            lambda v: self.azure_poll_interval_label.setText(f"{v/100:.2f}")
-        )
-        poll_layout.addWidget(self.azure_poll_interval_label)
-        
-        poll_unit = QLabel("sec")
-        poll_layout.addWidget(poll_unit)
-        poll_layout.addStretch()
-
         # Help text
         azure_help = QLabel(
-            "💡 Azure Read API auto-detects language well\n"
-            "💡 Natural reading order works better for manga panels"
+            "💡 Azure uses new Image Analysis API (synchronous, no polling)\n"
+            "💡 Language auto-detection works well for manga"
         )
         azure_help_font = QFont('Arial', 9)
         azure_help.setFont(azure_help_font)
@@ -2746,7 +2651,7 @@ class MangaSettingsDialog(QDialog):
         
         # Use RT-DETR for text region detection (not just bubble detection)
         self.use_rtdetr_for_ocr_checkbox = self._create_styled_checkbox("Use RT-DETR to guide OCR (Google/Azure only - others already do this)")
-        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', True))  # Default: True
+        self.use_rtdetr_for_ocr_checkbox.setChecked(self.settings['ocr'].get('use_rtdetr_for_ocr_regions', True))  # Default: True for best accuracy
         self.use_rtdetr_for_ocr_checkbox.setToolTip(
             "When enabled, RT-DETR first detects all text regions (text bubbles + free text), \n"
             "then your OCR provider reads each region separately.\n\n"
@@ -3932,14 +3837,11 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'english_exclude_min_chars'): self.english_exclude_min_chars.set(int(ocr.get('english_exclude_min_chars', 4)))
             if hasattr(self, 'english_exclude_short_tokens'): self.english_exclude_short_tokens.set(bool(ocr.get('english_exclude_short_tokens', False)))
 
-            # Azure
+            # Azure (simplified - only merge multiplier remains)
             if hasattr(self, 'azure_merge_multiplier'): self.azure_merge_multiplier.set(float(ocr.get('azure_merge_multiplier', 3.0)))
-            if hasattr(self, 'azure_reading_order'): self.azure_reading_order.set(str(ocr.get('azure_reading_order', 'natural')))
-            if hasattr(self, 'azure_model_version'): self.azure_model_version.set(str(ocr.get('azure_model_version', 'latest')))
-            if hasattr(self, 'azure_max_wait'): self.azure_max_wait.set(int(ocr.get('azure_max_wait', 60)))
-            if hasattr(self, 'azure_poll_interval'): self.azure_poll_interval.set(float(ocr.get('azure_poll_interval', 0.5)))
             try:
-                self._update_azure_label()
+                if hasattr(self, '_update_azure_label'):
+                    self._update_azure_label()
             except Exception:
                 pass
 
@@ -4193,11 +4095,8 @@ class MangaSettingsDialog(QDialog):
             self.settings['ocr']['text_detection_mode'] = self.detection_mode_combo.currentText()
             self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold_spinbox.value()
             self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation_checkbox.isChecked()
+            # Azure settings - only merge multiplier remains (new API is synchronous)
             self.settings['ocr']['azure_merge_multiplier'] = self.azure_merge_multiplier_slider.value() / 100.0
-            self.settings['ocr']['azure_reading_order'] = self.azure_reading_order_combo.currentText()
-            self.settings['ocr']['azure_model_version'] = self.azure_model_version_combo.currentText()
-            self.settings['ocr']['azure_max_wait'] = self.azure_max_wait_spinbox.value()
-            self.settings['ocr']['azure_poll_interval'] = self.azure_poll_interval_slider.value() / 100.0
             self.settings['ocr']['min_text_length'] = self.min_text_length_spinbox.value()
             self.settings['ocr']['exclude_english_text'] = self.exclude_english_checkbox.isChecked()
             

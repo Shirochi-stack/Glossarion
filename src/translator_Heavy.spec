@@ -443,54 +443,29 @@ api_modules = [
     'google.rpc',
     'google.type',
     
-    # Azure Computer Vision (for manga OCR) - ADD THIS SECTION
+    # Azure Computer Vision (for manga OCR) - New Image Analysis API
     'azure',
-    'azure.cognitiveservices',
-    'azure.cognitiveservices.vision',
-    'azure.cognitiveservices.vision.computervision',
-    'azure.cognitiveservices.vision.computervision.models',
-    'azure.cognitiveservices.vision.computervision.operations',
-    'azure.cognitiveservices.vision.computervision._configuration',
-    'azure.cognitiveservices.vision.computervision._computer_vision_client',
-    'azure.cognitiveservices.vision.computervision.aio',
+    'azure.ai',
+    'azure.ai.vision',
+    'azure.ai.vision.imageanalysis',
+    'azure.ai.vision.imageanalysis.models',
+    'azure.ai.vision.imageanalysis._client',
+    'azure.ai.vision.imageanalysis._operations',
+    'azure.ai.vision.imageanalysis._version',
     'azure.core',
     'azure.core.credentials',
     'azure.core.exceptions',
     'azure.core.pipeline',
     'azure.core.pipeline.transport',
     'azure.core.pipeline.policies',
-    'azure.core.polling',
-    'azure.core.paging',
-    'azure.core.async_paging',
     'azure.core.rest',
     'azure.core.tracing',
     'azure.core.utils',
     'azure.identity',
     'azure.common',
     
-    # MSRest (required for Azure authentication)
-    'msrest',
-    'msrest.authentication',
-    'msrest.configuration',
-    'msrest.exceptions',
-    'msrest.http_logger',
-    'msrest.paging',
-    'msrest.pipeline',
-    'msrest.polling',
-    'msrest.serialization',
-    'msrest.service_client',
-    'msrest.universal_http',
-    'msrest.universal_http.requests',
-    'msrest.async_client',
-    'msrest.version',
-    'msrestazure',
-    'msrestazure.azure_configuration',
-    'msrestazure.azure_exceptions',
-    'msrestazure.azure_operation',
-    'msrestazure.polling',
-    
     # Additional Azure dependencies
-    'isodate',  # Required by msrest
+    'isodate',  # Required by Azure
     'oauthlib',  # May be required for Azure auth
     'requests_oauthlib',  # May be required for Azure auth
 
