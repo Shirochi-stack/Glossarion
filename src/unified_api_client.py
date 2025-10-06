@@ -4043,6 +4043,13 @@ class UnifiedClient:
                     # allowing the parent loop to try the next key in the fallback list
                     temp_client._is_retry_client = True
                     
+                    # CRITICAL: Disable retries for fallback keys - they should only try once
+                    temp_client._max_retries = 0
+                    temp_client.max_retries = 0
+                    # Also disable underlying OpenAI client retries if it exists
+                    if hasattr(temp_client, '_client') and temp_client._client:
+                        temp_client._client.max_retries = 0
+                    
                     # The client should already be set up from __init__, but verify
                     if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
                         temp_client.api_key = fallback_key
@@ -4087,13 +4094,13 @@ class UnifiedClient:
                             print(f"[{label} {idx+1}] ❌ Got error message: {content}")
                             continue
                         
-                        # Check if content is valid - FIX: Add None check
-                        if content and self._safe_len(content, "main_key_retry_content") > 50:
+                        # Check if content is valid - accept any non-empty content (symbols, single chars, etc. are valid)
+                        if content and self._safe_len(content, "main_key_retry_content") > 0:
                             print(f"[{label} {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
                             self._save_response(content, response_name)
                             return content, finish_reason
                         else:
-                            print(f"[{label} {idx+1}] ❌ Content too short or empty: {len(content) if content else 0} chars")
+                            print(f"[{label} {idx+1}] ❌ Content empty or null")
                             continue
                     else:
                         print(f"[{label} {idx+1}] ❌ Unexpected result type: {type(result)}")
@@ -4206,6 +4213,10 @@ class UnifiedClient:
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
                     temp_client._is_retry_client = True
                     
+                    # CRITICAL: Disable retries for fallback keys - they should only try once
+                    temp_client._max_retries = 0
+                    temp_client.max_retries = 0
+                    
                     # Set key-specific credentials
                     if fallback_google_creds:
                         temp_client.current_key_google_creds = fallback_google_creds
@@ -4232,6 +4243,10 @@ class UnifiedClient:
                     
                     # Setup the client
                     temp_client._setup_client()
+                    
+                    # Disable underlying OpenAI client retries if it exists (after setup)
+                    if hasattr(temp_client, '_client') and temp_client._client:
+                        temp_client._client.max_retries = 0
                     
                     # Copy relevant state
                     temp_client.context = context
