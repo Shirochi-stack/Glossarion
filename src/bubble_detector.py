@@ -610,8 +610,9 @@ class BubbleDetector:
                     'low_cpu_mem_usage': low_cpu,
                     'device_map': device_map,
                 }
+                # Note: dtype is handled via torch_dtype parameter in newer transformers
                 if dtype is not None:
-                    from_kwargs['dtype'] = dtype
+                    from_kwargs['torch_dtype'] = dtype
                 
                 # First attempt: load directly to target (CUDA if available)
                 try:
@@ -628,7 +629,7 @@ class BubbleDetector:
                         'device_map': None,
                     }
                     if TORCH_AVAILABLE:
-                        from_kwargs_fallback['dtype'] = torch.float32
+                        from_kwargs_fallback['torch_dtype'] = torch.float32
                     self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
                         model_path if model_path else repo_id,
                         **from_kwargs_fallback,
