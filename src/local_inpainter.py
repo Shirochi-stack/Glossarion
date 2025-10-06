@@ -2003,6 +2003,15 @@ class LocalInpainter:
                         mask_np = mask_resized.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0.5) * 1.0  # Binary mask
                         img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
+                    elif 'anime' in str(self.current_method).lower():
+                        # Anime/Manga LaMa normalization: [0, 1] range with optional input masking for stability
+                        logger.debug("Using Anime/Manga LaMa normalization [0, 1] with input masking")
+                        img_np = image_resized.astype(np.float32) / 255.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                        # CRITICAL: Mask out input regions for better text region stability
+                        # This helps the model focus on generating content rather than being influenced by text artifacts
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
                     else:
                         # Standard LaMa normalization: [0, 1] range
                         logger.debug("Using standard LaMa normalization [0, 1]")
@@ -2065,6 +2074,15 @@ class LocalInpainter:
                         mask_np = mask_padded.astype(np.float32) / 255.0
                         mask_np = (mask_np > 0.5) * 1.0
                         img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
+                    elif 'anime' in str(self.current_method).lower():
+                        # Anime/Manga LaMa normalization: [0, 1] range with optional input masking for stability
+                        logger.debug("Using Anime/Manga LaMa normalization [0, 1] with input masking")
+                        img_np = image_padded.astype(np.float32) / 255.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                        # CRITICAL: Mask out input regions for better text region stability
+                        # This helps the model focus on generating content rather than being influenced by text artifacts
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
                     else:
                         # Standard LaMa normalization: [0, 1]
                         logger.debug("Using standard LaMa normalization [0, 1]")
@@ -2181,6 +2199,11 @@ class LocalInpainter:
                     
                     # Binary mask (values > 0 become 1)
                     mask_binary = (mask_norm > 0) * 1.0
+                    
+                    # For anime models: mask out input regions for better text stability
+                    if 'anime' in str(self.current_method).lower():
+                        logger.debug("Applying input masking for anime model (text region stability)")
+                        image_norm = image_norm * (1 - mask_binary[:, :, np.newaxis])
                     
                     # Convert to PyTorch tensors with correct shape
                     # Image should be [B, C, H, W]  

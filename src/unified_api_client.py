@@ -3903,6 +3903,25 @@ class UnifiedClient:
             print(f"[{retry_type}MAIN KEY RETRY] Thread {threading.current_thread().name} already in retry, preventing recursion")
             return None
         
+        # PER-REQUEST TRACKING: Track which keys have been tried for THIS specific request
+        # Use request_id or create a unique ID from messages hash
+        if not request_id:
+            import hashlib
+            msg_str = json.dumps([m.get('content', '')[:100] for m in messages], sort_keys=True)
+            request_id = hashlib.md5(msg_str.encode()).hexdigest()[:16]
+        
+        # Initialize per-request tracking if not exists
+        if not hasattr(tls, 'tried_keys_per_request'):
+            tls.tried_keys_per_request = {}
+        
+        # Check if we've already tried fallback keys for this request
+        if request_id in tls.tried_keys_per_request:
+            print(f"[MAIN KEY RETRY] Request {request_id[:8]}... already attempted fallback keys, preventing loop")
+            return None
+        
+        # Mark this request as having attempted fallbacks
+        tls.tried_keys_per_request[request_id] = True
+        
         # CHECK: Verify multi-key mode is actually enabled
         if not self._multi_key_mode:
             print(f"[MAIN KEY RETRY] Not in multi-key mode, skipping retry")
@@ -4103,6 +4122,9 @@ class UnifiedClient:
         finally:
             # ALWAYS clear the thread-local flag
             setattr(tls, retry_flag, False)
+            # Clean up per-request tracking for this request (allow it to be tried again on next API call)
+            if hasattr(tls, 'tried_keys_per_request') and request_id in tls.tried_keys_per_request:
+                del tls.tried_keys_per_request[request_id]
     
     def _try_fallback_keys_direct(self, messages, temperature=None, max_tokens=None, 
                                   max_completion_tokens=None, context=None, 
@@ -4111,16 +4133,41 @@ class UnifiedClient:
         Try fallback API keys directly when main key fails (single-key mode).
         Used when fallback keys are enabled in single-key mode.
         """
+        # PER-REQUEST TRACKING: Prevent infinite loops
+        tls = self._get_thread_local_client()
+        
+        # Generate request_id if not provided
+        if not request_id:
+            import hashlib
+            msg_str = json.dumps([m.get('content', '')[:100] for m in messages], sort_keys=True)
+            request_id = hashlib.md5(msg_str.encode()).hexdigest()[:16]
+        
+        # Initialize per-request tracking if not exists
+        if not hasattr(tls, 'tried_fallback_direct_per_request'):
+            tls.tried_fallback_direct_per_request = {}
+        
+        # Check if we've already tried direct fallback for this request
+        if request_id in tls.tried_fallback_direct_per_request:
+            print(f"[FALLBACK DIRECT] Request {request_id[:8]}... already attempted direct fallback, preventing loop")
+            return None
+        
+        # Mark this request as having attempted direct fallback
+        tls.tried_fallback_direct_per_request[request_id] = True
+        
         # Check if fallback keys are enabled
         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
         if not use_fallback_keys:
             print(f"[FALLBACK DIRECT] Fallback keys not enabled, skipping")
+            # Clean up tracking since we're not actually trying
+            del tls.tried_fallback_direct_per_request[request_id]
             return None
         
         # Load fallback keys from environment
         fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
         if fallback_keys_json == '[]':
             print(f"[FALLBACK DIRECT] No fallback keys configured")
+            # Clean up tracking since we're not actually trying
+            del tls.tried_fallback_direct_per_request[request_id]
             return None
         
         try:
@@ -4266,6 +4313,10 @@ class UnifiedClient:
         except Exception as e:
             print(f"[FALLBACK DIRECT] Failed to parse fallback keys: {e}")
             return None
+        finally:
+            # Clean up per-request tracking when done
+            if hasattr(tls, 'tried_fallback_direct_per_request') and request_id in tls.tried_fallback_direct_per_request:
+                del tls.tried_fallback_direct_per_request[request_id]
     
     # Image handling methods
     def send_image(self, messages: List[Dict[str, Any]], image_data: Any,

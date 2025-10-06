@@ -3909,20 +3909,68 @@ class MangaTranslator:
                     
                     self._log(f"⚡ RapidOCR - Recognition: {'Full' if use_recognition else 'Detection Only'}")
                     
-                    # ALWAYS process full image with RapidOCR for best results
-                    self._log("📊 Processing full image with RapidOCR")
-                    ocr_results = self.ocr_manager.detect_text(
-                        image, 
-                        'rapidocr',
-                        confidence=confidence_threshold,
-                        use_recognition=use_recognition,
-                        language=language,
-                        detection_mode=detection_mode
-                    )
-                    
-                    # RT-DETR detection only affects merging, not OCR
+                    # Check if we should use bubble detection for regions
                     if ocr_settings.get('bubble_detection_enabled', False):
-                        self._log("🤖 RT-DETR will be used for bubble-based merging")
+                        self._log("📝 Using bubble detection regions for RapidOCR...")
+                        
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with RapidOCR")
+                            
+                            # Clear detections after extracting regions
+                            rtdetr_detections = None
+                            
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with RapidOCR")
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'rapidocr', confidence_threshold)
+                            else:
+                                # Process each region with RapidOCR
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue 
+                                    result = self.ocr_manager.detect_text(
+                                        cropped,
+                                        'rapidocr',
+                                        confidence=confidence_threshold,
+                                        use_recognition=use_recognition,
+                                        language=language,
+                                        detection_mode=detection_mode
+                                    )
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        # CRITICAL: Store RT-DETR bubble bounds for rendering
+                                        result[0].bubble_bounds = (x, y, w, h)
+                                        ocr_results.append(result[0])
+                                        self._log(f"🔍 Region {i+1}/{len(all_regions)}: {result[0].text[:50]}...")
+                            
+                            # Clear regions list after processing
+                            all_regions = None
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📊 Processing full image with RapidOCR")
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            'rapidocr',
+                            confidence=confidence_threshold,
+                            use_recognition=use_recognition,
+                            language=language,
+                            detection_mode=detection_mode
+                        )
 
                 else:
                     # Default processing for any other providers
