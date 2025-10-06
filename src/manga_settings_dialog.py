@@ -3398,9 +3398,40 @@ class MangaSettingsDialog(QDialog):
         debug_layout.setContentsMargins(8, 8, 8, 6)
         debug_layout.setSpacing(4)
         
-        self.debug_mode_checkbox = self._create_styled_checkbox("Enable debug mode (verbose logging)")
+        self.debug_mode_checkbox = self._create_styled_checkbox("Enable debug mode (verbose logging + bubble_bounds diagnostics)")
         self.debug_mode_checkbox.setChecked(self.settings['advanced']['debug_mode'])
+        # Connect handler to also update concise_logs when debug mode changes
+        def _on_debug_mode_changed():
+            try:
+                debug_enabled = self.debug_mode_checkbox.isChecked()
+                # When debug mode is ON, automatically disable concise logs for full verbosity
+                # When debug mode is OFF, enable concise logs to reduce noise
+                if hasattr(self, 'concise_logs_checkbox'):
+                    self.concise_logs_checkbox.setChecked(not debug_enabled)
+                # Save both settings
+                if 'advanced' not in self.settings:
+                    self.settings['advanced'] = {}
+                self.settings['advanced']['debug_mode'] = debug_enabled
+                self.settings['advanced']['concise_logs'] = not debug_enabled
+                if hasattr(self, 'config'):
+                    self.config['manga_settings'] = self.settings
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+            except Exception:
+                pass
+        self.debug_mode_checkbox.toggled.connect(_on_debug_mode_changed)
         debug_layout.addWidget(self.debug_mode_checkbox)
+        
+        # Add info label explaining what debug mode does
+        debug_info = QLabel(
+            "When enabled: Shows detailed bubble_bounds propagation, OCR diagnostics, and rendering decisions.\n"
+            "Automatically enables verbose logging for full diagnostic output."
+        )
+        debug_info_font = QFont('Arial', 9)
+        debug_info.setFont(debug_info_font)
+        debug_info.setStyleSheet("color: gray;")
+        debug_info.setWordWrap(True)
+        debug_layout.addWidget(debug_info)
         
         # New: Concise pipeline logs (reduce noise)
         self.concise_logs_checkbox = self._create_styled_checkbox("Concise pipeline logs (reduce noise)")

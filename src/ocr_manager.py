@@ -1817,45 +1817,94 @@ class RapidOCRProvider(OCRProvider):
             return []
         
         results = []
+        debug_mode = kwargs.get('debug', False)
         
         try:
             # Convert numpy array to PIL Image for RapidOCR
             if len(image.shape) == 3:
                 # BGR to RGB
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                img_h, img_w = image.shape[:2]
             else:
                 image_rgb = image
+                img_h, img_w = image.shape[:2]
+            
+            if debug_mode:
+                self._log(f"🔍 [RapidOCR DEBUG] Input image size: {img_w}x{img_h}")
+                self._log(f"🔍 [RapidOCR DEBUG] Image channels: {image.shape[2] if len(image.shape) == 3 else 1}")
             
             # RapidOCR expects PIL Image or numpy array
-            ocr_results, _ = self.model(image_rgb)
+            result_data = self.model(image_rgb)
+            
+            # Handle different return formats from RapidOCR
+            if isinstance(result_data, tuple) and len(result_data) >= 2:
+                ocr_results = result_data[0]
+                elapsed = result_data[1]
+                # elapsed might be a list or float
+                if isinstance(elapsed, (list, tuple)):
+                    elapsed = elapsed[0] if elapsed else 0.0
+            else:
+                ocr_results = result_data
+                elapsed = 0.0
+            
+            if debug_mode:
+                self._log(f"🔍 [RapidOCR DEBUG] OCR inference time: {float(elapsed):.3f}s")
+                self._log(f"🔍 [RapidOCR DEBUG] Raw OCR results count: {len(ocr_results) if ocr_results else 0}")
             
             if ocr_results:
-                for result in ocr_results:
+                for idx, result in enumerate(ocr_results):
                     # RapidOCR returns [bbox, text, confidence]
                     bbox_points = result[0]  # 4 corner points
                     text = result[1]
                     confidence = float(result[2])
-                    
-                    if not text or not text.strip():
-                        continue
                     
                     # Convert 4-point bbox to x,y,w,h format
                     xs = [point[0] for point in bbox_points]
                     ys = [point[1] for point in bbox_points]
                     x_min, x_max = min(xs), max(xs)
                     y_min, y_max = min(ys), max(ys)
+                    bbox_xywh = (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
+                    
+                    if debug_mode:
+                        self._log(f"🔍 [RapidOCR DEBUG] Region {idx+1}:")
+                        self._log(f"   Text: '{text[:50]}{'...' if len(text) > 50 else ''}'")
+                        self._log(f"   Confidence: {confidence:.3f}")
+                        self._log(f"   BBox (x,y,w,h): {bbox_xywh}")
+                        self._log(f"   Vertices: {[(int(p[0]), int(p[1])) for p in bbox_points]}")
+                        self._log(f"   Area: {bbox_xywh[2] * bbox_xywh[3]} px²")
+                        # Calculate position relative to image
+                        center_x = x_min + (x_max - x_min) / 2
+                        center_y = y_min + (y_max - y_min) / 2
+                        rel_x = center_x / img_w
+                        rel_y = center_y / img_h
+                        self._log(f"   Center: ({int(center_x)}, {int(center_y)}) = {rel_x:.1%} x {rel_y:.1%} of image")
+                    
+                    if not text or not text.strip():
+                        if debug_mode:
+                            self._log(f"   ⚠️ SKIPPED: Empty text")
+                        continue
                     
                     results.append(OCRResult(
                         text=text.strip(),
-                        bbox=(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)),
+                        bbox=bbox_xywh,
                         confidence=confidence,
                         vertices=[(int(p[0]), int(p[1])) for p in bbox_points]
                     ))
             
-            self._log(f"Detected {len(results)} text regions")
+            if debug_mode:
+                self._log(f"🔍 [RapidOCR DEBUG] Final results: {len(results)} valid text regions")
+                if len(results) > 0:
+                    total_text = ' '.join([r.text for r in results])
+                    self._log(f"🔍 [RapidOCR DEBUG] Total text length: {len(total_text)} chars")
+                    self._log(f"🔍 [RapidOCR DEBUG] Sample text: '{total_text[:100]}{'...' if len(total_text) > 100 else ''}'")
+            else:
+                self._log(f"Detected {len(results)} text regions")
             
         except Exception as e:
             self._log(f"Error in RapidOCR detection: {str(e)}", "error")
+            if debug_mode:
+                import traceback
+                self._log(traceback.format_exc(), "error")
         
         return results
 
