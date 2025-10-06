@@ -76,6 +76,7 @@ class MangaSettingsDialog(QDialog):
             'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
                 'confidence_threshold': 0.7,
+                'min_region_size': 50,  # Minimum dimension for cloud OCR regions (0 = disabled)
                 'merge_nearby_threshold': 20,
                 'azure_merge_multiplier': 3.0,
                 'text_detection_mode': 'document',
@@ -143,6 +144,7 @@ class MangaSettingsDialog(QDialog):
             
             # Mask dilation settings with new iteration controls
             'mask_dilation': 0,
+            'dilation_kernel_size': 5,  # Kernel size for dilation operations
             'use_all_iterations': True,  # Master control - use same for all by default
             'all_iterations': 2,  # Value when using same for all
             'text_bubble_dilation_iterations': 2,  # Text-filled speech bubbles
@@ -1459,6 +1461,26 @@ class MangaSettingsDialog(QDialog):
         dilation_layout.addWidget(self.dilation_unit_label)
         dilation_layout.addStretch()
         
+        # Kernel size
+        kernel_frame = QWidget()
+        kernel_layout = QHBoxLayout(kernel_frame)
+        kernel_layout.setContentsMargins(0, 0, 0, 0)
+        mask_dilation_layout.addWidget(kernel_frame)
+        
+        self.kernel_size_label = QLabel("Kernel Size:")
+        self.kernel_size_label.setMinimumWidth(150)
+        kernel_layout.addWidget(self.kernel_size_label)
+        
+        self.kernel_size_spinbox = QSpinBox()
+        self.kernel_size_spinbox.setRange(3, 15)
+        self.kernel_size_spinbox.setSingleStep(2)  # Only odd numbers
+        self.kernel_size_spinbox.setValue(self.settings.get('dilation_kernel_size', 5))
+        kernel_layout.addWidget(self.kernel_size_spinbox)
+        
+        self.kernel_size_unit_label = QLabel("pixels (dilation kernel size, must be odd)")
+        kernel_layout.addWidget(self.kernel_size_unit_label)
+        kernel_layout.addStretch()
+        
         # Per-Text-Type Iterations - EXPANDED SECTION
         iterations_group = QGroupBox("Dilation Iterations Control")
         iterations_layout = QVBoxLayout(iterations_group)
@@ -1691,6 +1713,22 @@ class MangaSettingsDialog(QDialog):
                     self.dilation_unit_label.setEnabled(False)
             except Exception:
                 pass
+            # Kernel size controls
+            try:
+                if hasattr(self, 'kernel_size_spinbox'):
+                    self.kernel_size_spinbox.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'kernel_size_label'):
+                    self.kernel_size_label.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'kernel_size_unit_label'):
+                    self.kernel_size_unit_label.setEnabled(False)
+            except Exception:
+                pass
             # Iteration controls
             try:
                 self.all_iterations_spinbox.setEnabled(False)
@@ -1742,6 +1780,22 @@ class MangaSettingsDialog(QDialog):
         try:
             if hasattr(self, 'dilation_unit_label'):
                 self.dilation_unit_label.setEnabled(True)
+        except Exception:
+            pass
+        # Kernel size is always enabled when auto is off
+        try:
+            if hasattr(self, 'kernel_size_spinbox'):
+                self.kernel_size_spinbox.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'kernel_size_label'):
+                self.kernel_size_label.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'kernel_size_unit_label'):
+                self.kernel_size_unit_label.setEnabled(True)
         except Exception:
             pass
         
@@ -2303,6 +2357,40 @@ class MangaSettingsDialog(QDialog):
         mode_desc.setStyleSheet("color: gray;")
         mode_layout.addWidget(mode_desc)
         mode_layout.addStretch()
+        
+        # Minimum region size for cloud OCR (Google/Azure)
+        min_region_widget = QWidget()
+        min_region_layout = QHBoxLayout(min_region_widget)
+        min_region_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_layout.addWidget(min_region_widget)
+        
+        min_region_label = QLabel("☁️ Min Region Size:")
+        min_region_label.setMinimumWidth(180)
+        min_region_label.setToolTip(
+            "Minimum dimension for cloud OCR regions (Google/Azure).\n"
+            "Regions smaller than this will be resized before OCR.\n\n"
+            "• 50px = Default (safer, ensures good OCR quality)\n"
+            "• 32px = Smaller minimum (like some implementations)\n"
+            "• 0px = Disabled (send regions as-is, may fail on very small text)"
+        )
+        min_region_layout.addWidget(min_region_label)
+        
+        self.min_region_size_spinbox = QSpinBox()
+        self.min_region_size_spinbox.setRange(0, 100)
+        self.min_region_size_spinbox.setSingleStep(1)
+        self.min_region_size_spinbox.setValue(self.settings['ocr'].get('min_region_size', 50))
+        self.min_region_size_spinbox.setToolTip("0 = disabled, 32-50 = recommended range")
+        min_region_layout.addWidget(self.min_region_size_spinbox)
+        
+        min_region_unit = QLabel("pixels")
+        min_region_layout.addWidget(min_region_unit)
+        
+        min_region_desc = QLabel("(0 = no resize, comic-translate style)")
+        min_region_desc_font = QFont('Arial', 9)
+        min_region_desc.setFont(min_region_desc_font)
+        min_region_desc.setStyleSheet("color: gray;")
+        min_region_layout.addWidget(min_region_desc)
+        min_region_layout.addStretch()
         
         # Text merging settings
         merge_group = QGroupBox("Text Region Merging")
@@ -4093,6 +4181,7 @@ class MangaSettingsDialog(QDialog):
             # Keep old setting for backward compatibility
             self.settings['ocr']['confidence_threshold'] = self.settings['ocr']['cloud_ocr_confidence']
             self.settings['ocr']['text_detection_mode'] = self.detection_mode_combo.currentText()
+            self.settings['ocr']['min_region_size'] = self.min_region_size_spinbox.value()
             self.settings['ocr']['merge_nearby_threshold'] = self.merge_nearby_threshold_spinbox.value()
             self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation_checkbox.isChecked()
             # Azure settings - only merge multiplier remains (new API is synchronous)
@@ -4148,6 +4237,7 @@ class MangaSettingsDialog(QDialog):
             
             # Save all dilation settings
             self.settings['mask_dilation'] = self.mask_dilation_spinbox.value()
+            self.settings['dilation_kernel_size'] = self.kernel_size_spinbox.value()
             self.settings['use_all_iterations'] = self.use_all_iterations_checkbox.isChecked()
             self.settings['all_iterations'] = self.all_iterations_spinbox.value()
             self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iter_spinbox.value()

@@ -2539,15 +2539,16 @@ class MangaTranslator:
                                         
                                         # Validate and resize crop if needed (Google Vision requires minimum dimensions)
                                         h_crop, w_crop = cropped.shape[:2]
-                                        MIN_SIZE = 50  # Minimum dimension (increased from 10 for better OCR)
-                                        MIN_AREA = 2500  # Minimum area (50x50)
+                                        MIN_SIZE = ocr_settings.get('min_region_size', 50)  # Configurable minimum (0 = disabled)
+                                        MIN_AREA = MIN_SIZE * MIN_SIZE if MIN_SIZE > 0 else 0  # Area based on MIN_SIZE
                                         
                                         # Skip completely invalid/corrupted regions (0 or negative dimensions)
                                         if h_crop <= 0 or w_crop <= 0:
                                             self._log(f"⚠️ Region {i} has invalid dimensions ({w_crop}x{h_crop}px), skipping", "debug")
                                             return None
                                         
-                                        if h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA:
+                                        # Only apply minimum size check if MIN_SIZE > 0
+                                        if MIN_SIZE > 0 and (h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA):
                                             # Region too small - resize it
                                             scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
                                             scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
@@ -2986,15 +2987,16 @@ class MangaTranslator:
                                         
                                         # Validate and resize crop if needed (Azure Vision requires minimum dimensions)
                                         h_crop, w_crop = cropped.shape[:2]
-                                        MIN_SIZE = 50  # Minimum dimension (Azure requirement)
-                                        MIN_AREA = 2500  # Minimum area (50x50)
+                                        MIN_SIZE = ocr_settings.get('min_region_size', 50)  # Configurable minimum (0 = disabled)
+                                        MIN_AREA = MIN_SIZE * MIN_SIZE if MIN_SIZE > 0 else 0  # Area based on MIN_SIZE
                                         
                                         # Skip completely invalid/corrupted regions (0 or negative dimensions)
                                         if h_crop <= 0 or w_crop <= 0:
                                             self._log(f"⚠️ Region {i} has invalid dimensions ({w_crop}x{h_crop}px), skipping", "debug")
                                             return None
                                         
-                                        if h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA:
+                                        # Only apply minimum size check if MIN_SIZE > 0
+                                        if MIN_SIZE > 0 and (h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA):
                                             # Region too small - resize it
                                             scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
                                             scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
@@ -6911,9 +6913,15 @@ class MangaTranslator:
                 pass
         
         # Auto iterations: decide by image color vs B&W
+        # When enabled, also use 5x5 kernel (comic-translate approach)
         auto_iterations = manga_settings.get('auto_iterations', True)
+        kernel_size = 5  # Default kernel size
+        
         if auto_iterations:
             try:
+                # Use 5x5 kernel when auto mode is enabled (comic-translate standard)
+                kernel_size = 5
+                
                 # Heuristic: consider image B&W if RGB channels are near-equal
                 if len(image.shape) < 3 or image.shape[2] == 1:
                     is_bw = True
@@ -6931,12 +6939,12 @@ class MangaTranslator:
                     text_bubble_iterations = 2
                     empty_bubble_iterations = 2
                     free_text_iterations = 0
-                    self._log("📏 Auto iterations (B&W): text=2, empty=2, free=0", "info")
+                    self._log(f"📏 Auto mode (B&W): kernel={kernel_size}x{kernel_size}px, text=2, empty=2, free=0", "info")
                 else:
                     text_bubble_iterations = 4
                     empty_bubble_iterations = 4
                     free_text_iterations = 4
-                    self._log("📏 Auto iterations (Color): all=3", "info")
+                    self._log(f"📏 Auto mode (Color): kernel={kernel_size}x{kernel_size}px, all=4", "info")
             except Exception:
                 # Fallback to configured behavior on any error
                 auto_iterations = False
@@ -7057,25 +7065,39 @@ class MangaTranslator:
                  f"{free_text_count} free text regions, {regions_skipped} skipped", "info")
         
         # Apply different dilation settings to each mask type
+        # Use kernel_size for the structuring element (5x5 in auto mode, comic-translate approach)
+        # Base dilation is applied first if > 0, then iterations with kernel
+        
+        # First apply base dilation if needed (simple pixel expansion)
         if base_dilation_size > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilation_size, base_dilation_size))
-            
-            # Apply dilation to text bubble mask
-            if text_bubble_count > 0 and text_bubble_iterations > 0:
-                self._log(f"📏 Applying text bubble dilation: {base_dilation_size}px, {text_bubble_iterations} iterations", "info")
-                text_bubble_mask = cv2.dilate(text_bubble_mask, kernel, iterations=text_bubble_iterations)
-            
-            # Apply dilation to empty bubble mask
-            if empty_bubble_count > 0 and empty_bubble_iterations > 0:
-                self._log(f"📏 Applying empty bubble dilation: {base_dilation_size}px, {empty_bubble_iterations} iterations", "info")
-                empty_bubble_mask = cv2.dilate(empty_bubble_mask, kernel, iterations=empty_bubble_iterations)
-            
-            # Apply dilation to free text mask
-            if free_text_count > 0 and free_text_iterations > 0:
-                self._log(f"📏 Applying free text dilation: {base_dilation_size}px, {free_text_iterations} iterations", "info")
-                free_text_mask = cv2.dilate(free_text_mask, kernel, iterations=free_text_iterations)
-            elif free_text_count > 0 and free_text_iterations == 0:
-                self._log(f"📏 No dilation for free text (iterations=0, perfect for B&W panels)", "info")
+            base_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilation_size, base_dilation_size))
+            if text_bubble_count > 0:
+                text_bubble_mask = cv2.dilate(text_bubble_mask, base_kernel, iterations=1)
+            if empty_bubble_count > 0:
+                empty_bubble_mask = cv2.dilate(empty_bubble_mask, base_kernel, iterations=1)
+            if free_text_count > 0:
+                free_text_mask = cv2.dilate(free_text_mask, base_kernel, iterations=1)
+            self._log(f"📏 Applied base dilation: {base_dilation_size}px expansion", "info")
+        
+        # Then apply iterations with kernel_size (default 5x5)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        
+        # Apply dilation to text bubble mask
+        if text_bubble_count > 0 and text_bubble_iterations > 0:
+            self._log(f"📏 Applying text bubble dilation: {kernel_size}x{kernel_size} kernel, {text_bubble_iterations} iterations", "info")
+            text_bubble_mask = cv2.dilate(text_bubble_mask, kernel, iterations=text_bubble_iterations)
+        
+        # Apply dilation to empty bubble mask
+        if empty_bubble_count > 0 and empty_bubble_iterations > 0:
+            self._log(f"📏 Applying empty bubble dilation: {kernel_size}x{kernel_size} kernel, {empty_bubble_iterations} iterations", "info")
+            empty_bubble_mask = cv2.dilate(empty_bubble_mask, kernel, iterations=empty_bubble_iterations)
+        
+        # Apply dilation to free text mask
+        if free_text_count > 0 and free_text_iterations > 0:
+            self._log(f"📏 Applying free text dilation: {kernel_size}x{kernel_size} kernel, {free_text_iterations} iterations", "info")
+            free_text_mask = cv2.dilate(free_text_mask, kernel, iterations=free_text_iterations)
+        elif free_text_count > 0 and free_text_iterations == 0:
+            self._log(f"📏 No iteration dilation for free text (perfect for clean B&W)", "info")
         
         # Combine all masks
         mask = cv2.bitwise_or(text_bubble_mask, empty_bubble_mask)
