@@ -743,17 +743,30 @@ class MultiAPIKeyDialog:
                                                     font=('TkDefaultFont', 7), state='normal', width=10)
         self.fallback_google_region_entry.grid(row=1, column=4, sticky=tk.W, pady=2)
         
-        # Row 2: Azure Endpoint (optional, discretely styled)
-        tk.Label(add_fallback_frame, text="Azure Endpoint:", font=('TkDefaultFont', 8), 
-                fg='gray').grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        # Row 2: Individual Endpoint Toggle for fallback
+        self.fallback_use_individual_endpoint_var = tk.BooleanVar(value=False)
+        fallback_individual_endpoint_toggle = tb.Checkbutton(add_fallback_frame, text="Use Individual Endpoint", 
+                                                             variable=self.fallback_use_individual_endpoint_var,
+                                                             bootstyle="round-toggle",
+                                                             command=self._toggle_fallback_individual_endpoint_fields)
+        fallback_individual_endpoint_toggle.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(0, 10), pady=5)
+        
+        # Store references for toggling
+        self.fallback_individual_endpoint_toggle = fallback_individual_endpoint_toggle
+        
+        # Row 3: Individual Endpoint (initially hidden)
+        self.fallback_individual_endpoint_label = tk.Label(add_fallback_frame, text="Individual Endpoint:", font=('TkDefaultFont', 9), 
+                                                          fg='gray')
+        self.fallback_individual_endpoint_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=2)
         self.fallback_azure_endpoint_var = tk.StringVar()
         self.fallback_azure_endpoint_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_azure_endpoint_var,
-                                                     font=('TkDefaultFont', 7), state='normal')
-        self.fallback_azure_endpoint_entry.grid(row=2, column=1, columnspan=2, sticky=tk.EW, pady=2)
+                                                     font=('TkDefaultFont', 8), state='normal')
+        self.fallback_azure_endpoint_entry.grid(row=3, column=1, columnspan=2, sticky=tk.EW, pady=2)
         
-        # Azure API Version for fallback (small dropdown)
-        tk.Label(add_fallback_frame, text="API Ver:", font=('TkDefaultFont', 10), 
-                fg='gray').grid(row=2, column=3, sticky=tk.W, padx=(10, 5), pady=2)
+        # Individual Endpoint API Version (small dropdown, initially hidden)
+        self.fallback_individual_api_version_label = tk.Label(add_fallback_frame, text="API Ver:", font=('TkDefaultFont', 11), 
+                                                             fg='gray')
+        self.fallback_individual_api_version_label.grid(row=3, column=3, sticky=tk.W, padx=(10, 5), pady=2)
         self.fallback_azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
         fallback_azure_versions = [
             '2025-01-01-preview',
@@ -768,13 +781,16 @@ class MultiAPIKeyDialog:
                                                             textvariable=self.fallback_azure_api_version_var,
                                                             values=fallback_azure_versions, width=18, 
                                                             state='normal', font=('TkDefaultFont', 7))
-        self.fallback_azure_api_version_combo.grid(row=2, column=4, sticky=tk.W, pady=2)
+        self.fallback_azure_api_version_combo.grid(row=3, column=4, sticky=tk.W, pady=2)
         # Block mouse wheel on version combobox
         try:
             if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
                 self.translator_gui.ui.disable_spinbox_mousewheel(self.fallback_azure_api_version_combo)
         except Exception:
             pass
+        
+        # Initially hide the endpoint fields when toggle is off
+        self._toggle_fallback_individual_endpoint_fields()
         
         # Fallback keys list
         self._create_fallback_list(fallback_frame)
@@ -991,6 +1007,23 @@ class MultiAPIKeyDialog:
             
             menu.add_separator()
             
+            # Individual Endpoint options for fallback keys
+            if index < len(fallback_keys):
+                key_data = fallback_keys[index]
+                endpoint_enabled = key_data.get('use_individual_endpoint', False)
+                endpoint_url = key_data.get('azure_endpoint', '')
+                
+                if endpoint_enabled and endpoint_url:
+                    menu.add_command(label="✅ Individual Endpoint", 
+                                   command=lambda: self._configure_fallback_individual_endpoint(index))
+                    menu.add_command(label="Disable Individual Endpoint", 
+                                   command=lambda: self._toggle_fallback_individual_endpoint(index, False))
+                else:
+                    menu.add_command(label="🔧 Configure Individual Endpoint", 
+                                   command=lambda: self._configure_fallback_individual_endpoint(index))
+            
+            menu.add_separator()
+            
             # Test and Remove options
             menu.add_command(label="Test", command=self._test_selected_fallback)
             menu.add_separator()
@@ -1122,9 +1155,12 @@ class MultiAPIKeyDialog:
         api_key = self.fallback_key_var.get().strip()
         model = self.fallback_model_var.get().strip()
         google_credentials = self.fallback_google_creds_var.get().strip() or None
-        azure_endpoint = self.fallback_azure_endpoint_var.get().strip() or None
         google_region = self.fallback_google_region_var.get().strip() or None
-        azure_api_version = self.fallback_azure_api_version_var.get().strip() or None
+        
+        # Only use individual endpoint if toggle is enabled
+        use_individual_endpoint = self.fallback_use_individual_endpoint_var.get()
+        azure_endpoint = self.fallback_azure_endpoint_var.get().strip() if use_individual_endpoint else None
+        azure_api_version = self.fallback_azure_api_version_var.get().strip() if use_individual_endpoint else None
         
         if not api_key or not model:
             messagebox.showerror("Error", "Please enter both API key and model name")
@@ -1141,6 +1177,7 @@ class MultiAPIKeyDialog:
             'azure_endpoint': azure_endpoint,
             'google_region': google_region,
             'azure_api_version': azure_api_version,
+            'use_individual_endpoint': use_individual_endpoint,
             'times_used': 0
         })
         
@@ -1155,6 +1192,9 @@ class MultiAPIKeyDialog:
         self.fallback_azure_endpoint_var.set("")
         self.fallback_google_region_var.set("us-east5")
         self.fallback_azure_api_version_var.set('2025-01-01-preview')
+        self.fallback_use_individual_endpoint_var.set(False)
+        # Update the UI to disable endpoint fields
+        self._toggle_fallback_individual_endpoint_fields()
         
         # Reload list
         self._load_fallback_keys()
@@ -1358,8 +1398,14 @@ class MultiAPIKeyDialog:
             self.fallback_model_combo.config(state=state)
             self.fallback_google_creds_entry.config(state=state)
             self.fallback_google_region_entry.config(state=state)
-            self.fallback_azure_endpoint_entry.config(state=state)
             self.show_fallback_btn.config(state=state)
+            
+            # Enable individual endpoint toggle
+            if hasattr(self, 'fallback_individual_endpoint_toggle'):
+                self.fallback_individual_endpoint_toggle.config(state=state)
+            
+            # Show/hide endpoint fields based on toggle state
+            self._toggle_fallback_individual_endpoint_fields()
             
             # Enable add button
             for widget in self.fallback_key_entry.master.winfo_children():
@@ -1382,8 +1428,13 @@ class MultiAPIKeyDialog:
             self.fallback_model_combo.config(state=state)
             self.fallback_google_creds_entry.config(state=state)
             self.fallback_google_region_entry.config(state=state)
-            self.fallback_azure_endpoint_entry.config(state=state)
             self.show_fallback_btn.config(state=state)
+            
+            # Disable individual endpoint toggle
+            if hasattr(self, 'fallback_individual_endpoint_toggle'):
+                self.fallback_individual_endpoint_toggle.config(state=state)
+            
+            # Note: endpoint fields are managed by the toggle itself, not here
             
             # Disable add button
             for widget in self.fallback_key_entry.master.winfo_children():
@@ -1408,6 +1459,97 @@ class MultiAPIKeyDialog:
         else:
             self.fallback_key_entry.config(show='*')
             self.show_fallback_btn.config(text='👁')
+    
+    def _toggle_fallback_individual_endpoint_fields(self):
+        """Toggle visibility and state of fallback individual endpoint fields"""
+        enabled = self.fallback_use_individual_endpoint_var.get()
+        
+        if enabled:
+            # Show and enable endpoint fields
+            state = tk.NORMAL
+            self.fallback_individual_endpoint_label.grid()
+            self.fallback_azure_endpoint_entry.grid()
+            self.fallback_individual_api_version_label.grid()
+            self.fallback_azure_api_version_combo.grid()
+            
+            self.fallback_azure_endpoint_entry.config(state=state)
+            self.fallback_azure_api_version_combo.config(state='readonly')
+        else:
+            # Hide and disable endpoint fields
+            state = tk.DISABLED
+            self.fallback_individual_endpoint_label.grid_remove()
+            self.fallback_azure_endpoint_entry.grid_remove()
+            self.fallback_individual_api_version_label.grid_remove()
+            self.fallback_azure_api_version_combo.grid_remove()
+            
+            # Clear the fields when disabled
+            self.fallback_azure_endpoint_var.set("")
+            self.fallback_azure_api_version_var.set('2025-01-01-preview')
+    
+    def _configure_fallback_individual_endpoint(self, fallback_index):
+        """Configure individual endpoint for a fallback key"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if fallback_index >= len(fallback_keys):
+            return
+        
+        key_data = fallback_keys[fallback_index]
+        
+        # Create a temporary APIKeyEntry object for compatibility with IndividualEndpointDialog
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,  # Not used for fallback keys
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+        )
+        
+        # Define callback to update config after dialog closes
+        def on_endpoint_configured():
+            # Update the fallback key with new values
+            fallback_keys[fallback_index]['azure_endpoint'] = temp_key.azure_endpoint
+            fallback_keys[fallback_index]['azure_api_version'] = temp_key.azure_api_version
+            fallback_keys[fallback_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            
+            # Save to config
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+            
+            # Reload the fallback list
+            self._load_fallback_keys()
+            
+            # Show status
+            status = "configured" if temp_key.use_individual_endpoint else "disabled"
+            self._show_status(f"Individual endpoint {status} for fallback key")
+        
+        # Create individual endpoint dialog using the class
+        if IndividualEndpointDialog is None:
+            messagebox.showerror("Error", "IndividualEndpointDialog is not available.")
+            return
+        IndividualEndpointDialog(self.dialog, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
+    
+    def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
+        """Quick toggle individual endpoint on/off for fallback key"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        if fallback_index >= len(fallback_keys):
+            return
+        
+        fallback_keys[fallback_index]['use_individual_endpoint'] = enabled
+        
+        # Save to config
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        
+        # Reload fallback list
+        self._load_fallback_keys()
+        
+        # Show status
+        status = "enabled" if enabled else "disabled"
+        model = fallback_keys[fallback_index].get('model', 'unknown')
+        self._show_status(f"Individual endpoint {status} for fallback key ({model})")
 
     def _create_button_bar(self, parent):
         """Create the bottom button bar"""

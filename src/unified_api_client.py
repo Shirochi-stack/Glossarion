@@ -8533,9 +8533,12 @@ class UnifiedClient:
                             # Build params with correct token parameter based on model
                             params = {
                                 "model": deployment,
-                                "messages": messages,
-                                "temperature": temperature
+                                "messages": messages
                             }
+                            
+                            # O-series models don't support temperature parameter
+                            if not self._is_o_series_model():
+                                params["temperature"] = temperature
 
                             # Normalize token parameter for Azure endpoint
                             norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
