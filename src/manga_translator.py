@@ -3095,9 +3095,10 @@ class MangaTranslator:
                                     regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
                                     self._log(f"✅ RT-DETR + Azure Vision: {len(regions)} text regions detected (sorted by position)")
                                     
-                                    # POST-PROCESS: Check for text_bubbles that overlap with free_text regions
+                                    # POST-PROCESS: DISABLED - was causing duplicate text issues
+                                    # Check for text_bubbles that overlap with free_text regions
                                     # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
-                                    free_text_bboxes = rtdetr_detections.get('text_free', [])
+                                    free_text_bboxes = [] # rtdetr_detections.get('text_free', [])
                                     
                                     # DEBUG: Log what we have
                                     self._log(f"🔍 POST-PROCESS: Found {len(free_text_bboxes)} free_text bboxes from RT-DETR", "debug")
