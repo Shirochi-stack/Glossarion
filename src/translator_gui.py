@@ -8394,8 +8394,8 @@ Provide translations in the same numbered format."""
             
             # Debug: Show first 200 chars of system prompt
             if system_prompt:
-                preview = system_prompt[:200] + "..." if len(system_prompt) > 200 else system_prompt
-                self.append_log(f"   System prompt preview: {preview}")
+                preview = system_prompt[:] if len(system_prompt) > 200 else system_prompt
+                self.append_log(f"   System prompt: {preview}")
             
             # Check stop before making API call
             if self.stop_requested:
@@ -8726,8 +8726,8 @@ Provide translations in the same numbered format."""
                 
                 # Get the system prompt and log first 100 characters
                 system_prompt = self.prompt_text.get("1.0", "end").strip()
-                prompt_preview = system_prompt[:200] + "..." if len(system_prompt) > 100 else system_prompt
-                self.append_log(f"📝 System prompt preview: {prompt_preview}")
+                prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
+                self.append_log(f"📝 System prompt: {prompt_preview}")
                 self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
                 
                 # Check if glossary info is in the system prompt
