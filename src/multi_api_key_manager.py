@@ -825,7 +825,8 @@ class MultiAPIKeyDialog(QDialog):
         # Create scrollable content widget
         scrollable_widget = QWidget()
         scrollable_layout = QVBoxLayout(scrollable_widget)
-        scrollable_layout.setContentsMargins(20, 20, 20, 20)
+        scrollable_layout.setContentsMargins(20, 10, 20, 20)  # Reduced top margin from 20 to 10
+        scrollable_layout.setSpacing(10)  # Set spacing between widgets
         scroll_area.setWidget(scrollable_widget)
         
         # Set main layout
@@ -837,11 +838,12 @@ class MultiAPIKeyDialog(QDialog):
         self.main_frame = scrollable_widget
         self.scrollable_frame = scrollable_widget
         self.main_layout = scrollable_layout
+        self.scrollable_layout = scrollable_layout  # Store for adjusting spacing
         
         # Title and description
         title_frame = QWidget()
         title_layout = QHBoxLayout(title_frame)
-        title_layout.setContentsMargins(0, 0, 0, 10)
+        title_layout.setContentsMargins(0, 0, 0, 5)  # Reduced bottom margin from 10 to 5
         
         title_label = QLabel("Multi API Key Management")
         title_font = QFont()
@@ -860,17 +862,18 @@ class MultiAPIKeyDialog(QDialog):
         
         scrollable_layout.addWidget(title_frame)
         
-        desc_label = QLabel(
+        # Store reference to description label for hide/show
+        self.multikey_desc_label = QLabel(
                 "Manage multiple API keys with automatic rotation and rate limit handling.\n"
                 "Keys can be rotated automatically to distribute load evenly.\n"
                 "Rate-limited keys are automatically cooled down and skipped in rotation.")
-        desc_label.setStyleSheet("color: gray;")
-        desc_label.setWordWrap(True)
-        scrollable_layout.addWidget(desc_label)
+        self.multikey_desc_label.setStyleSheet("color: gray;")
+        self.multikey_desc_label.setWordWrap(True)
+        scrollable_layout.addWidget(self.multikey_desc_label)
         
-        # Rotation settings frame
-        rotation_frame = QGroupBox("Rotation Settings")
-        rotation_frame_layout = QVBoxLayout(rotation_frame)
+        # Rotation settings frame - store reference for enabling/disabling
+        self.rotation_frame = QGroupBox("Rotation Settings")
+        rotation_frame_layout = QVBoxLayout(self.rotation_frame)
         rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
         
         # Force rotation toggle
@@ -906,19 +909,23 @@ class MultiAPIKeyDialog(QDialog):
         rotation_frame_layout.addWidget(self.rotation_desc_label)
         self._update_rotation_display()
         
-        scrollable_layout.addWidget(rotation_frame)
+        scrollable_layout.addWidget(self.rotation_frame)
         
         # Add key section
         self._create_add_key_section(scrollable_layout)
         
-        # Separator
-        separator1 = QFrame()
-        separator1.setFrameShape(QFrame.HLine)
-        separator1.setFrameShadow(QFrame.Sunken)
-        scrollable_layout.addWidget(separator1)
+        # Separator - store reference to hide when multi-key mode is off
+        self.multikey_separator = QFrame()
+        self.multikey_separator.setFrameShape(QFrame.HLine)
+        self.multikey_separator.setFrameShadow(QFrame.Sunken)
+        scrollable_layout.addWidget(self.multikey_separator)
         
         # Key list section
         self._create_key_list_section(scrollable_layout)
+        
+        # Add stretch before fallback that only appears when multi-key is enabled
+        # This will be removed when multi-key is disabled to bring fallback closer
+        scrollable_layout.addStretch(0)
         
         # Create fallback container (hidden by default)
         self._create_fallback_section(scrollable_layout)
@@ -931,19 +938,22 @@ class MultiAPIKeyDialog(QDialog):
         
         # Set icon
         self._set_icon(self)
+        
+        # Apply initial state for multi-key mode toggle
+        self._toggle_multi_key_mode()
 
     def _create_fallback_section(self, parent_layout):
         """Create the fallback keys section at the bottom"""
         # Container that can be hidden
         self.fallback_container = QWidget()
         fallback_container_layout = QVBoxLayout(self.fallback_container)
-        fallback_container_layout.setContentsMargins(0, 10, 0, 0)
+        fallback_container_layout.setContentsMargins(0, 5, 0, 0)  # Reduced top margin from 10 to 5
         
-        # Separator
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        fallback_container_layout.addWidget(separator)
+        # Separator - store reference to hide when multi-key mode is off
+        self.fallback_separator = QFrame()
+        self.fallback_separator.setFrameShape(QFrame.HLine)
+        self.fallback_separator.setFrameShadow(QFrame.Sunken)
+        fallback_container_layout.addWidget(self.fallback_separator)
         
         # Main fallback frame
         fallback_frame = QGroupBox("Fallback Keys (For Prohibited Content)")
@@ -967,9 +977,9 @@ class MultiAPIKeyDialog(QDialog):
         self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
         fallback_frame_layout.addWidget(self.use_fallback_checkbox)
         
-        # Add fallback key section
-        add_fallback_frame = QWidget()
-        add_fallback_grid = QGridLayout(add_fallback_frame)
+        # Add fallback key section - store reference for opacity effect
+        self.add_fallback_frame = QWidget()
+        add_fallback_grid = QGridLayout(self.add_fallback_frame)
         add_fallback_grid.setContentsMargins(0, 0, 0, 10)
         
         # Row 0: Fallback API Key and Model
@@ -1002,7 +1012,7 @@ class MultiAPIKeyDialog(QDialog):
         add_fallback_grid.setColumnStretch(1, 1)
         add_fallback_grid.setColumnStretch(4, 1)
         
-        fallback_frame_layout.addWidget(add_fallback_frame)
+        fallback_frame_layout.addWidget(self.add_fallback_frame)
         
         # Row 1: Google Credentials (optional, discretely styled)
         google_creds_label = QLabel("Google Creds:")
@@ -1078,21 +1088,21 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_fallback_list(self, parent_layout):
         """Create the fallback keys list"""
-        # Label
-        list_label = QLabel("Fallback Keys (tried in order):")
+        # Label - store reference for hide/show
+        self.fallback_list_label = QLabel("Fallback Keys (tried in order):")
         list_label_font = QFont()
         list_label_font.setBold(True)
-        list_label.setFont(list_label_font)
-        parent_layout.addWidget(list_label)
+        self.fallback_list_label.setFont(list_label_font)
+        parent_layout.addWidget(self.fallback_list_label)
         
         # Container for tree and buttons
-        container = QWidget()
-        container_layout = QHBoxLayout(container)
+        self.fallback_tree_container = QWidget()
+        container_layout = QHBoxLayout(self.fallback_tree_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Left side: Move buttons
-        move_frame = QWidget()
-        move_layout = QVBoxLayout(move_frame)
+        # Left side: Move buttons - store reference for hide/show
+        self.fallback_move_frame = QWidget()
+        move_layout = QVBoxLayout(self.fallback_move_frame)
         move_layout.setContentsMargins(0, 0, 5, 0)
         
         order_label = QLabel("Order")
@@ -1112,7 +1122,7 @@ class MultiAPIKeyDialog(QDialog):
         move_layout.addWidget(down_btn)
         
         move_layout.addStretch()
-        container_layout.addWidget(move_frame)
+        container_layout.addWidget(self.fallback_move_frame)
         
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
@@ -1137,7 +1147,7 @@ class MultiAPIKeyDialog(QDialog):
         
         container_layout.addWidget(self.fallback_tree)
         
-        parent_layout.addWidget(container)
+        parent_layout.addWidget(self.fallback_tree_container)
         
         # Action buttons - store reference for toggling
         self.fallback_action_frame = QWidget()
@@ -1666,31 +1676,52 @@ class MultiAPIKeyDialog(QDialog):
             self._show_status("Cleared all fallback keys")
 
     def _toggle_fallback_section(self):
-        """Enable/disable fallback section based on checkbox"""
+        """Toggle fallback section - simply hide/show elements"""
         enabled = self.use_fallback_checkbox.isChecked()
         
-        # Enable/disable input widgets
-        self.fallback_key_entry.setEnabled(enabled)
-        self.fallback_model_combo.setEnabled(enabled)
-        self.fallback_google_creds_entry.setEnabled(enabled)
-        self.fallback_google_region_entry.setEnabled(enabled)
-        self.show_fallback_btn.setEnabled(enabled)
+        # Show/hide the input frame
+        if hasattr(self, 'add_fallback_frame'):
+            self.add_fallback_frame.setVisible(enabled)
         
-        # Enable/disable individual endpoint toggle
-        if hasattr(self, 'fallback_individual_endpoint_toggle'):
-            self.fallback_individual_endpoint_toggle.setEnabled(enabled)
+        # Show/hide the list label
+        if hasattr(self, 'fallback_list_label'):
+            self.fallback_list_label.setVisible(enabled)
         
-        # Show/hide endpoint fields based on toggle state
-        self._toggle_fallback_individual_endpoint_fields()
+        # Show/hide the tree container (includes move buttons and tree)
+        if hasattr(self, 'fallback_tree_container'):
+            self.fallback_tree_container.setVisible(enabled)
         
-        # Show/hide the tree and action buttons
-        self.fallback_tree.setVisible(enabled)
+        # Show/hide action buttons
         if hasattr(self, 'fallback_action_frame'):
             self.fallback_action_frame.setVisible(enabled)
         
-        if not enabled:
-            # Clear selection
+        # Clear selection when disabled
+        if hasattr(self, 'fallback_tree') and not enabled:
             self.fallback_tree.clearSelection()
+        
+        # === Check if multi-key is also disabled ===
+        multikey_enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
+        both_disabled = not enabled and not multikey_enabled
+        
+        # === Adjust fallback container spacing ===
+        if hasattr(self, 'fallback_container'):
+            layout = self.fallback_container.layout()
+            if layout:
+                if both_disabled:
+                    layout.setContentsMargins(0, 0, 0, 0)  # No top margin when both are off
+                else:
+                    layout.setContentsMargins(0, 5, 0, 0)  # Normal spacing otherwise
+        
+        # === Hide fallback separator when both are off ===
+        if hasattr(self, 'fallback_separator'):
+            self.fallback_separator.setVisible(not both_disabled)
+        
+        # === Adjust layout spacing ===
+        if hasattr(self, 'scrollable_layout'):
+            if both_disabled:
+                self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
+            else:
+                self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
 
     def _toggle_fallback_visibility(self):
         """Toggle fallback key visibility"""
@@ -1816,8 +1847,9 @@ class MultiAPIKeyDialog(QDialog):
  
     def _create_key_list_section(self, parent_layout):
         """Create the key list section with inline editing and rearrangement controls"""
-        list_frame = QGroupBox("API Keys")
-        list_frame_layout = QVBoxLayout(list_frame)
+        # Store reference for enabling/disabling
+        self.key_list_frame = QGroupBox("API Keys")
+        list_frame_layout = QVBoxLayout(self.key_list_frame)
         list_frame_layout.setContentsMargins(15, 15, 15, 15)
         
         # Add primary key indicator frame at the top with improved styling
@@ -1959,25 +1991,26 @@ class MultiAPIKeyDialog(QDialog):
         action_layout = QHBoxLayout(action_frame)
         action_layout.setContentsMargins(0, 10, 0, 0)
         
-        test_selected_btn = QPushButton("Test Selected")
-        test_selected_btn.clicked.connect(self._test_selected)
-        action_layout.addWidget(test_selected_btn)
+        # Store references to action buttons for enabling/disabling
+        self.test_selected_btn = QPushButton("Test Selected")
+        self.test_selected_btn.clicked.connect(self._test_selected)
+        action_layout.addWidget(self.test_selected_btn)
         
-        test_all_btn = QPushButton("Test All")
-        test_all_btn.clicked.connect(self._test_all)
-        action_layout.addWidget(test_all_btn)
+        self.test_all_btn = QPushButton("Test All")
+        self.test_all_btn.clicked.connect(self._test_all)
+        action_layout.addWidget(self.test_all_btn)
         
-        enable_selected_btn = QPushButton("Enable Selected")
-        enable_selected_btn.clicked.connect(self._enable_selected)
-        action_layout.addWidget(enable_selected_btn)
+        self.enable_selected_btn = QPushButton("Enable Selected")
+        self.enable_selected_btn.clicked.connect(self._enable_selected)
+        action_layout.addWidget(self.enable_selected_btn)
         
-        disable_selected_btn = QPushButton("Disable Selected")
-        disable_selected_btn.clicked.connect(self._disable_selected)
-        action_layout.addWidget(disable_selected_btn)
+        self.disable_selected_btn = QPushButton("Disable Selected")
+        self.disable_selected_btn.clicked.connect(self._disable_selected)
+        action_layout.addWidget(self.disable_selected_btn)
         
-        remove_selected_btn = QPushButton("Remove Selected")
-        remove_selected_btn.clicked.connect(self._remove_selected)
-        action_layout.addWidget(remove_selected_btn)
+        self.remove_selected_btn = QPushButton("Remove Selected")
+        self.remove_selected_btn.clicked.connect(self._remove_selected)
+        action_layout.addWidget(self.remove_selected_btn)
         
         action_layout.addStretch()
         
@@ -1990,12 +2023,13 @@ class MultiAPIKeyDialog(QDialog):
         action_layout.addWidget(self.stats_label)
         
         list_frame_layout.addWidget(action_frame)
-        parent_layout.addWidget(list_frame)
+        parent_layout.addWidget(self.key_list_frame)
  
     def _create_add_key_section(self, parent_layout):
         """Create the add key section with Google credentials and Azure endpoint support"""
-        add_frame = QGroupBox("Add New API Key")
-        add_grid = QGridLayout(add_frame)
+        # Store reference for enabling/disabling
+        self.add_key_frame = QGroupBox("Add New API Key")
+        add_grid = QGridLayout(self.add_key_frame)
         add_grid.setContentsMargins(15, 15, 15, 15)
         
         # Row 0: API Key and Model
@@ -2044,13 +2078,14 @@ class MultiAPIKeyDialog(QDialog):
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.addStretch()
         
-        add_key_btn = QPushButton("Add Key")
-        add_key_btn.clicked.connect(self._add_key)
-        button_layout.addWidget(add_key_btn)
+        # Store references for enabling/disabling
+        self.add_key_btn = QPushButton("Add Key")
+        self.add_key_btn.clicked.connect(self._add_key)
+        button_layout.addWidget(self.add_key_btn)
         
-        copy_current_btn = QPushButton("Copy Current Key")
-        copy_current_btn.clicked.connect(self._copy_current_settings)
-        button_layout.addWidget(copy_current_btn)
+        self.copy_current_btn = QPushButton("Copy Current Key")
+        self.copy_current_btn.clicked.connect(self._copy_current_settings)
+        button_layout.addWidget(self.copy_current_btn)
         
         add_grid.addWidget(button_widget, 1, 4, Qt.AlignRight)
         
@@ -2122,7 +2157,7 @@ class MultiAPIKeyDialog(QDialog):
         # Initially hide the endpoint fields
         self._toggle_individual_endpoint_fields()
         
-        parent_layout.addWidget(add_frame)
+        parent_layout.addWidget(self.add_key_frame)
     
     def _toggle_individual_endpoint_fields(self):
         """Toggle visibility and state of individual endpoint fields"""
@@ -2880,7 +2915,7 @@ class MultiAPIKeyDialog(QDialog):
             self.show_key_btn.setText('👁')
     
     def _toggle_multi_key_mode(self):
-        """Toggle multi-key mode"""
+        """Toggle multi-key mode - simply hide/show sections"""
         enabled = self.enabled_checkbox.isChecked()
         self.translator_gui.config['use_multi_api_keys'] = enabled
         self.enabled_var = enabled
@@ -2888,27 +2923,71 @@ class MultiAPIKeyDialog(QDialog):
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
         
-        # Fallback section is always visible now (works in both modes)
-        # No need to show/hide fallback section based on multi-key mode
+        # === Rotation Settings Frame ===
+        if hasattr(self, 'rotation_frame'):
+            if enabled:
+                self.rotation_frame.setMaximumHeight(16777215)  # Reset to max
+                self.rotation_frame.show()
+            else:
+                self.rotation_frame.hide()
+                self.rotation_frame.setMaximumHeight(0)
         
-        # Update other UI elements
-        if hasattr(self, 'api_key_entry'):
-            self.api_key_entry.setEnabled(enabled)
-        if hasattr(self, 'model_combo'):
-            self.model_combo.setEnabled(enabled)
+        # === Add Key Section ===
+        if hasattr(self, 'add_key_frame'):
+            if enabled:
+                self.add_key_frame.setMaximumHeight(16777215)  # Reset to max
+                self.add_key_frame.show()
+            else:
+                self.add_key_frame.hide()
+                self.add_key_frame.setMaximumHeight(0)
         
-        # Tree widget enable/disable
-        if hasattr(self, 'tree'):
-            self.tree.setEnabled(enabled)
+        # === Separator ===
+        if hasattr(self, 'multikey_separator'):
+            if enabled:
+                self.multikey_separator.setMaximumHeight(16777215)  # Reset to max
+                self.multikey_separator.show()
+            else:
+                self.multikey_separator.hide()
+                self.multikey_separator.setMaximumHeight(0)
         
-        # Update all action buttons - find them by text and enable/disable
-        # This is a simplified approach; buttons are already connected to slots
-        if hasattr(self, 'button_frame'):
-            for button in self.button_frame.findChildren(QPushButton):
-                button_text = button.text()
-                if button_text in ['Test Selected', 'Test All', 'Enable Selected', 
-                                   'Disable Selected', 'Remove Selected', 'Add Key']:
-                    button.setEnabled(enabled)
+        # === Key List Section ===
+        if hasattr(self, 'key_list_frame'):
+            if enabled:
+                self.key_list_frame.setMaximumHeight(16777215)  # Reset to max
+                self.key_list_frame.show()
+            else:
+                self.key_list_frame.hide()
+                self.key_list_frame.setMaximumHeight(0)
+        
+        # === Check if fallback is also disabled ===
+        fallback_enabled = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
+        both_disabled = not enabled and not fallback_enabled
+        
+        # === Adjust fallback container spacing ===
+        # When both toggles are disabled, eliminate all top spacing
+        if hasattr(self, 'fallback_container'):
+            layout = self.fallback_container.layout()
+            if layout:
+                if both_disabled:
+                    layout.setContentsMargins(0, 0, 0, 0)  # No top margin when both are off
+                else:
+                    layout.setContentsMargins(0, 5, 0, 0)  # Normal spacing otherwise
+        
+        # === Hide fallback separator when both are off ===
+        if hasattr(self, 'fallback_separator'):
+            self.fallback_separator.setVisible(not both_disabled)
+        
+        # === Adjust layout spacing ===
+        # Reduce spacing between widgets when both toggles are off
+        if hasattr(self, 'scrollable_layout'):
+            if both_disabled:
+                self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
+            else:
+                self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
+        
+        # Show status message
+        status = "enabled" if enabled else "disabled"
+        self._show_status(f"Multi-Key Mode {status}")
     
     def _copy_current_settings(self):
         """Copy current API key and model from main GUI"""
