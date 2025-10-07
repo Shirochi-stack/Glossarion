@@ -9,9 +9,13 @@ import time
 import re
 from typing import Optional, Dict, Tuple, List
 from packaging import version
-import tkinter as tk
-from tkinter import ttk, messagebox, font
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
+    QTextEdit, QProgressBar, QMessageBox, QApplication
+)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QIcon, QTextCursor
 from datetime import datetime
 
 class UpdateManager:
@@ -204,48 +208,61 @@ class UpdateManager:
                 
         except requests.Timeout:
             if not silent:
-                messagebox.showerror("Update Check Failed", 
-                                   "Connection timed out while checking for updates.\n\n"
-                                   "This is usually due to network connectivity issues.\n"
-                                   "The next update check will be in 1 hour.")
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                msg.setText("Connection timed out while checking for updates.\n\n"
+                          "This is usually due to network connectivity issues.\n"
+                          "The next update check will be in 1 hour.")
+                msg.exec()
             return False, None
             
         except requests.ConnectionError as e:
             if not silent:
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
                 if 'api.github.com' in str(e):
-                    messagebox.showerror("Update Check Failed", 
-                                       "Cannot reach GitHub servers for update check.\n\n"
-                                       "This may be due to:\n"
-                                       "• Internet connectivity issues\n"
-                                       "• Firewall blocking GitHub API\n"
-                                       "• GitHub API temporarily unavailable\n\n"
-                                       "The next update check will be in 1 hour.")
+                    msg.setText("Cannot reach GitHub servers for update check.\n\n"
+                              "This may be due to:\n"
+                              "• Internet connectivity issues\n"
+                              "• Firewall blocking GitHub API\n"
+                              "• GitHub API temporarily unavailable\n\n"
+                              "The next update check will be in 1 hour.")
                 else:
-                    messagebox.showerror("Update Check Failed", 
-                                       f"Network error: {str(e)}\n\n"
-                                       "The next update check will be in 1 hour.")
+                    msg.setText(f"Network error: {str(e)}\n\n"
+                              "The next update check will be in 1 hour.")
+                msg.exec()
             return False, None
             
         except requests.HTTPError as e:
             if not silent:
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
                 if e.response.status_code == 403:
-                    messagebox.showerror("Update Check Failed", 
-                                       "GitHub API rate limit exceeded. Please try again later.")
+                    msg.setText("GitHub API rate limit exceeded. Please try again later.")
                 else:
-                    messagebox.showerror("Update Check Failed", 
-                                       f"GitHub returned error: {e.response.status_code}")
+                    msg.setText(f"GitHub returned error: {e.response.status_code}")
+                msg.exec()
             return False, None
             
         except ValueError as e:
             if not silent:
-                messagebox.showerror("Update Check Failed", 
-                                   "Invalid response from GitHub. The update service may be temporarily unavailable.")
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                msg.setText("Invalid response from GitHub. The update service may be temporarily unavailable.")
+                msg.exec()
             return False, None
             
         except Exception as e:
             if not silent:
-                messagebox.showerror("Update Check Failed", 
-                                   f"An unexpected error occurred:\n{str(e)}")
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Update Check Failed")
+                msg.setText(f"An unexpected error occurred:\n{str(e)}")
+                msg.exec()
             return False, None
     
     def check_for_updates_manual(self):
@@ -263,19 +280,22 @@ class UpdateManager:
         except Exception as e:
             print(f"[DEBUG] Failed to save last check time: {e}")
     
-    def format_markdown_to_tkinter(self, text_widget, markdown_text):
-        """Convert GitHub markdown to formatted tkinter text - simplified version
+    def format_markdown_to_qt(self, text_widget, markdown_text):
+        """Convert GitHub markdown to formatted Qt text - simplified version
         
         Args:
-            text_widget: The Text widget to insert formatted text into
+            text_widget: The QTextEdit widget to insert formatted text into
             markdown_text: The markdown source text
         """
-        # Configure minimal tags
-        text_widget.tag_config("heading", font=('TkDefaultFont', 12, 'bold'))
-        text_widget.tag_config("bold", font=('TkDefaultFont', 10, 'bold'))
+        # Set default font
+        default_font = QFont()
+        default_font.setPointSize(10)
+        text_widget.setFont(default_font)
         
         # Process text line by line with minimal formatting
         lines = markdown_text.split('\n')
+        cursor = text_widget.textCursor()
+        cursor.movePosition(QTextCursor.End)
         
         for line in lines:
             # Strip any weird unicode characters that might cause display issues
@@ -286,7 +306,17 @@ class UpdateManager:
                 # Remove all # symbols and get the heading text
                 heading_text = line.lstrip('#').strip()
                 if heading_text:
-                    text_widget.insert('end', heading_text + '\n', 'heading')
+                    cursor.insertText(heading_text + '\n')
+                    # Make it bold by moving back and applying format
+                    cursor.movePosition(QTextCursor.PreviousBlock)
+                    cursor.select(QTextCursor.BlockUnderCursor)
+                    fmt = cursor.charFormat()
+                    font = QFont()
+                    font.setBold(True)
+                    font.setPointSize(12)
+                    fmt.setFont(font)
+                    cursor.mergeCharFormat(fmt)
+                    cursor.movePosition(QTextCursor.End)
             
             # Handle bullet points
             elif line.strip().startswith(('- ', '* ')):
@@ -294,7 +324,7 @@ class UpdateManager:
                 bullet_text = line.strip()[2:].strip()
                 # Clean the text of markdown formatting
                 bullet_text = self._clean_markdown_text(bullet_text)
-                text_widget.insert('end', '    • ' + bullet_text + '\n')
+                cursor.insertText('    • ' + bullet_text + '\n')
             
             # Handle numbered lists  
             elif re.match(r'^\s*\d+\.\s', line):
@@ -303,11 +333,11 @@ class UpdateManager:
                 if match:
                     indent, num, text = match.groups()
                     clean_text = self._clean_markdown_text(text.strip())
-                    text_widget.insert('end', f'    {num}. {clean_text}\n')
+                    cursor.insertText(f'    {num}. {clean_text}\n')
             
             # Handle separator lines
             elif line.strip() in ['---', '***', '___']:
-                text_widget.insert('end', '─' * 40 + '\n')
+                cursor.insertText('─' * 40 + '\n')
             
             # Handle code blocks - just skip the markers
             elif line.strip().startswith('```'):
@@ -317,15 +347,15 @@ class UpdateManager:
             elif line.strip():
                 # Clean and insert the line
                 clean_text = self._clean_markdown_text(line)
-                # Check if this looks like it should be bold (common pattern)
-                if clean_text.endswith(':') and len(clean_text) < 50:
-                    text_widget.insert('end', clean_text + '\n', 'bold')
-                else:
-                    text_widget.insert('end', clean_text + '\n')
+                cursor.insertText(clean_text + '\n')
             
             # Empty lines
             else:
-                text_widget.insert('end', '\n')
+                cursor.insertText('\n')
+        
+        # Move cursor to start and scroll to top
+        cursor.movePosition(QTextCursor.Start)
+        text_widget.setTextCursor(cursor)
     
     def _clean_markdown_text(self, text):
         """Remove markdown formatting from text
@@ -364,7 +394,11 @@ class UpdateManager:
             if self.all_releases:
                 self.latest_release = self.all_releases[0]
             else:
-                messagebox.showerror("Error", "Unable to fetch version information from GitHub.")
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Error")
+                msg.setText("Unable to fetch version information from GitHub.")
+                msg.exec()
                 return
         
         # Set appropriate title
@@ -373,49 +407,117 @@ class UpdateManager:
         else:
             title = "Version History"
         
-        # Create dialog first without content
-        dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.main_gui.master,
-            title,
-            width=None,
-            height=None,
-            max_width_ratio=0.5,
-            max_height_ratio=0.8
-        )
+        # Ensure QApplication exists
+        app = QApplication.instance()
+        if not app:
+            try:
+                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+            except:
+                pass
+            app = QApplication(sys.argv)
         
-        # Show dialog immediately
-        dialog.update_idletasks()
+        # Create PySide6 dialog
+        dialog = QDialog(None)
+        dialog.setWindowTitle(title)
         
-        # Then populate content
-        self.main_gui.master.after(10, lambda: self._populate_update_dialog(dialog, scrollable_frame, canvas))
+        # Get screen dimensions and calculate size
+        screen = app.primaryScreen().geometry()
+        dialog_width = int(screen.width() * 0.25)  # Half of 0.5
+        dialog_height = int(screen.height() * 0.4)  # Half of 0.8
+        dialog.resize(dialog_width, dialog_height)
+        
+        # Set icon if available
+        icon_path = os.path.join(self.base_dir, 'halgakos.ico')
+        if os.path.exists(icon_path):
+            dialog.setWindowIcon(QIcon(icon_path))
+        
+        # Apply global stylesheet for radio buttons
+        dialog.setStyleSheet("""
+            QRadioButton {
+                color: white;
+                spacing: 6px;
+            }
+            QRadioButton::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:hover {
+                border: 1px solid #7ab8e8;
+                background-color: #3d3d3d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 1px solid #5a9fd4;
+            }
+            QRadioButton::indicator:checked:hover {
+                background-color: #7ab8e8;
+                border: 1px solid #7ab8e8;
+            }
+            QRadioButton::indicator:disabled {
+                border: 1px solid #555555;
+                background-color: #1e1e1e;
+            }
+            QGroupBox {
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 0 5px;
+                color: #5a9fd4;
+                font-weight: bold;
+            }
+        """)
+        
+        # Populate content
+        self._populate_update_dialog(dialog)
 
-    def _populate_update_dialog(self, dialog, scrollable_frame, canvas):
+    def _populate_update_dialog(self, dialog):
         """Populate the update dialog content"""
-        # Main container
-        main_frame = ttk.Frame(scrollable_frame)
-        main_frame.pack(fill='both', expand=True, padx=20, pady=20)
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)
         
         # Initialize selected_asset to None
         self.selected_asset = None
         
         # Version info
-        version_frame = ttk.LabelFrame(main_frame, text="Version Information", padding=10)
-        version_frame.pack(fill='x', pady=(0, 10))
+        version_group = QGroupBox("Version Information")
+        version_layout = QVBoxLayout()
+        version_layout.setContentsMargins(10, 10, 10, 10)
         
-        ttk.Label(version_frame, 
-                 text=f"Current Version: {self.CURRENT_VERSION}").pack(anchor='w')
+        current_label = QLabel(f"Current Version: {self.CURRENT_VERSION}")
+        version_layout.addWidget(current_label)
         
         if self.latest_release:
             latest_version = self.latest_release['tag_name']
             if self.update_available:
-                ttk.Label(version_frame, 
-                         text=f"Latest Version: {latest_version}",
-                         font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
+                latest_label = QLabel(f"Latest Version: {latest_version}")
+                latest_font = QFont()
+                latest_font.setBold(True)
+                latest_font.setPointSize(10)
+                latest_label.setFont(latest_font)
+                version_layout.addWidget(latest_label)
             else:
-                ttk.Label(version_frame, 
-                         text=f"Latest Version: {latest_version} ✓ You are up to date!",
-                         foreground='green',
-                         font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
+                latest_label = QLabel(f"Latest Version: {latest_version} ✓ You are up to date!")
+                latest_font = QFont()
+                latest_font.setBold(True)
+                latest_font.setPointSize(10)
+                latest_label.setFont(latest_font)
+                latest_label.setStyleSheet("color: green;")
+                version_layout.addWidget(latest_label)
+        
+        version_group.setLayout(version_layout)
+        main_layout.addWidget(version_group)
         
         # ALWAYS show asset selection when we have the first release data (current or latest)
         release_to_check = self.all_releases[0] if self.all_releases else self.latest_release
@@ -435,49 +537,67 @@ class UpdateManager:
                 else:
                     frame_title = "Available Download"
                 
-                asset_frame = ttk.LabelFrame(main_frame, text=frame_title, padding=10)
-                asset_frame.pack(fill='x', pady=(0, 10))
+                asset_group = QGroupBox(frame_title)
+                asset_layout = QVBoxLayout()
+                asset_layout.setContentsMargins(10, 10, 10, 10)
                 
                 if len(exe_assets) > 1:
                     # Multiple exe files - show radio buttons to choose
-                    self.asset_var = tk.StringVar()
+                    self.asset_button_group = QButtonGroup()
                     for i, asset in enumerate(exe_assets):
                         filename = asset['name']
                         size_mb = asset['size'] / (1024 * 1024)
                         
-                        # Try to identify variant type from filename
-                        if 'full' in filename.lower():
-                            variant_label = f"Full Version - {filename} ({size_mb:.1f} MB)"
+                        # Identify variant type based on first letter of filename
+                        first_letter = filename[0].upper() if filename else ''
+                        if first_letter == 'G':
+                            variant_type = "Standard"
+                        elif first_letter == 'L':
+                            variant_type = "Lite"
+                        elif first_letter == 'N':
+                            variant_type = "No CUDA"
                         else:
-                            variant_label = f"Standard Version - {filename} ({size_mb:.1f} MB)"
+                            # Fallback: check for keywords in filename
+                            if 'lite' in filename.lower():
+                                variant_type = "Lite"
+                            elif 'cuda' in filename.lower():
+                                variant_type = "No CUDA"
+                            elif 'full' in filename.lower():
+                                variant_type = "Full"
+                            else:
+                                variant_type = "Standard"
                         
-                        rb = ttk.Radiobutton(asset_frame, text=variant_label, 
-                                            variable=self.asset_var, 
-                                            value=str(i))
-                        rb.pack(anchor='w', pady=2)
+                        variant_label = f"{variant_type} - {filename} ({size_mb:.1f} MB)"
+                        
+                        rb = QRadioButton(variant_label)
+                        rb.setProperty("asset_index", i)
+                        self.asset_button_group.addButton(rb, i)
+                        asset_layout.addWidget(rb)
                         
                         # Select first option by default
                         if i == 0:
-                            self.asset_var.set(str(i))
+                            rb.setChecked(True)
                             self.selected_asset = asset
                     
                     # Add listener for selection changes
-                    def on_asset_change(*args):
-                        idx = int(self.asset_var.get())
-                        self.selected_asset = exe_assets[idx]
+                    def on_asset_change(button_id):
+                        self.selected_asset = exe_assets[button_id]
                     
-                    self.asset_var.trace_add('write', on_asset_change)
+                    self.asset_button_group.idClicked.connect(on_asset_change)
                 else:
                     # Only one exe file - just show it and set it as selected
                     self.selected_asset = exe_assets[0]
                     filename = exe_assets[0]['name']
                     size_mb = exe_assets[0]['size'] / (1024 * 1024)
-                    ttk.Label(asset_frame, 
-                             text=f"{filename} ({size_mb:.1f} MB)").pack(anchor='w')
+                    asset_label = QLabel(f"{filename} ({size_mb:.1f} MB)")
+                    asset_layout.addWidget(asset_label)
+                
+                asset_group.setLayout(asset_layout)
+                main_layout.addWidget(asset_group)
         
-        # Create notebook for version history
-        notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill='both', expand=True, pady=(0, 10))
+        # Create tab widget for version history
+        tab_widget = QTabWidget()
+        tab_widget.setMinimumHeight(300)
         
         # Add tabs for different versions
         if self.all_releases:
@@ -496,87 +616,104 @@ class UpdateManager:
                 elif is_latest:
                     tab_label += " (Latest)"
                 
-                # Create frame for this version
-                tab_frame = ttk.Frame(notebook)
-                notebook.add(tab_frame, text=tab_label)
+                # Create widget for this version
+                tab_widget_container = QWidget()
+                tab_layout = QVBoxLayout(tab_widget_container)
+                tab_layout.setContentsMargins(10, 10, 10, 10)
                 
                 # Add release date
                 if 'published_at' in release:
                     date_str = release['published_at'][:10]  # Get YYYY-MM-DD
-                    date_label = ttk.Label(tab_frame, text=f"Released: {date_str}", 
-                                         font=('TkDefaultFont', 9, 'italic'))
-                    date_label.pack(anchor='w', padx=10, pady=(10, 5))
+                    date_label = QLabel(f"Released: {date_str}")
+                    date_font = QFont()
+                    date_font.setItalic(True)
+                    date_font.setPointSize(9)
+                    date_label.setFont(date_font)
+                    tab_layout.addWidget(date_label)
                 
                 # Create text widget for release notes
-                text_frame = ttk.Frame(tab_frame)
-                text_frame.pack(fill='both', expand=True, padx=10, pady=(0, 10))
-                
-                notes_text = tk.Text(text_frame, height=12, wrap='word', width=60)
-                notes_scroll = ttk.Scrollbar(text_frame, command=notes_text.yview)
-                notes_text.config(yscrollcommand=notes_scroll.set)
-                
-                notes_text.pack(side='left', fill='both', expand=True)
-                notes_scroll.pack(side='right', fill='y')
+                notes_text = QTextEdit()
+                notes_text.setReadOnly(True)
+                notes_text.setMinimumHeight(200)
                 
                 # Format and insert release notes with markdown support
                 release_notes = release.get('body', 'No release notes available')
-                self.format_markdown_to_tkinter(notes_text, release_notes)
+                self.format_markdown_to_qt(notes_text, release_notes)
                 
-                notes_text.config(state='disabled')  # Make read-only
-                
-                # Don't set background color as it causes rendering artifacts
+                tab_layout.addWidget(notes_text)
+                tab_widget.addTab(tab_widget_container, tab_label)
         else:
             # Fallback to simple display if no releases fetched
-            notes_frame = ttk.LabelFrame(main_frame, text="Release Notes", padding=10)
-            notes_frame.pack(fill='both', expand=True, pady=(0, 10))
+            tab_widget_container = QWidget()
+            tab_layout = QVBoxLayout(tab_widget_container)
+            tab_layout.setContentsMargins(10, 10, 10, 10)
             
-            notes_text = tk.Text(notes_frame, height=10, wrap='word')
-            notes_scroll = ttk.Scrollbar(notes_frame, command=notes_text.yview)
-            notes_text.config(yscrollcommand=notes_scroll.set)
-            
-            notes_text.pack(side='left', fill='both', expand=True)
-            notes_scroll.pack(side='right', fill='y')
+            notes_text = QTextEdit()
+            notes_text.setReadOnly(True)
+            notes_text.setMinimumHeight(200)
             
             if self.latest_release:
                 release_notes = self.latest_release.get('body', 'No release notes available')
-                self.format_markdown_to_tkinter(notes_text, release_notes)
+                self.format_markdown_to_qt(notes_text, release_notes)
             else:
-                notes_text.insert('1.0', 'Unable to fetch release notes.')
+                notes_text.setPlainText('Unable to fetch release notes.')
             
-            notes_text.config(state='disabled')
+            tab_layout.addWidget(notes_text)
+            tab_widget.addTab(tab_widget_container, "Release Notes")
+        
+        main_layout.addWidget(tab_widget)
         
         # Download progress (initially hidden)
-        self.progress_frame = ttk.Frame(main_frame)
-        self.progress_label = ttk.Label(self.progress_frame, text="Downloading update...")
-        self.progress_label.pack(anchor='w')
-        self.progress_bar = ttk.Progressbar(self.progress_frame, mode='determinate', length=400)
-        self.progress_bar.pack(fill='x', pady=5)
+        self.progress_widget = QWidget()
+        progress_layout = QVBoxLayout(self.progress_widget)
+        progress_layout.setContentsMargins(0, 10, 0, 10)
+        
+        self.progress_label = QLabel("Downloading update...")
+        progress_layout.addWidget(self.progress_label)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setTextVisible(True)
+        progress_layout.addWidget(self.progress_bar)
         
         # Add status label for download details
-        self.status_label = ttk.Label(self.progress_frame, text="", font=('TkDefaultFont', 8))
-        self.status_label.pack(anchor='w')
+        self.status_label = QLabel("")
+        status_font = QFont()
+        status_font.setPointSize(8)
+        self.status_label.setFont(status_font)
+        progress_layout.addWidget(self.status_label)
+        
+        # Hide progress initially
+        self.progress_widget.setVisible(False)
+        
+        # Add progress widget to layout (hidden initially)
+        main_layout.addWidget(self.progress_widget)
         
         # Buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill='x', pady=(10, 0))
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
         
         def start_download():
             if not self.selected_asset:
-                messagebox.showerror("No File Selected", 
-                                   "Please select a version to download.")
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("No File Selected")
+                msg.setText("Please select a version to download.")
+                msg.exec()
                 return
-                
-            self.progress_frame.pack(fill='x', pady=(0, 10), before=button_frame)
-            download_btn.config(state='disabled')
-            if 'remind_btn' in locals():
-                remind_btn.config(state='disabled')
-            if 'skip_btn' in locals():
-                skip_btn.config(state='disabled')
-            if 'close_btn' in locals():
-                close_btn.config(state='disabled')
+            
+            # Show progress
+            self.progress_widget.setVisible(True)
+            
+            # Disable all buttons
+            for i in range(button_layout.count()):
+                widget = button_layout.itemAt(i).widget()
+                if widget and isinstance(widget, QPushButton):
+                    widget.setEnabled(False)
             
             # Reset progress
-            self.progress_bar['value'] = 0
+            self.progress_bar.setValue(0)
             self.download_progress = 0
             
             # Start download using shared executor if available
@@ -598,18 +735,53 @@ class UpdateManager:
         
         if self.update_available:
             # Show update-specific buttons
-            download_btn = tb.Button(button_frame, text="Download Update", 
-                                   command=start_download, bootstyle="success")
-            download_btn.pack(side='left', padx=(0, 5))
+            download_btn = QPushButton("Download Update")
+            download_btn.setMinimumHeight(35)
+            download_btn.clicked.connect(start_download)
+            download_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #218838; }
+            """)
+            button_layout.addWidget(download_btn)
             
-            remind_btn = tb.Button(button_frame, text="Remind Me Later", 
-                                 command=dialog.destroy, bootstyle="secondary")
-            remind_btn.pack(side='left', padx=5)
+            remind_btn = QPushButton("Remind Me Later")
+            remind_btn.setMinimumHeight(35)
+            remind_btn.clicked.connect(dialog.close)
+            remind_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #5a6268; }
+            """)
+            button_layout.addWidget(remind_btn)
             
-            skip_btn = tb.Button(button_frame, text="Skip This Version", 
-                               command=lambda: self.skip_version(dialog), 
-                               bootstyle="link")
-            skip_btn.pack(side='left', padx=5)
+            skip_btn = QPushButton("Skip This Version")
+            skip_btn.setMinimumHeight(35)
+            skip_btn.clicked.connect(lambda: self.skip_version(dialog))
+            skip_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #007bff;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    border: none;
+                    text-decoration: underline;
+                }
+                QPushButton:hover { color: #0056b3; }
+            """)
+            button_layout.addWidget(skip_btn)
         elif has_exe_files:
             # We're up to date but have downloadable files
             # Check if there are multiple exe files
@@ -621,44 +793,109 @@ class UpdateManager:
             
             if exe_count > 1:
                 # Multiple versions available
-                download_btn = tb.Button(button_frame, text="Download Different Path", 
-                                       command=start_download, bootstyle="info")
+                download_btn = QPushButton("Download Different Path")
+                download_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #17a2b8;
+                        color: white;
+                        padding: 8px 20px;
+                        font-size: 11pt;
+                        font-weight: bold;
+                        border-radius: 4px;
+                    }
+                    QPushButton:hover { background-color: #117a8b; }
+                """)
             else:
                 # Single version available
-                download_btn = tb.Button(button_frame, text="Re-download", 
-                                       command=start_download, bootstyle="secondary")
-            download_btn.pack(side='left', padx=(0, 5))
+                download_btn = QPushButton("Re-download")
+                download_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #6c757d;
+                        color: white;
+                        padding: 8px 20px;
+                        font-size: 11pt;
+                        font-weight: bold;
+                        border-radius: 4px;
+                    }
+                    QPushButton:hover { background-color: #5a6268; }
+                """)
+            download_btn.setMinimumHeight(35)
+            download_btn.clicked.connect(start_download)
+            button_layout.addWidget(download_btn)
             
-            close_btn = tb.Button(button_frame, text="Close", 
-                                command=dialog.destroy, 
-                                bootstyle="secondary")
-            close_btn.pack(side='left', padx=(0, 5))
+            close_btn = QPushButton("Close")
+            close_btn.setMinimumHeight(35)
+            close_btn.clicked.connect(dialog.close)
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #5a6268; }
+            """)
+            button_layout.addWidget(close_btn)
         else:
             # No downloadable files
-            close_btn = tb.Button(button_frame, text="Close", 
-                                command=dialog.destroy, 
-                                bootstyle="primary")
-            close_btn.pack(side='left', padx=(0, 5))
+            close_btn = QPushButton("Close")
+            close_btn.setMinimumHeight(35)
+            close_btn.clicked.connect(dialog.close)
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #007bff;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #0056b3; }
+            """)
+            button_layout.addWidget(close_btn)
         
         # Add "View All Releases" link button
         def open_releases_page():
             import webbrowser
             webbrowser.open("https://github.com/Shirochi-stack/Glossarion/releases")
         
-        tb.Button(button_frame, text="View All Releases", 
-                 command=open_releases_page, 
-                 bootstyle="link").pack(side='right', padx=5)
+        view_releases_btn = QPushButton("View All Releases")
+        view_releases_btn.setMinimumHeight(35)
+        view_releases_btn.clicked.connect(open_releases_page)
+        view_releases_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #007bff;
+                padding: 8px 20px;
+                font-size: 11pt;
+                border: none;
+                text-decoration: underline;
+            }
+            QPushButton:hover { color: #0056b3; }
+        """)
+        button_layout.addStretch()
+        button_layout.addWidget(view_releases_btn)
         
-        # Auto-resize at the end
-        dialog.after(100, lambda: self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.8))
-    
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        # Add button layout to main layout
+        main_layout.addLayout(button_layout)
+        
+        # Set dialog layout and show
+        dialog.setLayout(main_layout)
+        
+        # Show dialog using exec in main thread
+        # We need to show it non-blocking to work with tkinter main loop
+        dialog.setModal(False)
+        dialog.show()
+        
+        # Keep reference to prevent garbage collection
+        self._update_dialog = dialog
     
     def skip_version(self, dialog):
         """Mark this version as skipped and close dialog"""
         if not self.latest_release:
-            dialog.destroy()
+            dialog.close()
             return
         
         # Get current skipped versions list
@@ -674,12 +911,15 @@ class UpdateManager:
         self.main_gui.save_config(show_message=False)
         
         # Close dialog
-        dialog.destroy()
+        dialog.close()
         
         # Show confirmation
-        messagebox.showinfo("Version Skipped", 
-                          f"Version {version_tag} will be skipped in future update checks.\n"
-                          "You can manually check for updates from the Help menu.")
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Version Skipped")
+        msg.setText(f"Version {version_tag} will be skipped in future update checks.\n"
+                   "You can manually check for updates from the Help menu.")
+        msg.exec()
     
     def download_update(self, dialog):
         """Download the update file"""
@@ -688,8 +928,13 @@ class UpdateManager:
             asset = self.selected_asset
                     
             if not asset:
-                dialog.after(0, lambda: messagebox.showerror("Download Error", 
-                                                           "No file selected for download."))
+                def show_error():
+                    msg = QMessageBox(dialog)
+                    msg.setIcon(QMessageBox.Critical)
+                    msg.setWindowTitle("Download Error")
+                    msg.setText("No file selected for download.")
+                    msg.exec()
+                QTimer.singleShot(0, show_error)
                 return
             
             # Get the current executable path
@@ -732,37 +977,45 @@ class UpdateManager:
                             size_mb = downloaded / (1024 * 1024)
                             total_mb = total_size / (1024 * 1024)
                             
-                            # Use after_idle for smoother updates
+                            # Use QTimer for smoother updates
                             def update_progress(p=progress, d=size_mb, t=total_mb):
                                 try:
-                                    self.progress_bar['value'] = p
-                                    self.progress_label.config(text=f"Downloading update... {p}%")
-                                    self.status_label.config(text=f"{d:.1f} MB / {t:.1f} MB")
+                                    self.progress_bar.setValue(p)
+                                    self.progress_label.setText(f"Downloading update... {p}%")
+                                    self.status_label.setText(f"{d:.1f} MB / {t:.1f} MB")
                                 except:
                                     pass  # Dialog might have been closed
                             
-                            dialog.after_idle(update_progress)
+                            QTimer.singleShot(0, update_progress)
             
             # Download complete
-            dialog.after(0, lambda: self.download_complete(dialog, download_path))
+            QTimer.singleShot(0, lambda: self.download_complete(dialog, download_path))
             
         except Exception as e:
             # Capture the error message immediately
             error_msg = str(e)
-            dialog.after(0, lambda: messagebox.showerror("Download Failed", error_msg))
+            def show_error():
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Download Failed")
+                msg.setText(error_msg)
+                msg.exec()
+            QTimer.singleShot(0, show_error)
     
     def download_complete(self, dialog, file_path):
         """Handle completed download"""
-        dialog.destroy()
+        dialog.close()
         
-        result = messagebox.askyesno(
-            "Download Complete",
-            "Update downloaded successfully.\n\n"
-            "Would you like to install it now?\n"
-            "(The application will need to restart)"
-        )
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Download Complete")
+        msg.setText("Update downloaded successfully.\n\n"
+                   "Would you like to install it now?\n"
+                   "(The application will need to restart)")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
         
-        if result:
+        if msg.exec() == QMessageBox.Yes:
             self.install_update(file_path)
     
     def install_update(self, update_file):
@@ -822,5 +1075,8 @@ del "%~f0"
             sys.exit(0)
             
         except Exception as e:
-            messagebox.showerror("Installation Error", 
-                               f"Could not start update process:\n{str(e)}")
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Installation Error")
+            msg.setText(f"Could not start update process:\n{str(e)}")
+            msg.exec()
