@@ -6,9 +6,12 @@ Complete implementation - no truncation
 
 import os
 import json
-import tkinter as tk
-from tkinter import ttk, messagebox
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+                               QCheckBox, QRadioButton, QButtonGroup, QWidget, QScrollArea,
+                               QFrame, QGroupBox, QTabWidget, QTextEdit, QLineEdit, QComboBox,
+                               QMessageBox, QApplication)
+from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt, QSize
 from typing import Dict, List, Tuple, Optional, Any
 import zipfile
 from bs4 import BeautifulSoup
@@ -71,26 +74,48 @@ class MetadataBatchTranslatorUI:
             
     def configure_metadata_fields(self):
             """Configure which metadata fields to translate"""
-            # Use scrollable dialog with proper ratios
-            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-                self.gui.master,
-                "Configure Metadata Translation",
-                width=950,
-                height=None,
-                max_width_ratio=0.9,
-                max_height_ratio=0.7
-            )
+            # Create dialog (use None as parent for top-level window)
+            dialog = QDialog(None)
+            dialog.setWindowTitle("Configure Metadata Translation")
             
-            # Main content
-            tk.Label(scrollable_frame, text="Select Metadata Fields to Translate", 
-                    font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 10))
+            # Get screen dimensions and calculate size
+            screen = QApplication.primaryScreen().geometry()
+            dialog_width = int(screen.width() * 0.60)
+            dialog_height = int(screen.height() * 0.70)
+            dialog.resize(dialog_width, dialog_height)
             
-            tk.Label(scrollable_frame, text="These fields will be translated along with or separately from the book title:",
-                    font=('TkDefaultFont', 10), fg='gray').pack(pady=(0, 20), padx=20)
+            # Set window icon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
             
-            # Create content frame for fields
-            fields_container = tk.Frame(scrollable_frame)
-            fields_container.pack(fill=tk.BOTH, expand=True, padx=20)
+            # Main layout
+            main_layout = QVBoxLayout()
+            main_layout.setContentsMargins(20, 20, 20, 20)
+            
+            # Title
+            title_label = QLabel("Select Metadata Fields to Translate")
+            title_font = QFont()
+            title_font.setPointSize(14)
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            main_layout.addWidget(title_label)
+            
+            # Description
+            desc_label = QLabel("These fields will be translated along with or separately from the book title:")
+            desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+            desc_label.setWordWrap(True)
+            desc_label.setContentsMargins(0, 10, 0, 20)
+            main_layout.addWidget(desc_label)
+            
+            # Create scroll area for fields
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            
+            fields_container = QWidget()
+            fields_layout = QVBoxLayout(fields_container)
+            fields_layout.setContentsMargins(0, 0, 0, 0)
             
             # Load metadata fields from EPUB
             all_fields = self._detect_all_metadata_fields()
@@ -111,300 +136,471 @@ class MetadataBatchTranslatorUI:
             field_vars = {}
             
             # Section for standard fields
-            tk.Label(fields_container, text="Standard Metadata Fields:", 
-                    font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+            section_label = QLabel("Standard Metadata Fields:")
+            section_font = QFont()
+            section_font.setPointSize(12)
+            section_font.setBold(True)
+            section_label.setFont(section_font)
+            section_label.setContentsMargins(0, 10, 0, 5)
+            fields_layout.addWidget(section_label)
             
             # Get saved settings
             translate_fields = self.gui.config.get('translate_metadata_fields', {})
             
             for field, (label, description) in standard_fields.items():
                 if field in all_fields:
-                    frame = tk.Frame(fields_container)
-                    frame.pack(fill=tk.X, pady=5)
+                    frame = QWidget()
+                    frame_layout = QHBoxLayout(frame)
+                    frame_layout.setContentsMargins(0, 5, 0, 5)
                     
                     # Special handling for title field - show note instead of checkbox
                     if field == 'title':
                         # Show the title field info but with a note instead of checkbox
-                        tk.Label(frame, text=f"{label}:", width=25, anchor='w',
-                                font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
+                        label_widget = QLabel(f"{label}:")
+                        label_font = QFont()
+                        label_font.setBold(True)
+                        label_widget.setFont(label_font)
+                        label_widget.setMinimumWidth(200)
+                        frame_layout.addWidget(label_widget)
                         
                         # Show current value
                         current_value = str(all_fields[field])
                         if len(current_value) > 50:
                             current_value = current_value[:47] + "..."
-                        tk.Label(frame, text=current_value, font=('TkDefaultFont', 9), 
-                                fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                        value_label = QLabel(current_value)
+                        value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                        frame_layout.addWidget(value_label)
+                        frame_layout.addStretch()
+                        fields_layout.addWidget(frame)
                         
                         # Add note explaining title is controlled elsewhere
-                        note_frame = tk.Frame(fields_container)
-                        note_frame.pack(fill=tk.X, pady=(0, 10))
-                        tk.Label(note_frame, 
-                                text="ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface",
-                                font=('TkDefaultFont', 9), fg='blue', wraplength=600).pack(anchor=tk.W, padx=(25, 0))
+                        note_label = QLabel("ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface")
+                        note_label.setStyleSheet("color: blue; font-size: 9pt;")
+                        note_label.setWordWrap(True)
+                        note_label.setContentsMargins(25, 0, 0, 10)
+                        fields_layout.addWidget(note_label)
                         continue  # Skip to next field
                     
                     # Normal handling for other fields
                     default_value = False  # All other fields default to False
-                    var = tk.BooleanVar(value=translate_fields.get(field, default_value))
-                    field_vars[field] = var
-                    
-                    cb = tb.Checkbutton(frame, text=f"{label}:", variable=var,
-                                       bootstyle="round-toggle", width=25)
-                    cb.pack(side=tk.LEFT)
+                    checkbox = QCheckBox(f"{label}:")
+                    checkbox.setChecked(translate_fields.get(field, default_value))
+                    checkbox.setMinimumWidth(200)
+                    field_vars[field] = checkbox
+                    frame_layout.addWidget(checkbox)
                     
                     # Show current value
                     current_value = str(all_fields[field])
                     if len(current_value) > 50:
                         current_value = current_value[:47] + "..."
-                    tk.Label(frame, text=current_value, font=('TkDefaultFont', 9), 
-                            fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                    value_label = QLabel(current_value)
+                    value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                    frame_layout.addWidget(value_label)
+                    frame_layout.addStretch()
+                    fields_layout.addWidget(frame)
             
             # Custom fields section
             custom_fields = {k: v for k, v in all_fields.items() if k not in standard_fields}
             
             if custom_fields:
-                tk.Label(fields_container, text="Custom Metadata Fields:", 
-                        font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(20, 5))
+                custom_label = QLabel("Custom Metadata Fields:")
+                custom_font = QFont()
+                custom_font.setPointSize(12)
+                custom_font.setBold(True)
+                custom_label.setFont(custom_font)
+                custom_label.setContentsMargins(0, 20, 0, 5)
+                fields_layout.addWidget(custom_label)
                 
-                tk.Label(fields_container, text="(Non-standard fields found in your EPUB)", 
-                        font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+                custom_desc = QLabel("(Non-standard fields found in your EPUB)")
+                custom_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                custom_desc.setContentsMargins(0, 0, 0, 10)
+                fields_layout.addWidget(custom_desc)
                 
                 for field, value in custom_fields.items():
-                    frame = tk.Frame(fields_container)
-                    frame.pack(fill=tk.X, pady=5)
+                    frame = QWidget()
+                    frame_layout = QHBoxLayout(frame)
+                    frame_layout.setContentsMargins(0, 5, 0, 5)
                     
-                    var = tk.BooleanVar(value=translate_fields.get(field, False))
-                    field_vars[field] = var
-                    
-                    cb = tb.Checkbutton(frame, text=f"{field}:", variable=var,
-                                       bootstyle="round-toggle", width=25)
-                    cb.pack(side=tk.LEFT)
+                    checkbox = QCheckBox(f"{field}:")
+                    checkbox.setChecked(translate_fields.get(field, False))
+                    checkbox.setMinimumWidth(200)
+                    field_vars[field] = checkbox
+                    frame_layout.addWidget(checkbox)
                     
                     display_value = str(value)
                     if len(display_value) > 50:
                         display_value = display_value[:47] + "..."
-                    tk.Label(frame, text=display_value, font=('TkDefaultFont', 9), 
-                            fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                    value_label = QLabel(display_value)
+                    value_label.setStyleSheet("color: gray; font-size: 9pt;")
+                    frame_layout.addWidget(value_label)
+                    frame_layout.addStretch()
+                    fields_layout.addWidget(frame)
+            
+            # Add stretch to fields layout
+            fields_layout.addStretch()
+            scroll_area.setWidget(fields_container)
+            main_layout.addWidget(scroll_area)
             
             # Translation mode
-            mode_frame = tk.LabelFrame(scrollable_frame, text="Translation Mode", padx=10, pady=10)
-            mode_frame.pack(fill=tk.X, pady=(20, 10), padx=20)
+            mode_group = QGroupBox("Translation Mode")
+            mode_layout = QVBoxLayout()
+            mode_layout.setContentsMargins(10, 10, 10, 10)
             
-            translation_mode_var = tk.StringVar(value=self.gui.config.get('metadata_translation_mode', 'together'))
+            translation_mode_group = QButtonGroup()
+            current_mode = self.gui.config.get('metadata_translation_mode', 'together')
             
-            rb1 = tk.Radiobutton(mode_frame, text="Translate together (single API call)",
-                                variable=translation_mode_var, value='together')
-            rb1.pack(anchor=tk.W, pady=5)
+            rb1 = QRadioButton("Translate together (single API call)")
+            rb1.setChecked(current_mode == 'together')
+            rb1.setProperty("value", "together")
+            translation_mode_group.addButton(rb1)
+            mode_layout.addWidget(rb1)
             
-            rb2 = tk.Radiobutton(mode_frame, text="Translate separately (parallel API calls)",
-                                variable=translation_mode_var, value='parallel')
-            rb2.pack(anchor=tk.W, pady=5)
+            rb2 = QRadioButton("Translate separately (parallel API calls)")
+            rb2.setChecked(current_mode == 'parallel')
+            rb2.setProperty("value", "parallel")
+            translation_mode_group.addButton(rb2)
+            mode_layout.addWidget(rb2)
+            
+            mode_group.setLayout(mode_layout)
+            main_layout.addWidget(mode_group)
             
             # Buttons
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill=tk.X, pady=(20, 20), padx=20)
+            button_layout = QHBoxLayout()
+            button_layout.setSpacing(10)
             
             def save_metadata_config():
                 # Update configuration
                 self.gui.translate_metadata_fields = {}
-                for field, var in field_vars.items():
-                    if var.get():
+                for field, checkbox in field_vars.items():
+                    if checkbox.isChecked():
                         self.gui.translate_metadata_fields[field] = True
                 
+                # Get selected translation mode
+                selected_mode = 'together'
+                for button in translation_mode_group.buttons():
+                    if button.isChecked():
+                        selected_mode = button.property("value")
+                        break
+                
                 self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
-                self.gui.config['metadata_translation_mode'] = translation_mode_var.get()
+                self.gui.config['metadata_translation_mode'] = selected_mode
                 self.gui.save_config()
                 
-                messagebox.showinfo("Success", 
-                                   f"Saved {len(self.gui.translate_metadata_fields)} fields for translation!")
-                dialog.destroy()
+                msg_box = QMessageBox()
+                msg_box.setIcon(QMessageBox.Information)
+                msg_box.setWindowTitle("Success")
+                msg_box.setText(f"Saved {len(self.gui.translate_metadata_fields)} fields for translation!")
+                if os.path.exists(icon_path):
+                    msg_box.setWindowIcon(QIcon(icon_path))
+                msg_box.exec()
+                dialog.accept()
             
             def reset_metadata_config():
-                if messagebox.askyesno("Reset Settings", "Reset all metadata fields to their defaults?"):
-                    for field, var in field_vars.items():
+                msg_box = QMessageBox()
+                msg_box.setIcon(QMessageBox.Question)
+                msg_box.setWindowTitle("Reset Settings")
+                msg_box.setText("Reset all metadata fields to their defaults?")
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg_box.setDefaultButton(QMessageBox.No)
+                if os.path.exists(icon_path):
+                    msg_box.setWindowIcon(QIcon(icon_path))
+                
+                if msg_box.exec() == QMessageBox.Yes:
+                    for field, checkbox in field_vars.items():
                         # Since title is no longer in field_vars, all fields default to False
-                        var.set(False)
+                        checkbox.setChecked(False)
             
-            tb.Button(button_frame, text="Save", command=save_metadata_config,
-                     bootstyle="success", width=20).pack(side=tk.LEFT, padx=(0, 10))
+            save_btn = QPushButton("Save")
+            save_btn.setMinimumWidth(120)
+            save_btn.clicked.connect(save_metadata_config)
+            save_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px; }")
+            button_layout.addWidget(save_btn)
             
-            tb.Button(button_frame, text="Reset", command=reset_metadata_config,
-                     bootstyle="warning-outline", width=20).pack(side=tk.LEFT, padx=(0, 10))
+            reset_btn = QPushButton("Reset")
+            reset_btn.setMinimumWidth(120)
+            reset_btn.clicked.connect(reset_metadata_config)
+            reset_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 8px; }")
+            button_layout.addWidget(reset_btn)
             
-            tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                     bootstyle="secondary-outline", width=20).pack(side=tk.LEFT)
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setMinimumWidth(120)
+            cancel_btn.clicked.connect(dialog.reject)
+            cancel_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 8px; }")
+            button_layout.addWidget(cancel_btn)
             
-            # Auto-resize dialog
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.7)
+            button_layout.addStretch()
             
-            # Handle window close
-            dialog.protocol("WM_DELETE_WINDOW", lambda: [
-                dialog._cleanup_scrolling() if hasattr(dialog, '_cleanup_scrolling') else None,
-                dialog.destroy()
-            ])
+            main_layout.addLayout(button_layout)
+            dialog.setLayout(main_layout)
+            dialog.exec()
     
     def configure_translation_prompts(self):
         """Configure all translation prompts in one place"""
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.gui.master,
-            "Configure Translation Prompts",
-            width=1000,
-            height=None,
-            max_width_ratio=0.9,
-            max_height_ratio=1.3
-        )
+        # Create dialog (use None as parent for top-level window)
+        dialog = QDialog(None)
+        dialog.setWindowTitle("Configure Translation Prompts")
+        
+        # Get screen dimensions and calculate size
+        screen = QApplication.primaryScreen().geometry()
+        dialog_width = int(screen.width() * 0.70)
+        dialog_height = int(screen.height() * 0.85)
+        dialog.resize(dialog_width, dialog_height)
+        
+        # Set window icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        if os.path.exists(icon_path):
+            dialog.setWindowIcon(QIcon(icon_path))
+        
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
         # Title
-        tk.Label(scrollable_frame, text="Configure All Translation Prompts", 
-                font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 10))
+        title_label = QLabel("Configure All Translation Prompts")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        main_layout.addWidget(title_label)
         
-        tk.Label(scrollable_frame, text="Customize how different types of content are translated",
-                font=('TkDefaultFont', 10), fg='gray').pack(pady=(0, 20))
+        # Description
+        desc_label = QLabel("Customize how different types of content are translated")
+        desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+        desc_label.setContentsMargins(0, 10, 0, 20)
+        main_layout.addWidget(desc_label)
         
-        # Create notebook for different prompt categories
-        notebook = ttk.Notebook(scrollable_frame)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        # Create tab widget for different prompt categories
+        tab_widget = QTabWidget()
         
         # Tab 1: Book Title Prompts
-        title_frame = ttk.Frame(notebook)
-        notebook.add(title_frame, text="Book Titles")
-        self._create_title_prompts_tab(title_frame)
+        title_tab = QWidget()
+        tab_widget.addTab(title_tab, "Book Titles")
+        self._create_title_prompts_tab(title_tab)
         
         # Tab 2: Chapter Header Prompts
-        header_frame = ttk.Frame(notebook)
-        notebook.add(header_frame, text="Chapter Headers")
-        self._create_header_prompts_tab(header_frame)
+        header_tab = QWidget()
+        tab_widget.addTab(header_tab, "Chapter Headers")
+        self._create_header_prompts_tab(header_tab)
         
         # Tab 3: Metadata Field Prompts
-        metadata_frame = ttk.Frame(notebook)
-        notebook.add(metadata_frame, text="Metadata Fields")
-        self._create_metadata_prompts_tab(metadata_frame)
+        metadata_tab = QWidget()
+        tab_widget.addTab(metadata_tab, "Metadata Fields")
+        self._create_metadata_prompts_tab(metadata_tab)
         
         # Tab 4: Advanced Prompts
-        advanced_frame = ttk.Frame(notebook)
-        notebook.add(advanced_frame, text="Advanced")
-        self._create_advanced_prompts_tab(advanced_frame)
+        advanced_tab = QWidget()
+        tab_widget.addTab(advanced_tab, "Advanced")
+        self._create_advanced_prompts_tab(advanced_tab)
+        
+        main_layout.addWidget(tab_widget)
         
         # Buttons
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 20), padx=20)
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
         
         def save_all_prompts():
             # Save all text widgets to config
             self._save_all_prompt_configs()
             self.gui.save_config()
-            #messagebox.showinfo("Success", "All prompts saved!")
-            dialog.destroy()
+            dialog.accept()
         
         def reset_all_prompts():
-            if messagebox.askyesno("Reset Prompts", "Reset ALL prompts to defaults?"):
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Reset Prompts")
+            msg_box.setText("Reset ALL prompts to defaults?")
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.No)
+            if os.path.exists(icon_path):
+                msg_box.setWindowIcon(QIcon(icon_path))
+            
+            if msg_box.exec() == QMessageBox.Yes:
                 self._reset_all_prompts_to_defaults()
-                messagebox.showinfo("Success", "All prompts reset to defaults!")
-                dialog.destroy()
+                
+                success_box = QMessageBox()
+                success_box.setIcon(QMessageBox.Information)
+                success_box.setWindowTitle("Success")
+                success_box.setText("All prompts reset to defaults!")
+                if os.path.exists(icon_path):
+                    success_box.setWindowIcon(QIcon(icon_path))
+                success_box.exec()
+                
+                dialog.accept()
                 # Re-open dialog with defaults
                 self.configure_translation_prompts()
         
-        tb.Button(button_frame, text="Save All", command=save_all_prompts,
-                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=(0, 10))
+        save_btn = QPushButton("Save All")
+        save_btn.setMinimumWidth(150)
+        save_btn.clicked.connect(save_all_prompts)
+        save_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px; }")
+        button_layout.addWidget(save_btn)
         
-        tb.Button(button_frame, text="Reset All to Defaults", command=reset_all_prompts,
-                 bootstyle="warning-outline", width=25).pack(side=tk.LEFT, padx=(0, 10))
+        reset_btn = QPushButton("Reset All to Defaults")
+        reset_btn.setMinimumWidth(180)
+        reset_btn.clicked.connect(reset_all_prompts)
+        reset_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 8px; }")
+        button_layout.addWidget(reset_btn)
         
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                 bootstyle="secondary-outline", width=20).pack(side=tk.LEFT)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumWidth(120)
+        cancel_btn.clicked.connect(dialog.reject)
+        cancel_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 8px; }")
+        button_layout.addWidget(cancel_btn)
         
-        # Auto-resize
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.3)
+        button_layout.addStretch()
         
-        # Handle close
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [
-            dialog._cleanup_scrolling() if hasattr(dialog, '_cleanup_scrolling') else None,
-            dialog.destroy()
-        ])
+        main_layout.addLayout(button_layout)
+        dialog.setLayout(main_layout)
+        dialog.exec()
     
     def _create_title_prompts_tab(self, parent):
         """Create tab for book title prompts"""
+        tab_layout = QVBoxLayout(parent)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+        
         # System prompt
-        tk.Label(parent, text="System Prompt (AI Instructions)", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(20, 5))
+        system_label = QLabel("System Prompt (AI Instructions)")
+        system_font = QFont()
+        system_font.setPointSize(12)
+        system_font.setBold(True)
+        system_label.setFont(system_font)
+        tab_layout.addWidget(system_label)
         
-        tk.Label(parent, text="Defines how the AI should behave when translating titles:",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+        system_desc = QLabel("Defines how the AI should behave when translating titles:")
+        system_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        system_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(system_desc)
         
-        self.title_system_text = self.ui.setup_scrollable_text(parent, height=4, wrap=tk.WORD)
-        self.title_system_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 15))
-        self.title_system_text.insert('1.0', self.gui.config.get('book_title_system_prompt', 
+        self.title_system_text = QTextEdit()
+        self.title_system_text.setMinimumHeight(100)
+        self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt', 
             "You are a translator. Respond with only the translated text, nothing else."))
+        tab_layout.addWidget(self.title_system_text)
         
         # User prompt
-        tk.Label(parent, text="User Prompt (Translation Request)", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(10, 5))
+        user_label = QLabel("User Prompt (Translation Request)")
+        user_font = QFont()
+        user_font.setPointSize(12)
+        user_font.setBold(True)
+        user_label.setFont(user_font)
+        user_label.setContentsMargins(0, 15, 0, 0)
+        tab_layout.addWidget(user_label)
         
-        self.title_user_text = self.ui.setup_scrollable_text(parent, height=3, wrap=tk.WORD)
-        self.title_user_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-        self.title_user_text.insert('1.0', self.gui.config.get('book_title_prompt',
+        self.title_user_text = QTextEdit()
+        self.title_user_text.setMinimumHeight(80)
+        self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
             "Translate this book title to English while retaining any acronyms:"))
+        tab_layout.addWidget(self.title_user_text)
+        
+        tab_layout.addStretch()
     
     def _create_header_prompts_tab(self, parent):
         """Create tab for chapter header prompts"""
+        tab_layout = QVBoxLayout(parent)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
         
-        # System prompt for batch headers (NEW)
-        tk.Label(parent, text="System Prompt (AI Instructions)", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(20, 5))
+        # System prompt for batch headers
+        system_label = QLabel("System Prompt (AI Instructions)")
+        system_font = QFont()
+        system_font.setPointSize(12)
+        system_font.setBold(True)
+        system_label.setFont(system_font)
+        tab_layout.addWidget(system_label)
         
-        tk.Label(parent, text="Defines how the AI should behave when translating chapter headers:",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+        system_desc = QLabel("Defines how the AI should behave when translating chapter headers:")
+        system_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        system_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(system_desc)
         
-        self.header_batch_system_text = self.ui.setup_scrollable_text(parent, height=4, wrap=tk.WORD)
-        self.header_batch_system_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 15))
-        self.header_batch_system_text.insert('1.0', self.gui.config.get('batch_header_system_prompt',
+        self.header_batch_system_text = QTextEdit()
+        self.header_batch_system_text.setMinimumHeight(100)
+        self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
             "You are a professional translator specializing in novel chapter titles. "
             "Respond with only the translated JSON, nothing else. "
             "Maintain the original tone and style while making titles natural in the target language."))
+        tab_layout.addWidget(self.header_batch_system_text)
         
-        # User prompt for batch headers (existing, but with better label)
-        tk.Label(parent, text="User Prompt (Translation Request)", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(10, 5))
+        # User prompt for batch headers
+        user_label = QLabel("User Prompt (Translation Request)")
+        user_font = QFont()
+        user_font.setPointSize(12)
+        user_font.setBold(True)
+        user_label.setFont(user_font)
+        user_label.setContentsMargins(0, 15, 0, 0)
+        tab_layout.addWidget(user_label)
         
-        tk.Label(parent, text="Instructions for how to translate the chapter headers:",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+        user_desc = QLabel("Instructions for how to translate the chapter headers:")
+        user_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        user_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(user_desc)
         
-        self.header_batch_text = self.ui.setup_scrollable_text(parent, height=6, wrap=tk.WORD)
-        self.header_batch_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-        self.header_batch_text.insert('1.0', self.gui.config.get('batch_header_prompt',
+        self.header_batch_text = QTextEdit()
+        self.header_batch_text.setMinimumHeight(150)
+        self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
             "Translate these chapter titles to English.\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
+        tab_layout.addWidget(self.header_batch_text)
         
-        tk.Label(parent, text="Variables available: {source_lang} - detected source language",
-                font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W, padx=20)
+        var_label = QLabel("Variables available: {source_lang} - detected source language")
+        var_label.setStyleSheet("color: blue; font-size: 10pt;")
+        var_label.setContentsMargins(0, 10, 0, 0)
+        tab_layout.addWidget(var_label)
+        
+        tab_layout.addStretch()
     
     def _create_metadata_prompts_tab(self, parent):
         """Create tab for metadata field prompts"""
+        # Create scroll area for this tab
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        
+        scroll_widget = QWidget()
+        tab_layout = QVBoxLayout(scroll_widget)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+        
         # Batch prompt
-        tk.Label(parent, text="Batch Metadata Translation Prompt", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(20, 5))
+        batch_label = QLabel("Batch Metadata Translation Prompt")
+        batch_font = QFont()
+        batch_font.setPointSize(12)
+        batch_font.setBold(True)
+        batch_label.setFont(batch_font)
+        tab_layout.addWidget(batch_label)
         
-        tk.Label(parent, text="Used when translating multiple metadata fields together:",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+        batch_desc = QLabel("Used when translating multiple metadata fields together:")
+        batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        batch_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(batch_desc)
         
-        self.metadata_batch_text = self.ui.setup_scrollable_text(parent, height=4, wrap=tk.WORD)
-        self.metadata_batch_text.pack(fill=tk.X, padx=20, pady=(0, 20))
-        self.metadata_batch_text.insert('1.0', self.gui.config.get('metadata_batch_prompt',
+        self.metadata_batch_text = QTextEdit()
+        self.metadata_batch_text.setMinimumHeight(100)
+        self.metadata_batch_text.setMaximumHeight(120)
+        self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
             "Translate the following metadata fields to English.\n"
             "Return ONLY a JSON object with the same field names as keys."))
+        tab_layout.addWidget(self.metadata_batch_text)
+        
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setContentsMargins(0, 20, 0, 20)
+        tab_layout.addWidget(separator)
         
         # Field-specific prompts
-        ttk.Separator(parent, orient='horizontal').pack(fill=tk.X, padx=20, pady=20)
+        field_label = QLabel("Field-Specific Prompts")
+        field_font = QFont()
+        field_font.setPointSize(12)
+        field_font.setBold(True)
+        field_label.setFont(field_font)
+        tab_layout.addWidget(field_label)
         
-        tk.Label(parent, text="Field-Specific Prompts", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        field_desc = QLabel("Customize prompts for each metadata field type:")
+        field_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        field_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(field_desc)
         
-        tk.Label(parent, text="Customize prompts for each metadata field type:",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
-        
-        # NO NESTED SCROLLING - just put fields directly in parent
-        # The main dialog already handles scrolling
         field_prompts = self.gui.config.get('metadata_field_prompts', {})
         self.field_prompt_widgets = {}
         
@@ -417,104 +613,169 @@ class MetadataBatchTranslatorUI:
             ('_default', 'Default (Other Fields)')
         ]
         
-        for field_key, field_label in fields:
-            frame = tk.Frame(parent)
-            frame.pack(fill=tk.X, pady=10, padx=20)
+        for field_key, field_label_text in fields:
+            field_widget = QWidget()
+            field_layout = QVBoxLayout(field_widget)
+            field_layout.setContentsMargins(0, 10, 0, 0)
             
-            tk.Label(frame, text=f"{field_label}:", width=20, anchor='w',
-                    font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+            label = QLabel(f"{field_label_text}:")
+            label_font = QFont()
+            label_font.setBold(True)
+            label.setFont(label_font)
+            field_layout.addWidget(label)
             
-            text_widget = tk.Text(frame, height=2, wrap=tk.WORD)
-            text_widget.pack(fill=tk.X, pady=(5, 0))
+            text_widget = QTextEdit()
+            text_widget.setMinimumHeight(60)
+            text_widget.setMaximumHeight(80)
             
-            default_prompt = field_prompts.get(field_key, f"Translate this {field_label.lower()} to English:")
-            text_widget.insert('1.0', default_prompt)
+            default_prompt = field_prompts.get(field_key, f"Translate this {field_label_text.lower()} to English:")
+            text_widget.setPlainText(default_prompt)
             
             self.field_prompt_widgets[field_key] = text_widget
+            field_layout.addWidget(text_widget)
+            
+            tab_layout.addWidget(field_widget)
         
-        tk.Label(parent, text="Variables: {source_lang} - detected language, {field_value} - the text to translate",
-                font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W, padx=20, pady=(10, 0))
+        var_label = QLabel("Variables: {source_lang} - detected language, {field_value} - the text to translate")
+        var_label.setStyleSheet("color: blue; font-size: 10pt;")
+        var_label.setContentsMargins(0, 10, 0, 0)
+        tab_layout.addWidget(var_label)
+        
+        tab_layout.addStretch()
+        scroll_area.setWidget(scroll_widget)
+        
+        # Set scroll area as the tab's main widget
+        main_layout = QVBoxLayout(parent)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(scroll_area)
             
     def _create_advanced_prompts_tab(self, parent):
         """Create tab for advanced prompt settings"""
-        tk.Label(parent, text="Advanced Prompt Settings", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(20, 10))
+        tab_layout = QVBoxLayout(parent)
+        tab_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title_label = QLabel("Advanced Prompt Settings")
+        title_font = QFont()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setContentsMargins(0, 0, 0, 10)
+        tab_layout.addWidget(title_label)
         
         # Language detection behavior
-        lang_frame = tk.LabelFrame(parent, text="Language Detection", padx=15, pady=10)
-        lang_frame.pack(fill=tk.X, padx=20, pady=10)
+        lang_group = QGroupBox("Language Detection")
+        lang_layout = QVBoxLayout()
+        lang_layout.setContentsMargins(15, 15, 15, 15)
         
-        tk.Label(lang_frame, text="How to handle source language in prompts:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 10))
+        lang_desc = QLabel("How to handle source language in prompts:")
+        lang_desc.setContentsMargins(0, 0, 0, 10)
+        lang_layout.addWidget(lang_desc)
         
-        self.lang_behavior_var = tk.StringVar(value=self.gui.config.get('lang_prompt_behavior', 'auto'))
+        self.lang_behavior_group = QButtonGroup()
+        current_behavior = self.gui.config.get('lang_prompt_behavior', 'auto')
         
-        rb1 = tk.Radiobutton(lang_frame, text="Auto-detect and include language (e.g., 'Translate this Korean text')",
-                            variable=self.lang_behavior_var, value='auto')
-        rb1.pack(anchor=tk.W, pady=2)
+        rb1 = QRadioButton("Auto-detect and include language (e.g., 'Translate this Korean text')")
+        rb1.setChecked(current_behavior == 'auto')
+        rb1.setProperty("value", "auto")
+        self.lang_behavior_group.addButton(rb1)
+        lang_layout.addWidget(rb1)
         
-        rb2 = tk.Radiobutton(lang_frame, text="Never include language (e.g., 'Translate this text')",
-                            variable=self.lang_behavior_var, value='never')
-        rb2.pack(anchor=tk.W, pady=2)
+        rb2 = QRadioButton("Never include language (e.g., 'Translate this text')")
+        rb2.setChecked(current_behavior == 'never')
+        rb2.setProperty("value", "never")
+        self.lang_behavior_group.addButton(rb2)
+        lang_layout.addWidget(rb2)
         
-        rb3 = tk.Radiobutton(lang_frame, text="Always specify language:",
-                            variable=self.lang_behavior_var, value='always')
-        rb3.pack(anchor=tk.W, pady=2)
+        rb3 = QRadioButton("Always specify language:")
+        rb3.setChecked(current_behavior == 'always')
+        rb3.setProperty("value", "always")
+        self.lang_behavior_group.addButton(rb3)
+        lang_layout.addWidget(rb3)
         
-        lang_entry_frame = tk.Frame(lang_frame)
-        lang_entry_frame.pack(anchor=tk.W, padx=20, pady=5)
+        # Language entry
+        lang_entry_widget = QWidget()
+        lang_entry_layout = QHBoxLayout(lang_entry_widget)
+        lang_entry_layout.setContentsMargins(20, 5, 0, 0)
         
-        tk.Label(lang_entry_frame, text="Language to use:").pack(side=tk.LEFT)
-        self.forced_lang_var = tk.StringVar(value=self.gui.config.get('forced_source_lang', 'Korean'))
-        tk.Entry(lang_entry_frame, textvariable=self.forced_lang_var, width=20).pack(side=tk.LEFT, padx=(10, 0))
+        lang_entry_label = QLabel("Language to use:")
+        lang_entry_layout.addWidget(lang_entry_label)
+        
+        self.forced_lang_entry = QLineEdit()
+        self.forced_lang_entry.setText(self.gui.config.get('forced_source_lang', 'Korean'))
+        self.forced_lang_entry.setFixedWidth(150)
+        lang_entry_layout.addWidget(self.forced_lang_entry)
+        lang_entry_layout.addStretch()
+        
+        lang_layout.addWidget(lang_entry_widget)
+        lang_group.setLayout(lang_layout)
+        tab_layout.addWidget(lang_group)
         
         # Output language
-        output_frame = tk.LabelFrame(parent, text="Output Language", padx=15, pady=10)
-        output_frame.pack(fill=tk.X, padx=20, pady=10)
+        output_group = QGroupBox("Output Language")
+        output_layout = QVBoxLayout()
+        output_layout.setContentsMargins(15, 15, 15, 15)
         
-        tk.Label(output_frame, text="Target language for translations:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 10))
-        
-        self.output_lang_var = tk.StringVar(value=self.gui.config.get('output_language', 'English'))
+        output_desc = QLabel("Target language for translations:")
+        output_desc.setContentsMargins(0, 0, 0, 10)
+        output_layout.addWidget(output_desc)
         
         common_langs = ['English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese', 
                        'Russian', 'Japanese', 'Korean', 'Chinese (Simplified)', 'Chinese (Traditional)']
         
-        tk.Label(output_frame, text="Target language:").pack(anchor=tk.W)
-        output_combo = tb.Combobox(output_frame, textvariable=self.output_lang_var, 
-                                  values=common_langs, state="normal", width=30)
-        output_combo.pack(anchor=tk.W, pady=5)
+        lang_label = QLabel("Target language:")
+        output_layout.addWidget(lang_label)
         
-        # Disable mousewheel scrolling to prevent accidental changes
-        self.ui.disable_spinbox_mousewheel(output_combo)
+        self.output_lang_combo = QComboBox()
+        self.output_lang_combo.addItems(common_langs)
+        self.output_lang_combo.setEditable(True)
+        self.output_lang_combo.setCurrentText(self.gui.config.get('output_language', 'English'))
+        self.output_lang_combo.setFixedWidth(250)
+        output_layout.addWidget(self.output_lang_combo)
         
-        tk.Label(output_frame, text="This will replace 'English' in all prompts with your chosen language",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(5, 0))
+        # Disable mousewheel scrolling
+        self.output_lang_combo.wheelEvent = lambda event: None
+        
+        output_note = QLabel("This will replace 'English' in all prompts with your chosen language")
+        output_note.setStyleSheet("color: gray; font-size: 9pt;")
+        output_note.setContentsMargins(0, 5, 0, 0)
+        output_layout.addWidget(output_note)
+        
+        output_group.setLayout(output_layout)
+        tab_layout.addWidget(output_group)
+        
+        tab_layout.addStretch()
     
     def _save_all_prompt_configs(self):
         """Save all prompt configurations"""
         # Book title prompts
-        self.gui.config['book_title_system_prompt'] = self.title_system_text.get('1.0', tk.END).strip()
-        self.gui.config['book_title_prompt'] = self.title_user_text.get('1.0', tk.END).strip()
+        self.gui.config['book_title_system_prompt'] = self.title_system_text.toPlainText().strip()
+        self.gui.config['book_title_prompt'] = self.title_user_text.toPlainText().strip()
         self.gui.book_title_prompt = self.gui.config['book_title_prompt']
         
-        # Batch header prompts (UPDATED - now includes system prompt)
-        self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.get('1.0', tk.END).strip()
-        self.gui.config['batch_header_prompt'] = self.header_batch_text.get('1.0', tk.END).strip()
+        # Batch header prompts
+        self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.toPlainText().strip()
+        self.gui.config['batch_header_prompt'] = self.header_batch_text.toPlainText().strip()
         
         # Metadata prompts
-        self.gui.config['metadata_batch_prompt'] = self.metadata_batch_text.get('1.0', tk.END).strip()
+        self.gui.config['metadata_batch_prompt'] = self.metadata_batch_text.toPlainText().strip()
         
         # Field-specific prompts
         field_prompts = {}
         for field_key, widget in self.field_prompt_widgets.items():
-            field_prompts[field_key] = widget.get('1.0', tk.END).strip()
+            field_prompts[field_key] = widget.toPlainText().strip()
         self.gui.config['metadata_field_prompts'] = field_prompts
         
-        # Advanced settings
-        self.gui.config['lang_prompt_behavior'] = self.lang_behavior_var.get()
-        self.gui.config['forced_source_lang'] = self.forced_lang_var.get()
-        self.gui.config['output_language'] = self.output_lang_var.get()
+        # Advanced settings - get selected radio button value
+        lang_behavior = 'auto'
+        for button in self.lang_behavior_group.buttons():
+            if button.isChecked():
+                lang_behavior = button.property("value")
+                break
+        
+        self.gui.config['lang_prompt_behavior'] = lang_behavior
+        self.gui.config['forced_source_lang'] = self.forced_lang_entry.text()
+        self.gui.config['output_language'] = self.output_lang_combo.currentText()
     
     def _reset_all_prompts_to_defaults(self):
         """Reset all prompts to default values"""
@@ -557,9 +818,15 @@ class MetadataBatchTranslatorUI:
         for attr in path_attributes:
             if hasattr(self.gui, attr):
                 widget = getattr(self.gui, attr)
-                if hasattr(widget, 'get'):
+                # Try Qt widget methods first
+                if hasattr(widget, 'text'):
+                    epub_path = widget.text()
+                    break
+                # Then try tkinter methods
+                elif hasattr(widget, 'get'):
                     epub_path = widget.get()
                     break
+                # Handle if it's a string directly
                 elif isinstance(widget, str):
                     epub_path = widget
                     break
