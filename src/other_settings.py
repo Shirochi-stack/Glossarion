@@ -2109,12 +2109,67 @@ def configure_image_compression(self):
     except Exception:
         pass
     
+    # Apply global stylesheet for checkboxes and radio buttons
+    checkbox_radio_style = """
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+        QRadioButton {
+            color: white;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5a9fd4;
+            border-radius: 7px;
+            background-color: #2d2d2d;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #5a9fd4;
+            border: 2px solid #5a9fd4;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QRadioButton:disabled {
+            color: #666666;
+        }
+        QRadioButton::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """
+    
     # Scrollable area
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     
     scroll_widget = QWidget()
+    scroll_widget.setStyleSheet(checkbox_radio_style)  # Apply stylesheet to scroll widget
     main_layout = QVBoxLayout(scroll_widget)
     main_layout.setContentsMargins(20, 20, 20, 20)
     
@@ -2349,10 +2404,34 @@ def configure_image_compression(self):
     
     save_btn = QPushButton("💾 Save Settings")
     save_btn.clicked.connect(save_compression_settings)
+    save_btn.setMinimumHeight(35)
+    save_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #28a745; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #218838; }"
+    )
     button_layout.addWidget(save_btn)
     
     cancel_btn = QPushButton("❌ Cancel")
     cancel_btn.clicked.connect(dialog.close)
+    cancel_btn.setMinimumHeight(35)
+    cancel_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #6c757d; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #5a6268; }"
+    )
     button_layout.addWidget(cancel_btn)
     
     dialog_layout.addLayout(button_layout)
