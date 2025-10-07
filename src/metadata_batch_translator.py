@@ -31,6 +31,63 @@ class MetadataBatchTranslatorUI:
         # Initialize default prompts if not in config
         self._initialize_default_prompts()
     
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        from PySide6.QtCore import QTimer
+        
+        checkbox = QCheckBox(text)
+        # Don't set inline stylesheet - use the global stylesheet from container
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                # Check if checkmark still exists and is valid
+                if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        def update_checkmark():
+            try:
+                # Check if both widgets still exist
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        
+        # Use try-except to handle case where widgets are deleted before timer fires
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
+        return checkbox
+    
     def _initialize_default_prompts(self):
         """Initialize all default prompts in config if not present"""
         # Batch header system prompt (NEW)
@@ -80,14 +137,88 @@ class MetadataBatchTranslatorUI:
             
             # Get screen dimensions and calculate size
             screen = QApplication.primaryScreen().geometry()
-            dialog_width = int(screen.width() * 0.60)
-            dialog_height = int(screen.height() * 0.70)
+            dialog_width = int(screen.width() * 0.25)
+            dialog_height = int(screen.height() * 0.50)
             dialog.resize(dialog_width, dialog_height)
             
             # Set window icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
             if os.path.exists(icon_path):
                 dialog.setWindowIcon(QIcon(icon_path))
+            
+            # Apply global stylesheet for checkboxes and radio buttons
+            checkbox_radio_style = """
+                QCheckBox {
+                    color: white;
+                    spacing: 6px;
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #5a9fd4;
+                    border-radius: 2px;
+                    background-color: #2d2d2d;
+                }
+                QCheckBox::indicator:hover {
+                    border: 1px solid #7ab8e8;
+                    background-color: #3d3d3d;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #5a9fd4;
+                    border: 1px solid #5a9fd4;
+                }
+                QCheckBox::indicator:checked:hover {
+                    background-color: #7ab8e8;
+                    border: 1px solid #7ab8e8;
+                }
+                QCheckBox::indicator:disabled {
+                    border: 1px solid #555555;
+                    background-color: #1e1e1e;
+                }
+                QRadioButton {
+                    color: white;
+                    spacing: 6px;
+                }
+                QRadioButton::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #5a9fd4;
+                    border-radius: 7px;
+                    background-color: #2d2d2d;
+                }
+                QRadioButton::indicator:hover {
+                    border: 1px solid #7ab8e8;
+                    background-color: #3d3d3d;
+                }
+                QRadioButton::indicator:checked {
+                    background-color: #5a9fd4;
+                    border: 1px solid #5a9fd4;
+                }
+                QRadioButton::indicator:checked:hover {
+                    background-color: #7ab8e8;
+                    border: 1px solid #7ab8e8;
+                }
+                QRadioButton::indicator:disabled {
+                    border: 1px solid #555555;
+                    background-color: #1e1e1e;
+                }
+                QGroupBox {
+                    color: white;
+                    border: 1px solid #555555;
+                    border-radius: 4px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    left: 10px;
+                    padding: 0 5px;
+                    color: #5a9fd4;
+                    font-weight: bold;
+                }
+            """
+            dialog.setStyleSheet(checkbox_radio_style)
             
             # Main layout
             main_layout = QVBoxLayout()
@@ -183,7 +314,7 @@ class MetadataBatchTranslatorUI:
                     
                     # Normal handling for other fields
                     default_value = False  # All other fields default to False
-                    checkbox = QCheckBox(f"{label}:")
+                    checkbox = self._create_styled_checkbox(f"{label}:")
                     checkbox.setChecked(translate_fields.get(field, default_value))
                     checkbox.setMinimumWidth(200)
                     field_vars[field] = checkbox
@@ -221,7 +352,7 @@ class MetadataBatchTranslatorUI:
                     frame_layout = QHBoxLayout(frame)
                     frame_layout.setContentsMargins(0, 5, 0, 5)
                     
-                    checkbox = QCheckBox(f"{field}:")
+                    checkbox = self._create_styled_checkbox(f"{field}:")
                     checkbox.setChecked(translate_fields.get(field, False))
                     checkbox.setMinimumWidth(200)
                     field_vars[field] = checkbox
@@ -267,6 +398,7 @@ class MetadataBatchTranslatorUI:
             # Buttons
             button_layout = QHBoxLayout()
             button_layout.setSpacing(10)
+            button_layout.addStretch()  # Center buttons
             
             def save_metadata_config():
                 # Update configuration
@@ -310,25 +442,63 @@ class MetadataBatchTranslatorUI:
                         # Since title is no longer in field_vars, all fields default to False
                         checkbox.setChecked(False)
             
-            save_btn = QPushButton("Save")
+            save_btn = QPushButton("💾 Save")
             save_btn.setMinimumWidth(120)
+            save_btn.setMinimumHeight(35)
             save_btn.clicked.connect(save_metadata_config)
-            save_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px; }")
+            save_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #218838;
+                }
+            """)
             button_layout.addWidget(save_btn)
             
-            reset_btn = QPushButton("Reset")
+            reset_btn = QPushButton("↺ Reset")
             reset_btn.setMinimumWidth(120)
+            reset_btn.setMinimumHeight(35)
             reset_btn.clicked.connect(reset_metadata_config)
-            reset_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 8px; }")
+            reset_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ffc107;
+                    color: black;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #e0a800;
+                }
+            """)
             button_layout.addWidget(reset_btn)
             
-            cancel_btn = QPushButton("Cancel")
+            cancel_btn = QPushButton("❌ Cancel")
             cancel_btn.setMinimumWidth(120)
+            cancel_btn.setMinimumHeight(35)
             cancel_btn.clicked.connect(dialog.reject)
-            cancel_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 8px; }")
+            cancel_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    font-size: 11pt;
+                    font-weight: bold;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #5a6268;
+                }
+            """)
             button_layout.addWidget(cancel_btn)
-            
-            button_layout.addStretch()
+            button_layout.addStretch()  # Center buttons
             
             main_layout.addLayout(button_layout)
             dialog.setLayout(main_layout)
@@ -342,9 +512,64 @@ class MetadataBatchTranslatorUI:
         
         # Get screen dimensions and calculate size
         screen = QApplication.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.70)
+        dialog_width = int(screen.width() * 0.35)  # Reduced from 70% to 35%
         dialog_height = int(screen.height() * 0.85)
         dialog.resize(dialog_width, dialog_height)
+        
+        # Apply global stylesheet for checkboxes and radio buttons
+        checkbox_radio_style = """
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QRadioButton {
+                color: white;
+                spacing: 5px;
+            }
+            QRadioButton::indicator {
+                width: 13px;
+                height: 13px;
+                border: 2px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 2px solid #5a9fd4;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QRadioButton:disabled {
+                color: #666666;
+            }
+            QRadioButton::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """
+        dialog.setStyleSheet(checkbox_radio_style)
         
         # Set window icon
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
@@ -372,24 +597,53 @@ class MetadataBatchTranslatorUI:
         # Create tab widget for different prompt categories
         tab_widget = QTabWidget()
         
+        # Style the tab widget to make tabs stand out
+        tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 2px solid #3daee9;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+            }
+            QTabBar::tab {
+                background-color: #3c3c3c;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                padding: 8px 20px;
+                margin-right: 2px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background-color: #3daee9;
+                color: white;
+                border-color: #3daee9;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #505050;
+                color: white;
+            }
+        """)
+        
         # Tab 1: Book Title Prompts
         title_tab = QWidget()
-        tab_widget.addTab(title_tab, "Book Titles")
+        tab_widget.addTab(title_tab, "📖 Book Titles")
         self._create_title_prompts_tab(title_tab)
         
         # Tab 2: Chapter Header Prompts
         header_tab = QWidget()
-        tab_widget.addTab(header_tab, "Chapter Headers")
+        tab_widget.addTab(header_tab, "📑 Chapter Headers")
         self._create_header_prompts_tab(header_tab)
         
         # Tab 3: Metadata Field Prompts
         metadata_tab = QWidget()
-        tab_widget.addTab(metadata_tab, "Metadata Fields")
+        tab_widget.addTab(metadata_tab, "🏷️ Metadata Fields")
         self._create_metadata_prompts_tab(metadata_tab)
         
         # Tab 4: Advanced Prompts
         advanced_tab = QWidget()
-        tab_widget.addTab(advanced_tab, "Advanced")
+        tab_widget.addTab(advanced_tab, "⚙️ Advanced")
         self._create_advanced_prompts_tab(advanced_tab)
         
         main_layout.addWidget(tab_widget)
@@ -429,24 +683,65 @@ class MetadataBatchTranslatorUI:
                 # Re-open dialog with defaults
                 self.configure_translation_prompts()
         
-        save_btn = QPushButton("Save All")
+        save_btn = QPushButton("💾 Save All")
         save_btn.setMinimumWidth(150)
+        save_btn.setMinimumHeight(35)
         save_btn.clicked.connect(save_all_prompts)
-        save_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px; }")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
         button_layout.addWidget(save_btn)
         
-        reset_btn = QPushButton("Reset All to Defaults")
-        reset_btn.setMinimumWidth(180)
+        reset_btn = QPushButton("↺ Reset All to Defaults")
+        reset_btn.setMinimumWidth(200)
+        reset_btn.setMinimumHeight(35)
         reset_btn.clicked.connect(reset_all_prompts)
-        reset_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 8px; }")
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: black;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """)
         button_layout.addWidget(reset_btn)
         
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton("❌ Cancel")
         cancel_btn.setMinimumWidth(120)
+        cancel_btn.setMinimumHeight(35)
         cancel_btn.clicked.connect(dialog.reject)
-        cancel_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 8px; }")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
         button_layout.addWidget(cancel_btn)
         
+        # Center the buttons
+        button_layout.insertStretch(0)
         button_layout.addStretch()
         
         main_layout.addLayout(button_layout)
@@ -473,6 +768,19 @@ class MetadataBatchTranslatorUI:
         
         self.title_system_text = QTextEdit()
         self.title_system_text.setMinimumHeight(100)
+        self.title_system_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
         self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt', 
             "You are a translator. Respond with only the translated text, nothing else."))
         tab_layout.addWidget(self.title_system_text)
@@ -488,6 +796,16 @@ class MetadataBatchTranslatorUI:
         
         self.title_user_text = QTextEdit()
         self.title_user_text.setMinimumHeight(80)
+        self.title_user_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+        """)
         self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
             "Translate this book title to English while retaining any acronyms:"))
         tab_layout.addWidget(self.title_user_text)
@@ -514,6 +832,16 @@ class MetadataBatchTranslatorUI:
         
         self.header_batch_system_text = QTextEdit()
         self.header_batch_system_text.setMinimumHeight(100)
+        self.header_batch_system_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+        """)
         self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
             "You are a professional translator specializing in novel chapter titles. "
             "Respond with only the translated JSON, nothing else. "
@@ -536,6 +864,16 @@ class MetadataBatchTranslatorUI:
         
         self.header_batch_text = QTextEdit()
         self.header_batch_text.setMinimumHeight(150)
+        self.header_batch_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+        """)
         self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
             "Translate these chapter titles to English.\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
@@ -576,6 +914,16 @@ class MetadataBatchTranslatorUI:
         self.metadata_batch_text = QTextEdit()
         self.metadata_batch_text.setMinimumHeight(100)
         self.metadata_batch_text.setMaximumHeight(120)
+        self.metadata_batch_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+        """)
         self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
             "Translate the following metadata fields to English.\n"
             "Return ONLY a JSON object with the same field names as keys."))
@@ -627,6 +975,16 @@ class MetadataBatchTranslatorUI:
             text_widget = QTextEdit()
             text_widget.setMinimumHeight(60)
             text_widget.setMaximumHeight(80)
+            text_widget.setStyleSheet("""
+                QTextEdit {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 5px;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                }
+            """)
             
             default_prompt = field_prompts.get(field_key, f"Translate this {field_label_text.lower()} to English:")
             text_widget.setPlainText(default_prompt)
@@ -665,6 +1023,21 @@ class MetadataBatchTranslatorUI:
         
         # Language detection behavior
         lang_group = QGroupBox("Language Detection")
+        lang_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #555555;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #3daee9;
+            }
+        """)
         lang_layout = QVBoxLayout()
         lang_layout.setContentsMargins(15, 15, 15, 15)
         
@@ -704,6 +1077,18 @@ class MetadataBatchTranslatorUI:
         self.forced_lang_entry = QLineEdit()
         self.forced_lang_entry.setText(self.gui.config.get('forced_source_lang', 'Korean'))
         self.forced_lang_entry.setFixedWidth(150)
+        self.forced_lang_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
         lang_entry_layout.addWidget(self.forced_lang_entry)
         lang_entry_layout.addStretch()
         
@@ -713,6 +1098,21 @@ class MetadataBatchTranslatorUI:
         
         # Output language
         output_group = QGroupBox("Output Language")
+        output_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #555555;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #3daee9;
+            }
+        """)
         output_layout = QVBoxLayout()
         output_layout.setContentsMargins(15, 15, 15, 15)
         
@@ -731,6 +1131,28 @@ class MetadataBatchTranslatorUI:
         self.output_lang_combo.setEditable(True)
         self.output_lang_combo.setCurrentText(self.gui.config.get('output_language', 'English'))
         self.output_lang_combo.setFixedWidth(250)
+        self.output_lang_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+            }
+            QComboBox:focus {
+                border: 1px solid #5a9fd4;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #e0e0e0;
+                margin-right: 5px;
+            }
+        """)
         output_layout.addWidget(self.output_lang_combo)
         
         # Disable mousewheel scrolling
@@ -751,7 +1173,9 @@ class MetadataBatchTranslatorUI:
         # Book title prompts
         self.gui.config['book_title_system_prompt'] = self.title_system_text.toPlainText().strip()
         self.gui.config['book_title_prompt'] = self.title_user_text.toPlainText().strip()
-        self.gui.book_title_prompt = self.gui.config['book_title_prompt']
+        # Only set attribute if it exists on the gui object
+        if hasattr(self.gui, 'book_title_prompt'):
+            self.gui.book_title_prompt = self.gui.config['book_title_prompt']
         
         # Batch header prompts
         self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.toPlainText().strip()
