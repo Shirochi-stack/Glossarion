@@ -1258,10 +1258,11 @@ class WindowManager:
         # Execute immediately (no after_idle delay)
         do_center()
     
-# Import QA Scanner mixin
+# Import QA Scanner and Retranslation mixins
 from QA_Scanner_GUI import QAScannerMixin
+from Retranslation_GUI import RetranslationMixin
 
-class TranslatorGUI(QAScannerMixin):
+class TranslatorGUI(QAScannerMixin, RetranslationMixin):
     def __init__(self, master):
         # Initialization
         master.configure(bg='#2b2b2b')
