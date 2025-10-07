@@ -131,12 +131,22 @@ class MetadataBatchTranslatorUI:
             
     def configure_metadata_fields(self):
             """Configure which metadata fields to translate"""
+            # Ensure QApplication instance exists
+            import sys
+            app = QApplication.instance()
+            if not app:
+                try:
+                    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+                except:
+                    pass
+                app = QApplication(sys.argv)
+            
             # Create dialog (use None as parent for top-level window)
             dialog = QDialog(None)
             dialog.setWindowTitle("Configure Metadata Translation")
             
             # Get screen dimensions and calculate size
-            screen = QApplication.primaryScreen().geometry()
+            screen = app.primaryScreen().geometry()
             dialog_width = int(screen.width() * 0.25)
             dialog_height = int(screen.height() * 0.50)
             dialog.resize(dialog_width, dialog_height)
@@ -416,24 +426,17 @@ class MetadataBatchTranslatorUI:
                 
                 self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
                 self.gui.config['metadata_translation_mode'] = selected_mode
-                self.gui.save_config()
-                
-                msg_box = QMessageBox()
-                msg_box.setIcon(QMessageBox.Information)
-                msg_box.setWindowTitle("Success")
-                msg_box.setText(f"Saved {len(self.gui.translate_metadata_fields)} fields for translation!")
-                if os.path.exists(icon_path):
-                    msg_box.setWindowIcon(QIcon(icon_path))
-                msg_box.exec()
+                self.gui.save_config(show_message=False)
                 dialog.accept()
             
             def reset_metadata_config():
-                msg_box = QMessageBox()
+                msg_box = QMessageBox(dialog)  # Set dialog as parent
                 msg_box.setIcon(QMessageBox.Question)
-                msg_box.setWindowTitle("Reset Settings")
-                msg_box.setText("Reset all metadata fields to their defaults?")
+                msg_box.setWindowTitle("Reset Metadata Fields")
+                msg_box.setText("Are you sure you want to reset all metadata field selections?\n\nThis will uncheck all fields.")
                 msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                 msg_box.setDefaultButton(QMessageBox.No)
+                msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)  # Force on top
                 if os.path.exists(icon_path):
                     msg_box.setWindowIcon(QIcon(icon_path))
                 
@@ -502,16 +505,39 @@ class MetadataBatchTranslatorUI:
             
             main_layout.addLayout(button_layout)
             dialog.setLayout(main_layout)
-            dialog.exec()
+            
+            # Run dialog in separate thread to avoid GIL conflicts
+            import threading
+            result = {'done': False}
+            
+            def run_dialog():
+                dialog.exec()
+                result['done'] = True
+            
+            thread = threading.Thread(target=run_dialog, daemon=True)
+            thread.start()
+            
+            # Keep the dialog reference to prevent garbage collection
+            self.gui._metadata_dialog = dialog
     
     def configure_translation_prompts(self):
         """Configure all translation prompts in one place"""
+        # Ensure QApplication instance exists
+        import sys
+        app = QApplication.instance()
+        if not app:
+            try:
+                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+            except:
+                pass
+            app = QApplication(sys.argv)
+        
         # Create dialog (use None as parent for top-level window)
         dialog = QDialog(None)
         dialog.setWindowTitle("Configure Translation Prompts")
         
         # Get screen dimensions and calculate size
-        screen = QApplication.primaryScreen().geometry()
+        screen = app.primaryScreen().geometry()
         dialog_width = int(screen.width() * 0.35)  # Reduced from 70% to 35%
         dialog_height = int(screen.height() * 0.85)
         dialog.resize(dialog_width, dialog_height)
@@ -655,33 +681,30 @@ class MetadataBatchTranslatorUI:
         def save_all_prompts():
             # Save all text widgets to config
             self._save_all_prompt_configs()
-            self.gui.save_config()
+            self.gui.save_config(show_message=False)
             dialog.accept()
         
         def reset_all_prompts():
-            msg_box = QMessageBox()
+            msg_box = QMessageBox(dialog)  # Set dialog as parent
             msg_box.setIcon(QMessageBox.Question)
-            msg_box.setWindowTitle("Reset Prompts")
-            msg_box.setText("Reset ALL prompts to defaults?")
+            msg_box.setWindowTitle("Reset All Prompts")
+            msg_box.setText("Are you sure you want to reset ALL prompts to their default values?\n\nThis cannot be undone.")
             msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg_box.setDefaultButton(QMessageBox.No)
+            msg_box.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)  # Force on top
             if os.path.exists(icon_path):
                 msg_box.setWindowIcon(QIcon(icon_path))
             
             if msg_box.exec() == QMessageBox.Yes:
                 self._reset_all_prompts_to_defaults()
-                
-                success_box = QMessageBox()
-                success_box.setIcon(QMessageBox.Information)
-                success_box.setWindowTitle("Success")
-                success_box.setText("All prompts reset to defaults!")
-                if os.path.exists(icon_path):
-                    success_box.setWindowIcon(QIcon(icon_path))
-                success_box.exec()
-                
-                dialog.accept()
-                # Re-open dialog with defaults
-                self.configure_translation_prompts()
+                dialog.close()
+                # Re-open dialog with defaults to refresh the UI
+                import threading
+                def reopen():
+                    import time
+                    time.sleep(0.1)  # Small delay to let dialog close cleanly
+                    self.configure_translation_prompts()
+                threading.Thread(target=reopen, daemon=True).start()
         
         save_btn = QPushButton("💾 Save All")
         save_btn.setMinimumWidth(150)
@@ -746,7 +769,20 @@ class MetadataBatchTranslatorUI:
         
         main_layout.addLayout(button_layout)
         dialog.setLayout(main_layout)
-        dialog.exec()
+        
+        # Run dialog in separate thread to avoid GIL conflicts
+        import threading
+        result = {'done': False}
+        
+        def run_dialog():
+            dialog.exec()
+            result['done'] = True
+        
+        thread = threading.Thread(target=run_dialog, daemon=True)
+        thread.start()
+        
+        # Keep the dialog reference to prevent garbage collection
+        self.gui._prompts_dialog = dialog
     
     def _create_title_prompts_tab(self, parent):
         """Create tab for book title prompts"""
@@ -1218,7 +1254,7 @@ class MetadataBatchTranslatorUI:
         
         # Re-initialize defaults
         self._initialize_default_prompts()
-        self.gui.save_config()
+        self.gui.save_config(show_message=False)
     
     def _detect_all_metadata_fields(self) -> Dict[str, str]:
         """Detect ALL metadata fields in the current EPUB"""
