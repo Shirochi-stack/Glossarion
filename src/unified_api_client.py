@@ -6859,6 +6859,13 @@ class UnifiedClient:
                 raise UnifiedClientError(error_str, error_type="rate_limit")
                 
             else:
+                # Check if this is a cancellation error that should be suppressed
+                if "cancelled" in error_str.lower() or "operation cancelled" in error_str.lower():
+                    # Check if stop was requested - if so, suppress the error message
+                    if self._is_stop_requested() if hasattr(self, '_is_stop_requested') else False:
+                        # Silently re-raise without printing when user stopped
+                        raise
+                
                 # Re-raise original error with context
                 print(f"ElectronHub API error for model '{actual_model}': {e}")
                 raise
@@ -8730,6 +8737,12 @@ class UnifiedClient:
                                 error_type="parse_error"
                             )
                     if not self._multi_key_mode and attempt < max_retries - 1:
+                        # Suppress cancellation errors when stop is requested
+                        error_str = str(e).lower()
+                        if ("cancelled" in error_str or "operation cancelled" in error_str):
+                            if self._is_stop_requested() if hasattr(self, '_is_stop_requested') else False:
+                                # Silently raise without printing when user stopped
+                                raise UnifiedClientError(f"{provider} SDK error: {e}")
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
