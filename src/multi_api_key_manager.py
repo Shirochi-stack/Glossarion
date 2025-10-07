@@ -493,6 +493,63 @@ class MultiAPIKeyDialog(QDialog):
                     pass
         except Exception:
             pass
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        checkbox = QCheckBox(text)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+        
+        def update_checkmark():
+            try:
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
+        return checkbox
+    
+    def _disable_spinbox_mousewheel(self, spinbox):
+        """Disable mousewheel scrolling on a spinbox (PySide6)"""
+        spinbox.wheelEvent = lambda event: None
+    
+    def _disable_combobox_mousewheel(self, combobox):
+        """Disable mousewheel scrolling on a combobox (PySide6)"""
+        combobox.wheelEvent = lambda event: None
 
     def _bind_shared_pool(self):
         """Bind this dialog to the UnifiedClient's shared APIKeyPool if available.
@@ -518,8 +575,9 @@ class MultiAPIKeyDialog(QDialog):
     
     def _update_rotation_display(self, *args):
         """Update the rotation description based on settings"""
-        if self.force_rotation_var:
-            freq = self.rotation_frequency_var
+        # Read current state from widgets
+        if hasattr(self, 'force_rotation_checkbox') and self.force_rotation_checkbox.isChecked():
+            freq = self.frequency_spinbox.value() if hasattr(self, 'frequency_spinbox') else 1
             if freq == 1:
                 desc = "Keys will rotate on every request (maximum distribution)"
             else:
@@ -527,7 +585,8 @@ class MultiAPIKeyDialog(QDialog):
         else:
             desc = "Keys will only rotate on errors or rate limits"
         
-        self.rotation_desc_label.setText(desc)
+        if hasattr(self, 'rotation_desc_label'):
+            self.rotation_desc_label.setText(desc)
     
     def _save_keys_to_config(self):
         """Save API keys and rotation settings to translator GUI config"""
@@ -536,19 +595,26 @@ class MultiAPIKeyDialog(QDialog):
             key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
             self.translator_gui.config['multi_api_keys'] = key_list
             
-            # Save fallback settings
-            self.translator_gui.config['use_fallback_keys'] = self.use_fallback_var
+            # Save fallback settings - read from checkbox
+            use_fallback = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
+            self.translator_gui.config['use_fallback_keys'] = use_fallback
             # Update the parent GUI's variable to stay in sync
             if hasattr(self.translator_gui, 'use_fallback_keys_var'):
-                self.translator_gui.use_fallback_keys_var = self.use_fallback_var
+                try:
+                    self.translator_gui.use_fallback_keys_var.set(use_fallback)
+                except:
+                    self.translator_gui.use_fallback_keys_var = use_fallback
             # Fallback keys are already saved when added/removed
             
-            # Use the current state of the toggle
-            self.translator_gui.config['use_multi_api_keys'] = self.enabled_var
+            # Use the current state of the toggle - read from checkbox
+            enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
+            self.translator_gui.config['use_multi_api_keys'] = enabled
             
-            # Save rotation settings
-            self.translator_gui.config['force_key_rotation'] = self.force_rotation_var
-            self.translator_gui.config['rotation_frequency'] = self.rotation_frequency_var
+            # Save rotation settings - read from widgets
+            force_rotation = self.force_rotation_checkbox.isChecked() if hasattr(self, 'force_rotation_checkbox') else True
+            rotation_freq = self.frequency_spinbox.value() if hasattr(self, 'frequency_spinbox') else 1
+            self.translator_gui.config['force_key_rotation'] = force_rotation
+            self.translator_gui.config['rotation_frequency'] = rotation_freq
             
             # Save config
             self.translator_gui.save_config(show_message=False)
@@ -558,6 +624,197 @@ class MultiAPIKeyDialog(QDialog):
         # Set window properties
         self.setWindowTitle("Multi API Key Manager")
         self.resize(900, 700)
+        
+        # Apply comprehensive stylesheet matching other settings dialogs
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #5a9fd4;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 5px 15px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #5a5a5a;
+            }
+            QPushButton:pressed {
+                background-color: #1a1a1a;
+            }
+            QPushButton:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border-color: #2a2a2a;
+            }
+            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border-color: #5a5a5a;
+            }
+            QLineEdit:disabled, QTextEdit:disabled, QSpinBox:disabled, QComboBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid #7a7a7a;
+                width: 0;
+                height: 0;
+                margin-right: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                selection-background-color: #4a7ba7;
+                selection-color: #ffffff;
+                border: 1px solid #3a3a3a;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a5a5a;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4a7ba7;
+                border-color: #4a7ba7;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #6a6a6a;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QTreeWidget {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                alternate-background-color: #252525;
+            }
+            QTreeWidget::item {
+                padding: 4px;
+            }
+            QTreeWidget::item:selected {
+                background-color: #4a7ba7;
+                color: #ffffff;
+            }
+            QTreeWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            QHeaderView::section {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: none;
+                border-right: 1px solid #3a3a3a;
+                border-bottom: 1px solid #3a3a3a;
+                padding: 4px;
+                font-weight: bold;
+            }
+            QScrollBar:vertical {
+                background-color: #1e1e1e;
+                width: 12px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #4a7ba7;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #5a8ab7;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                background-color: #1e1e1e;
+                height: 12px;
+                border: none;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #4a7ba7;
+                border-radius: 6px;
+                min-width: 20px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background-color: #5a8ab7;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QFrame[frameShape="4"] {
+                /* HLine */
+                background-color: #3a3a3a;
+                max-height: 1px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #2d2d2d;
+                border: none;
+                width: 16px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #3a3a3a;
+            }
+            QSpinBox::up-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 6px solid #7a7a7a;
+                width: 0;
+                height: 0;
+            }
+            QSpinBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid #7a7a7a;
+                width: 0;
+                height: 0;
+            }
+        """)
         
         # Create scroll area
         scroll_area = QScrollArea(self)
@@ -595,7 +852,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Enable/Disable toggle
         self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
-        self.enabled_checkbox = QCheckBox("Enable Multi-Key Mode")
+        self.enabled_checkbox = self._create_styled_checkbox("Enable Multi-Key Mode")
         self.enabled_checkbox.setChecked(self.enabled_var)
         self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
         title_layout.addStretch()
@@ -622,7 +879,7 @@ class MultiAPIKeyDialog(QDialog):
         rotation_settings_layout.setContentsMargins(0, 0, 0, 0)
         
         self.force_rotation_var = self.translator_gui.config.get('force_key_rotation', True)
-        self.force_rotation_checkbox = QCheckBox("Force Key Rotation")
+        self.force_rotation_checkbox = self._create_styled_checkbox("Force Key Rotation")
         self.force_rotation_checkbox.setChecked(self.force_rotation_var)
         self.force_rotation_checkbox.toggled.connect(self._update_rotation_display)
         rotation_settings_layout.addWidget(self.force_rotation_checkbox)
@@ -636,6 +893,7 @@ class MultiAPIKeyDialog(QDialog):
         self.frequency_spinbox.setValue(self.rotation_frequency_var)
         self.frequency_spinbox.setMaximumWidth(60)
         self.frequency_spinbox.valueChanged.connect(self._update_rotation_display)
+        self._disable_spinbox_mousewheel(self.frequency_spinbox)  # Disable mousewheel
         rotation_settings_layout.addWidget(self.frequency_spinbox)
         rotation_settings_layout.addWidget(QLabel("requests"))
         rotation_settings_layout.addStretch()
@@ -704,7 +962,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Enable fallback checkbox
         self.use_fallback_var = self.translator_gui.config.get('use_fallback_keys', False)
-        self.use_fallback_checkbox = QCheckBox("Enable Fallback Keys")
+        self.use_fallback_checkbox = self._create_styled_checkbox("Enable Fallback Keys")
         self.use_fallback_checkbox.setChecked(self.use_fallback_var)
         self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
         fallback_frame_layout.addWidget(self.use_fallback_checkbox)
@@ -732,6 +990,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_model_combo = QComboBox()
         self.fallback_model_combo.addItems(fallback_models)
         self.fallback_model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_model_combo, 0, 4)
         
         # Add fallback button
@@ -770,7 +1029,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Row 2: Individual Endpoint Toggle for fallback
         self.fallback_use_individual_endpoint_var = False
-        self.fallback_individual_endpoint_toggle = QCheckBox("Use Individual Endpoint")
+        self.fallback_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
         self.fallback_individual_endpoint_toggle.setChecked(False)
         self.fallback_individual_endpoint_toggle.toggled.connect(self._toggle_fallback_individual_endpoint_fields)
         add_fallback_grid.addWidget(self.fallback_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
@@ -801,6 +1060,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.fallback_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
         self.fallback_azure_api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(self.fallback_azure_api_version_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
         
         # Initially hide the endpoint fields when toggle is off
@@ -854,7 +1114,7 @@ class MultiAPIKeyDialog(QDialog):
         move_layout.addStretch()
         container_layout.addWidget(move_frame)
         
-        # Right side: TreeWidget
+        # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
         self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Status', 'Times Used'])
         self.fallback_tree.setColumnWidth(0, 220)
@@ -864,6 +1124,17 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
         self.fallback_tree.setMinimumHeight(150)
+        
+        # Enable drag and drop for fallback tree
+        self.fallback_tree.setDragEnabled(True)
+        self.fallback_tree.setAcceptDrops(True)
+        self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.fallback_tree.setDefaultDropAction(Qt.MoveAction)
+        
+        # Store original dropEvent and override
+        self._fallback_tree_original_dropEvent = self.fallback_tree.dropEvent
+        self.fallback_tree.dropEvent = self._on_fallback_tree_drop
+        
         container_layout.addWidget(self.fallback_tree)
         
         parent_layout.addWidget(container)
@@ -1548,14 +1819,29 @@ class MultiAPIKeyDialog(QDialog):
         list_frame_layout = QVBoxLayout(list_frame)
         list_frame_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Add primary key indicator frame at the top
+        # Add primary key indicator frame at the top with improved styling
         primary_frame = QFrame()
-        primary_frame.setStyleSheet("background-color: #FF8C00; border: 2px solid #CC7000;")
+        primary_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2d5a7b, stop:0.5 #4a7ba7, stop:1 #2d5a7b);
+                border: 2px solid #3a5a7a;
+                border-radius: 6px;
+            }
+        """)
         primary_frame_layout = QVBoxLayout(primary_frame)
-        primary_frame_layout.setContentsMargins(5, 5, 5, 5)
+        primary_frame_layout.setContentsMargins(8, 8, 8, 8)
         
         self.primary_key_label = QLabel("⭐ PRIMARY KEY: Position #1 will be used first in rotation ⭐")
-        self.primary_key_label.setStyleSheet("background-color: #FF8C00; color: white;")
+        self.primary_key_label.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 2px;
+            }
+        """)
         primary_label_font = QFont()
         primary_label_font.setBold(True)
         primary_label_font.setPointSize(11)
@@ -1581,27 +1867,31 @@ class MultiAPIKeyDialog(QDialog):
         reorder_label.setFont(reorder_font)
         move_layout.addWidget(reorder_label)
         
-        # Move to top button
+        # Move to top button with expanded width
         top_btn = QPushButton("⬆⬆")
-        top_btn.setFixedWidth(40)
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         top_btn.clicked.connect(lambda: self._move_key('top'))
         move_layout.addWidget(top_btn)
         
-        # Move up button
+        # Move up button with expanded width
         up_btn = QPushButton("⬆")
-        up_btn.setFixedWidth(40)
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_key('up'))
         move_layout.addWidget(up_btn)
         
-        # Move down button
+        # Move down button with expanded width
         down_btn = QPushButton("⬇")
-        down_btn.setFixedWidth(40)
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_key('down'))
         move_layout.addWidget(down_btn)
         
-        # Move to bottom button
+        # Move to bottom button with expanded width
         bottom_btn = QPushButton("⬇⬇")
-        bottom_btn.setFixedWidth(40)
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         bottom_btn.clicked.connect(lambda: self._move_key('bottom'))
         move_layout.addWidget(bottom_btn)
         
@@ -1619,13 +1909,14 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.tree.setColumnWidth(0, 180)
-        self.tree.setColumnWidth(1, 260)
-        self.tree.setColumnWidth(2, 80)
-        self.tree.setColumnWidth(3, 160)
-        self.tree.setColumnWidth(4, 40)
-        self.tree.setColumnWidth(5, 40)
-        self.tree.setColumnWidth(6, 90)
+        # Adjusted column widths: balanced distribution
+        self.tree.setColumnWidth(0, 125)  # API Key (decreased from 140)
+        self.tree.setColumnWidth(1, 230)  # Model (decreased from 320)
+        self.tree.setColumnWidth(2, 80)   # Cooldown
+        self.tree.setColumnWidth(3, 80)   # Status
+        self.tree.setColumnWidth(4, 65)   # Success (increased from 40)
+        self.tree.setColumnWidth(5, 60)   # Errors (increased from 40)
+        self.tree.setColumnWidth(6, 90)   # Times Used
         
         # Set header font
         header = self.tree.header()
@@ -1724,6 +2015,7 @@ class MultiAPIKeyDialog(QDialog):
         self.model_combo = QComboBox()
         self.model_combo.addItems(add_models)
         self.model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
         add_grid.addWidget(self.model_combo, 0, 4)
         
         # Row 1: Cooldown and buttons
@@ -1736,6 +2028,7 @@ class MultiAPIKeyDialog(QDialog):
         self.cooldown_spinbox.setRange(10, 3600)
         self.cooldown_spinbox.setValue(60)
         self.cooldown_spinbox.setMaximumWidth(100)
+        self._disable_spinbox_mousewheel(self.cooldown_spinbox)  # Disable mousewheel
         cooldown_layout.addWidget(self.cooldown_spinbox)
         
         cooldown_hint = QLabel("(10-3600)")
@@ -1785,7 +2078,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Row 3: Individual Endpoint Toggle
         self.use_individual_endpoint_var = False
-        self.individual_endpoint_toggle = QCheckBox("Use Individual Endpoint")
+        self.individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
         self.individual_endpoint_toggle.setChecked(False)
         self.individual_endpoint_toggle.toggled.connect(self._toggle_individual_endpoint_fields)
         add_grid.addWidget(self.individual_endpoint_toggle, 3, 0, 1, 2, Qt.AlignLeft)
@@ -1818,6 +2111,7 @@ class MultiAPIKeyDialog(QDialog):
         self.azure_api_version_combo.setStyleSheet("font-size: 7pt;")
         self.azure_api_version_combo.setMaximumWidth(180)
         self.azure_api_version_combo.setEnabled(False)
+        self._disable_combobox_mousewheel(self.azure_api_version_combo)  # Disable mousewheel
         add_grid.addWidget(self.azure_api_version_combo, 4, 4, 1, 1, Qt.AlignLeft)
         
         # Set column stretch
@@ -1979,6 +2273,88 @@ class MultiAPIKeyDialog(QDialog):
             self._show_status(f"Moved key to position {adjusted_target + 1}")
         else:
             self._show_status(f"Moved {len(selected_indices)} keys to position {adjusted_target + 1}")
+        
+        event.accept()
+    
+    def _on_fallback_tree_drop(self, event):
+        """Handle drop event for reordering fallback keys"""
+        # Get the item being dropped and its target position
+        drop_indicator = self.fallback_tree.dropIndicatorPosition()
+        target_item = self.fallback_tree.itemAt(event.pos())
+        
+        # Get selected items (items being dragged)
+        selected_items = self.fallback_tree.selectedItems()
+        if not selected_items:
+            self._fallback_tree_original_dropEvent(event)
+            return
+        
+        # Get current fallback keys
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        # Get indices of selected items
+        selected_indices = []
+        for item in selected_items:
+            index = self.fallback_tree.indexOfTopLevelItem(item)
+            if index >= 0 and index < len(fallback_keys):
+                selected_indices.append(index)
+        
+        if not selected_indices:
+            event.ignore()
+            return
+        
+        selected_indices.sort()
+        
+        # Determine target index
+        if target_item is None:
+            target_index = len(fallback_keys)
+        else:
+            target_index = self.fallback_tree.indexOfTopLevelItem(target_item)
+            
+            if drop_indicator == QAbstractItemView.BelowItem:
+                target_index += 1
+            elif drop_indicator == QAbstractItemView.OnItem:
+                pass
+        
+        # Don't do anything if dropping in the same position
+        if len(selected_indices) == 1 and selected_indices[0] == target_index:
+            event.ignore()
+            return
+        
+        # Reorder keys in the fallback list
+        selected_keys = [fallback_keys[i] for i in selected_indices]
+        
+        # Remove selected keys from their original positions (in reverse)
+        for index in reversed(selected_indices):
+            del fallback_keys[index]
+        
+        # Adjust target index
+        adjusted_target = target_index
+        for index in selected_indices:
+            if index < target_index:
+                adjusted_target -= 1
+        
+        # Insert selected keys at the new position
+        for i, key in enumerate(selected_keys):
+            fallback_keys.insert(adjusted_target + i, key)
+        
+        # Save to config
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        
+        # Reload the list
+        self._load_fallback_keys()
+        
+        # Reselect the moved items
+        for i in range(len(selected_keys)):
+            item = self.fallback_tree.topLevelItem(adjusted_target + i)
+            if item:
+                item.setSelected(True)
+        
+        # Show status
+        if len(selected_indices) == 1:
+            self._show_status(f"Moved fallback key to position {adjusted_target + 1}")
+        else:
+            self._show_status(f"Moved {len(selected_indices)} fallback keys to position {adjusted_target + 1}")
         
         event.accept()
 
@@ -2608,6 +2984,18 @@ class MultiAPIKeyDialog(QDialog):
         # Get selected indices
         indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         
+        # Mark keys as testing BEFORE starting thread (in main thread)
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                key.last_test_result = None
+                key._testing = True
+                print(f"[DEBUG] Pre-marked key {index} as testing")
+        
+        # Refresh UI immediately to show testing status
+        self._refresh_key_list()
+        QApplication.processEvents()  # Force UI update
+        
         # Ensure UnifiedClient uses the same shared pool instance
         try:
             from unified_api_client import UnifiedClient
@@ -2625,14 +3013,26 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.warning(self, "Warning", "No keys to test")
             return
         
+        indices = list(range(len(self.key_pool.keys)))
+        
+        # Mark keys as testing BEFORE starting thread (in main thread)
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                key.last_test_result = None
+                key._testing = True
+                print(f"[DEBUG] Pre-marked key {index} as testing")
+        
+        # Refresh UI immediately to show testing status
+        self._refresh_key_list()
+        QApplication.processEvents()  # Force UI update
+        
         # Ensure UnifiedClient uses the same shared pool instance
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-            
-        indices = list(range(len(self.key_pool.keys)))
         
         # Start testing in thread
         thread = threading.Thread(target=self._run_inline_tests, args=(indices,))
@@ -2646,16 +3046,12 @@ class MultiAPIKeyDialog(QDialog):
         
         print(f"[DEBUG] Starting tests for {len(indices)} keys")
         
-        # Mark all selected keys as testing
+        # Keys are already marked as testing in the main thread before this function is called
+        # Just verify they're still marked
         for index in indices:
             if index < len(self.key_pool.keys):
                 key = self.key_pool.keys[index]
-                key.last_test_result = None
-                key._testing = True
-                print(f"[DEBUG] Marked key {index} as testing")
-        
-        # Refresh once to show "Testing..." status
-        QTimer.singleShot(0, self._refresh_key_list)
+                print(f"[DEBUG] Key {index} testing state: _testing={hasattr(key, '_testing')}, last_test_result={key.last_test_result}")
         
         # Create thread pool for parallel testing
         max_workers = min(10, len(indices))
