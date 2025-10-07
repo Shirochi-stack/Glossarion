@@ -116,17 +116,38 @@ def _create_styled_checkbox(self, text):
     checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
     
     def position_checkmark():
-        checkmark.setGeometry(2, 1, 14, 14)
+        try:
+            # Check if checkmark still exists and is valid
+            if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                checkmark.setGeometry(2, 1, 14, 14)
+        except RuntimeError:
+            # Widget was already deleted
+            pass
     
     def update_checkmark():
-        if checkbox.isChecked():
-            position_checkmark()
-            checkmark.show()
-        else:
-            checkmark.hide()
+        try:
+            # Check if both widgets still exist
+            if checkbox and checkmark:
+                if checkbox.isChecked():
+                    position_checkmark()
+                    checkmark.show()
+                else:
+                    checkmark.hide()
+        except RuntimeError:
+            # Widget was already deleted
+            pass
     
     checkbox.stateChanged.connect(update_checkmark)
-    QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+    
+    # Use try-except to handle case where widgets are deleted before timer fires
+    def safe_init():
+        try:
+            position_checkmark()
+            update_checkmark()
+        except RuntimeError:
+            pass
+    
+    QTimer.singleShot(0, safe_init)
     
     return checkbox
 
@@ -243,24 +264,32 @@ def configure_rolling_summary_prompts(self):
     dialog.show()
 
 def toggle_thinking_budget(self):
-    """Enable/disable thinking budget entry based on checkbox state (Qt version)"""
+    """Enable/disable thinking budget entry and labels based on checkbox state (Qt version)"""
     try:
+        enabled = bool(self.enable_gemini_thinking_var.get())
         if hasattr(self, 'thinking_budget_entry'):
-            enabled = bool(self.enable_gemini_thinking_var.get())
             self.thinking_budget_entry.setEnabled(enabled)
+        if hasattr(self, 'thinking_budget_label'):
+            self.thinking_budget_label.setEnabled(enabled)
+        if hasattr(self, 'thinking_tokens_label'):
+            self.thinking_tokens_label.setEnabled(enabled)
     except Exception:
         pass
 
 def toggle_gpt_reasoning_controls(self):
-    """Enable/disable GPT reasoning controls based on toggle state (Qt version)"""
+    """Enable/disable GPT reasoning controls and labels based on toggle state (Qt version)"""
     try:
         enabled = bool(self.enable_gpt_thinking_var.get())
-        # Tokens entry
+        # Tokens entry and label
         if hasattr(self, 'gpt_reasoning_tokens_entry'):
             self.gpt_reasoning_tokens_entry.setEnabled(enabled)
-        # Effort combo
+        if hasattr(self, 'gpt_reasoning_tokens_label'):
+            self.gpt_reasoning_tokens_label.setEnabled(enabled)
+        # Effort combo and label
         if hasattr(self, 'gpt_effort_combo'):
             self.gpt_effort_combo.setEnabled(enabled)
+        if hasattr(self, 'gpt_effort_label'):
+            self.gpt_effort_label.setEnabled(enabled)
     except Exception:
         pass
 
@@ -268,10 +297,26 @@ def open_other_settings(self):
     """Open the Other Settings dialog (PySide6)"""
     from PySide6.QtGui import QIcon, QKeyEvent
     from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
     
-    dialog = QDialog(None)
+    # Create dialog with proper window attributes
+    dialog = QDialog()
     dialog.setWindowTitle("Other Settings")
-    dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowMaximizeButtonHint)
+    
+    # CRITICAL: Set window attribute to allow maximize
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    
+    # Set window flags
+    dialog.setWindowFlags(
+        Qt.WindowType.Window |
+        Qt.WindowType.WindowSystemMenuHint |
+        Qt.WindowType.WindowMinimizeButtonHint |
+        Qt.WindowType.WindowMaximizeButtonHint |
+        Qt.WindowType.WindowCloseButtonHint
+    )
+    
+    # CRITICAL: Remove size constraints that prevent maximize
+    dialog.setSizeGripEnabled(False)
     
     # Set icon
     try:
@@ -279,15 +324,8 @@ def open_other_settings(self):
     except Exception:
         pass
     
-    # Calculate optimal size (80% of screen width, 90% of screen height)
-    try:
-        from PySide6.QtWidgets import QApplication
-        screen = QApplication.primaryScreen().geometry()
-        optimal_width = int(screen.width() * 0.8)
-        optimal_height = int(screen.height() * 0.9)
-        dialog.resize(optimal_width, optimal_height)
-    except Exception:
-        dialog.resize(1200, 900)  # Fallback size
+    # Set initial size
+    dialog.resize(950, 850)
     
     # Add F11 fullscreen toggle
     def toggle_fullscreen():
@@ -306,6 +344,8 @@ def open_other_settings(self):
     dialog.keyPressEvent = custom_keyPressEvent
     
     main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
+    main_layout.setSpacing(8)  # Set spacing between widgets
 
     # Apply global stylesheet for blue checkboxes (from manga integration)
     checkbox_radio_style = """
@@ -369,29 +409,27 @@ def open_other_settings(self):
     grid = QGridLayout(container)
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)
-    grid.setHorizontalSpacing(8)  # Compact horizontal spacing
-    grid.setVerticalSpacing(10)
+    grid.setHorizontalSpacing(6)  # Compact horizontal spacing between columns
+    grid.setVerticalSpacing(2)  # Minimal vertical spacing between sections
+    grid.setContentsMargins(4, 4, 4, 4)  # Minimal grid margins
 
     # Build sections (converted sections will populate the Qt layout)
     self._create_context_management_section(container)
-
-    # Note: remaining sections are still Tkinter-based and will be converted next.
-    # Calls below are intentionally left in place; they may fail until conversion is complete.
-    try:
-        self._create_response_handling_section(container)  # to be converted
-        self._create_prompt_management_section(container)   # to be converted
-        self._create_processing_options_section(container)  # to be converted
-        self._create_image_translation_section(container)   # to be converted
-        self._create_anti_duplicate_section(container)      # to be converted
-        self._create_custom_api_endpoints_section(container) # to be converted
-    except Exception:
-        pass
+    self._create_response_handling_section(container)
+    self._create_prompt_management_section(container)
+    self._create_processing_options_section(container)
+    self._create_image_translation_section(container)
+    self._create_anti_duplicate_section(container)
+    self._create_custom_api_endpoints_section(container)
 
     scroll.setWidget(container)
-    main_layout.addWidget(scroll)
+    scroll.setWidgetResizable(True)
+    
+    main_layout.addWidget(scroll, 1)
 
-    # Buttons row (Save and Close)
+    # Buttons row (Save and Close) - always visible at bottom
     btns = QHBoxLayout()
+    btns.setContentsMargins(5, 10, 5, 10)  # Add padding around buttons
 
     def _save_and_close():
         try:
@@ -409,15 +447,48 @@ def open_other_settings(self):
 
     save_btn = QPushButton("💾 Save Settings")
     save_btn.clicked.connect(_save_and_close)
+    save_btn.setMinimumHeight(35)
+    save_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #28a745; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #218838; }"
+    )
     btns.addWidget(save_btn)
 
     close_btn = QPushButton("❌ Close")
     close_btn.clicked.connect(dialog.close)
+    close_btn.setMinimumHeight(35)
+    close_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #6c757d; "
+        "  color: white; "
+        "  padding: 8px 20px; "
+        "  font-size: 11pt; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "} "
+        "QPushButton:hover { background-color: #5a6268; }"
+    )
     btns.addWidget(close_btn)
 
     main_layout.addLayout(btns)
 
     dialog.show()
+    
+    # Auto-fit width to content after showing
+    from PySide6.QtCore import QTimer
+    def adjust_width():
+        # Calculate width needed for both columns with spacing
+        needed_width = container.sizeHint().width() + 40  # Add margins
+        if needed_width > dialog.width():
+            dialog.resize(needed_width, dialog.height())
+    QTimer.singleShot(0, adjust_width)
 
 def _create_context_management_section(self, parent):
     """Create context management section (PySide6)"""
@@ -431,7 +502,10 @@ def _create_context_management_section(self, parent):
         grid.setColumnStretch(1, 1)
 
     section_box = QGroupBox("Context Management & Memory")
+    # No max width - let it expand in fullscreen
     section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
 
     # Rolling summary toggle
     rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
@@ -449,24 +523,24 @@ def _create_context_management_section(self, parent):
 
     # Description
     desc = QLabel("AI-powered memory system that maintains story context")
-    desc.setStyleSheet("color: gray;")
+    desc.setStyleSheet("color: gray; font-size: 9pt;")
+    desc.setContentsMargins(0, 0, 0, 8)
     section_v.addWidget(desc)
 
-    # Settings container
+    # Settings container - single column for cleaner layout
     settings_w = QWidget()
     settings_v = QVBoxLayout(settings_w)
+    settings_v.setContentsMargins(0, 5, 0, 5)
+    settings_v.setSpacing(6)
 
-    # Row 1: Role + Mode
-    row1 = QWidget()
-    row1_h = QHBoxLayout(row1)
-    row1_h.setContentsMargins(0, 0, 0, 0)
-
-    role_label = QLabel("Role:")
-    role_label.setFixedWidth(95)  # Match "Summarize last" label width
-    row1_h.addWidget(role_label)
+    # Role
+    role_row = QWidget()
+    role_h = QHBoxLayout(role_row)
+    role_h.setContentsMargins(0, 0, 0, 0)
+    role_h.addWidget(QLabel("Role:"))
     role_combo = QComboBox()
     role_combo.addItems(["user", "system"])
-    role_combo.setFixedWidth(60)  # Match input field width
+    role_combo.setFixedWidth(90)
     self._disable_combobox_mousewheel(role_combo)
     try:
         role_combo.setCurrentText(self.summary_role_var.get())
@@ -478,16 +552,18 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     role_combo.currentTextChanged.connect(_on_role_changed)
-    row1_h.addWidget(role_combo)
-    row1_h.addWidget(QLabel(" "))  # Spacer to match "exchanges" label
+    role_h.addWidget(role_combo)
+    role_h.addStretch()
+    settings_v.addWidget(role_row)
 
-    row1_h.addSpacing(12)  # Match spacing in row2
-    mode_label = QLabel("Mode:")
-    mode_label.setFixedWidth(45)  # Match "Retain" label width
-    row1_h.addWidget(mode_label)
+    # Mode
+    mode_row = QWidget()
+    mode_h = QHBoxLayout(mode_row)
+    mode_h.setContentsMargins(0, 0, 0, 0)
+    mode_h.addWidget(QLabel("Mode:"))
     mode_combo = QComboBox()
     mode_combo.addItems(["append", "replace"])
-    mode_combo.setFixedWidth(60)  # Match input field width
+    mode_combo.setFixedWidth(90)
     self._disable_combobox_mousewheel(mode_combo)
     try:
         mode_combo.setCurrentText(self.rolling_summary_mode_var.get())
@@ -499,19 +575,17 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     mode_combo.currentTextChanged.connect(_on_mode_changed)
-    row1_h.addWidget(mode_combo)
-    row1_h.addStretch()  # Add stretch to push everything to the left
+    mode_h.addWidget(mode_combo)
+    mode_h.addStretch()
+    settings_v.addWidget(mode_row)
 
-    settings_v.addWidget(row1)
-
-    # Row 2: Summarize last N and Retain entries
-    row2 = QWidget()
-    row2_h = QHBoxLayout(row2)
-    row2_h.setContentsMargins(0, 0, 0, 0)
-
-    row2_h.addWidget(QLabel("Summarize last"))
+    # Summarize last N exchanges
+    exchanges_row = QWidget()
+    exchanges_h = QHBoxLayout(exchanges_row)
+    exchanges_h.setContentsMargins(0, 0, 0, 0)
+    exchanges_h.addWidget(QLabel("Summarize last:"))
     exchanges_edit = QLineEdit()
-    exchanges_edit.setFixedWidth(60)
+    exchanges_edit.setFixedWidth(70)
     try:
         exchanges_edit.setText(str(self.rolling_summary_exchanges_var.get()))
     except Exception:
@@ -522,13 +596,18 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     exchanges_edit.textChanged.connect(_on_exchanges_changed)
-    row2_h.addWidget(exchanges_edit)
-    row2_h.addWidget(QLabel("exchanges"))
+    exchanges_h.addWidget(exchanges_edit)
+    exchanges_h.addWidget(QLabel("exchanges"))
+    exchanges_h.addStretch()
+    settings_v.addWidget(exchanges_row)
 
-    row2_h.addSpacing(12)
-    row2_h.addWidget(QLabel("Retain"))
+    # Retain N entries
+    retain_row = QWidget()
+    retain_h = QHBoxLayout(retain_row)
+    retain_h.setContentsMargins(0, 0, 0, 0)
+    retain_h.addWidget(QLabel("Retain:"))
     retain_edit = QLineEdit()
-    retain_edit.setFixedWidth(60)
+    retain_edit.setFixedWidth(70)
     try:
         retain_edit.setText(str(self.rolling_summary_max_entries_var.get()))
     except Exception:
@@ -539,15 +618,27 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     retain_edit.textChanged.connect(_on_retain_changed)
-    row2_h.addWidget(retain_edit)
-    row2_h.addWidget(QLabel("entries"))
+    retain_h.addWidget(retain_edit)
+    retain_h.addWidget(QLabel("entries"))
+    retain_h.addStretch()
+    settings_v.addWidget(retain_row)
 
-    settings_v.addWidget(row2)
-
+    section_v.addWidget(settings_w)
+    
     # Configure prompts button
     cfg_btn = QPushButton("⚙️ Configure Memory Prompts")
+    cfg_btn.setMinimumHeight(28)
+    cfg_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #17a2b8; "
+        "  color: white; "
+        "  padding: 5px 12px; "
+        "  font-size: 10pt; "
+        "  border-radius: 3px; "
+        "} "
+        "QPushButton:hover { background-color: #138496; }"
+    )
     cfg_btn.clicked.connect(self.configure_rolling_summary_prompts)
-    section_v.addWidget(settings_w)
     section_v.addWidget(cfg_btn)
 
     # Separator
@@ -639,7 +730,10 @@ def _create_response_handling_section(self, parent):
     from PySide6.QtCore import Qt
     
     section_box = QGroupBox("Response Handling & Retry Logic")
+    # No max width - let it expand in fullscreen
     section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
     
     # GPT-5/OpenAI Reasoning Toggle
     gpt5_title = QLabel("GPT-5 Thinking (OpenRouter/OpenAI-style)")
@@ -665,10 +759,11 @@ def _create_response_handling_section(self, parent):
     gpt_h1.addWidget(gpt_enable_cb)
     
     gpt_h1.addSpacing(20)
-    gpt_h1.addWidget(QLabel("Effort:"))
+    self.gpt_effort_label = QLabel("Effort:")
+    gpt_h1.addWidget(self.gpt_effort_label)
     self.gpt_effort_combo = QComboBox()
     self.gpt_effort_combo.addItems(["low", "medium", "high"])
-    self.gpt_effort_combo.setFixedWidth(100)
+    self.gpt_effort_combo.setFixedWidth(90)
     self._disable_combobox_mousewheel(self.gpt_effort_combo)
     try:
         effort_val = self.gpt_effort_var.get()
@@ -691,9 +786,10 @@ def _create_response_handling_section(self, parent):
     gpt_row2 = QWidget()
     gpt_h2 = QHBoxLayout(gpt_row2)
     gpt_h2.setContentsMargins(40, 5, 0, 0)
-    gpt_h2.addWidget(QLabel("OR Thinking Tokens:"))
+    self.gpt_reasoning_tokens_label = QLabel("OR Thinking Tokens:")
+    gpt_h2.addWidget(self.gpt_reasoning_tokens_label)
     self.gpt_reasoning_tokens_entry = QLineEdit()
-    self.gpt_reasoning_tokens_entry.setFixedWidth(80)
+    self.gpt_reasoning_tokens_entry.setFixedWidth(70)
     try:
         self.gpt_reasoning_tokens_entry.setText(str(self.gpt_reasoning_tokens_var.get()))
     except Exception:
@@ -741,9 +837,10 @@ def _create_response_handling_section(self, parent):
     thinking_h.addWidget(gemini_thinking_cb)
     
     thinking_h.addSpacing(20)
-    thinking_h.addWidget(QLabel("Budget:"))
+    self.thinking_budget_label = QLabel("Budget:")
+    thinking_h.addWidget(self.thinking_budget_label)
     self.thinking_budget_entry = QLineEdit()
-    self.thinking_budget_entry.setFixedWidth(80)
+    self.thinking_budget_entry.setFixedWidth(70)
     try:
         self.thinking_budget_entry.setText(str(self.thinking_budget_var.get()))
     except Exception:
@@ -755,7 +852,8 @@ def _create_response_handling_section(self, parent):
             pass
     self.thinking_budget_entry.textChanged.connect(_on_budget_changed)
     thinking_h.addWidget(self.thinking_budget_entry)
-    thinking_h.addWidget(QLabel("tokens"))
+    self.thinking_tokens_label = QLabel("tokens")
+    thinking_h.addWidget(self.thinking_tokens_label)
     thinking_h.addStretch()
     section_v.addWidget(thinking_row)
     
@@ -796,7 +894,7 @@ def _create_response_handling_section(self, parent):
     extraction_h.addSpacing(20)
     extraction_h.addWidget(QLabel("Workers:"))
     self.extraction_workers_entry = QLineEdit()
-    self.extraction_workers_entry.setFixedWidth(60)
+    self.extraction_workers_entry.setFixedWidth(50)
     try:
         self.extraction_workers_entry.setText(str(self.extraction_workers_var.get()))
     except Exception:
@@ -872,18 +970,35 @@ def _create_response_handling_section(self, parent):
     
     multi_key_h.addStretch()
     
-    # Multi API Key Manager button
-    btn_multi_key = QPushButton("Configure API Keys")
-    btn_multi_key.setFixedWidth(180)
-    btn_multi_key.clicked.connect(lambda: self.open_multi_api_key_manager())
-    multi_key_h.addWidget(btn_multi_key)
-    
     section_v.addWidget(multi_key_row)
     
     multi_key_desc = QLabel("Manage multiple API keys with automatic rotation and rate limit handling")
     multi_key_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    multi_key_desc.setContentsMargins(20, 0, 0, 10)
+    multi_key_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(multi_key_desc)
+    
+    # Multi API Key Manager button (moved below description)
+    btn_row = QWidget()
+    btn_row_h = QHBoxLayout(btn_row)
+    btn_row_h.setContentsMargins(20, 5, 0, 10)
+    btn_multi_key = QPushButton("⚙️ Configure API Keys")
+    btn_multi_key.setMinimumWidth(160)
+    btn_multi_key.setMaximumWidth(200)
+    btn_multi_key.setMinimumHeight(28)
+    btn_multi_key.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #17a2b8; "
+        "  color: white; "
+        "  padding: 5px 12px; "
+        "  font-size: 10pt; "
+        "  border-radius: 3px; "
+        "} "
+        "QPushButton:hover { background-color: #138496; }"
+    )
+    btn_multi_key.clicked.connect(lambda: self.open_multi_api_key_manager())
+    btn_row_h.addWidget(btn_multi_key)
+    btn_row_h.addStretch()
+    section_v.addWidget(btn_row)
     
     # Separator
     sep3 = QFrame()
@@ -1203,14 +1318,9 @@ def _create_response_handling_section(self, parent):
             pass
     self.http_tuning_checkbox.toggled.connect(_on_http_tuning_toggle)
     http_main_v.addWidget(self.http_tuning_checkbox)
-    http_main_v.addSpacing(6)
+    http_main_v.addSpacing(8)
     
-    # Build a compact grid so fields align nicely
-    from PySide6.QtWidgets import QGridLayout
-    http_grid = QWidget()
-    http_grid_layout = QGridLayout(http_grid)
-    http_grid_layout.setContentsMargins(0, 0, 0, 0)
-    
+    # Single column layout for more compact display
     if not hasattr(self, 'connect_timeout_var'):
         self.connect_timeout_var = tk.StringVar(value=str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))))
     if not hasattr(self, 'read_timeout_var'):
@@ -1220,10 +1330,14 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'http_pool_maxsize_var'):
         self.http_pool_maxsize_var = tk.StringVar(value=str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))))
     
-    # Row 0: Timeouts
-    http_grid_layout.addWidget(QLabel("Connect timeout (s):"), 0, 0, Qt.AlignLeft)
+    # Connect timeout
+    connect_row = QWidget()
+    connect_h = QHBoxLayout(connect_row)
+    connect_h.setContentsMargins(0, 0, 0, 5)
+    self.connect_timeout_label = QLabel("Connect timeout (s):")
+    connect_h.addWidget(self.connect_timeout_label)
     self.connect_timeout_entry = QLineEdit()
-    self.connect_timeout_entry.setFixedWidth(60)
+    self.connect_timeout_entry.setFixedWidth(70)
     try:
         self.connect_timeout_entry.setText(str(self.connect_timeout_var.get()))
     except Exception:
@@ -1234,11 +1348,18 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.connect_timeout_entry.textChanged.connect(_on_connect_timeout_changed)
-    http_grid_layout.addWidget(self.connect_timeout_entry, 0, 1, Qt.AlignLeft)
+    connect_h.addWidget(self.connect_timeout_entry)
+    connect_h.addStretch()
+    http_main_v.addWidget(connect_row)
     
-    http_grid_layout.addWidget(QLabel("Read timeout (s):"), 0, 3, Qt.AlignLeft)
+    # Read timeout
+    read_row = QWidget()
+    read_h = QHBoxLayout(read_row)
+    read_h.setContentsMargins(0, 0, 0, 5)
+    self.read_timeout_label = QLabel("Read timeout (s):")
+    read_h.addWidget(self.read_timeout_label)
     self.read_timeout_entry = QLineEdit()
-    self.read_timeout_entry.setFixedWidth(60)
+    self.read_timeout_entry.setFixedWidth(70)
     try:
         self.read_timeout_entry.setText(str(self.read_timeout_var.get()))
     except Exception:
@@ -1249,12 +1370,18 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.read_timeout_entry.textChanged.connect(_on_read_timeout_changed)
-    http_grid_layout.addWidget(self.read_timeout_entry, 0, 4, Qt.AlignLeft)
+    read_h.addWidget(self.read_timeout_entry)
+    read_h.addStretch()
+    http_main_v.addWidget(read_row)
     
-    # Row 1: Pool sizes
-    http_grid_layout.addWidget(QLabel("Pool connections:"), 1, 0, Qt.AlignLeft)
+    # Pool connections
+    pool_conn_row = QWidget()
+    pool_conn_h = QHBoxLayout(pool_conn_row)
+    pool_conn_h.setContentsMargins(0, 0, 0, 5)
+    self.http_pool_connections_label = QLabel("Pool connections:")
+    pool_conn_h.addWidget(self.http_pool_connections_label)
     self.http_pool_connections_entry = QLineEdit()
-    self.http_pool_connections_entry.setFixedWidth(60)
+    self.http_pool_connections_entry.setFixedWidth(70)
     try:
         self.http_pool_connections_entry.setText(str(self.http_pool_connections_var.get()))
     except Exception:
@@ -1265,11 +1392,18 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.http_pool_connections_entry.textChanged.connect(_on_pool_conn_changed)
-    http_grid_layout.addWidget(self.http_pool_connections_entry, 1, 1, Qt.AlignLeft)
+    pool_conn_h.addWidget(self.http_pool_connections_entry)
+    pool_conn_h.addStretch()
+    http_main_v.addWidget(pool_conn_row)
     
-    http_grid_layout.addWidget(QLabel("Pool max size:"), 1, 3, Qt.AlignLeft)
+    # Pool max size
+    pool_max_row = QWidget()
+    pool_max_h = QHBoxLayout(pool_max_row)
+    pool_max_h.setContentsMargins(0, 0, 0, 5)
+    self.http_pool_maxsize_label = QLabel("Pool max size:")
+    pool_max_h.addWidget(self.http_pool_maxsize_label)
     self.http_pool_maxsize_entry = QLineEdit()
-    self.http_pool_maxsize_entry.setFixedWidth(60)
+    self.http_pool_maxsize_entry.setFixedWidth(70)
     try:
         self.http_pool_maxsize_entry.setText(str(self.http_pool_maxsize_var.get()))
     except Exception:
@@ -1280,9 +1414,9 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.http_pool_maxsize_entry.textChanged.connect(_on_pool_maxsize_changed)
-    http_grid_layout.addWidget(self.http_pool_maxsize_entry, 1, 4, Qt.AlignLeft)
-    
-    http_main_v.addWidget(http_grid)
+    pool_max_h.addWidget(self.http_pool_maxsize_entry)
+    pool_max_h.addStretch()
+    http_main_v.addWidget(pool_max_row)
     
     # Optional toggle: ignore server Retry-After header
     if not hasattr(self, 'ignore_retry_after_var'):
@@ -1630,20 +1764,32 @@ def create_ai_hunter_section(self, parent_frame):
     config_h.addSpacing(10)
     
     # Configure button
-    config_btn = QPushButton("Configure AI Hunter")
+    config_btn = QPushButton("⚙️ Configure AI Hunter")
     config_btn.clicked.connect(lambda: self.show_ai_hunter_settings())
     config_h.addWidget(config_btn)
     config_h.addStretch()
     
-    # Add to parent layout
-    if hasattr(parent_frame, 'addWidget'):
+    # Add to parent layout (parent_frame should be a QVBoxLayout)
+    if hasattr(parent_frame, 'layout'):
+        # parent_frame is a QWidget, get its layout
+        layout = parent_frame.layout()
+        if layout:
+            layout.addWidget(config_w)
+    elif hasattr(parent_frame, 'addWidget'):
+        # parent_frame is a QLayout
         parent_frame.addWidget(config_w)
     
     # Info text
     info_lbl = QLabel("AI Hunter uses multiple detection methods to identify duplicate content\nwith configurable thresholds and detection modes")
     info_lbl.setStyleSheet("color: gray; font-size: 10pt;")
     info_lbl.setContentsMargins(20, 0, 0, 10)
-    if hasattr(parent_frame, 'addWidget'):
+    if hasattr(parent_frame, 'layout'):
+        # parent_frame is a QWidget, get its layout
+        layout = parent_frame.layout()
+        if layout:
+            layout.addWidget(info_lbl)
+    elif hasattr(parent_frame, 'addWidget'):
+        # parent_frame is a QLayout
         parent_frame.addWidget(info_lbl)
 
 def _get_ai_hunter_status_text(self):
@@ -2204,7 +2350,10 @@ def _create_prompt_management_section(self, parent):
     from PySide6.QtCore import Qt
     
     section_box = QGroupBox("Meta Data")
+    # No max width - let it expand in fullscreen
     section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
     
     # Title frame with checkbox and buttons
     title_w = QWidget()
@@ -2483,7 +2632,10 @@ def _create_processing_options_section(self, parent):
     from PySide6.QtCore import Qt
     
     section_box = QGroupBox("Processing Options")
+    # No max width - let it expand in fullscreen
     section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
     
     # Translation Chunk Prompt button
     btn_chunk_prompt = QPushButton("⚙️ Configure Translation Chunk Prompt")
@@ -3135,7 +3287,7 @@ def _create_processing_options_section(self, parent):
     provider_combo = QComboBox()
     provider_combo.setEditable(True)
     provider_combo.addItems(provider_options)
-    provider_combo.setFixedWidth(200)
+    provider_combo.setFixedWidth(160)  # Reduced for more compact layout
     self._disable_combobox_mousewheel(provider_combo)
     try:
         idx = provider_combo.findText(self.openrouter_preferred_provider_var.get())
@@ -3197,8 +3349,16 @@ def _create_image_translation_section(self, parent):
     from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QGridLayout
     from PySide6.QtCore import Qt
     
-    section_box = QGroupBox("Image Translation")
-    section_h = QHBoxLayout(section_box)
+    section_box = QGroupBox("Image Translation & Vision API")
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
+    
+    # Create horizontal container for two columns
+    columns_container = QWidget()
+    section_h = QHBoxLayout(columns_container)
+    section_h.setContentsMargins(0, 0, 0, 0)
+    section_h.setSpacing(10)
     
     # Left column
     left_column = QWidget()
@@ -3427,6 +3587,9 @@ def _create_image_translation_section(self, parent):
     
     right_v.addStretch()
     section_h.addWidget(right_column)
+    
+    # Add the columns container to the main section layout
+    section_v.addWidget(columns_container)
     
     # Dependency logic for watermark options
     def _toggle_watermark_options():
@@ -3767,7 +3930,7 @@ def _toggle_http_tuning_controls(self):
     except Exception:
         enabled = False
     
-    # Entries
+    # Entry fields
     for attr in ['connect_timeout_entry', 'read_timeout_entry', 'http_pool_connections_entry', 'http_pool_maxsize_entry']:
         widget = getattr(self, attr, None)
         if widget is not None:
@@ -3775,6 +3938,16 @@ def _toggle_http_tuning_controls(self):
                 widget.setEnabled(enabled)
             except Exception:
                 pass
+    
+    # Labels
+    for attr in ['connect_timeout_label', 'read_timeout_label', 'http_pool_connections_label', 'http_pool_maxsize_label']:
+        widget = getattr(self, attr, None)
+        if widget is not None:
+            try:
+                widget.setEnabled(enabled)
+            except Exception:
+                pass
+    
     # Retry-After checkbox
     if hasattr(self, 'ignore_retry_after_checkbox') and self.ignore_retry_after_checkbox is not None:
         try:
@@ -3852,6 +4025,8 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     section_box = QGroupBox("Custom API Endpoints")
     section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
+    section_v.setSpacing(4)  # Compact spacing between widgets
     
     # Checkbox to enable/disable custom endpoint
     enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
