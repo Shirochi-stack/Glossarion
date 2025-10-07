@@ -5051,13 +5051,18 @@ def export_profiles(self):
 def configure_title_prompt(self):
     """Configure the book title translation prompt"""
     from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                                   QTextEdit, QPushButton, QGroupBox, QMessageBox)
-    from PySide6.QtGui import QFont, QIcon
+                                   QTextEdit, QPushButton, QGroupBox, QMessageBox, QApplication)
+    from PySide6.QtGui import QFont, QIcon, QScreen
     from PySide6.QtCore import Qt
     
     dialog = QDialog(self.master)
     dialog.setWindowTitle("Configure Book Title Translation")
-    dialog.resize(950, 850)
+    
+    # Get screen dimensions and calculate size based on ratios
+    screen = QApplication.primaryScreen().geometry()
+    dialog_width = int(screen.width() * 0.60)  # 60% of screen width
+    dialog_height = int(screen.height() * 0.74)  # 74% of screen height
+    dialog.resize(dialog_width, dialog_height)
     
     # Set window icon
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")

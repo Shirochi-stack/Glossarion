@@ -485,6 +485,9 @@ class MetadataBatchTranslatorUI:
                                   values=common_langs, state="normal", width=30)
         output_combo.pack(anchor=tk.W, pady=5)
         
+        # Disable mousewheel scrolling to prevent accidental changes
+        self.ui.disable_spinbox_mousewheel(output_combo)
+        
         tk.Label(output_frame, text="This will replace 'English' in all prompts with your chosen language",
                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(5, 0))
     
