@@ -4,9 +4,15 @@ Multi API Key Manager for Glossarion
 Handles multiple API keys with round-robin load balancing and rate limit management
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext, filedialog
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit, 
+    QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox,
+    QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
+    QCompleter
+)
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence
 import json
 import os
 import threading
@@ -430,19 +436,38 @@ class APIKeyPool:
                 
                 logger.info(f"Removed key for model {removed_key.model} from pool")
 
-class MultiAPIKeyDialog:
+class MultiAPIKeyDialog(QDialog):
     """Dialog for managing multiple API keys"""
     
+    @staticmethod
+    def show_dialog(parent, translator_gui):
+        """Static method to create and show the dialog modally.
+        
+        This ensures proper PySide6 application context and returns after dialog closes.
+        Use this method when calling from tkinter code.
+        """
+        # Ensure QApplication exists
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+        
+        # Create and execute dialog
+        dialog = MultiAPIKeyDialog(parent, translator_gui)
+        dialog.exec_()  # Modal execution - blocks until closed
+        
+        return dialog
+    
     def __init__(self, parent, translator_gui):
-        self.parent = parent
+        # Don't pass parent to super().__init__ if it's a tkinter window
+        # PySide6 dialogs need QWidget parents or None
+        # Since we're being called from tkinter, create as standalone dialog
+        super().__init__(None)  # Create as top-level dialog
+        
         self.translator_gui = translator_gui
-        self.dialog = None
-        # Keep a reference for icon image to avoid GC
-        self._icon_photo_ref = None
-
-        self.key_pool = APIKeyPool()
         self.tree = None
         self.test_results = queue.Queue()
+        
+        self.key_pool = APIKeyPool()
         
         # Attempt to bind to UnifiedClient's shared pool so UI reflects live usage
         self._bind_shared_pool()
@@ -453,11 +478,8 @@ class MultiAPIKeyDialog:
         # Create and show dialog
         self._create_dialog()
         
-        # Auto-resize to fit content if WindowManager is available
-        if hasattr(self.translator_gui, 'wm') and hasattr(self, 'canvas'):
-            self.translator_gui.wm.auto_resize_dialog(self.dialog, self.canvas, 
-                                                      max_width_ratio=0.9, 
-                                                      max_height_ratio=1.55)
+        # Make it a window (not just a dialog)
+        self.setWindowFlags(self.windowFlags() | Qt.Window)
         
     def _set_icon(self, window):
         """Set Halgakos.ico as window icon if available."""
@@ -466,17 +488,7 @@ class MultiAPIKeyDialog:
             ico_path = os.path.join(base_dir, 'Halgakos.ico')
             if os.path.isfile(ico_path):
                 try:
-                    window.iconbitmap(ico_path)
-                except Exception:
-                    pass
-                # Try iconphoto for better scaling
-                try:
-                    from PIL import Image, ImageTk
-                    img = Image.open(ico_path)
-                    if img.mode != 'RGBA':
-                        img = img.convert('RGBA')
-                    self._icon_photo_ref = ImageTk.PhotoImage(img)
-                    window.iconphoto(False, self._icon_photo_ref)
+                    window.setWindowIcon(QIcon(ico_path))
                 except Exception:
                     pass
         except Exception:
@@ -506,8 +518,8 @@ class MultiAPIKeyDialog:
     
     def _update_rotation_display(self, *args):
         """Update the rotation description based on settings"""
-        if self.force_rotation_var.get():
-            freq = self.rotation_frequency_var.get()
+        if self.force_rotation_var:
+            freq = self.rotation_frequency_var
             if freq == 1:
                 desc = "Keys will rotate on every request (maximum distribution)"
             else:
@@ -515,7 +527,7 @@ class MultiAPIKeyDialog:
         else:
             desc = "Keys will only rotate on errors or rate limits"
         
-        self.rotation_desc_label.config(text=desc)
+        self.rotation_desc_label.setText(desc)
     
     def _save_keys_to_config(self):
         """Save API keys and rotation settings to translator GUI config"""
@@ -525,249 +537,256 @@ class MultiAPIKeyDialog:
             self.translator_gui.config['multi_api_keys'] = key_list
             
             # Save fallback settings
-            self.translator_gui.config['use_fallback_keys'] = self.use_fallback_var.get()
+            self.translator_gui.config['use_fallback_keys'] = self.use_fallback_var
             # Update the parent GUI's variable to stay in sync
             if hasattr(self.translator_gui, 'use_fallback_keys_var'):
-                self.translator_gui.use_fallback_keys_var.set(self.use_fallback_var.get())
+                self.translator_gui.use_fallback_keys_var = self.use_fallback_var
             # Fallback keys are already saved when added/removed
             
             # Use the current state of the toggle
-            self.translator_gui.config['use_multi_api_keys'] = self.enabled_var.get()
+            self.translator_gui.config['use_multi_api_keys'] = self.enabled_var
             
             # Save rotation settings
-            self.translator_gui.config['force_key_rotation'] = self.force_rotation_var.get()
-            self.translator_gui.config['rotation_frequency'] = self.rotation_frequency_var.get()
+            self.translator_gui.config['force_key_rotation'] = self.force_rotation_var
+            self.translator_gui.config['rotation_frequency'] = self.rotation_frequency_var
             
             # Save config
             self.translator_gui.save_config(show_message=False)
     
     def _create_dialog(self):
-        """Create the main dialog using WindowManager"""
-        # Use WindowManager to create scrollable dialog
-        if hasattr(self.translator_gui, 'wm'):
-            self.dialog, scrollable_frame, self.canvas = self.translator_gui.wm.setup_scrollable(
-                self.parent,
-                "Multi API Key Manager",
-                width=900,
-                height=700,
-                max_width_ratio=0.9,
-                max_height_ratio=1.45
-            )
-        else:
-            # Fallback to regular dialog
-            self.dialog = tk.Toplevel(self.parent)
-            self.dialog.title("Multi API Key Manager")
-            self.dialog.geometry("900x700")
-            scrollable_frame = self.dialog
-            self.canvas = None
+        """Create the main dialog using PySide6"""
+        # Set window properties
+        self.setWindowTitle("Multi API Key Manager")
+        self.resize(900, 700)
         
-        # Main container with consistent padding
-        main_frame = tk.Frame(scrollable_frame, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Create scroll area
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Create scrollable content widget
+        scrollable_widget = QWidget()
+        scrollable_layout = QVBoxLayout(scrollable_widget)
+        scrollable_layout.setContentsMargins(20, 20, 20, 20)
+        scroll_area.setWidget(scrollable_widget)
+        
+        # Set main layout
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.addWidget(scroll_area)
         
         # Store references
-        self.main_frame = main_frame
-        self.scrollable_frame = scrollable_frame
+        self.main_frame = scrollable_widget
+        self.scrollable_frame = scrollable_widget
+        self.main_layout = scrollable_layout
         
         # Title and description
-        title_frame = tk.Frame(main_frame)
-        title_frame.pack(fill=tk.X, pady=(0, 10))
+        title_frame = QWidget()
+        title_layout = QHBoxLayout(title_frame)
+        title_layout.setContentsMargins(0, 0, 0, 10)
         
-        tk.Label(title_frame, text="Multi API Key Management", 
-                font=('TkDefaultFont', 16, 'bold')).pack(side=tk.LEFT)
+        title_label = QLabel("Multi API Key Management")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_layout.addWidget(title_label)
         
         # Enable/Disable toggle
-        self.enabled_var = tk.BooleanVar(value=self.translator_gui.config.get('use_multi_api_keys', False))
-        tb.Checkbutton(title_frame, text="Enable Multi-Key Mode", 
-                      variable=self.enabled_var,
-                      bootstyle="round-toggle",
-                      command=self._toggle_multi_key_mode).pack(side=tk.RIGHT, padx=(20, 0))
+        self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
+        self.enabled_checkbox = QCheckBox("Enable Multi-Key Mode")
+        self.enabled_checkbox.setChecked(self.enabled_var)
+        self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
+        title_layout.addStretch()
+        title_layout.addWidget(self.enabled_checkbox)
         
-        tk.Label(main_frame, 
-                text="Manage multiple API keys with automatic rotation and rate limit handling.\n"
-                     "Keys can be rotated automatically to distribute load evenly.\n"
-                     "Rate-limited keys are automatically cooled down and skipped in rotation.",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 15))
+        scrollable_layout.addWidget(title_frame)
+        
+        desc_label = QLabel(
+                "Manage multiple API keys with automatic rotation and rate limit handling.\n"
+                "Keys can be rotated automatically to distribute load evenly.\n"
+                "Rate-limited keys are automatically cooled down and skipped in rotation.")
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        scrollable_layout.addWidget(desc_label)
         
         # Rotation settings frame
-        rotation_frame = tk.LabelFrame(main_frame, text="Rotation Settings", padx=15, pady=10)
-        rotation_frame.pack(fill=tk.X, pady=(0, 15))
+        rotation_frame = QGroupBox("Rotation Settings")
+        rotation_frame_layout = QVBoxLayout(rotation_frame)
+        rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
         
         # Force rotation toggle
-        rotation_settings = tk.Frame(rotation_frame)
-        rotation_settings.pack(fill=tk.X)
+        rotation_settings = QWidget()
+        rotation_settings_layout = QHBoxLayout(rotation_settings)
+        rotation_settings_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.force_rotation_var = tk.BooleanVar(value=self.translator_gui.config.get('force_key_rotation', True))
-        tb.Checkbutton(rotation_settings, text="Force Key Rotation", 
-                      variable=self.force_rotation_var,
-                      bootstyle="round-toggle",
-                      command=self._update_rotation_display).pack(side=tk.LEFT)
+        self.force_rotation_var = self.translator_gui.config.get('force_key_rotation', True)
+        self.force_rotation_checkbox = QCheckBox("Force Key Rotation")
+        self.force_rotation_checkbox.setChecked(self.force_rotation_var)
+        self.force_rotation_checkbox.toggled.connect(self._update_rotation_display)
+        rotation_settings_layout.addWidget(self.force_rotation_checkbox)
         
         # Rotation frequency
-        tk.Label(rotation_settings, text="Every").pack(side=tk.LEFT, padx=(20, 5))
-        self.rotation_frequency_var = tk.IntVar(value=self.translator_gui.config.get('rotation_frequency', 1))
-        frequency_spinbox = tb.Spinbox(rotation_settings, from_=1, to=100, 
-                                      textvariable=self.rotation_frequency_var,
-                                      width=5, command=self._update_rotation_display)
-        frequency_spinbox.pack(side=tk.LEFT)
-        # Disable mouse wheel changing values (use main GUI helper if available)
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(frequency_spinbox)
-        except Exception:
-            pass
-        tk.Label(rotation_settings, text="requests").pack(side=tk.LEFT, padx=(5, 0))
+        rotation_settings_layout.addSpacing(20)
+        rotation_settings_layout.addWidget(QLabel("Every"))
+        self.rotation_frequency_var = self.translator_gui.config.get('rotation_frequency', 1)
+        self.frequency_spinbox = QSpinBox()
+        self.frequency_spinbox.setRange(1, 100)
+        self.frequency_spinbox.setValue(self.rotation_frequency_var)
+        self.frequency_spinbox.setMaximumWidth(60)
+        self.frequency_spinbox.valueChanged.connect(self._update_rotation_display)
+        rotation_settings_layout.addWidget(self.frequency_spinbox)
+        rotation_settings_layout.addWidget(QLabel("requests"))
+        rotation_settings_layout.addStretch()
+        
+        rotation_frame_layout.addWidget(rotation_settings)
         
         # Rotation description
-        self.rotation_desc_label = tk.Label(rotation_frame, 
-                                          text="", 
-                                          font=('TkDefaultFont', 9), fg='blue')
-        self.rotation_desc_label.pack(anchor=tk.W, pady=(5, 0))
+        self.rotation_desc_label = QLabel()
+        self.rotation_desc_label.setStyleSheet("color: blue;")
+        rotation_frame_layout.addWidget(self.rotation_desc_label)
         self._update_rotation_display()
         
+        scrollable_layout.addWidget(rotation_frame)
+        
         # Add key section
-        self._create_add_key_section(main_frame)
+        self._create_add_key_section(scrollable_layout)
         
         # Separator
-        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=15)
+        separator1 = QFrame()
+        separator1.setFrameShape(QFrame.HLine)
+        separator1.setFrameShadow(QFrame.Sunken)
+        scrollable_layout.addWidget(separator1)
         
         # Key list section
-        self._create_key_list_section(main_frame)
+        self._create_key_list_section(scrollable_layout)
         
         # Create fallback container (hidden by default)
-        self._create_fallback_section(main_frame)
+        self._create_fallback_section(scrollable_layout)
         
         # Button bar at the bottom
-        self._create_button_bar(main_frame)
+        self._create_button_bar(scrollable_layout)
         
         # Load existing keys into tree
         self._refresh_key_list()
         
-        # Center dialog
-        self.dialog.transient(self.parent)
-        
-        # Handle window close
-        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Set icon
+        self._set_icon(self)
 
-    def _create_fallback_section(self, parent):
+    def _create_fallback_section(self, parent_layout):
         """Create the fallback keys section at the bottom"""
         # Container that can be hidden
-        self.fallback_container = tk.Frame(parent)
-        
-        # Always show fallback section (works in both single and multi-key mode)
-        self.fallback_container.pack(fill=tk.X, pady=(10, 0))
+        self.fallback_container = QWidget()
+        fallback_container_layout = QVBoxLayout(self.fallback_container)
+        fallback_container_layout.setContentsMargins(0, 10, 0, 0)
         
         # Separator
-        ttk.Separator(self.fallback_container, orient='horizontal').pack(fill=tk.X, pady=(0, 10))
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        fallback_container_layout.addWidget(separator)
         
         # Main fallback frame
-        fallback_frame = tk.LabelFrame(self.fallback_container, 
-                                       text="Fallback Keys (For Prohibited Content)", 
-                                       padx=15, pady=15)
-        fallback_frame.pack(fill=tk.X)
+        fallback_frame = QGroupBox("Fallback Keys (For Prohibited Content)")
+        fallback_frame_layout = QVBoxLayout(fallback_frame)
+        fallback_frame_layout.setContentsMargins(15, 15, 15, 15)
         
         # Description
-        tk.Label(fallback_frame, 
-                text="Configure fallback keys that will be used when content is blocked.\n"
-                     "These should use different API keys or models that are less restrictive.\n"
-                     "In Multi-Key Mode: tried when main rotation encounters prohibited content.\n"
-                     "In Single-Key Mode: tried directly when main key fails, bypassing main key retry.",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
+        desc_label = QLabel(
+                "Configure fallback keys that will be used when content is blocked.\n"
+                "These should use different API keys or models that are less restrictive.\n"
+                "In Multi-Key Mode: tried when main rotation encounters prohibited content.\n"
+                "In Single-Key Mode: tried directly when main key fails, bypassing main key retry.")
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        fallback_frame_layout.addWidget(desc_label)
         
         # Enable fallback checkbox
-        self.use_fallback_var = tk.BooleanVar(value=self.translator_gui.config.get('use_fallback_keys', False))
-        tb.Checkbutton(fallback_frame, text="Enable Fallback Keys", 
-                      variable=self.use_fallback_var,
-                      bootstyle="round-toggle",
-                      command=self._toggle_fallback_section).pack(anchor=tk.W, pady=(0, 10))
+        self.use_fallback_var = self.translator_gui.config.get('use_fallback_keys', False)
+        self.use_fallback_checkbox = QCheckBox("Enable Fallback Keys")
+        self.use_fallback_checkbox.setChecked(self.use_fallback_var)
+        self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
+        fallback_frame_layout.addWidget(self.use_fallback_checkbox)
         
         # Add fallback key section
-        add_fallback_frame = tk.Frame(fallback_frame)
-        add_fallback_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Configure grid for more columns
-        add_fallback_frame.columnconfigure(1, weight=1)
-        add_fallback_frame.columnconfigure(4, weight=1)
-        # Don't give weight to column 3 to keep labels close to fields
+        add_fallback_frame = QWidget()
+        add_fallback_grid = QGridLayout(add_fallback_frame)
+        add_fallback_grid.setContentsMargins(0, 0, 0, 10)
         
         # Row 0: Fallback API Key and Model
-        tk.Label(add_fallback_frame, text="Fallback API Key:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=5)
-        self.fallback_key_var = tk.StringVar()
-        self.fallback_key_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_key_var, show='*')
-        self.fallback_key_entry.grid(row=0, column=1, sticky=tk.EW, pady=5)
+        add_fallback_grid.addWidget(QLabel("Fallback API Key:"), 0, 0, Qt.AlignLeft)
+        self.fallback_key_entry = QLineEdit()
+        self.fallback_key_entry.setEchoMode(QLineEdit.Password)
+        add_fallback_grid.addWidget(self.fallback_key_entry, 0, 1)
         
         # Toggle fallback visibility
-        self.show_fallback_btn = tb.Button(add_fallback_frame, text="👁", width=3,
-                                          command=self._toggle_fallback_visibility)
-        self.show_fallback_btn.grid(row=0, column=2, padx=5, pady=5)
+        self.show_fallback_btn = QPushButton("👁")
+        self.show_fallback_btn.setFixedWidth(40)
+        self.show_fallback_btn.clicked.connect(self._toggle_fallback_visibility)
+        add_fallback_grid.addWidget(self.show_fallback_btn, 0, 2)
         
         # Fallback Model
-        tk.Label(add_fallback_frame, text="Model:").grid(row=0, column=3, sticky=tk.W, padx=(20, 10), pady=5)
-        self.fallback_model_var = tk.StringVar()
+        add_fallback_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         fallback_models = get_model_options()
-        self.fallback_model_combo = tb.Combobox(add_fallback_frame, textvariable=self.fallback_model_var,
-                                               values=fallback_models, state='normal')
-        self.fallback_model_combo.grid(row=0, column=4, sticky=tk.EW, pady=5)
-        # Block mouse wheel on combobox to avoid accidental changes
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(self.fallback_model_combo)
-        except Exception:
-            pass
-        # Attach gentle autofill
-        self._attach_model_autofill(self.fallback_model_combo, self.fallback_model_var)
+        self.fallback_model_combo = QComboBox()
+        self.fallback_model_combo.addItems(fallback_models)
+        self.fallback_model_combo.setEditable(True)
+        add_fallback_grid.addWidget(self.fallback_model_combo, 0, 4)
         
         # Add fallback button
-        tb.Button(add_fallback_frame, text="Add Fallback Key", 
-                 command=self._add_fallback_key,
-                 bootstyle="info").grid(row=0, column=5, sticky=tk.E, padx=(10, 0), pady=5)
+        add_fallback_btn = QPushButton("Add Fallback Key")
+        add_fallback_btn.clicked.connect(self._add_fallback_key)
+        add_fallback_grid.addWidget(add_fallback_btn, 0, 5, Qt.AlignRight)
+        
+        # Set column stretch
+        add_fallback_grid.setColumnStretch(1, 1)
+        add_fallback_grid.setColumnStretch(4, 1)
+        
+        fallback_frame_layout.addWidget(add_fallback_frame)
         
         # Row 1: Google Credentials (optional, discretely styled)
-        tk.Label(add_fallback_frame, text="Google Creds:", font=('TkDefaultFont', 8), 
-                fg='gray').grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=2)
-        self.fallback_google_creds_var = tk.StringVar()
-        self.fallback_google_creds_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_google_creds_var,
-                                                   font=('TkDefaultFont', 7), state='normal')
-        self.fallback_google_creds_entry.grid(row=1, column=1, sticky=tk.EW, pady=2)
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
+        add_fallback_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
+        self.fallback_google_creds_entry = QLineEdit()
+        self.fallback_google_creds_entry.setStyleSheet("font-size: 7pt;")
+        add_fallback_grid.addWidget(self.fallback_google_creds_entry, 1, 1)
         
-        # Google credentials browse button (moved closer)
-        tb.Button(add_fallback_frame, text="📁", width=3, 
-                 command=self._browse_fallback_google_credentials,
-                 bootstyle="secondary-outline").grid(row=1, column=2, padx=(5, 0), pady=2)
+        # Google credentials browse button
+        browse_google_btn = QPushButton("📁")
+        browse_google_btn.setFixedWidth(40)
+        browse_google_btn.clicked.connect(self._browse_fallback_google_credentials)
+        add_fallback_grid.addWidget(browse_google_btn, 1, 2)
         
         # Google region field for fallback
-        tk.Label(add_fallback_frame, text="Region:", font=('TkDefaultFont', 10), 
-                fg='gray').grid(row=1, column=3, sticky=tk.W, padx=(10, 5), pady=2)
-        self.fallback_google_region_var = tk.StringVar(value='us-east5')  # Default region
-        self.fallback_google_region_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_google_region_var,
-                                                    font=('TkDefaultFont', 7), state='normal', width=10)
-        self.fallback_google_region_entry.grid(row=1, column=4, sticky=tk.W, pady=2)
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_fallback_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
+        self.fallback_google_region_entry = QLineEdit("us-east5")
+        self.fallback_google_region_entry.setStyleSheet("font-size: 7pt;")
+        self.fallback_google_region_entry.setMaximumWidth(100)
+        add_fallback_grid.addWidget(self.fallback_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
         
         # Row 2: Individual Endpoint Toggle for fallback
-        self.fallback_use_individual_endpoint_var = tk.BooleanVar(value=False)
-        fallback_individual_endpoint_toggle = tb.Checkbutton(add_fallback_frame, text="Use Individual Endpoint", 
-                                                             variable=self.fallback_use_individual_endpoint_var,
-                                                             bootstyle="round-toggle",
-                                                             command=self._toggle_fallback_individual_endpoint_fields)
-        fallback_individual_endpoint_toggle.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(0, 10), pady=5)
-        
-        # Store references for toggling
-        self.fallback_individual_endpoint_toggle = fallback_individual_endpoint_toggle
+        self.fallback_use_individual_endpoint_var = False
+        self.fallback_individual_endpoint_toggle = QCheckBox("Use Individual Endpoint")
+        self.fallback_individual_endpoint_toggle.setChecked(False)
+        self.fallback_individual_endpoint_toggle.toggled.connect(self._toggle_fallback_individual_endpoint_fields)
+        add_fallback_grid.addWidget(self.fallback_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
         
         # Row 3: Individual Endpoint (initially hidden)
-        self.fallback_individual_endpoint_label = tk.Label(add_fallback_frame, text="Individual Endpoint:", font=('TkDefaultFont', 9), 
-                                                          fg='gray')
-        self.fallback_individual_endpoint_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=2)
-        self.fallback_azure_endpoint_var = tk.StringVar()
-        self.fallback_azure_endpoint_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_azure_endpoint_var,
-                                                     font=('TkDefaultFont', 8), state='normal')
-        self.fallback_azure_endpoint_entry.grid(row=3, column=1, columnspan=2, sticky=tk.EW, pady=2)
+        self.fallback_individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.fallback_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_fallback_grid.addWidget(self.fallback_individual_endpoint_label, 3, 0, Qt.AlignLeft)
+        self.fallback_azure_endpoint_entry = QLineEdit()
+        self.fallback_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        add_fallback_grid.addWidget(self.fallback_azure_endpoint_entry, 3, 1, 1, 2)
         
         # Individual Endpoint API Version (small dropdown, initially hidden)
-        self.fallback_individual_api_version_label = tk.Label(add_fallback_frame, text="API Ver:", font=('TkDefaultFont', 11), 
-                                                             fg='gray')
-        self.fallback_individual_api_version_label.grid(row=3, column=3, sticky=tk.W, padx=(10, 5), pady=2)
-        self.fallback_azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
+        self.fallback_individual_api_version_label = QLabel("API Ver:")
+        self.fallback_individual_api_version_label.setStyleSheet("color: gray;")
+        add_fallback_grid.addWidget(self.fallback_individual_api_version_label, 3, 3, Qt.AlignLeft)
         fallback_azure_versions = [
             '2025-01-01-preview',
             '2024-12-01-preview', 
@@ -777,103 +796,101 @@ class MultiAPIKeyDialog:
             '2024-02-01',
             '2023-12-01-preview'
         ]
-        self.fallback_azure_api_version_combo = ttk.Combobox(add_fallback_frame, 
-                                                            textvariable=self.fallback_azure_api_version_var,
-                                                            values=fallback_azure_versions, width=18, 
-                                                            state='normal', font=('TkDefaultFont', 7))
-        self.fallback_azure_api_version_combo.grid(row=3, column=4, sticky=tk.W, pady=2)
-        # Block mouse wheel on version combobox
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(self.fallback_azure_api_version_combo)
-        except Exception:
-            pass
+        self.fallback_azure_api_version_combo = QComboBox()
+        self.fallback_azure_api_version_combo.addItems(fallback_azure_versions)
+        self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.fallback_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self.fallback_azure_api_version_combo.setMaximumWidth(180)
+        add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
         
         # Initially hide the endpoint fields when toggle is off
         self._toggle_fallback_individual_endpoint_fields()
         
         # Fallback keys list
-        self._create_fallback_list(fallback_frame)
+        self._create_fallback_list(fallback_frame_layout)
+        
+        # Add fallback container to parent
+        fallback_container_layout.addWidget(fallback_frame)
+        parent_layout.addWidget(self.fallback_container)
         
         # Initially disable if checkbox is unchecked
         self._toggle_fallback_section()
 
-    def _create_fallback_list(self, parent):
+    def _create_fallback_list(self, parent_layout):
         """Create the fallback keys list"""
-        list_frame = tk.Frame(parent)
-        list_frame.pack(fill=tk.BOTH, expand=True)
-        
         # Label
-        tk.Label(list_frame, text="Fallback Keys (tried in order):", 
-                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+        list_label = QLabel("Fallback Keys (tried in order):")
+        list_label_font = QFont()
+        list_label_font.setBold(True)
+        list_label.setFont(list_label_font)
+        parent_layout.addWidget(list_label)
         
         # Container for tree and buttons
-        container = tk.Frame(list_frame)
-        container.pack(fill=tk.BOTH, expand=True)
+        container = QWidget()
+        container_layout = QHBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
         
         # Left side: Move buttons
-        move_frame = tk.Frame(container)
-        move_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        move_frame = QWidget()
+        move_layout = QVBoxLayout(move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
         
-        tk.Label(move_frame, text="Order", font=('TkDefaultFont', 9, 'bold')).pack(pady=(0, 5))
+        order_label = QLabel("Order")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
         
-        tb.Button(move_frame, text="↑", width=3,
-                 command=lambda: self._move_fallback_key('up'),
-                 bootstyle="secondary-outline").pack(pady=2)
+        up_btn = QPushButton("↑")
+        up_btn.setFixedWidth(40)
+        up_btn.clicked.connect(lambda: self._move_fallback_key('up'))
+        move_layout.addWidget(up_btn)
         
-        tb.Button(move_frame, text="↓", width=3,
-                 command=lambda: self._move_fallback_key('down'),
-                 bootstyle="secondary-outline").pack(pady=2)
+        down_btn = QPushButton("↓")
+        down_btn.setFixedWidth(40)
+        down_btn.clicked.connect(lambda: self._move_fallback_key('down'))
+        move_layout.addWidget(down_btn)
         
-        # Right side: Treeview
-        tree_container = tk.Frame(container)
-        tree_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        move_layout.addStretch()
+        container_layout.addWidget(move_frame)
         
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Right side: TreeWidget
+        self.fallback_tree = QTreeWidget()
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Status', 'Times Used'])
+        self.fallback_tree.setColumnWidth(0, 220)
+        self.fallback_tree.setColumnWidth(1, 220)
+        self.fallback_tree.setColumnWidth(2, 120)
+        self.fallback_tree.setColumnWidth(3, 100)
+        self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
+        self.fallback_tree.setMinimumHeight(150)
+        container_layout.addWidget(self.fallback_tree)
         
-        # Treeview for fallback keys
-        columns = ('Model', 'Status', 'Times Used')
-        self.fallback_tree = ttk.Treeview(tree_container, columns=columns, show='tree headings',
-                                          yscrollcommand=scrollbar.set, height=5)
-        self.fallback_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        scrollbar.config(command=self.fallback_tree.yview)
-        self.fallback_tree.bind('<Button-3>', self._show_fallback_context_menu)
-        
-        # Configure columns
-        self.fallback_tree.heading('#0', text='API Key', anchor='w')
-        self.fallback_tree.column('#0', width=220, minwidth=160, anchor='w')
-        
-        self.fallback_tree.heading('Model', text='Model', anchor='w')
-        self.fallback_tree.column('Model', width=220, minwidth=140, anchor='w')
-        
-        self.fallback_tree.heading('Status', text='Status', anchor='center')
-        self.fallback_tree.column('Status', width=120, minwidth=80, anchor='center')
-        
-        self.fallback_tree.heading('Times Used', text='Times Used', anchor='center')
-        self.fallback_tree.column('Times Used', width=100, minwidth=70, anchor='center')
+        parent_layout.addWidget(container)
         
         # Action buttons - store reference for toggling
-        self.fallback_action_frame = tk.Frame(list_frame)
-        self.fallback_action_frame.pack(fill=tk.X, pady=(10, 0))
+        self.fallback_action_frame = QWidget()
+        fallback_action_layout = QHBoxLayout(self.fallback_action_frame)
+        fallback_action_layout.setContentsMargins(0, 10, 0, 0)
         
-        tb.Button(self.fallback_action_frame, text="Test Selected", 
-                 command=self._test_selected_fallback,
-                 bootstyle="warning").pack(side=tk.LEFT, padx=(0, 5))
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected_fallback)
+        fallback_action_layout.addWidget(test_selected_btn)
 
-        tb.Button(self.fallback_action_frame, text="Test All", 
-                 command=self._test_all_fallbacks,
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all_fallbacks)
+        fallback_action_layout.addWidget(test_all_btn)
     
-        tb.Button(self.fallback_action_frame, text="Remove Selected", 
-                 command=self._remove_selected_fallback,
-                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected_fallback)
+        fallback_action_layout.addWidget(remove_selected_btn)
         
-        tb.Button(self.fallback_action_frame, text="Clear All", 
-                 command=self._clear_all_fallbacks,
-                 bootstyle="danger-outline").pack(side=tk.LEFT, padx=5)
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_fallbacks)
+        fallback_action_layout.addWidget(clear_all_btn)
+        
+        fallback_action_layout.addStretch()
+        parent_layout.addWidget(self.fallback_action_frame)
         
         # Load existing fallback keys
         self._load_fallback_keys()
@@ -883,15 +900,14 @@ class MultiAPIKeyDialog:
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
         if not fallback_keys:
-            messagebox.showwarning("Warning", "No fallback keys to test")
+            QMessageBox.warning(self, "Warning", "No fallback keys to test")
             return
         
         # Update UI to show testing status for all keys
-        items = self.fallback_tree.get_children()
-        for item in items:
-            values = list(self.fallback_tree.item(item, 'values'))
-            values[1] = "⏳ Testing..."
-            self.fallback_tree.item(item, values=values)
+        for i in range(self.fallback_tree.topLevelItemCount()):
+            item = self.fallback_tree.topLevelItem(i)
+            if item:
+                item.setText(2, "⏳ Testing...")
         
         # Run tests in thread for all fallback keys
         # Ensure UnifiedClient uses the same shared pool instance
@@ -958,146 +974,131 @@ class MultiAPIKeyDialog:
                 if result:
                     index, success, message = result
                     # Update UI in main thread
-                    self.dialog.after(0, lambda idx=index, s=success: 
+                    QTimer.singleShot(0, lambda idx=index, s=success: 
                                      self._update_fallback_test_result(idx, s))
         
         # Show completion message
         successful = sum(1 for future in futures if future.result() and future.result()[1])
         total = len(fallback_keys)
-        self.dialog.after(0, lambda: self._show_status(
+        QTimer.singleShot(0, lambda: self._show_status(
             f"Fallback test complete: {successful}/{total} passed"))
 
-    def _show_fallback_context_menu(self, event):
+    def _show_fallback_context_menu(self, position):
         """Show context menu for fallback keys - includes model name editing"""
-        # Select item under cursor
-        item = self.fallback_tree.identify_row(event.y)
-        if item:
-            # If the clicked item is not in selection, select only it
-            if item not in self.fallback_tree.selection():
-                self.fallback_tree.selection_set(item)
+        # Get item at position
+        item = self.fallback_tree.itemAt(position)
+        if not item:
+            return
+        
+        # Select item if not already selected
+        if item not in self.fallback_tree.selectedItems():
+            self.fallback_tree.setCurrentItem(item)
+        
+        # Create context menu
+        menu = QMenu(self)
+        
+        # Get index for position info
+        index = self.fallback_tree.indexOfTopLevelItem(item)
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        total = len(fallback_keys)
+        
+        # Reorder submenu
+        if total > 1:  # Only show reorder if there's more than one key
+            reorder_menu = menu.addMenu("Reorder")
+            if index > 0:
+                up_action = reorder_menu.addAction("Move Up")
+                up_action.triggered.connect(lambda: self._move_fallback_key('up'))
+            if index < total - 1:
+                down_action = reorder_menu.addAction("Move Down")
+                down_action.triggered.connect(lambda: self._move_fallback_key('down'))
+            menu.addSeparator()
+        
+        # Add Change Model option
+        selected_count = len(self.fallback_tree.selectedItems())
+        if selected_count > 1:
+            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
+        else:
+            change_model_action = menu.addAction("Change Model")
+        change_model_action.triggered.connect(self._change_fallback_model_for_selected)
+        
+        menu.addSeparator()
+        
+        # Individual Endpoint options for fallback keys
+        if index < len(fallback_keys):
+            key_data = fallback_keys[index]
+            endpoint_enabled = key_data.get('use_individual_endpoint', False)
+            endpoint_url = key_data.get('azure_endpoint', '')
             
-            # Create context menu
-            menu = tk.Menu(self.dialog, tearoff=0)
-            
-            # Get index for position info
-            index = self.fallback_tree.index(item)
-            fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-            total = len(fallback_keys)
-            
-            # Reorder submenu
-            if total > 1:  # Only show reorder if there's more than one key
-                reorder_menu = tk.Menu(menu, tearoff=0)
-                if index > 0:
-                    reorder_menu.add_command(label="Move Up", 
-                                            command=lambda: self._move_fallback_key('up'))
-                if index < total - 1:
-                    reorder_menu.add_command(label="Move Down", 
-                                            command=lambda: self._move_fallback_key('down'))
-                menu.add_cascade(label="Reorder", menu=reorder_menu)
-                menu.add_separator()
-            
-            # Add Change Model option
-            selected_count = len(self.fallback_tree.selection())
-            if selected_count > 1:
-                menu.add_command(label=f"Change Model ({selected_count} selected)", 
-                               command=self._change_fallback_model_for_selected)
+            if endpoint_enabled and endpoint_url:
+                config_action = menu.addAction("✅ Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_fallback_individual_endpoint(index))
+                disable_action = menu.addAction("Disable Individual Endpoint")
+                disable_action.triggered.connect(lambda: self._toggle_fallback_individual_endpoint(index, False))
             else:
-                menu.add_command(label="Change Model", 
-                               command=self._change_fallback_model_for_selected)
-            
-            menu.add_separator()
-            
-            # Individual Endpoint options for fallback keys
-            if index < len(fallback_keys):
-                key_data = fallback_keys[index]
-                endpoint_enabled = key_data.get('use_individual_endpoint', False)
-                endpoint_url = key_data.get('azure_endpoint', '')
-                
-                if endpoint_enabled and endpoint_url:
-                    menu.add_command(label="✅ Individual Endpoint", 
-                                   command=lambda: self._configure_fallback_individual_endpoint(index))
-                    menu.add_command(label="Disable Individual Endpoint", 
-                                   command=lambda: self._toggle_fallback_individual_endpoint(index, False))
-                else:
-                    menu.add_command(label="🔧 Configure Individual Endpoint", 
-                                   command=lambda: self._configure_fallback_individual_endpoint(index))
-            
-            menu.add_separator()
-            
-            # Test and Remove options
-            menu.add_command(label="Test", command=self._test_selected_fallback)
-            menu.add_separator()
-            menu.add_command(label="Remove", command=self._remove_selected_fallback)
-            
-            if total > 1:
-                menu.add_command(label="Clear All", command=self._clear_all_fallbacks)
-            
-            # Show menu
-            menu.post(event.x_root, event.y_root)
+                config_action = menu.addAction("🔧 Configure Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_fallback_individual_endpoint(index))
+        
+        menu.addSeparator()
+        
+        # Test and Remove options
+        test_action = menu.addAction("Test")
+        test_action.triggered.connect(self._test_selected_fallback)
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(self._remove_selected_fallback)
+        
+        if total > 1:
+            clear_action = menu.addAction("Clear All")
+            clear_action.triggered.connect(self._clear_all_fallbacks)
+        
+        # Show menu
+        menu.exec_(self.fallback_tree.viewport().mapToGlobal(position))
 
 
     def _change_fallback_model_for_selected(self):
         """Change model name for selected fallback keys"""
-        selected = self.fallback_tree.selection()
+        selected = self.fallback_tree.selectedItems()
         if not selected:
             return
         
         # Get fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
-        # Create simple dialog (same style as main tree)
-        dialog = tk.Toplevel(self.dialog)
-        dialog.title(f"Change Model for {len(selected)} Fallback Keys")
-        dialog.geometry("400x130")
-        dialog.transient(self.dialog)
-        # Set icon
+        # Create simple dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Change Model for {len(selected)} Fallback Keys")
+        dialog.resize(400, 130)
         self._set_icon(dialog)
         
-        # Center the dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Main frame
-        main_frame = tk.Frame(dialog, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
         # Label
-        tk.Label(main_frame, text="Enter new model name (press Enter to apply):",
-                font=('TkDefaultFont', 10)).pack(pady=(0, 10))
+        label = QLabel("Enter new model name (press Enter to apply):")
+        main_layout.addWidget(label)
         
-        # Model entry with dropdown
-        model_var = tk.StringVar()
-        
-        # Full model list (same as main GUI)
+        # Full model list
         all_models = get_model_options()
         
-        model_combo = ttk.Combobox(main_frame, values=all_models, 
-                                   textvariable=model_var, width=45, height=12)
-        model_combo.pack(pady=(0, 10))
-        # Block mouse wheel on combobox
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(model_combo)
-        except Exception:
-            pass
-        # Attach gentle autofill
-        self._attach_model_autofill(model_combo, model_var)
+        model_combo = QComboBox()
+        model_combo.addItems(all_models)
+        model_combo.setEditable(True)
+        main_layout.addWidget(model_combo)
         
         # Get current model from first selected item as default
-        selected_indices = [self.fallback_tree.index(item) for item in selected]
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         if selected_indices and selected_indices[0] < len(fallback_keys):
             current_model = fallback_keys[selected_indices[0]].get('model', '')
-            model_var.set(current_model)
-            model_combo.select_range(0, tk.END)  # Select all text for easy replacement
+            model_combo.setCurrentText(current_model)
+            model_combo.lineEdit().selectAll()
         
-        def apply_change(event=None):
-            new_model = model_var.get().strip()
+        def apply_change():
+            new_model = model_combo.currentText().strip()
             if new_model:
                 # Update all selected fallback keys
                 for item in selected:
-                    index = self.fallback_tree.index(item)
+                    index = self.fallback_tree.indexOfTopLevelItem(item)
                     if index < len(fallback_keys):
                         fallback_keys[index]['model'] = new_model
                 
@@ -1111,23 +1112,35 @@ class MultiAPIKeyDialog:
                 # Show status
                 self._show_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
                 
-                dialog.destroy()
+                dialog.accept()
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(apply_change)
+        apply_btn.setDefault(True)
+        button_layout.addWidget(apply_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        main_layout.addLayout(button_layout)
         
         # Focus on the combobox
-        model_combo.focus()
+        model_combo.setFocus()
         
-        # Bind Enter key to apply
-        dialog.bind('<Return>', apply_change)
-        model_combo.bind('<Return>', apply_change)
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        # Show dialog
+        dialog.exec_()
 
     def _load_fallback_keys(self):
         """Load fallback keys from config"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
         # Clear tree
-        for item in self.fallback_tree.get_children():
-            self.fallback_tree.delete(item)
+        self.fallback_tree.clear()
         
         # Add keys to tree
         for key_data in fallback_keys:
@@ -1139,31 +1152,27 @@ class MultiAPIKeyDialog:
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
             
             # Insert into tree
-            self.fallback_tree.insert('', 'end',
-                                     text=masked_key,
-                                     values=(model, "Not tested", times_used),
-                                     tags=('untested',))
-        
-        # Configure tags
-        self.fallback_tree.tag_configure('untested', foreground='gray')
-        self.fallback_tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 10, 'bold'))
-        self.fallback_tree.tag_configure('passed', foreground='green')
-        self.fallback_tree.tag_configure('failed', foreground='red')
+            item = QTreeWidgetItem([masked_key, model, "Not tested", str(times_used)])
+            item.setForeground(0, Qt.gray)  # Untested styling
+            item.setForeground(1, Qt.gray)
+            item.setForeground(2, Qt.gray)
+            item.setForeground(3, Qt.gray)
+            self.fallback_tree.addTopLevelItem(item)
 
     def _add_fallback_key(self):
         """Add a new fallback key with optional Google credentials and Azure endpoint"""
-        api_key = self.fallback_key_var.get().strip()
-        model = self.fallback_model_var.get().strip()
-        google_credentials = self.fallback_google_creds_var.get().strip() or None
-        google_region = self.fallback_google_region_var.get().strip() or None
+        api_key = self.fallback_key_entry.text().strip()
+        model = self.fallback_model_combo.currentText().strip()
+        google_credentials = self.fallback_google_creds_entry.text().strip() or None
+        google_region = self.fallback_google_region_entry.text().strip() or None
         
         # Only use individual endpoint if toggle is enabled
-        use_individual_endpoint = self.fallback_use_individual_endpoint_var.get()
-        azure_endpoint = self.fallback_azure_endpoint_var.get().strip() if use_individual_endpoint else None
-        azure_api_version = self.fallback_azure_api_version_var.get().strip() if use_individual_endpoint else None
+        use_individual_endpoint = self.fallback_individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.fallback_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.fallback_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
         
         if not api_key or not model:
-            messagebox.showerror("Error", "Please enter both API key and model name")
+            QMessageBox.critical(self, "Error", "Please enter both API key and model name")
             return
         
         # Get current fallback keys
@@ -1186,13 +1195,13 @@ class MultiAPIKeyDialog:
         self.translator_gui.save_config(show_message=False)
         
         # Clear inputs
-        self.fallback_key_var.set("")
-        self.fallback_model_var.set("")
-        self.fallback_google_creds_var.set("")
-        self.fallback_azure_endpoint_var.set("")
-        self.fallback_google_region_var.set("us-east5")
-        self.fallback_azure_api_version_var.set('2025-01-01-preview')
-        self.fallback_use_individual_endpoint_var.set(False)
+        self.fallback_key_entry.clear()
+        self.fallback_model_combo.setCurrentText("")
+        self.fallback_google_creds_entry.clear()
+        self.fallback_azure_endpoint_entry.clear()
+        self.fallback_google_region_entry.setText("us-east5")
+        self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.fallback_individual_endpoint_toggle.setChecked(False)
         # Update the UI to disable endpoint fields
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -1211,12 +1220,12 @@ class MultiAPIKeyDialog:
 
     def _move_fallback_key(self, direction):
         """Move selected fallback key up or down"""
-        selected = self.fallback_tree.selection()
+        selected = self.fallback_tree.selectedItems()
         if not selected:
             return
         
         item = selected[0]
-        index = self.fallback_tree.index(item)
+        index = self.fallback_tree.indexOfTopLevelItem(item)
         
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
@@ -1242,31 +1251,30 @@ class MultiAPIKeyDialog:
             self._load_fallback_keys()
             
             # Reselect item
-            items = self.fallback_tree.get_children()
-            if new_index < len(items):
-                self.fallback_tree.selection_set(items[new_index])
-                self.fallback_tree.focus(items[new_index])
+            if new_index < self.fallback_tree.topLevelItemCount():
+                item = self.fallback_tree.topLevelItem(new_index)
+                if item:
+                    self.fallback_tree.setCurrentItem(item)
+                    item.setSelected(True)
 
     def _test_selected_fallback(self):
         """Test selected fallback key"""
-        selected = self.fallback_tree.selection()
+        selected = self.fallback_tree.selectedItems()
         if not selected:
-            messagebox.showwarning("Warning", "Please select a fallback key to test")
+            QMessageBox.warning(self, "Warning", "Please select a fallback key to test")
             return
         
-        index = self.fallback_tree.index(selected[0])
+        index = self.fallback_tree.indexOfTopLevelItem(selected[0])
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
         if index >= len(fallback_keys):
             return
         
         # Update UI to show testing status immediately
-        items = self.fallback_tree.get_children()
-        if index < len(items):
-            item = items[index]
-            values = list(self.fallback_tree.item(item, 'values'))
-            values[1] = "⏳ Testing..."
-            self.fallback_tree.item(item, values=values)
+        if index < self.fallback_tree.topLevelItemCount():
+            item = self.fallback_tree.topLevelItem(index)
+            if item:
+                item.setText(2, "⏳ Testing...")
         
         key_data = fallback_keys[index]
         
@@ -1294,20 +1302,17 @@ class MultiAPIKeyDialog:
             except Exception:
                 pass
         
-        items = self.fallback_tree.get_children()
-        if index < len(items):
-            item = items[index]
-            values = list(self.fallback_tree.item(item, 'values'))
-            # Update status
-            if len(values) < 3:
-                values = values + [0] * (3 - len(values))
-            values[1] = "✅ Passed" if success else "❌ Failed"
-            # Update times used cell
-            try:
-                values[2] = int(values[2]) + 1
-            except Exception:
-                values[2] = 1
-            self.fallback_tree.item(item, values=values)
+        if index < self.fallback_tree.topLevelItemCount():
+            item = self.fallback_tree.topLevelItem(index)
+            if item:
+                # Update status (column 2)
+                item.setText(2, "✅ Passed" if success else "❌ Failed")
+                # Update times used cell (column 3)
+                try:
+                    current_times = int(item.text(3))
+                    item.setText(3, str(current_times + 1))
+                except Exception:
+                    item.setText(3, "1")
 
     def _test_single_fallback_key(self, key_data, index):
         """Test a single fallback key"""
@@ -1338,22 +1343,24 @@ class MultiAPIKeyDialog:
                 content, _ = response
                 if content and "test successful" in content.lower():
                     # Update tree item to show success
-                    self.dialog.after(0, lambda: self._update_fallback_test_result(index, True))
+                    QTimer.singleShot(0, lambda: self._update_fallback_test_result(index, True))
                     return
         except Exception as e:
             print(f"Fallback key test failed: {e}")
         
         # Update tree item to show failure
-        self.dialog.after(0, lambda: self._update_fallback_test_result(index, False))
+        QTimer.singleShot(0, lambda: self._update_fallback_test_result(index, False))
 
     def _remove_selected_fallback(self):
         """Remove selected fallback key"""
-        selected = self.fallback_tree.selection()
+        selected = self.fallback_tree.selectedItems()
         if not selected:
             return
         
-        if messagebox.askyesno("Confirm", "Remove selected fallback key?"):
-            index = self.fallback_tree.index(selected[0])
+        reply = QMessageBox.question(self, "Confirm", "Remove selected fallback key?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            index = self.fallback_tree.indexOfTopLevelItem(selected[0])
             
             # Get current fallback keys
             fallback_keys = self.translator_gui.config.get('fallback_keys', [])
@@ -1372,10 +1379,12 @@ class MultiAPIKeyDialog:
 
     def _clear_all_fallbacks(self):
         """Clear all fallback keys"""
-        if not self.fallback_tree.get_children():
+        if self.fallback_tree.topLevelItemCount() == 0:
             return
         
-        if messagebox.askyesno("Confirm", "Remove ALL fallback keys?"):
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL fallback keys?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
             # Clear fallback keys
             self.translator_gui.config['fallback_keys'] = []
             self.translator_gui.save_config(show_message=False)
@@ -1387,104 +1396,57 @@ class MultiAPIKeyDialog:
 
     def _toggle_fallback_section(self):
         """Enable/disable fallback section based on checkbox"""
-        enabled = self.use_fallback_var.get()
+        enabled = self.use_fallback_checkbox.isChecked()
         
-        if enabled:
-            # Show and enable all fallback widgets
-            state = tk.NORMAL
-            
-            # Enable input widgets
-            self.fallback_key_entry.config(state=state)
-            self.fallback_model_combo.config(state=state)
-            self.fallback_google_creds_entry.config(state=state)
-            self.fallback_google_region_entry.config(state=state)
-            self.show_fallback_btn.config(state=state)
-            
-            # Enable individual endpoint toggle
-            if hasattr(self, 'fallback_individual_endpoint_toggle'):
-                self.fallback_individual_endpoint_toggle.config(state=state)
-            
-            # Show/hide endpoint fields based on toggle state
-            self._toggle_fallback_individual_endpoint_fields()
-            
-            # Enable add button
-            for widget in self.fallback_key_entry.master.winfo_children():
-                if isinstance(widget, tb.Button) and "Add Fallback" in str(widget.cget('text')):
-                    widget.config(state=state)
-            
-            # Show the tree container
-            self.fallback_tree.master.master.pack(fill=tk.BOTH, expand=True)
-            
-            # Show the action buttons frame
-            if hasattr(self, 'fallback_action_frame'):
-                self.fallback_action_frame.pack(fill=tk.X, pady=(10, 0))
-            
-        else:
-            # Hide and disable all fallback widgets
-            state = tk.DISABLED
-            
-            # Disable input widgets
-            self.fallback_key_entry.config(state=state)
-            self.fallback_model_combo.config(state=state)
-            self.fallback_google_creds_entry.config(state=state)
-            self.fallback_google_region_entry.config(state=state)
-            self.show_fallback_btn.config(state=state)
-            
-            # Disable individual endpoint toggle
-            if hasattr(self, 'fallback_individual_endpoint_toggle'):
-                self.fallback_individual_endpoint_toggle.config(state=state)
-            
-            # Note: endpoint fields are managed by the toggle itself, not here
-            
-            # Disable add button
-            for widget in self.fallback_key_entry.master.winfo_children():
-                if isinstance(widget, tb.Button) and "Add Fallback" in str(widget.cget('text')):
-                    widget.config(state=state)
-            
-            # Hide the tree container
-            self.fallback_tree.master.master.pack_forget()
-            
-            # Hide the action buttons frame
-            if hasattr(self, 'fallback_action_frame'):
-                self.fallback_action_frame.pack_forget()
-            
+        # Enable/disable input widgets
+        self.fallback_key_entry.setEnabled(enabled)
+        self.fallback_model_combo.setEnabled(enabled)
+        self.fallback_google_creds_entry.setEnabled(enabled)
+        self.fallback_google_region_entry.setEnabled(enabled)
+        self.show_fallback_btn.setEnabled(enabled)
+        
+        # Enable/disable individual endpoint toggle
+        if hasattr(self, 'fallback_individual_endpoint_toggle'):
+            self.fallback_individual_endpoint_toggle.setEnabled(enabled)
+        
+        # Show/hide endpoint fields based on toggle state
+        self._toggle_fallback_individual_endpoint_fields()
+        
+        # Show/hide the tree and action buttons
+        self.fallback_tree.setVisible(enabled)
+        if hasattr(self, 'fallback_action_frame'):
+            self.fallback_action_frame.setVisible(enabled)
+        
+        if not enabled:
             # Clear selection
-            self.fallback_tree.selection_remove(*self.fallback_tree.selection())
+            self.fallback_tree.clearSelection()
 
     def _toggle_fallback_visibility(self):
         """Toggle fallback key visibility"""
-        if self.fallback_key_entry.cget('show') == '*':
-            self.fallback_key_entry.config(show='')
-            self.show_fallback_btn.config(text='🔒')
+        if self.fallback_key_entry.echoMode() == QLineEdit.Password:
+            self.fallback_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_fallback_btn.setText('🔒')
         else:
-            self.fallback_key_entry.config(show='*')
-            self.show_fallback_btn.config(text='👁')
+            self.fallback_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_fallback_btn.setText('👁')
     
     def _toggle_fallback_individual_endpoint_fields(self):
         """Toggle visibility and state of fallback individual endpoint fields"""
-        enabled = self.fallback_use_individual_endpoint_var.get()
+        enabled = self.fallback_individual_endpoint_toggle.isChecked()
         
-        if enabled:
-            # Show and enable endpoint fields
-            state = tk.NORMAL
-            self.fallback_individual_endpoint_label.grid()
-            self.fallback_azure_endpoint_entry.grid()
-            self.fallback_individual_api_version_label.grid()
-            self.fallback_azure_api_version_combo.grid()
-            
-            self.fallback_azure_endpoint_entry.config(state=state)
-            self.fallback_azure_api_version_combo.config(state='readonly')
-        else:
-            # Hide and disable endpoint fields
-            state = tk.DISABLED
-            self.fallback_individual_endpoint_label.grid_remove()
-            self.fallback_azure_endpoint_entry.grid_remove()
-            self.fallback_individual_api_version_label.grid_remove()
-            self.fallback_azure_api_version_combo.grid_remove()
-            
+        # Show/hide and enable/disable endpoint fields
+        self.fallback_individual_endpoint_label.setVisible(enabled)
+        self.fallback_azure_endpoint_entry.setVisible(enabled)
+        self.fallback_individual_api_version_label.setVisible(enabled)
+        self.fallback_azure_api_version_combo.setVisible(enabled)
+        
+        self.fallback_azure_endpoint_entry.setEnabled(enabled)
+        self.fallback_azure_api_version_combo.setEnabled(enabled)
+        
+        if not enabled:
             # Clear the fields when disabled
-            self.fallback_azure_endpoint_var.set("")
-            self.fallback_azure_api_version_var.set('2025-01-01-preview')
+            self.fallback_azure_endpoint_entry.clear()
+            self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
     
     def _configure_fallback_individual_endpoint(self, fallback_index):
         """Configure individual endpoint for a fallback key"""
@@ -1527,9 +1489,9 @@ class MultiAPIKeyDialog:
         
         # Create individual endpoint dialog using the class
         if IndividualEndpointDialog is None:
-            messagebox.showerror("Error", "IndividualEndpointDialog is not available.")
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        IndividualEndpointDialog(self.dialog, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
+        IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
     
     def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
         """Quick toggle individual endpoint on/off for fallback key"""
@@ -1551,269 +1513,296 @@ class MultiAPIKeyDialog:
         model = fallback_keys[fallback_index].get('model', 'unknown')
         self._show_status(f"Individual endpoint {status} for fallback key ({model})")
 
-    def _create_button_bar(self, parent):
+    def _create_button_bar(self, parent_layout):
         """Create the bottom button bar"""
-        self.button_frame = tk.Frame(parent)
-        self.button_frame.pack(fill=tk.X, pady=(20, 0))
-        
-        # Save button
-        tb.Button(self.button_frame, text="Save & Close", command=self._save_and_close,
-                 bootstyle="success").pack(side=tk.RIGHT, padx=(5, 0))
-        
-        # Cancel button  
-        tb.Button(self.button_frame, text="Cancel", command=self._on_close,
-                 bootstyle="secondary").pack(side=tk.RIGHT)
+        self.button_frame = QWidget()
+        button_layout = QHBoxLayout(self.button_frame)
+        button_layout.setContentsMargins(0, 20, 0, 0)
         
         # Import/Export
-        tb.Button(self.button_frame, text="Import", command=self._import_keys,
-                 bootstyle="info-outline").pack(side=tk.LEFT, padx=(0, 5))
+        import_btn = QPushButton("Import")
+        import_btn.clicked.connect(self._import_keys)
+        button_layout.addWidget(import_btn)
         
-        tb.Button(self.button_frame, text="Export", command=self._export_keys,
-                 bootstyle="info-outline").pack(side=tk.LEFT)
+        export_btn = QPushButton("Export")
+        export_btn.clicked.connect(self._export_keys)
+        button_layout.addWidget(export_btn)
+        
+        button_layout.addStretch()
+        
+        # Cancel button
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self._on_close)
+        button_layout.addWidget(cancel_btn)
+        
+        # Save button
+        save_btn = QPushButton("Save & Close")
+        save_btn.clicked.connect(self._save_and_close)
+        button_layout.addWidget(save_btn)
+        
+        parent_layout.addWidget(self.button_frame)
  
-    def _create_key_list_section(self, parent):
+    def _create_key_list_section(self, parent_layout):
         """Create the key list section with inline editing and rearrangement controls"""
-        list_frame = tk.LabelFrame(parent, text="API Keys", padx=15, pady=15)
-        list_frame.pack(fill=tk.BOTH, expand=True)
+        list_frame = QGroupBox("API Keys")
+        list_frame_layout = QVBoxLayout(list_frame)
+        list_frame_layout.setContentsMargins(15, 15, 15, 15)
         
         # Add primary key indicator frame at the top
-        primary_frame = tk.Frame(list_frame, bg='#FF8C00', relief=tk.RAISED, bd=2)
-        primary_frame.pack(fill=tk.X, pady=(0, 10))
+        primary_frame = QFrame()
+        primary_frame.setStyleSheet("background-color: #FF8C00; border: 2px solid #CC7000;")
+        primary_frame_layout = QVBoxLayout(primary_frame)
+        primary_frame_layout.setContentsMargins(5, 5, 5, 5)
         
-        self.primary_key_label = tk.Label(primary_frame, 
-                                          text="⭐ PRIMARY KEY: Position #1 will be used first in rotation ⭐",
-                                          bg='#FF8C00', fg='white', 
-                                          font=('TkDefaultFont', 11, 'bold'),
-                                          pady=5)
-        self.primary_key_label.pack(fill=tk.X)
+        self.primary_key_label = QLabel("⭐ PRIMARY KEY: Position #1 will be used first in rotation ⭐")
+        self.primary_key_label.setStyleSheet("background-color: #FF8C00; color: white;")
+        primary_label_font = QFont()
+        primary_label_font.setBold(True)
+        primary_label_font.setPointSize(11)
+        self.primary_key_label.setFont(primary_label_font)
+        self.primary_key_label.setAlignment(Qt.AlignCenter)
+        primary_frame_layout.addWidget(self.primary_key_label)
+        
+        list_frame_layout.addWidget(primary_frame)
         
         # Main container with treeview and controls
-        main_container = tk.Frame(list_frame)
-        main_container.pack(fill=tk.BOTH, expand=True)
+        main_container = QWidget()
+        main_container_layout = QHBoxLayout(main_container)
+        main_container_layout.setContentsMargins(0, 0, 0, 0)
         
         # Left side: Move buttons
-        move_frame = tk.Frame(main_container)
-        move_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        move_frame = QWidget()
+        move_layout = QVBoxLayout(move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
         
-        tk.Label(move_frame, text="Reorder", font=('TkDefaultFont', 9, 'bold')).pack(pady=(0, 5))
+        reorder_label = QLabel("Reorder")
+        reorder_font = QFont()
+        reorder_font.setBold(True)
+        reorder_label.setFont(reorder_font)
+        move_layout.addWidget(reorder_label)
         
         # Move to top button
-        tb.Button(move_frame, text="⬆⬆", width=3, 
-                 command=lambda: self._move_key('top'),
-                 bootstyle="secondary-outline").pack(pady=2)
+        top_btn = QPushButton("⬆⬆")
+        top_btn.setFixedWidth(40)
+        top_btn.clicked.connect(lambda: self._move_key('top'))
+        move_layout.addWidget(top_btn)
         
         # Move up button
-        tb.Button(move_frame, text="⬆", width=3,
-                 command=lambda: self._move_key('up'),
-                 bootstyle="secondary-outline").pack(pady=2)
+        up_btn = QPushButton("⬆")
+        up_btn.setFixedWidth(40)
+        up_btn.clicked.connect(lambda: self._move_key('up'))
+        move_layout.addWidget(up_btn)
         
         # Move down button
-        tb.Button(move_frame, text="⬇", width=3,
-                 command=lambda: self._move_key('down'),
-                 bootstyle="secondary-outline").pack(pady=2)
+        down_btn = QPushButton("⬇")
+        down_btn.setFixedWidth(40)
+        down_btn.clicked.connect(lambda: self._move_key('down'))
+        move_layout.addWidget(down_btn)
         
         # Move to bottom button
-        tb.Button(move_frame, text="⬇⬇", width=3,
-                 command=lambda: self._move_key('bottom'),
-                 bootstyle="secondary-outline").pack(pady=2)
+        bottom_btn = QPushButton("⬇⬇")
+        bottom_btn.setFixedWidth(40)
+        bottom_btn.clicked.connect(lambda: self._move_key('bottom'))
+        move_layout.addWidget(bottom_btn)
         
         # Spacer
-        tk.Frame(move_frame).pack(pady=10)
+        move_layout.addSpacing(10)
         
         # Position label
-        self.position_label = tk.Label(move_frame, text="", font=('TkDefaultFont', 9), fg='gray')
-        self.position_label.pack()
+        self.position_label = QLabel()
+        self.position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.position_label)
+        move_layout.addStretch()
         
-        # Right side: Treeview with scrollbar
-        tree_frame = tk.Frame(main_container)
-        tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        main_container_layout.addWidget(move_frame)
         
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Right side: TreeWidget with drag and drop support
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.tree.setColumnWidth(0, 180)
+        self.tree.setColumnWidth(1, 260)
+        self.tree.setColumnWidth(2, 80)
+        self.tree.setColumnWidth(3, 160)
+        self.tree.setColumnWidth(4, 40)
+        self.tree.setColumnWidth(5, 40)
+        self.tree.setColumnWidth(6, 90)
         
-        # Treeview
-        columns = ('Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Times Used')
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings',
-                                yscrollcommand=scrollbar.set, height=10)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Set header font
+        header = self.tree.header()
+        header_font = QFont()
+        header_font.setBold(True)
+        header_font.setPointSize(11)
+        header.setFont(header_font)
         
-        scrollbar.config(command=self.tree.yview)
+        # Set context menu
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
         
-        # Configure columns with better widths and anchoring
-        self.tree.heading('#0', text='API Key', anchor='w')
-        self.tree.column('#0', width=180, minwidth=150, anchor='w')
-        
-        self.tree.heading('Model', text='Model', anchor='w')
-        self.tree.column('Model', width=260, minwidth=160, anchor='w')
-        
-        self.tree.heading('Cooldown', text='Cooldown', anchor='center')
-        self.tree.column('Cooldown', width=80, minwidth=60, anchor='center')
-        
-        self.tree.heading('Status', text='Status', anchor='center')
-        self.tree.column('Status', width=160, minwidth=100, anchor='center')
-        
-        self.tree.heading('Success', text='✓', anchor='center')
-        self.tree.column('Success', width=40, minwidth=30, anchor='center')
-        
-        self.tree.heading('Errors', text='✗', anchor='center')
-        self.tree.column('Errors', width=40, minwidth=30, anchor='center')
-        
-        self.tree.heading('Times Used', text='Times Used', anchor='center')
-        self.tree.column('Times Used', width=90, minwidth=60, anchor='center')
-        
-        # Configure tree style for better appearance
-        style = ttk.Style()
-        style.configure("Treeview.Heading", font=('TkDefaultFont', 11, 'bold'))
-        
-        # Bind events for inline editing
-        self.tree.bind('<Button-1>', self._on_click)
-        self.tree.bind('<Button-3>', self._show_context_menu)
-        self.tree.bind('<<TreeviewSelect>>', self._on_selection_change)
+        # Set selection mode
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
         # Enable drag and drop
-        self.tree.bind('<Button-1>', self._on_drag_start, add='+')
-        self.tree.bind('<B1-Motion>', self._on_drag_motion)
-        self.tree.bind('<ButtonRelease-1>', self._on_drag_release)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setDefaultDropAction(Qt.MoveAction)
+        
+        # Connect drop event to custom handler
+        # Store original dropEvent to wrap it
+        self._tree_original_dropEvent = self.tree.dropEvent
+        self.tree.dropEvent = self._on_tree_drop
+        
+        # Connect signals
+        self.tree.itemClicked.connect(self._on_click)
+        self.tree.itemSelectionChanged.connect(self._on_selection_change)
         
         # Track editing state
         self.edit_widget = None
         
-        # Track drag state
-        self.drag_start_item = None
-        self.drag_start_y = None
+        main_container_layout.addWidget(self.tree)
+        list_frame_layout.addWidget(main_container)
         
         # Action buttons
-        action_frame = tk.Frame(list_frame)
-        action_frame.pack(fill=tk.X, pady=(10, 0))
+        action_frame = QWidget()
+        action_layout = QHBoxLayout(action_frame)
+        action_layout.setContentsMargins(0, 10, 0, 0)
         
-        tb.Button(action_frame, text="Test Selected", command=self._test_selected,
-                 bootstyle="warning").pack(side=tk.LEFT, padx=(0, 5))
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected)
+        action_layout.addWidget(test_selected_btn)
         
-        tb.Button(action_frame, text="Test All", command=self._test_all,
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all)
+        action_layout.addWidget(test_all_btn)
         
-        tb.Button(action_frame, text="Enable Selected", command=self._enable_selected,
-                 bootstyle="success").pack(side=tk.LEFT, padx=5)
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected)
+        action_layout.addWidget(enable_selected_btn)
         
-        tb.Button(action_frame, text="Disable Selected", command=self._disable_selected,
-                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected)
+        action_layout.addWidget(disable_selected_btn)
         
-        tb.Button(action_frame, text="Remove Selected", command=self._remove_selected,
-                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected)
+        action_layout.addWidget(remove_selected_btn)
+        
+        action_layout.addStretch()
         
         # Stats label
-        self.stats_label = tk.Label(action_frame, text="", font=('TkDefaultFont', 11), fg='gray')
-        self.stats_label.pack(side=tk.RIGHT)
- 
-    def _create_add_key_section(self, parent):
-        """Create the add key section with Google credentials and Azure endpoint support"""
-        add_frame = tk.LabelFrame(parent, text="Add New API Key", padx=15, pady=15)
-        add_frame.pack(fill=tk.X, pady=(0, 10))
+        self.stats_label = QLabel()
+        self.stats_label.setStyleSheet("color: gray;")
+        stats_font = QFont()
+        stats_font.setPointSize(11)
+        self.stats_label.setFont(stats_font)
+        action_layout.addWidget(self.stats_label)
         
-        # Grid configuration - expand for more columns
-        add_frame.columnconfigure(1, weight=1)
-        add_frame.columnconfigure(4, weight=1)
-        # Don't give weight to column 3 to keep labels close to fields
+        list_frame_layout.addWidget(action_frame)
+        parent_layout.addWidget(list_frame)
+ 
+    def _create_add_key_section(self, parent_layout):
+        """Create the add key section with Google credentials and Azure endpoint support"""
+        add_frame = QGroupBox("Add New API Key")
+        add_grid = QGridLayout(add_frame)
+        add_grid.setContentsMargins(15, 15, 15, 15)
         
         # Row 0: API Key and Model
-        tk.Label(add_frame, text="API Key:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=5)
-        self.api_key_var = tk.StringVar()
-        self.api_key_entry = tb.Entry(add_frame, textvariable=self.api_key_var, show='*')
-        self.api_key_entry.grid(row=0, column=1, sticky=tk.EW, pady=5)
+        add_grid.addWidget(QLabel("API Key:"), 0, 0, Qt.AlignLeft)
+        self.api_key_entry = QLineEdit()
+        self.api_key_entry.setEchoMode(QLineEdit.Password)
+        add_grid.addWidget(self.api_key_entry, 0, 1)
         
         # Toggle visibility button
-        self.show_key_btn = tb.Button(add_frame, text="👁", width=3,
-                                     command=self._toggle_key_visibility)
-        self.show_key_btn.grid(row=0, column=2, padx=5, pady=5)
+        self.show_key_btn = QPushButton("👁")
+        self.show_key_btn.setFixedWidth(40)
+        self.show_key_btn.clicked.connect(self._toggle_key_visibility)
+        add_grid.addWidget(self.show_key_btn, 0, 2)
         
         # Model
-        tk.Label(add_frame, text="Model:").grid(row=0, column=3, sticky=tk.W, padx=(20, 10), pady=5)
-        self.model_var = tk.StringVar()
+        add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         add_models = get_model_options()
-        self.model_combo = tb.Combobox(add_frame, textvariable=self.model_var, values=add_models, state='normal')
-        self.model_combo.grid(row=0, column=4, sticky=tk.EW, pady=5)
-        # Block mouse wheel on combobox
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(self.model_combo)
-        except Exception:
-            pass
-        # Attach gentle autofill
-        self._attach_model_autofill(self.model_combo, self.model_var)
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(add_models)
+        self.model_combo.setEditable(True)
+        add_grid.addWidget(self.model_combo, 0, 4)
         
-        # Row 1: Cooldown and optional credentials
-        tk.Label(add_frame, text="Cooldown (s):").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=5)
-        self.cooldown_var = tk.IntVar(value=60)
-        cooldown_frame = tk.Frame(add_frame)
-        cooldown_frame.grid(row=1, column=1, sticky=tk.W, pady=5)
+        # Row 1: Cooldown and buttons
+        add_grid.addWidget(QLabel("Cooldown (s):"), 1, 0, Qt.AlignLeft)
+        cooldown_widget = QWidget()
+        cooldown_layout = QHBoxLayout(cooldown_widget)
+        cooldown_layout.setContentsMargins(0, 0, 0, 0)
         
-        cooldown_spinbox = tb.Spinbox(cooldown_frame, from_=10, to=3600, textvariable=self.cooldown_var,
-                  width=10)
-        cooldown_spinbox.pack(side=tk.LEFT)
-        # Disable mouse wheel for cooldown
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(cooldown_spinbox)
-        except Exception:
-            pass
-        tk.Label(cooldown_frame, text="(10-3600)", font=('TkDefaultFont', 9), 
-                fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        self.cooldown_spinbox = QSpinBox()
+        self.cooldown_spinbox.setRange(10, 3600)
+        self.cooldown_spinbox.setValue(60)
+        self.cooldown_spinbox.setMaximumWidth(100)
+        cooldown_layout.addWidget(self.cooldown_spinbox)
+        
+        cooldown_hint = QLabel("(10-3600)")
+        cooldown_hint.setStyleSheet("color: gray;")
+        cooldown_layout.addWidget(cooldown_hint)
+        cooldown_layout.addStretch()
+        add_grid.addWidget(cooldown_widget, 1, 1)
         
         # Add button and Copy Current Key button
-        button_frame = tk.Frame(add_frame)
-        button_frame.grid(row=1, column=4, sticky=tk.E, pady=5)
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addStretch()
         
-        tb.Button(button_frame, text="Add Key", command=self._add_key,
-                 bootstyle="success").pack(side=tk.LEFT, padx=(0, 5))
+        add_key_btn = QPushButton("Add Key")
+        add_key_btn.clicked.connect(self._add_key)
+        button_layout.addWidget(add_key_btn)
         
-        tb.Button(button_frame, text="Copy Current Key", 
-                 command=self._copy_current_settings,
-                 bootstyle="info-outline").pack(side=tk.LEFT)
+        copy_current_btn = QPushButton("Copy Current Key")
+        copy_current_btn.clicked.connect(self._copy_current_settings)
+        button_layout.addWidget(copy_current_btn)
+        
+        add_grid.addWidget(button_widget, 1, 4, Qt.AlignRight)
         
         # Row 2: Google Credentials (optional, discretely styled)
-        tk.Label(add_frame, text="Google Creds:", font=('TkDefaultFont', 9), 
-                fg='gray').grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=2)
-        self.google_creds_var = tk.StringVar()
-        self.google_creds_entry = tb.Entry(add_frame, textvariable=self.google_creds_var,
-                                          font=('TkDefaultFont', 8), state='normal')
-        self.google_creds_entry.grid(row=2, column=1, sticky=tk.EW, pady=2)
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_grid.addWidget(google_creds_label, 2, 0, Qt.AlignLeft)
+        self.google_creds_entry = QLineEdit()
+        self.google_creds_entry.setStyleSheet("font-size: 8pt;")
+        add_grid.addWidget(self.google_creds_entry, 2, 1)
         
-        # Google credentials browse button (moved closer)
-        tb.Button(add_frame, text="📁", width=3, 
-                 command=self._browse_google_credentials,
-                 bootstyle="secondary-outline").grid(row=2, column=2, padx=(5, 0), pady=2)
+        # Google credentials browse button
+        google_browse_btn = QPushButton("📁")
+        google_browse_btn.setFixedWidth(40)
+        google_browse_btn.clicked.connect(self._browse_google_credentials)
+        add_grid.addWidget(google_browse_btn, 2, 2)
         
         # Google region field
-        tk.Label(add_frame, text="Region:", font=('TkDefaultFont', 11), 
-                fg='gray').grid(row=2, column=3, sticky=tk.W, padx=(10, 5), pady=2)
-        self.google_region_var = tk.StringVar(value='us-east5')  # Default region
-        self.google_region_entry = tb.Entry(add_frame, textvariable=self.google_region_var,
-                                           font=('TkDefaultFont', 8), state='normal', width=12)
-        self.google_region_entry.grid(row=2, column=4, sticky=tk.W, pady=2)
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_grid.addWidget(region_label, 2, 3, Qt.AlignLeft)
+        self.google_region_entry = QLineEdit("us-east5")
+        self.google_region_entry.setStyleSheet("font-size: 8pt;")
+        self.google_region_entry.setMaximumWidth(120)
+        add_grid.addWidget(self.google_region_entry, 2, 4, 1, 1, Qt.AlignLeft)
         
         # Row 3: Individual Endpoint Toggle
-        self.use_individual_endpoint_var = tk.BooleanVar(value=False)
-        individual_endpoint_toggle = tb.Checkbutton(add_frame, text="Use Individual Endpoint", 
-                                                   variable=self.use_individual_endpoint_var,
-                                                   bootstyle="round-toggle",
-                                                   command=self._toggle_individual_endpoint_fields)
-        individual_endpoint_toggle.grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=(0, 10), pady=5)
+        self.use_individual_endpoint_var = False
+        self.individual_endpoint_toggle = QCheckBox("Use Individual Endpoint")
+        self.individual_endpoint_toggle.setChecked(False)
+        self.individual_endpoint_toggle.toggled.connect(self._toggle_individual_endpoint_fields)
+        add_grid.addWidget(self.individual_endpoint_toggle, 3, 0, 1, 2, Qt.AlignLeft)
         
         # Row 4: Individual Endpoint (initially hidden)
-        self.individual_endpoint_label = tk.Label(add_frame, text="Individual Endpoint:", font=('TkDefaultFont', 9), 
-                                                fg='gray')
-        self.individual_endpoint_label.grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=2)
-        self.azure_endpoint_var = tk.StringVar()
-        self.azure_endpoint_entry = tb.Entry(add_frame, textvariable=self.azure_endpoint_var,
-                                            font=('TkDefaultFont', 8), state='disabled')
-        self.azure_endpoint_entry.grid(row=4, column=1, columnspan=2, sticky=tk.EW, pady=2)
+        self.individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_grid.addWidget(self.individual_endpoint_label, 4, 0, Qt.AlignLeft)
+        self.azure_endpoint_entry = QLineEdit()
+        self.azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        self.azure_endpoint_entry.setEnabled(False)
+        add_grid.addWidget(self.azure_endpoint_entry, 4, 1, 1, 2)
         
         # Individual Endpoint API Version (small dropdown, initially hidden)
-        self.individual_api_version_label = tk.Label(add_frame, text="API Ver:", font=('TkDefaultFont', 11), 
-                                                    fg='gray')
-        self.individual_api_version_label.grid(row=4, column=3, sticky=tk.W, padx=(10, 5), pady=2)
-        self.azure_api_version_var = tk.StringVar(value='2025-01-01-preview')
+        self.individual_api_version_label = QLabel("API Ver:")
+        self.individual_api_version_label.setStyleSheet("color: gray;")
+        add_grid.addWidget(self.individual_api_version_label, 4, 3, Qt.AlignLeft)
         azure_versions = [
             '2025-01-01-preview',
             '2024-12-01-preview', 
@@ -1823,59 +1812,49 @@ class MultiAPIKeyDialog:
             '2024-02-01',
             '2023-12-01-preview'
         ]
-        self.azure_api_version_combo = ttk.Combobox(add_frame, textvariable=self.azure_api_version_var,
-                                                   values=azure_versions, width=18, state='disabled',
-                                                   font=('TkDefaultFont', 7))
-        self.azure_api_version_combo.grid(row=4, column=4, sticky=tk.W, pady=2)
-        # Block mouse wheel on version combobox
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(self.azure_api_version_combo)
-        except Exception:
-            pass
+        self.azure_api_version_combo = QComboBox()
+        self.azure_api_version_combo.addItems(azure_versions)
+        self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self.azure_api_version_combo.setMaximumWidth(180)
+        self.azure_api_version_combo.setEnabled(False)
+        add_grid.addWidget(self.azure_api_version_combo, 4, 4, 1, 1, Qt.AlignLeft)
+        
+        # Set column stretch
+        add_grid.setColumnStretch(1, 1)
+        add_grid.setColumnStretch(4, 1)
         
         # Initially hide the endpoint fields
         self._toggle_individual_endpoint_fields()
         
-        # Setup inline editor hooks to use model options as a dropdown too
-        # (Optional enhancement could be added later)
-        
-        # Row 5: (Copy Current Key button moved up next to Add Key)
+        parent_layout.addWidget(add_frame)
     
     def _toggle_individual_endpoint_fields(self):
         """Toggle visibility and state of individual endpoint fields"""
-        enabled = self.use_individual_endpoint_var.get()
+        enabled = self.individual_endpoint_toggle.isChecked()
         
-        if enabled:
-            # Show and enable endpoint fields
-            state = tk.NORMAL
-            self.individual_endpoint_label.grid()
-            self.azure_endpoint_entry.grid()
-            self.individual_api_version_label.grid() 
-            self.azure_api_version_combo.grid()
-            
-            self.azure_endpoint_entry.config(state=state)
-            self.azure_api_version_combo.config(state='readonly')
-        else:
-            # Hide and disable endpoint fields
-            state = tk.DISABLED
-            self.individual_endpoint_label.grid_remove()
-            self.azure_endpoint_entry.grid_remove()
-            self.individual_api_version_label.grid_remove()
-            self.azure_api_version_combo.grid_remove()
-            
+        # Show/hide and enable/disable endpoint fields
+        self.individual_endpoint_label.setVisible(enabled)
+        self.azure_endpoint_entry.setVisible(enabled)
+        self.individual_api_version_label.setVisible(enabled)
+        self.azure_api_version_combo.setVisible(enabled)
+        
+        self.azure_endpoint_entry.setEnabled(enabled)
+        self.azure_api_version_combo.setEnabled(enabled)
+        
+        if not enabled:
             # Clear the fields when disabled
-            self.azure_endpoint_var.set("")
-            self.azure_api_version_var.set('2025-01-01-preview')
+            self.azure_endpoint_entry.clear()
+            self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
     
     def _move_key(self, direction):
         """Move selected key in the specified direction"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         if not selected or len(selected) != 1:
             return
         
         item = selected[0]
-        index = self.tree.index(item)
+        index = self.tree.indexOfTopLevelItem(item)
         
         if index >= len(self.key_pool.keys):
             return
@@ -1901,94 +1880,112 @@ class MultiAPIKeyDialog:
             self._refresh_key_list()
             
             # Reselect the moved item
-            items = self.tree.get_children()
-            if new_index < len(items):
-                self.tree.selection_set(items[new_index])
-                self.tree.focus(items[new_index])
-                self.tree.see(items[new_index])
+            if new_index < self.tree.topLevelItemCount():
+                new_item = self.tree.topLevelItem(new_index)
+                if new_item:
+                    self.tree.setCurrentItem(new_item)
+                    new_item.setSelected(True)
+                    self.tree.scrollToItem(new_item)
             
             # Show status
             self._show_status(f"Moved key to position {new_index + 1}")
             
-    def _on_selection_change(self, event):
+    def _on_selection_change(self):
         """Update position label when selection changes"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         if selected:
-            index = self.tree.index(selected[0])
+            index = self.tree.indexOfTopLevelItem(selected[0])
             total = len(self.key_pool.keys)
-            self.position_label.config(text=f"#{index + 1}/{total}")
+            self.position_label.setText(f"#{index + 1}/{total}")
         else:
-            self.position_label.config(text="")
+            self.position_label.setText("")
 
-    def _on_drag_start(self, event):
-        """Start drag operation"""
-        # Check if we clicked on an item
-        item = self.tree.identify_row(event.y)
-        if item:
-            self.drag_start_item = item
-            self.drag_start_y = event.y
-            # Select the item being dragged
-            self.tree.selection_set(item)
-            # Set cursor
-            self.tree.config(cursor="hand2")
-
-    def _on_drag_motion(self, event):
-        """Handle drag motion"""
-        if not self.drag_start_item:
+    def _on_tree_drop(self, event):
+        """Handle drop event for reordering keys"""
+        # Get the item being dropped and its target position
+        drop_indicator = self.tree.dropIndicatorPosition()
+        target_item = self.tree.itemAt(event.pos())
+        
+        # Get selected items (items being dragged)
+        selected_items = self.tree.selectedItems()
+        if not selected_items:
+            # Call original drop event if nothing selected
+            self._tree_original_dropEvent(event)
             return
         
-        # Get the item under the cursor
-        target_item = self.tree.identify_row(event.y)
+        # Get indices of selected items
+        selected_indices = []
+        for item in selected_items:
+            index = self.tree.indexOfTopLevelItem(item)
+            if index >= 0 and index < len(self.key_pool.keys):
+                selected_indices.append(index)
         
-        if target_item and target_item != self.drag_start_item:
-            # Visual feedback - change cursor
-            self.tree.config(cursor="sb_v_double_arrow")
-
-    def _on_drag_release(self, event):
-        """Complete drag operation"""
-        if not self.drag_start_item:
+        if not selected_indices:
+            event.ignore()
             return
         
-        # Reset cursor
-        self.tree.config(cursor="")
+        selected_indices.sort()
         
-        # Get the target item
-        target_item = self.tree.identify_row(event.y)
+        # Determine target index
+        if target_item is None:
+            # Dropped at the end
+            target_index = len(self.key_pool.keys)
+        else:
+            target_index = self.tree.indexOfTopLevelItem(target_item)
+            
+            # Adjust based on drop indicator position
+            if drop_indicator == QAbstractItemView.BelowItem:
+                target_index += 1
+            elif drop_indicator == QAbstractItemView.OnItem:
+                # Treat as above item
+                pass
         
-        if target_item and target_item != self.drag_start_item:
-            # Get indices
-            source_index = self.tree.index(self.drag_start_item)
-            target_index = self.tree.index(target_item)
-            
-            # Reorder the keys in the pool
-            with self.key_pool.lock:
-                # Remove from source position
-                key = self.key_pool.keys.pop(source_index)
-                # Insert at target position
-                self.key_pool.keys.insert(target_index, key)
-            
-            # Refresh display
-            self._refresh_key_list()
-            
-            # Reselect the moved item
-            items = self.tree.get_children()
-            if target_index < len(items):
-                self.tree.selection_set(items[target_index])
-                self.tree.focus(items[target_index])
-                self.tree.see(items[target_index])
-            
-            # Show status
-            self._show_status(f"Moved key from position {source_index + 1} to {target_index + 1}")
+        # Don't do anything if dropping in the same position
+        if len(selected_indices) == 1 and selected_indices[0] == target_index:
+            event.ignore()
+            return
         
-        # Reset drag state
-        self.drag_start_item = None
-        self.drag_start_y = None
+        # Reorder keys in the pool
+        with self.key_pool.lock:
+            # Extract the selected keys
+            selected_keys = [self.key_pool.keys[i] for i in selected_indices]
+            
+            # Remove selected keys from their original positions (in reverse order to maintain indices)
+            for index in reversed(selected_indices):
+                del self.key_pool.keys[index]
+            
+            # Adjust target index if items were removed before it
+            adjusted_target = target_index
+            for index in selected_indices:
+                if index < target_index:
+                    adjusted_target -= 1
+            
+            # Insert selected keys at the new position
+            for i, key in enumerate(selected_keys):
+                self.key_pool.keys.insert(adjusted_target + i, key)
+        
+        # Refresh the display
+        self._refresh_key_list()
+        
+        # Reselect the moved items
+        new_start_index = adjusted_target
+        for i in range(len(selected_keys)):
+            item = self.tree.topLevelItem(new_start_index + i)
+            if item:
+                item.setSelected(True)
+        
+        # Show status
+        if len(selected_indices) == 1:
+            self._show_status(f"Moved key to position {adjusted_target + 1}")
+        else:
+            self._show_status(f"Moved {len(selected_indices)} keys to position {adjusted_target + 1}")
+        
+        event.accept()
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
         # Clear tree
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.tree.clear()
         
         # Update primary key label if it exists
         if hasattr(self, 'primary_key_label'):
@@ -1996,7 +1993,7 @@ class MultiAPIKeyDialog:
             if keys:
                 first_key = keys[0]
                 masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
-                self.primary_key_label.config(text=f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
+                self.primary_key_label.setText(f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
         
         # Add keys
         keys = self.key_pool.get_all_keys()
@@ -2047,269 +2044,243 @@ class MultiAPIKeyDialog:
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             
             # Insert into tree with position column
-            self.tree.insert('', 'end', 
-                           text=masked_key,
-                           values=(position, key.model, f"{key.cooldown}s", status, 
-                                 key.success_count, key.error_count, times_used),
-                           tags=tags)
-        
-        # Configure tags (these may or may not work depending on ttkbootstrap theme)
-        self.tree.tag_configure('active', foreground='green')
-        self.tree.tag_configure('cooling', foreground='orange')
-        self.tree.tag_configure('disabled', foreground='gray')
-        self.tree.tag_configure('testing', foreground='blue')
-        self.tree.tag_configure('passed', foreground='dark green')
-        self.tree.tag_configure('failed', foreground='red')
-        self.tree.tag_configure('ratelimited', foreground='orange')
-        self.tree.tag_configure('error', foreground='dark red')
+            item = QTreeWidgetItem([
+                masked_key, key.model, f"{key.cooldown}s", status,
+                str(key.success_count), str(key.error_count), str(times_used)
+            ])
+            
+            # Set colors based on status
+            if tags == ('active',):
+                for col in range(7):
+                    item.setForeground(col, Qt.green)
+            elif tags == ('cooling',):
+                for col in range(7):
+                    item.setForeground(col, Qt.darkYellow)
+            elif tags == ('disabled',):
+                for col in range(7):
+                    item.setForeground(col, Qt.gray)
+            elif tags == ('testing',):
+                for col in range(7):
+                    item.setForeground(col, Qt.blue)
+            elif tags == ('passed',):
+                for col in range(7):
+                    item.setForeground(col, Qt.darkGreen)
+            elif tags == ('failed',):
+                for col in range(7):
+                    item.setForeground(col, Qt.red)
+            elif tags == ('ratelimited',):
+                for col in range(7):
+                    item.setForeground(col, Qt.darkYellow)
+            elif tags == ('error',):
+                for col in range(7):
+                    item.setForeground(col, Qt.darkRed)
+            
+            self.tree.addTopLevelItem(item)
         
         # Update stats
         active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
         total_count = len(keys)
         passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
-        self.stats_label.config(text=f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
+        self.stats_label.setText(f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
 
-    def _on_click(self, event):
+    def _on_click(self, item, column):
         """Handle click on tree item for inline editing"""
-        # Close any existing edit widget
-        if self.edit_widget:
-            self.edit_widget.destroy()
-            self.edit_widget = None
-        
-        # Identify what was clicked
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "cell":
-            return
-        
-        item = self.tree.identify_row(event.y)
-        column = self.tree.identify_column(event.x)
-        
         if not item:
             return
         
-        # Get column index
-        col_index = int(column.replace('#', ''))
-        
-        # Get the key index
-        index = self.tree.index(item)
+        index = self.tree.indexOfTopLevelItem(item)
         if index >= len(self.key_pool.keys):
             return
         
         key = self.key_pool.keys[index]
         
-        # Only allow editing Model (column #1) and Cooldown (column #2)
-        if col_index == 1:  # Model column
-            self._edit_model_inline(item, column, key)
-        elif col_index == 2:  # Cooldown column
-            self._edit_cooldown_inline(item, column, key)
-
-    def _edit_model_inline(self, item, column, key):
-        """Create inline editor for model name"""
-        # Get the bounding box of the cell
-        x, y, width, height = self.tree.bbox(item, column)
-        
-        # Expand the width to show more text (make it wider than the column)
-        expanded_width = max(width + 100, 250)  # At least 250 pixels wide
-        expanded_height = height + 8  # Add some padding to the height
-        
-        # Create entry widget
-        edit_var = tk.StringVar(value=key.model)
-        self.edit_widget = tb.Entry(self.tree, textvariable=edit_var, font=('TkDefaultFont', 11))
-        
-        def save_edit():
-            new_value = edit_var.get().strip()
-            if new_value and new_value != key.model:
+        # Column 1 = Model (editable)
+        # Column 2 = Cooldown (editable)
+        if column == 1:  # Model column
+            # Create inline editor for model
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
                 key.model = new_value
                 self._refresh_key_list()
                 self._show_status(f"Updated model to: {new_value}")
-            if self.edit_widget:
-                self.edit_widget.destroy()
-                self.edit_widget = None
-        
-        def cancel_edit(event=None):
-            if self.edit_widget:
-                self.edit_widget.destroy()
-                self.edit_widget = None
-        
-        # Place and configure the entry with expanded dimensions
-        # Adjust y position slightly to center it better
-        self.edit_widget.place(x=x, y=y-2, width=expanded_width, height=expanded_height)
-        self.edit_widget.focus()
-        self.edit_widget.select_range(0, tk.END)
-        
-        # Make sure the widget appears on top
-        self.edit_widget.lift()
-        
-        # Bind events
-        self.edit_widget.bind('<Return>', lambda e: save_edit())
-        self.edit_widget.bind('<Escape>', cancel_edit)
-        self.edit_widget.bind('<FocusOut>', lambda e: save_edit())
-        
-        # Prevent the click from selecting the item
-        return "break"
-
-    def _edit_cooldown_inline(self, item, column, key):
-        """Create inline editor for cooldown"""
-        # Get the bounding box of the cell
-        x, y, width, height = self.tree.bbox(item, column)
-        
-        # Create spinbox widget
-        edit_var = tk.IntVar(value=key.cooldown)
-        self.edit_widget = tb.Spinbox(self.tree, from_=10, to=3600, 
-                                      textvariable=edit_var, width=10)
-        # Disable mouse wheel changing values on inline editor
-        try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(self.edit_widget)
-        except Exception:
-            pass
-        
-        def save_edit():
-            new_value = edit_var.get()
-            if new_value != key.cooldown:
+        elif column == 2:  # Cooldown column
+            # Create inline editor for cooldown
+            old_value = key.cooldown
+            new_value, ok = self._show_cooldown_edit_dialog(old_value)
+            if ok and new_value != old_value:
                 key.cooldown = new_value
                 self._refresh_key_list()
                 self._show_status(f"Updated cooldown to: {new_value}s")
-            if self.edit_widget:
-                self.edit_widget.destroy()
-                self.edit_widget = None
+    
+    def _show_model_edit_dialog(self, current_value):
+        """Show dialog for editing model name"""
+        from PySide6.QtWidgets import QInputDialog
+        all_models = get_model_options()
         
-        def cancel_edit(event=None):
-            if self.edit_widget:
-                self.edit_widget.destroy()
-                self.edit_widget = None
+        # Use QComboBox-based input dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Model")
+        layout = QVBoxLayout(dialog)
         
-        # Place and configure the spinbox
-        self.edit_widget.place(x=x, y=y, width=width, height=height)
-        self.edit_widget.focus()
+        layout.addWidget(QLabel("Model Name:"))
+        combo = QComboBox()
+        combo.addItems(all_models)
+        combo.setEditable(True)
+        combo.setCurrentText(current_value)
+        combo.lineEdit().selectAll()
+        layout.addWidget(combo)
         
-        # Bind events
-        self.edit_widget.bind('<Return>', lambda e: save_edit())
-        self.edit_widget.bind('<Escape>', cancel_edit)
-        self.edit_widget.bind('<FocusOut>', lambda e: save_edit())
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.setDefault(True)
+        cancel_btn = QPushButton("Cancel")
         
-        # Prevent the click from selecting the item
-        return "break"
+        def accept_dialog():
+            dialog.accept()
+        
+        ok_btn.clicked.connect(accept_dialog)
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        combo.setFocus()
+        
+        result = dialog.exec_()
+        return (combo.currentText(), result == QDialog.Accepted)
+    
+    def _show_cooldown_edit_dialog(self, current_value):
+        """Show dialog for editing cooldown"""
+        from PySide6.QtWidgets import QInputDialog
+        value, ok = QInputDialog.getInt(
+            self, "Edit Cooldown", "Cooldown (seconds):",
+            current_value, 10, 3600, 10
+        )
+        return (value, ok)
 
-    def _show_context_menu(self, event):
+    def _show_context_menu(self, position):
         """Show context menu with reorder options"""
-        # Select item under cursor
-        item = self.tree.identify_row(event.y)
-        if item:
-            # If the clicked item is not in selection, select only it
-            if item not in self.tree.selection():
-                self.tree.selection_set(item)
+        # Get item at position
+        item = self.tree.itemAt(position)
+        if not item:
+            return
+        
+        # Select item if not already selected
+        if item not in self.tree.selectedItems():
+            self.tree.setCurrentItem(item)
+        
+        # Create context menu
+        menu = QMenu(self)
+        
+        # Reorder submenu
+        reorder_menu = menu.addMenu("Reorder")
+        top_action = reorder_menu.addAction("Move to Top")
+        top_action.triggered.connect(lambda: self._move_key('top'))
+        up_action = reorder_menu.addAction("Move Up")
+        up_action.triggered.connect(lambda: self._move_key('up'))
+        down_action = reorder_menu.addAction("Move Down")
+        down_action.triggered.connect(lambda: self._move_key('down'))
+        bottom_action = reorder_menu.addAction("Move to Bottom")
+        bottom_action.triggered.connect(lambda: self._move_key('bottom'))
+        
+        menu.addSeparator()
+        
+        # Add change model option
+        selected_count = len(self.tree.selectedItems())
+        if selected_count > 1:
+            change_action = menu.addAction(f"Change Model ({selected_count} selected)")
+        else:
+            change_action = menu.addAction("Change Model")
+        change_action.triggered.connect(self._change_model_for_selected)
+        
+        menu.addSeparator()
+        
+        # Individual Endpoint options
+        index = self.tree.indexOfTopLevelItem(item)
+        if index < len(self.key_pool.keys):
+            key = self.key_pool.keys[index]
+            endpoint_enabled = getattr(key, 'use_individual_endpoint', False)
+            endpoint_url = getattr(key, 'azure_endpoint', '')
             
-            # Create context menu
-            menu = tk.Menu(self.dialog, tearoff=0)
-            
-            # Reorder submenu
-            reorder_menu = tk.Menu(menu, tearoff=0)
-            reorder_menu.add_command(label="Move to Top", command=lambda: self._move_key('top'))
-            reorder_menu.add_command(label="Move Up", command=lambda: self._move_key('up'))
-            reorder_menu.add_command(label="Move Down", command=lambda: self._move_key('down'))
-            reorder_menu.add_command(label="Move to Bottom", command=lambda: self._move_key('bottom'))
-            menu.add_cascade(label="Reorder", menu=reorder_menu)
-            
-            menu.add_separator()
-            
-            # Add change model option
-            selected_count = len(self.tree.selection())
-            if selected_count > 1:
-                menu.add_command(label=f"Change Model ({selected_count} selected)", 
-                               command=self._change_model_for_selected)
+            if endpoint_enabled and endpoint_url:
+                config_action = menu.addAction("✅ Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
+                disable_action = menu.addAction("Disable Individual Endpoint")
+                disable_action.triggered.connect(lambda: self._toggle_individual_endpoint(index, False))
             else:
-                menu.add_command(label="Change Model", 
-                               command=self._change_model_for_selected)
-            
-            menu.add_separator()
-            
-            # Individual Endpoint options
-            index = self.tree.index(item)
-            if index < len(self.key_pool.keys):
-                key = self.key_pool.keys[index]
-                endpoint_enabled = getattr(key, 'use_individual_endpoint', False)
-                endpoint_url = getattr(key, 'azure_endpoint', '')
-                
-                if endpoint_enabled and endpoint_url:
-                    menu.add_command(label="✅ Individual Endpoint", 
-                                   command=lambda: self._configure_individual_endpoint(index))
-                    menu.add_command(label="Disable Individual Endpoint", 
-                                   command=lambda: self._toggle_individual_endpoint(index, False))
-                else:
-                    menu.add_command(label="🔧 Configure Individual Endpoint", 
-                                   command=lambda: self._configure_individual_endpoint(index))
-            
-            menu.add_separator()
-            menu.add_command(label="Test", command=self._test_selected)
-            menu.add_command(label="Enable", command=self._enable_selected)
-            menu.add_command(label="Disable", command=self._disable_selected)
-            menu.add_separator()
-            menu.add_command(label="Remove", command=self._remove_selected)
-            
-            # Show menu
-            menu.post(event.x_root, event.y_root)
+                config_action = menu.addAction("🔧 Configure Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
+        
+        menu.addSeparator()
+        test_action = menu.addAction("Test")
+        test_action.triggered.connect(self._test_selected)
+        enable_action = menu.addAction("Enable")
+        enable_action.triggered.connect(self._enable_selected)
+        disable_action = menu.addAction("Disable")
+        disable_action.triggered.connect(self._disable_selected)
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(self._remove_selected)
+        
+        # Show menu
+        menu.exec_(self.tree.viewport().mapToGlobal(position))
 
     def _change_model_for_selected(self):
         """Change model for all selected entries"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         if not selected:
             return
         
-        # Create simple dialog
-        dialog = tk.Toplevel(self.dialog)
-        dialog.title(f"Change Model for {len(selected)} Keys")
-        dialog.geometry("400x130")
-        dialog.transient(self.dialog)
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Change Model for {len(selected)} Keys")
+        dialog.setMinimumWidth(400)
+        
         # Set icon
-        self._set_icon(dialog)
-        
-        # Center the dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Main frame
-        main_frame = tk.Frame(dialog, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Label
-        tk.Label(main_frame, text="Enter new model name (press Enter to apply):",
-                font=('TkDefaultFont', 10)).pack(pady=(0, 10))
-        
-        # Model entry with dropdown
-        model_var = tk.StringVar()
-        
-        # Full model list (same as main GUI)
-        all_models = get_model_options()
-        
-        model_combo = ttk.Combobox(main_frame, values=all_models, 
-                                   textvariable=model_var, width=45, height=12)
-        model_combo.pack(pady=(0, 10))
-        
-        # Block mouse wheel on combobox
         try:
-            if hasattr(self.translator_gui, 'ui') and hasattr(self.translator_gui.ui, 'disable_spinbox_mousewheel'):
-                self.translator_gui.ui.disable_spinbox_mousewheel(model_combo)
+            icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
         except Exception:
             pass
         
-        # Attach gentle autofill
-        self._attach_model_autofill(model_combo, model_var)
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Label
+        label = QLabel("Enter new model name (press Enter to apply):")
+        label_font = QFont()
+        label_font.setPointSize(10)
+        label.setFont(label_font)
+        main_layout.addWidget(label)
+        
+        # Model combo box
+        all_models = get_model_options()
+        model_combo = QComboBox()
+        model_combo.addItems(all_models)
+        model_combo.setEditable(True)
+        
         # Get current model from first selected item as default
-        selected_indices = [self.tree.index(item) for item in selected]
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         if selected_indices and selected_indices[0] < len(self.key_pool.keys):
             current_model = self.key_pool.keys[selected_indices[0]].model
-            model_var.set(current_model)
-            model_combo.select_range(0, tk.END)  # Select all text for easy replacement
+            model_combo.setCurrentText(current_model)
+            if model_combo.lineEdit():
+                model_combo.lineEdit().selectAll()
         
-        def apply_change(event=None):
-            new_model = model_var.get().strip()
+        main_layout.addWidget(model_combo)
+        
+        def apply_change():
+            new_model = model_combo.currentText().strip()
             if new_model:
                 # Update all selected keys
                 for item in selected:
-                    index = self.tree.index(item)
+                    index = self.tree.indexOfTopLevelItem(item)
                     if index < len(self.key_pool.keys):
                         self.key_pool.keys[index].model = new_model
                 
@@ -2319,15 +2290,37 @@ class MultiAPIKeyDialog:
                 # Show status
                 self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
                 
-                dialog.destroy()
+                dialog.accept()
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        ok_btn = QPushButton("Apply")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(apply_change)
+        button_layout.addWidget(ok_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        main_layout.addLayout(button_layout)
+        
+        # Set up keyboard shortcuts
+        from PySide6.QtGui import QShortcut, QKeySequence
+        return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), dialog)
+        return_shortcut.activated.connect(apply_change)
+        enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), dialog)
+        enter_shortcut.activated.connect(apply_change)
+        escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), dialog)
+        escape_shortcut.activated.connect(dialog.reject)
         
         # Focus on the combobox
-        model_combo.focus()
+        model_combo.setFocus()
         
-        # Bind Enter key to apply
-        dialog.bind('<Return>', apply_change)
-        model_combo.bind('<Return>', apply_change)
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        # Show dialog
+        dialog.exec_()
     
     def _configure_individual_endpoint(self, key_index):
         """Configure individual endpoint for a specific key"""
@@ -2338,18 +2331,15 @@ class MultiAPIKeyDialog:
         
         # Create individual endpoint dialog using the class
         if IndividualEndpointDialog is None:
-            messagebox.showerror("Error", "IndividualEndpointDialog is not available.")
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        IndividualEndpointDialog(self.dialog, self.translator_gui, key, self._refresh_key_list, self._show_status)
+        IndividualEndpointDialog(self, self.translator_gui, key, self._refresh_key_list, self._show_status)
     
-    def _toggle_endpoint_fields(self, enable_var, endpoint_entry, version_combo):
+    def _toggle_endpoint_fields(self, enable_checkbox, endpoint_entry, version_combo):
         """Toggle endpoint configuration fields based on enable state"""
-        if enable_var.get():
-            endpoint_entry.config(state='normal')
-            version_combo.config(state='readonly')
-        else:
-            endpoint_entry.config(state='disabled')
-            version_combo.config(state='disabled')
+        enabled = enable_checkbox.isChecked()
+        endpoint_entry.setEnabled(enabled)
+        version_combo.setEnabled(enabled)
     
     def _toggle_individual_endpoint(self, key_index, enabled):
         """Quick toggle individual endpoint on/off"""
@@ -2388,31 +2378,15 @@ class MultiAPIKeyDialog:
                 return True
         return False
     
-    def _create_button_bar(self, parent):
-        """Create the bottom button bar"""
-        button_frame = tk.Frame(parent)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
-        
-        # Save button
-        tb.Button(button_frame, text="Save & Close", command=self._save_and_close,
-                 bootstyle="success").pack(side=tk.RIGHT, padx=(5, 0))
-        
-        # Cancel button  
-        tb.Button(button_frame, text="Cancel", command=self._on_close,
-                 bootstyle="secondary").pack(side=tk.RIGHT)
-        
-        # Import/Export
-        tb.Button(button_frame, text="Import", command=self._import_keys,
-                 bootstyle="info-outline").pack(side=tk.LEFT, padx=(0, 5))
-        
-        tb.Button(button_frame, text="Export", command=self._export_keys,
-                 bootstyle="info-outline").pack(side=tk.LEFT)
+    # Note: Duplicate _create_button_bar removed - PySide6 version defined earlier at line 1491
     
     def _browse_google_credentials(self):
         """Browse for Google Cloud credentials JSON file"""
-        filename = filedialog.askopenfilename(
-            title="Select Google Cloud Credentials JSON",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON",
+            "",
+            "JSON files (*.json);;All files (*.*)"
         )
         
         if filename:
@@ -2421,21 +2395,24 @@ class MultiAPIKeyDialog:
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
-                        self.google_creds_var.set(filename)
+                        self.google_creds_entry.setText(filename)
                         self._show_status(f"Selected Google credentials: {os.path.basename(filename)}")
                     else:
-                        messagebox.showerror(
+                        QMessageBox.critical(
+                            self,
                             "Error", 
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
     
     def _browse_fallback_google_credentials(self):
         """Browse for Google Cloud credentials JSON file for fallback keys"""
-        filename = filedialog.askopenfilename(
-            title="Select Google Cloud Credentials JSON for Fallback",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON for Fallback",
+            "",
+            "JSON files (*.json);;All files (*.*)"
         )
         
         if filename:
@@ -2444,154 +2421,91 @@ class MultiAPIKeyDialog:
                 with open(filename, 'r') as f:
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
-                        self.fallback_google_creds_var.set(filename)
+                        self.fallback_google_creds_entry.setText(filename)
                         self._show_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
                     else:
-                        messagebox.showerror(
+                        QMessageBox.critical(
+                            self,
                             "Error", 
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
     
-    def _attach_model_autofill(self, combo: ttk.Combobox, var: tk.StringVar, on_change=None):
-        """Attach the same gentle autofill/scroll behavior as the main GUI.
-        - No filtering; keeps full list intact.
-        - Gentle autofill only when appending at end; Backspace/Delete respected.
-        - Scroll/highlight match if dropdown is open.
-        """
-        import tkinter as _tk
-        import logging as _logging
-
-        # Store full values list on the widget
-        try:
-            combo._all_values = list(combo['values'])
-        except Exception:
-            combo._all_values = []
-        combo._prev_text = var.get() if var else combo.get()
-
-        def _scroll_to_value(_combo: ttk.Combobox, value: str):
-            try:
-                values = getattr(_combo, '_all_values', []) or list(_combo['values'])
-                if value not in values:
-                    return
-                index = values.index(value)
-                popdown = _combo.tk.eval(f'ttk::combobox::PopdownWindow {_combo._w}')
-                listbox = f'{popdown}.f.l'
-                tkobj = _combo.tk
-                tkobj.call(listbox, 'see', index)
-                tkobj.call(listbox, 'selection', 'clear', 0, 'end')
-                tkobj.call(listbox, 'selection', 'set', index)
-                tkobj.call(listbox, 'activate', index)
-            except Exception:
-                pass
-
-        def _on_keyrelease(event=None):
-            try:
-                typed = combo.get()
-                prev = getattr(combo, '_prev_text', '')
-                keysym = (getattr(event, 'keysym', '') or '').lower()
-
-                if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
-                    return
-
-                source = getattr(combo, '_all_values', []) or list(combo['values'])
-
-                first_match = None
-                if typed:
-                    lowered = typed.lower()
-                    pref = [v for v in source if v.lower().startswith(lowered)]
-                    cont = [v for v in source if lowered in v.lower()] if not pref else []
-                    if pref:
-                        first_match = pref[0]
-                    elif cont:
-                        first_match = cont[0]
-
-                grew = len(typed) > len(prev) and typed.startswith(prev)
-                is_del = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
-                try:
-                    at_end = combo.index(_tk.INSERT) == len(typed)
-                except Exception:
-                    at_end = True
-                try:
-                    has_sel = combo.selection_present()
-                except Exception:
-                    has_sel = False
-
-                # Gentle autofill
-                if first_match and grew and at_end and not has_sel and not is_del:
-                    if first_match.lower().startswith(typed.lower()) and first_match != typed:
-                        combo.set(first_match)
-                        try:
-                            combo.icursor(len(typed))
-                            combo.selection_range(len(typed), len(first_match))
-                        except Exception:
-                            pass
-
-                # If dropdown is open, scroll/highlight (no auto-open)
-                if first_match:
-                    _scroll_to_value(combo, first_match)
-
-                combo._prev_text = typed
-                if on_change and typed != prev:
-                    on_change()
-            except Exception as e:
-                try:
-                    _logging.debug(f"Combobox autocomplete error: {e}")
-                except Exception:
-                    pass
-
-        combo.bind('<KeyRelease>', _on_keyrelease)
+    def _attach_model_autofill(self, combo: QComboBox, on_change=None):
+        """Attach gentle autofill/autocomplete behavior to a QComboBox.
         
-        def _on_return(event=None):
-            try:
-                typed = combo.get()
-                source = getattr(combo, '_all_values', []) or list(combo['values'])
-                match = None
-                if typed:
-                    lowered = typed.lower()
-                    pref = [v for v in source if v.lower().startswith(lowered)]
-                    cont = [v for v in source if lowered in v.lower()] if not pref else []
-                    match = pref[0] if pref else (cont[0] if cont else None)
-                if match and match != typed:
-                    combo.set(match)
-                # Place caret at end and clear selection
-                try:
-                    combo.icursor('end')
-                    try:
-                        combo.selection_clear()
-                    except Exception:
-                        combo.selection_range(0, 0)
-                except Exception:
-                    pass
-                combo._prev_text = combo.get()
-                if on_change:
-                    on_change()
-            except Exception as e:
-                try:
-                    _logging.debug(f"Combobox enter-commit error: {e}")
-                except Exception:
-                    pass
-            # Do not return "break" so outer dialogs bound to <Return> still fire
-            return None
-
-        combo.bind('<Return>', _on_return)
-        combo.bind('<<ComboboxSelected>>', lambda e: on_change() if on_change else None)
-        combo.bind('<FocusOut>', lambda e: on_change() if on_change else None)
+        PySide6 version using QCompleter with similar behavior to the tkinter version:
+        - Shows suggestions as user types
+        - Prefix-based matching with fallback to contains matching
+        - Respects backspace/delete (no forced autocomplete)
+        """
+        # Set up completer for the combobox
+        completer = QCompleter(combo.model())
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setFilterMode(Qt.MatchContains)  # Match anywhere in string
+        combo.setCompleter(completer)
+        
+        # Store callback for changes
+        if on_change:
+            combo.currentTextChanged.connect(lambda: on_change())
+            combo.editTextChanged.connect(lambda: on_change())
+        
+        # Enable completion while typing
+        if combo.lineEdit():
+            line_edit = combo.lineEdit()
+            
+            # Connect to text changed signal for gentle autofill
+            def on_text_edited(text):
+                if not text:
+                    return
+                
+                # Find first match (prefix first, then contains)
+                all_items = [combo.itemText(i) for i in range(combo.count())]
+                
+                # Try prefix match first
+                prefix_matches = [item for item in all_items if item.lower().startswith(text.lower())]
+                if prefix_matches:
+                    first_match = prefix_matches[0]
+                else:
+                    # Try contains match
+                    contains_matches = [item for item in all_items if text.lower() in item.lower()]
+                    first_match = contains_matches[0] if contains_matches else None
+                
+                # Gentle autofill: only if cursor is at end and we found a match
+                if first_match and line_edit.cursorPosition() == len(text):
+                    # Check if text is growing (not backspacing)
+                    if len(text) > len(getattr(line_edit, '_prev_text', '')):
+                        # Only autocomplete if the match starts with what was typed
+                        if first_match.lower().startswith(text.lower()) and first_match != text:
+                            # Save cursor position
+                            cursor_pos = len(text)
+                            # Set the full match
+                            line_edit.setText(first_match)
+                            # Select the auto-filled part
+                            line_edit.setSelection(cursor_pos, len(first_match) - cursor_pos)
+                
+                # Store current text for next comparison
+                line_edit._prev_text = text
+            
+            line_edit.textEdited.connect(on_text_edited)
+            line_edit._prev_text = ""
 
     def _toggle_key_visibility(self):
         """Toggle API key visibility"""
-        if self.api_key_entry.cget('show') == '*':
-            self.api_key_entry.config(show='')
-            self.show_key_btn.config(text='🔒')
+        if self.api_key_entry.echoMode() == QLineEdit.Password:
+            self.api_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_key_btn.setText('🔒')
         else:
-            self.api_key_entry.config(show='*')
-            self.show_key_btn.config(text='👁')
+            self.api_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_key_btn.setText('👁')
     
     def _toggle_multi_key_mode(self):
         """Toggle multi-key mode"""
-        enabled = self.enabled_var.get()
+        enabled = self.enabled_checkbox.isChecked()
         self.translator_gui.config['use_multi_api_keys'] = enabled
+        self.enabled_var = enabled
         
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
@@ -2600,64 +2514,52 @@ class MultiAPIKeyDialog:
         # No need to show/hide fallback section based on multi-key mode
         
         # Update other UI elements
-        for widget in [self.api_key_entry, self.model_combo]:
-            if widget:
-                widget.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        if hasattr(self, 'api_key_entry'):
+            self.api_key_entry.setEnabled(enabled)
+        if hasattr(self, 'model_combo'):
+            self.model_combo.setEnabled(enabled)
         
-        # Handle Treeview separately - it doesn't support state property
-        if self.tree:
-            if enabled:
-                # Re-enable tree interactions by restoring original bindings
-                self.tree.bind('<Button-1>', self._on_click)
-                self.tree.bind('<Button-3>', self._show_context_menu)
-                self.tree.bind('<<TreeviewSelect>>', self._on_selection_change)
-                
-                # Re-enable drag and drop
-                self.tree.bind('<Button-1>', self._on_drag_start, add='+')
-                self.tree.bind('<B1-Motion>', self._on_drag_motion)
-                self.tree.bind('<ButtonRelease-1>', self._on_drag_release)
-            else:
-                # Disable tree interactions
-                self.tree.unbind('<Button-1>')
-                self.tree.unbind('<Button-3>')
-                self.tree.unbind('<<TreeviewSelect>>')
-                self.tree.unbind('<B1-Motion>')
-                self.tree.unbind('<ButtonRelease-1>')
+        # Tree widget enable/disable
+        if hasattr(self, 'tree'):
+            self.tree.setEnabled(enabled)
         
-        # Update action buttons state
-        for child in self.dialog.winfo_children():
-            if isinstance(child, tk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, tk.Frame):
-                        for button in subchild.winfo_children():
-                            if isinstance(button, (tb.Button, ttk.Button)) and button.cget('text') in [
-                                'Test Selected', 'Test All', 'Enable Selected', 
-                                'Disable Selected', 'Remove Selected', 'Add Key'
-                            ]:
-                                button.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        # Update all action buttons - find them by text and enable/disable
+        # This is a simplified approach; buttons are already connected to slots
+        if hasattr(self, 'button_frame'):
+            for button in self.button_frame.findChildren(QPushButton):
+                button_text = button.text()
+                if button_text in ['Test Selected', 'Test All', 'Enable Selected', 
+                                   'Disable Selected', 'Remove Selected', 'Add Key']:
+                    button.setEnabled(enabled)
     
     def _copy_current_settings(self):
         """Copy current API key and model from main GUI"""
-        if hasattr(self.translator_gui, 'api_key_var'):
-            self.api_key_var.set(self.translator_gui.api_key_var.get())
-        if hasattr(self.translator_gui, 'model_var'):
-            self.model_var.set(self.translator_gui.model_var.get())
+        # Get current API key and model from translator GUI
+        if hasattr(self.translator_gui, 'api_key_entry'):
+            api_key = self.translator_gui.api_key_entry.text()
+            if api_key:
+                self.api_key_entry.setText(api_key)
+        
+        if hasattr(self.translator_gui, 'model_combo'):
+            model = self.translator_gui.model_combo.currentText()
+            if model:
+                self.model_combo.setCurrentText(model)
     
     def _add_key(self):
         """Add a new API key with optional Google credentials and individual endpoint"""
-        api_key = self.api_key_var.get().strip()
-        model = self.model_var.get().strip()
-        cooldown = self.cooldown_var.get()
-        google_credentials = self.google_creds_var.get().strip() or None
-        google_region = self.google_region_var.get().strip() or None
+        api_key = self.api_key_entry.text().strip()
+        model = self.model_combo.currentText().strip()
+        cooldown = self.cooldown_spinbox.value()
+        google_credentials = self.google_creds_entry.text().strip() or None
+        google_region = self.google_region_entry.text().strip() or None
         
         # Only use individual endpoint if toggle is enabled
-        use_individual_endpoint = self.use_individual_endpoint_var.get()
-        azure_endpoint = self.azure_endpoint_var.get().strip() if use_individual_endpoint else None
-        azure_api_version = self.azure_api_version_var.get().strip() if use_individual_endpoint else None
+        use_individual_endpoint = self.individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
         
         if not api_key or not model:
-            messagebox.showerror("Error", "Please enter both API key and model name")
+            QMessageBox.critical(self, "Error", "Please enter both API key and model name")
             return
         
         # Add to pool with new fields
@@ -2670,14 +2572,14 @@ class MultiAPIKeyDialog:
         self.key_pool.add_key(key_entry)
         
         # Clear inputs
-        self.api_key_var.set("")
-        self.model_var.set("")
-        self.cooldown_var.set(60)
-        self.google_creds_var.set("")
-        self.azure_endpoint_var.set("")
-        self.google_region_var.set("us-east5")
-        self.azure_api_version_var.set('2025-01-01-preview')
-        self.use_individual_endpoint_var.set(False)
+        self.api_key_entry.clear()
+        self.model_combo.setCurrentText("")
+        self.cooldown_spinbox.setValue(60)
+        self.google_creds_entry.clear()
+        self.azure_endpoint_entry.clear()
+        self.google_region_entry.setText("us-east5")
+        self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.individual_endpoint_toggle.setChecked(False)
         # Update the UI to hide endpoint fields
         self._toggle_individual_endpoint_fields()
         
@@ -2694,60 +2596,17 @@ class MultiAPIKeyDialog:
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_status(f"Added key for model: {model}{extra_info}")
     
-    def _refresh_key_list(self):
-        """Refresh the key list display"""
-        # Clear tree
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # Add keys
-        keys = self.key_pool.get_all_keys()
-        for i, key in enumerate(keys):
-            # Mask API key for display
-            masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
-            
-            # Status
-            if not key.enabled:
-                status = "Disabled"
-                tags = ('disabled',)
-            elif key.is_cooling_down:
-                remaining = int(key.cooldown - (time.time() - key.last_error_time))
-                status = f"Cooling ({remaining}s)"
-                tags = ('cooling',)
-            else:
-                status = "Active"
-                tags = ('active',)
-            
-            # Times used (counter)
-            times_used = getattr(key, 'times_used', key.success_count + key.error_count)
-            
-            # Insert into tree
-            self.tree.insert('', 'end', 
-                           text=masked_key,
-                           values=(key.model, f"{key.cooldown}s", status, 
-                                 key.success_count, key.error_count, times_used),
-                           tags=tags)
-        
-        # Configure tags
-        self.tree.tag_configure('active', foreground='green')
-        self.tree.tag_configure('cooling', foreground='orange')
-        self.tree.tag_configure('disabled', foreground='gray')
-        
-        # Update stats
-        active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
-        total_count = len(keys)
-        self.stats_label.config(text=f"Keys: {active_count} active / {total_count} total")
-    
+    # Note: _refresh_key_list is defined earlier in the file (PySide6 version)
     
     def _test_selected(self):
         """Test selected API keys with inline progress"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         if not selected:
-            messagebox.showwarning("Warning", "Please select keys to test")
+            QMessageBox.warning(self, "Warning", "Please select keys to test")
             return
         
         # Get selected indices
-        indices = [self.tree.index(item) for item in selected]
+        indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         
         # Ensure UnifiedClient uses the same shared pool instance
         try:
@@ -2763,9 +2622,16 @@ class MultiAPIKeyDialog:
     def _test_all(self):
         """Test all API keys with inline progress"""
         if not self.key_pool.keys:
-            messagebox.showwarning("Warning", "No keys to test")
+            QMessageBox.warning(self, "Warning", "No keys to test")
             return
         
+        # Ensure UnifiedClient uses the same shared pool instance
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+            
         indices = list(range(len(self.key_pool.keys)))
         
         # Start testing in thread
@@ -2789,7 +2655,7 @@ class MultiAPIKeyDialog:
                 print(f"[DEBUG] Marked key {index} as testing")
         
         # Refresh once to show "Testing..." status
-        self.dialog.after(0, self._refresh_key_list)
+        QTimer.singleShot(0, self._refresh_key_list)
         
         # Create thread pool for parallel testing
         max_workers = min(10, len(indices))
@@ -2855,9 +2721,9 @@ class MultiAPIKeyDialog:
         
         # Update UI in main thread
         print(f"[DEBUG] Refreshing UI with results")
-        self.dialog.after(0, self._refresh_key_list)
-        self.dialog.after(0, lambda: self.stats_label.config(
-            text=f"Test complete: {success_count}/{total_count} passed"))
+        QTimer.singleShot(0, self._refresh_key_list)
+        QTimer.singleShot(0, lambda: self.stats_label.setText(
+            f"Test complete: {success_count}/{total_count} passed"))
         
 
 
@@ -2865,168 +2731,95 @@ class MultiAPIKeyDialog:
         """Update a single tree item based on current key state"""
         def update():
             # Find the tree item for this index
-            items = self.tree.get_children()
-            if index < len(items):
-                item = items[index]
-                key = self.key_pool.keys[index]
-                
-                # Determine status and tags
-                if key.last_test_result is None:
-                    # Currently testing
-                    status = "⏳ Testing..."
-                    tags = ('testing',)
-                elif not key.enabled:
-                    status = "Disabled"
-                    tags = ('disabled',)
-                elif key.last_test_result == 'passed':
-                    if key.is_cooling_down:
-                        remaining = int(key.cooldown - (time.time() - key.last_error_time))
-                        status = f"✅ Passed (cooling {remaining}s)"
-                        tags = ('passed_cooling',)
-                    else:
-                        status = "✅ Passed"
-                        tags = ('passed',)
-                elif key.last_test_result == 'failed':
-                    status = "❌ Failed"
-                    tags = ('failed',)
-                elif key.last_test_result == 'rate_limited':
-                    remaining = int(key.cooldown - (time.time() - key.last_error_time))
-                    status = f"⚠️ Rate Limited ({remaining}s)"
-                    tags = ('ratelimited',)
-                elif key.last_test_result == 'error':
-                    status = "❌ Error"
-                    if key.last_test_message:
-                        status += f": {key.last_test_message[:20]}..."
-                    tags = ('error',)
-                elif key.is_cooling_down:
-                    remaining = int(key.cooldown - (time.time() - key.last_error_time))
-                    status = f"Cooling ({remaining}s)"
-                    tags = ('cooling',)
-                else:
-                    status = "Active"
-                    tags = ('active',)
-                
-                # Get current values
-                values = list(self.tree.item(item, 'values'))
-                
-                # Update status column
-                values[2] = status
-                
-                # Update success/error counts
-                values[3] = key.success_count
-                values[4] = key.error_count
-                
-                # Update times used (counter)
-                values[5] = getattr(key, 'times_used', key.success_count + key.error_count)
-                
-                # Update the item
-                self.tree.item(item, values=values, tags=tags)
-        
-        # Run in main thread
-        self.dialog.after(0, update)
-
-    def _refresh_key_list(self):
-        """Refresh the key list display preserving test results"""
-        # Clear tree
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # Add keys
-        keys = self.key_pool.get_all_keys()
-        for i, key in enumerate(keys):
-            # Mask API key for display
-            masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
+            if index >= self.tree.topLevelItemCount() or index >= len(self.key_pool.keys):
+                return
             
-            # Determine status based on test results and current state
-            if key.last_test_result is None and hasattr(key, '_testing'):
-                # Currently testing (temporary flag)
+            item = self.tree.topLevelItem(index)
+            if not item:
+                return
+            
+            key = self.key_pool.keys[index]
+            
+            # Determine status
+            if key.last_test_result is None:
                 status = "⏳ Testing..."
-                tags = ('testing',)
             elif not key.enabled:
                 status = "Disabled"
-                tags = ('disabled',)
             elif key.last_test_result == 'passed':
-                status = "✅ Passed"
-                tags = ('passed',)
+                if key.is_cooling_down:
+                    remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                    status = f"✅ Passed (cooling {remaining}s)"
+                else:
+                    status = "✅ Passed"
             elif key.last_test_result == 'failed':
                 status = "❌ Failed"
-                tags = ('failed',)
             elif key.last_test_result == 'rate_limited':
-                status = "⚠️ Rate Limited"
-                tags = ('ratelimited',)
+                remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                status = f"⚠️ Rate Limited ({remaining}s)"
             elif key.last_test_result == 'error':
                 status = "❌ Error"
                 if key.last_test_message:
                     status += f": {key.last_test_message[:20]}..."
-                tags = ('error',)
-            elif key.is_cooling_down and key.last_error_time:
+            elif key.is_cooling_down:
                 remaining = int(key.cooldown - (time.time() - key.last_error_time))
-                if remaining > 0:
-                    status = f"Cooling ({remaining}s)"
-                    tags = ('cooling',)
-                else:
-                    key.is_cooling_down = False
-                    status = "Active"
-                    tags = ('active',)
+                status = f"Cooling ({remaining}s)"
             else:
                 status = "Active"
-                tags = ('active',)
             
-            # Times used (counter)
+            # Update status column (column 3)
+            item.setText(3, status)
+            
+            # Update success/error counts
+            item.setText(4, str(key.success_count))
+            item.setText(5, str(key.error_count))
+            
+            # Update times used
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
-            
-            # Insert into tree
-            self.tree.insert('', 'end', 
-                           text=masked_key,
-                           values=(key.model, f"{key.cooldown}s", status, 
-                                 key.success_count, key.error_count, times_used),
-                           tags=tags)
+            item.setText(6, str(times_used))
         
-        # Configure tags
-        self.tree.tag_configure('active', foreground='green')
-        self.tree.tag_configure('cooling', foreground='orange')
-        self.tree.tag_configure('disabled', foreground='gray')
-        self.tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 11))
-        self.tree.tag_configure('passed', foreground='dark green', font=('TkDefaultFont', 11))
-        self.tree.tag_configure('failed', foreground='red')
-        self.tree.tag_configure('ratelimited', foreground='orange')
-        self.tree.tag_configure('error', foreground='dark red')
-        
-        # Update stats
-        active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
-        total_count = len(keys)
-        passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
-        self.stats_label.config(text=f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
+        # Run in main thread
+        QTimer.singleShot(0, update)
+
+    # Note: Another duplicate _refresh_key_list removed - using PySide6 version defined earlier
     
     def _create_progress_dialog(self):
         """Create simple progress dialog at mouse cursor position"""
-        self.progress_dialog = tk.Toplevel(self.dialog)
-        self.progress_dialog.title("Testing API Keys")
+        from PySide6.QtGui import QCursor
         
-        # Get mouse position
-        x = self.progress_dialog.winfo_pointerx()
-        y = self.progress_dialog.winfo_pointery()
+        self.progress_dialog = QDialog(self)
+        self.progress_dialog.setWindowTitle("Testing API Keys")
+        self.progress_dialog.resize(500, 400)
         
-        # Set geometry at cursor position (offset slightly so cursor is inside window)
-        self.progress_dialog.geometry(f"500x400+{x-50}+{y-30}")
+        # Get mouse position and move dialog there
+        cursor_pos = QCursor.pos()
+        self.progress_dialog.move(cursor_pos.x() - 50, cursor_pos.y() - 30)
+        
+        # Layout
+        layout = QVBoxLayout(self.progress_dialog)
         
         # Add label
-        label = tb.Label(self.progress_dialog, text="Testing in progress...", 
-                        font=('TkDefaultFont', 10, 'bold'))
-        label.pack(pady=10)
+        label = QLabel("Testing in progress...")
+        label_font = QFont()
+        label_font.setPointSize(10)
+        label_font.setBold(True)
+        label.setFont(label_font)
+        layout.addWidget(label)
         
         # Add text widget for results
-        self.progress_text = scrolledtext.ScrolledText(self.progress_dialog, 
-                                                      wrap=tk.WORD, width=60, height=20)
-        self.progress_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.progress_text = QTextEdit()
+        self.progress_text.setReadOnly(True)
+        self.progress_text.setMinimumWidth(500)
+        self.progress_text.setMinimumHeight(300)
+        layout.addWidget(self.progress_text)
         
         # Add close button (initially disabled)
-        self.close_button = tb.Button(self.progress_dialog, text="Close", 
-                                     command=self.progress_dialog.destroy,
-                                     bootstyle="secondary", state=tk.DISABLED)
-        self.close_button.pack(pady=(0, 10))
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.progress_dialog.close)
+        self.close_button.setEnabled(False)
+        layout.addWidget(self.close_button)
         
-        self.progress_dialog.transient(self.dialog)
+        # Show dialog
+        self.progress_dialog.show()
 
     def _run_tests(self, indices: List[int]):
         """Run API tests for specified keys in parallel"""
@@ -3053,8 +2846,8 @@ class MultiAPIKeyDialog:
             test_label = f"{key.model} [{key_preview}]"
             
             # Update UI to show test started
-            self.dialog.after(0, lambda label=test_label: self.progress_text.insert(tk.END, f"Testing {label}... "))
-            self.dialog.after(0, lambda: self.progress_text.see(tk.END))
+            QTimer.singleShot(0, lambda label=test_label: self.progress_text.append(f"Testing {label}... "))
+            QTimer.singleShot(0, lambda: self.progress_text.moveCursor(self.progress_text.textCursor().End))
             
             try:
                 # Count this usage for times used in testing as well
@@ -3092,11 +2885,11 @@ class MultiAPIKeyDialog:
                     
                     content = response.choices[0].message.content
                     if content and "test successful" in content.lower():
-                        self.dialog.after(0, lambda label=test_label: self._update_test_result(label, True))
+                        QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
                         key.mark_success()
                         return (index, True, "Test passed")
                     else:
-                        self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False))
+                        QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
                         key.mark_error()
                         return (index, False, "Unexpected response")
                 else:
@@ -3121,15 +2914,15 @@ class MultiAPIKeyDialog:
                     if response and isinstance(response, tuple):
                         content, finish_reason = response
                         if content and "test successful" in content.lower():
-                            self.dialog.after(0, lambda label=test_label: self._update_test_result(label, True))
+                            QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
                             key.mark_success()
                             return (index, True, "Test passed")
                         else:
-                            self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False))
+                            QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
                             key.mark_error()
                             return (index, False, "Unexpected response")
                     else:
-                        self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False))
+                        QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
                         key.mark_error()
                         return (index, False, "No response")
                         
@@ -3140,7 +2933,7 @@ class MultiAPIKeyDialog:
                 if "429" in error_msg or "rate limit" in error_msg.lower():
                     error_code = 429
                     
-                self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False, error=True))
+                QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False, error=True))
                 key.mark_error(error_code)
                 return (index, False, f"Error: {error_msg}")
         
@@ -3156,15 +2949,15 @@ class MultiAPIKeyDialog:
                     self.test_results.put(result)
         
         # Show completion and close button
-        self.dialog.after(0, self._show_completion)
+        QTimer.singleShot(0, self._show_completion)
         
         # Process final results
-        self.dialog.after(0, self._process_test_results)
+        QTimer.singleShot(0, self._process_test_results)
 
     def _update_test_result(self, test_label, success, error=False):
         """Update the progress text with test result"""
         # Find the line with this test label
-        content = self.progress_text.get("1.0", tk.END)
+        content = self.progress_text.toPlainText()
         lines = content.split('\n')
         
         for i, line in enumerate(lines):
@@ -3177,19 +2970,25 @@ class MultiAPIKeyDialog:
                 else:
                     result_text = "❌ FAILED"
                 
-                # Calculate position
-                line_num = i + 1
-                line_end = f"{line_num}.end"
+                # Update the line
+                lines[i] = line + result_text
                 
-                self.progress_text.insert(line_end, result_text)
-                self.progress_text.insert(line_end, "\n")
-                self.progress_text.see(tk.END)
+                # Set updated text
+                self.progress_text.setPlainText('\n'.join(lines))
+                
+                # Scroll to end
+                cursor = self.progress_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.progress_text.setTextCursor(cursor)
                 break
 
     def _show_completion(self):
         """Show completion in the same dialog"""
-        self.progress_text.insert(tk.END, "\n--- Testing Complete ---\n")
-        self.progress_text.see(tk.END)
+        self.progress_text.append("\n--- Testing Complete ---\n")
+        cursor = self.progress_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.progress_text.setTextCursor(cursor)
+        self.close_button.setEnabled(True)
         
     def _process_test_results(self):
         """Process test results and show in the same dialog"""
@@ -3209,6 +3008,8 @@ class MultiAPIKeyDialog:
             
             # Update everything at once after all tests complete
             def final_update():
+                # Get indices from results
+                indices = [i for i, _, _ in results]
                 # Clear testing flags
                 for index in indices:
                     if index < len(self.key_pool.keys):
@@ -3217,38 +3018,41 @@ class MultiAPIKeyDialog:
                             delattr(key, '_testing')
                 
                 self._refresh_key_list()
-                self.stats_label.config(text=f"Test complete: {success_count}/{total_count} passed")
+                self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
 
-            # Use lambda to capture the variables in scope
-            self.dialog.after(0, lambda: final_update())
+            # Use QTimer to update in main thread
+            QTimer.singleShot(0, lambda: final_update())
             
             # Add summary to the same dialog
-            self.progress_text.insert(tk.END, f"\nSummary: {success_count}/{total_count} passed\n")
-            self.progress_text.insert(tk.END, "-" * 50 + "\n\n")
+            self.progress_text.append(f"\nSummary: {success_count}/{total_count} passed\n")
+            self.progress_text.append("-" * 50 + "\n\n")
             
             for i, success, msg in results:
                 key = self.key_pool.keys[i]
                 # Show key identifier in results too
                 key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
                 status = "✅" if success else "❌"
-                self.progress_text.insert(tk.END, f"{status} {key.model} [{key_preview}]: {msg}\n")
+                self.progress_text.append(f"{status} {key.model} [{key_preview}]: {msg}\n")
             
-            self.progress_text.see(tk.END)
+            # Scroll to end
+            cursor = self.progress_text.textCursor()
+            cursor.movePosition(cursor.End)
+            self.progress_text.setTextCursor(cursor)
             
             # Enable close button now that testing is complete
-            self.close_button.config(state=tk.NORMAL)
+            self.close_button.setEnabled(True)
             
             # Update the dialog title
-            self.progress_dialog.title(f"API Test Results - {success_count}/{total_count} passed")
+            self.progress_dialog.setWindowTitle(f"API Test Results - {success_count}/{total_count} passed")
             
             # Refresh list
             self._refresh_key_list()
     
     def _enable_selected(self):
         """Enable selected keys"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         for item in selected:
-            index = self.tree.index(item)
+            index = self.tree.indexOfTopLevelItem(item)
             if index < len(self.key_pool.keys):
                 self.key_pool.keys[index].enabled = True
         
@@ -3257,9 +3061,9 @@ class MultiAPIKeyDialog:
     
     def _disable_selected(self):
         """Disable selected keys"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         for item in selected:
-            index = self.tree.index(item)
+            index = self.tree.indexOfTopLevelItem(item)
             if index < len(self.key_pool.keys):
                 self.key_pool.keys[index].enabled = False
         
@@ -3268,13 +3072,15 @@ class MultiAPIKeyDialog:
     
     def _remove_selected(self):
         """Remove selected keys"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         if not selected:
             return
         
-        if messagebox.askyesno("Confirm", f"Remove {len(selected)} selected key(s)?"):
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
             # Get indices in reverse order to avoid index shifting
-            indices = sorted([self.tree.index(item) for item in selected], reverse=True)
+            indices = sorted([self.tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
             
             for index in indices:
                 self.key_pool.remove_key(index)
@@ -3284,37 +3090,36 @@ class MultiAPIKeyDialog:
     
     def _edit_cooldown(self):
         """Edit cooldown for selected key"""
-        selected = self.tree.selection()
+        selected = self.tree.selectedItems()
         if not selected or len(selected) != 1:
-            messagebox.showwarning("Warning", "Please select exactly one key")
+            QMessageBox.warning(self, "Warning", "Please select exactly one key")
             return
         
-        index = self.tree.index(selected[0])
+        index = self.tree.indexOfTopLevelItem(selected[0])
         if index >= len(self.key_pool.keys):
             return
         
         key = self.key_pool.keys[index]
         
-        # Create simple dialog
-        dialog = tk.Toplevel(self.dialog)
-        dialog.title("Edit Cooldown")
-        dialog.geometry("300x150")
+        # Use QInputDialog for simplicity
+        from PySide6.QtWidgets import QInputDialog
+        value, ok = QInputDialog.getInt(
+            self, "Edit Cooldown", f"Cooldown for {key.model} (seconds):",
+            key.cooldown, 10, 3600, 10
+        )
         
-        tk.Label(dialog, text=f"Cooldown for {key.model}:").pack(pady=10)
-        
-        cooldown_var = tk.IntVar(value=key.cooldown)
-        tb.Spinbox(dialog, from_=10, to=3600, textvariable=cooldown_var,
-                  width=10).pack(pady=5)
-        
-
+        if ok:
+            key.cooldown = value
+            self._refresh_key_list()
+            self._show_status(f"Updated cooldown to {value}s")
     
     def _import_keys(self):
         """Import keys from JSON file"""
-        from tkinter import filedialog
-        
-        filename = filedialog.askopenfilename(
-            title="Import API Keys",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import API Keys",
+            "",
+            "JSON files (*.json);;All files (*.*)"
         )
         
         if filename:
@@ -3331,25 +3136,24 @@ class MultiAPIKeyDialog:
                             imported_count += 1
                     
                     self._refresh_key_list()
-                    messagebox.showinfo("Success", f"Imported {imported_count} API keys")
+                    QMessageBox.information(self, "Success", f"Imported {imported_count} API keys")
                 else:
-                    messagebox.showerror("Error", "Invalid file format")
+                    QMessageBox.critical(self, "Error", "Invalid file format")
                     
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to import: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
     
     def _export_keys(self):
         """Export keys to JSON file"""
-        from tkinter import filedialog
-        
         if not self.key_pool.keys:
-            messagebox.showwarning("Warning", "No keys to export")
+            QMessageBox.warning(self, "Warning", "No keys to export")
             return
         
-        filename = filedialog.asksaveasfilename(
-            title="Export API Keys",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export API Keys",
+            "",
+            "JSON files (*.json);;All files (*.*)"
         )
         
         if filename:
@@ -3360,21 +3164,22 @@ class MultiAPIKeyDialog:
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(key_list, f, indent=2, ensure_ascii=False)
                 
-                messagebox.showinfo("Success", f"Exported {len(key_list)} API keys")
+                QMessageBox.information(self, "Success", f"Exported {len(key_list)} API keys")
                 
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to export: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
     
     def _show_status(self, message: str):
         """Show status message"""
-        self.stats_label.config(text=message)
+        if hasattr(self, 'stats_label'):
+            self.stats_label.setText(message)
     
     def _save_and_close(self):
         """Save configuration and close"""
         self._save_keys_to_config()
-        messagebox.showinfo("Success", "API key configuration saved")
-        self.dialog.destroy()
+        QMessageBox.information(self, "Success", "API key configuration saved")
+        self.accept()
     
     def _on_close(self):
         """Handle dialog close"""
-        self.dialog.destroy()
+        self.reject()

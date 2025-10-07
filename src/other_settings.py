@@ -1564,17 +1564,18 @@ def open_multi_api_key_manager(self):
     try:
         from multi_api_key_manager import MultiAPIKeyDialog
         
-        # Create and show dialog
-        dialog = MultiAPIKeyDialog(self.master, self)
-        
-        # Wait for dialog to close
-        self.master.wait_window(dialog.dialog)
+        # Use the static show_dialog method which handles PySide6 properly
+        # This blocks until the dialog is closed
+        MultiAPIKeyDialog.show_dialog(self.master, self)
         
         # Refresh the settings display if in settings dialog
         if hasattr(self, 'current_settings_dialog'):
-            # Close and reopen settings to refresh
-            self.current_settings_dialog.destroy()
-            self.show_settings()  # or open_other_settings()
+            try:
+                # Close and reopen settings to refresh (tkinter part)
+                self.current_settings_dialog.destroy()
+                self.show_settings()  # or open_other_settings()
+            except Exception:
+                pass
             
     except ImportError as e:
         QMessageBox.critical(None, "Error", f"Failed to load Multi API Key Manager: {str(e)}")
