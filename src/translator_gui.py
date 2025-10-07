@@ -14004,7 +14004,20 @@ Important rules:
             # Only show message if requested
             if show_message:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(None, "Saved", "Configuration saved.")
+                from PySide6.QtGui import QIcon
+                msg_box = QMessageBox()
+                msg_box.setWindowTitle("Saved")
+                msg_box.setText("Configuration saved.")
+                msg_box.setIcon(QMessageBox.Information)
+                msg_box.setStandardButtons(QMessageBox.Ok)
+                # Set custom window icon
+                try:
+                    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+                    if os.path.exists(icon_path):
+                        msg_box.setWindowIcon(QIcon(icon_path))
+                except Exception:
+                    pass
+                msg_box.exec()
                 
         except Exception as e:
             # Always show error messages regardless of show_message

@@ -923,6 +923,7 @@ class AIHunterConfigGUI:
         self.config['ai_hunter_config'] = ai_config
         
         # Call callback if provided (this should trigger main save_configuration)
+        # The callback (save_config) will show its own success message
         if self.callback:
             self.callback()
         

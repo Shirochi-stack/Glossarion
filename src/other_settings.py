@@ -231,17 +231,7 @@ def configure_rolling_summary_prompts(self):
         os.environ['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.rolling_summary_system_prompt
         os.environ['ROLLING_SUMMARY_USER_PROMPT'] = self.rolling_summary_user_prompt
 
-        msg_box = QMessageBox(dialog)
-        msg_box.setWindowTitle("Success")
-        msg_box.setText("Memory prompts saved!")
-        msg_box.setIcon(QMessageBox.Information)
-        try:
-            import os
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
-            msg_box.setWindowIcon(QIcon(icon_path))
-        except Exception as e:
-            print(f"Failed to set icon: {e}")
-        msg_box.exec()
+        QMessageBox.information(dialog, "Success", "Memory prompts saved!")
         dialog.close()
 
     def _reset_prompts():
@@ -1857,8 +1847,8 @@ def show_ai_hunter_settings(self):
     """Open AI Hunter configuration window (PySide6)"""
     try:
         def on_config_saved():
-            # Save the entire configuration
-            self.save_config()
+            # Save the entire configuration (without showing message box)
+            self.save_config(show_message=False)
             # Update status label if it still exists
             if hasattr(self, 'ai_hunter_status_label'):
                 try:
@@ -1978,17 +1968,7 @@ def configure_translation_chunk_prompt(self):
     def save_chunk_prompt():
         self.translation_chunk_prompt = chunk_prompt_text.toPlainText().strip()
         self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
-        msg_box = QMessageBox(dialog)
-        msg_box.setWindowTitle("Success")
-        msg_box.setText("Translation chunk prompt saved!")
-        msg_box.setIcon(QMessageBox.Information)
-        try:
-            import os
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
-            msg_box.setWindowIcon(QIcon(icon_path))
-        except Exception as e:
-            print(f"Failed to set icon: {e}")
-        msg_box.exec()
+        QMessageBox.information(dialog, "Success", "Translation chunk prompt saved!")
         dialog.close()
     
     def reset_chunk_prompt():
@@ -2102,17 +2082,7 @@ def configure_image_chunk_prompt(self):
     def save_image_chunk_prompt():
         self.image_chunk_prompt = image_chunk_prompt_text.toPlainText().strip()
         self.config['image_chunk_prompt'] = self.image_chunk_prompt
-        msg_box = QMessageBox(dialog)
-        msg_box.setWindowTitle("Success")
-        msg_box.setText("Image chunk prompt saved!")
-        msg_box.setIcon(QMessageBox.Information)
-        try:
-            import os
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
-            msg_box.setWindowIcon(QIcon(icon_path))
-        except Exception as e:
-            print(f"Failed to set icon: {e}")
-        msg_box.exec()
+        QMessageBox.information(dialog, "Success", "Image chunk prompt saved!")
         dialog.close()
     
     def reset_image_chunk_prompt():
