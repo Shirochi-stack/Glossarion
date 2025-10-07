@@ -335,12 +335,21 @@ def open_other_settings(self):
     except Exception:
         dialog.resize(950, 850)  # Fallback
     
+    # Store original size for restoring after fullscreen
+    original_geometry = None
+    
     # Add F11 fullscreen toggle with stay on top for buttons visibility
     def toggle_fullscreen():
+        nonlocal original_geometry
         if dialog.isFullScreen():
             dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
             dialog.showNormal()
+            # Restore original size
+            if original_geometry:
+                dialog.setGeometry(original_geometry)
         else:
+            # Save current geometry before fullscreen
+            original_geometry = dialog.geometry()
             dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             dialog.showFullScreen()
     
@@ -678,6 +687,10 @@ def _create_context_management_section(self, parent):
 
     btn_check_updates = QPushButton("🔄 Check for Updates")
     btn_check_updates.clicked.connect(lambda: self.check_for_updates_manual())
+    btn_check_updates.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; }"
+    )
     updates_h.addWidget(btn_check_updates)
 
     auto_cb = self._create_styled_checkbox("Check on startup")
@@ -715,10 +728,18 @@ def _create_context_management_section(self, parent):
 
     btn_backup = QPushButton("💾 Create Backup")
     btn_backup.clicked.connect(lambda: self._create_manual_config_backup())
+    btn_backup.setStyleSheet(
+        "QPushButton { background-color: #28a745; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #218838; }"
+    )
     backup_h.addWidget(btn_backup)
 
     btn_restore = QPushButton("↶ Restore Backup")
     btn_restore.clicked.connect(lambda: self._manual_restore_config())
+    btn_restore.setStyleSheet(
+        "QPushButton { background-color: #ffc107; color: black; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #e0a800; }"
+    )
     backup_h.addWidget(btn_restore)
 
     section_v.addWidget(backup_row)
@@ -2524,6 +2545,10 @@ def _create_prompt_management_section(self, parent):
     delete_btn = QPushButton("🗑️Delete Header Files")
     delete_btn.setFixedWidth(210)
     delete_btn.clicked.connect(lambda: self.delete_translated_headers_file())
+    delete_btn.setStyleSheet(
+        "QPushButton { background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #c82333; }"
+    )
     ignore_h.addWidget(delete_btn)
     ignore_h.addStretch()
     
@@ -2578,6 +2603,10 @@ def _create_prompt_management_section(self, parent):
     btn_validate = QPushButton("🔍 Validate EPUB Structure")
     btn_validate.setFixedWidth(250)
     btn_validate.clicked.connect(lambda: self.validate_epub_structure_gui())
+    btn_validate.setStyleSheet(
+        "QPushButton { background-color: #6f42c1; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #5a32a3; }"
+    )
     section_v.addWidget(btn_validate)
     
     validate_desc = QLabel("Check if all required EPUB files are present for compilation")
