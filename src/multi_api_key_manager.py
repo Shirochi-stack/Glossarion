@@ -867,7 +867,7 @@ class MultiAPIKeyDialog(QDialog):
                 "Manage multiple API keys with automatic rotation and rate limit handling.\n"
                 "Keys can be rotated automatically to distribute load evenly.\n"
                 "Rate-limited keys are automatically cooled down and skipped in rotation.")
-        self.multikey_desc_label.setStyleSheet("color: gray;")
+        self.multikey_desc_label.setStyleSheet("color: gray; padding-bottom: 10px;")
         self.multikey_desc_label.setWordWrap(True)
         scrollable_layout.addWidget(self.multikey_desc_label)
         
@@ -929,6 +929,9 @@ class MultiAPIKeyDialog(QDialog):
         
         # Create fallback container (hidden by default)
         self._create_fallback_section(scrollable_layout)
+        
+        # Add stretch to push button bar to bottom (will expand when content is minimal)
+        scrollable_layout.addStretch(1)
         
         # Button bar at the bottom
         self._create_button_bar(scrollable_layout)
