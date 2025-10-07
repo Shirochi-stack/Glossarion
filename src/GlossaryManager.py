@@ -3,8 +3,10 @@
 
 import os
 import re
+import os
 import threading
 import tempfile
+import queue
 import time
 from bs4 import BeautifulSoup
 import PatternManager as PM
@@ -34,6 +36,11 @@ def is_stop_requested():
 def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
     return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
+
+def send_with_interrupt(*args, **kwargs):
+    """Lazy wrapper to avoid circular import"""
+    from TransateKRtoEN import send_with_interrupt as _send_with_interrupt
+    return _send_with_interrupt(*args, **kwargs)
 
 
 # Class-level shared lock for API submission timing

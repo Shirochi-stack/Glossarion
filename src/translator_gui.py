@@ -10354,7 +10354,7 @@ Important rules:
                     self.master,
                     "Select QA Scanner Mode",
                     width=1500,  # Optimal width for 4 cards
-                    height=650,  # Compact height to ensure buttons are visible
+                    height=720,  # Compact height to ensure buttons are visible
                     hide_initially=True
                 )
             
