@@ -80,7 +80,9 @@ def setup_other_settings_methods(gui_instance):
         'create_ai_hunter_section', 'test_api_connections',
         # Prompt configuration dialogs
         'configure_translation_chunk_prompt', 'configure_image_chunk_prompt',
-        'configure_image_compression'
+        'configure_image_compression',
+        # Helper methods for styling
+        '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel'
     ]
     
     # Bind each method to the GUI instance
@@ -91,12 +93,65 @@ def setup_other_settings_methods(gui_instance):
                 setattr(gui_instance, method_name, types.MethodType(method, gui_instance))
 
 
+def _create_styled_checkbox(self, text):
+    """Create a checkbox with proper checkmark using text overlay - from manga integration"""
+    from PySide6.QtWidgets import QCheckBox, QLabel
+    from PySide6.QtCore import Qt, QTimer
+    
+    checkbox = QCheckBox(text)
+    # Don't set inline stylesheet - use the global stylesheet from container
+    
+    # Create checkmark overlay
+    checkmark = QLabel("✓", checkbox)
+    checkmark.setStyleSheet("""
+        QLabel {
+            color: white;
+            background: transparent;
+            font-weight: bold;
+            font-size: 11px;
+        }
+    """)
+    checkmark.setAlignment(Qt.AlignCenter)
+    checkmark.hide()
+    checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+    
+    def position_checkmark():
+        checkmark.setGeometry(2, 1, 14, 14)
+    
+    def update_checkmark():
+        if checkbox.isChecked():
+            position_checkmark()
+            checkmark.show()
+        else:
+            checkmark.hide()
+    
+    checkbox.stateChanged.connect(update_checkmark)
+    QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+    
+    return checkbox
+
+def _disable_combobox_mousewheel(self, combobox):
+    """Disable mousewheel scrolling on a combobox (PySide6)"""
+    combobox.wheelEvent = lambda event: None
+
+def _disable_spinbox_mousewheel(self, spinbox):
+    """Disable mousewheel scrolling on a spinbox (PySide6)"""
+    spinbox.wheelEvent = lambda event: None
+
 def configure_rolling_summary_prompts(self):
     """Configure rolling summary prompts (PySide6)"""
+    from PySide6.QtGui import QIcon
+    
     # Create a non-modal dialog
     dialog = QDialog(None)
     dialog.setWindowTitle("Configure Memory System Prompts")
     dialog.resize(800, 1050)
+    
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
 
     # Keep a reference so it isn't garbage-collected
     self._rolling_summary_dialog = dialog
@@ -211,17 +266,111 @@ def toggle_gpt_reasoning_controls(self):
 
 def open_other_settings(self):
     """Open the Other Settings dialog (PySide6)"""
+    from PySide6.QtGui import QIcon, QKeyEvent
+    from PySide6.QtCore import Qt
+    
     dialog = QDialog(None)
     dialog.setWindowTitle("Other Settings")
+    dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowMaximizeButtonHint)
+    
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+    
+    # Calculate optimal size (80% of screen width, 90% of screen height)
+    try:
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        optimal_width = int(screen.width() * 0.8)
+        optimal_height = int(screen.height() * 0.9)
+        dialog.resize(optimal_width, optimal_height)
+    except Exception:
+        dialog.resize(1200, 900)  # Fallback size
+    
+    # Add F11 fullscreen toggle
+    def toggle_fullscreen():
+        if dialog.isFullScreen():
+            dialog.showNormal()
+        else:
+            dialog.showFullScreen()
+    
+    # Override key press event for F11
+    original_keyPressEvent = dialog.keyPressEvent
+    def custom_keyPressEvent(event: QKeyEvent):
+        if event.key() == Qt.Key_F11:
+            toggle_fullscreen()
+        else:
+            original_keyPressEvent(event)
+    dialog.keyPressEvent = custom_keyPressEvent
+    
     main_layout = QVBoxLayout(dialog)
 
+    # Apply global stylesheet for blue checkboxes (from manga integration)
+    checkbox_radio_style = """
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+        QRadioButton {
+            color: white;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5a9fd4;
+            border-radius: 7px;
+            background-color: #2d2d2d;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #5a9fd4;
+            border: 2px solid #5a9fd4;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QRadioButton:disabled {
+            color: #666666;
+        }
+        QRadioButton::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """
+    
     # Scrollable area with a 2-column grid
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     container = QWidget()
+    container.setStyleSheet(checkbox_radio_style)  # Apply global stylesheet
     grid = QGridLayout(container)
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)
+    grid.setHorizontalSpacing(8)  # Compact horizontal spacing
+    grid.setVerticalSpacing(10)
 
     # Build sections (converted sections will populate the Qt layout)
     self._create_context_management_section(container)
@@ -285,7 +434,7 @@ def _create_context_management_section(self, parent):
     section_v = QVBoxLayout(section_box)
 
     # Rolling summary toggle
-    rolling_cb = QCheckBox("Use Rolling Summary (Memory)")
+    rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
     try:
         rolling_cb.setChecked(bool(self.rolling_summary_var.get()))
     except Exception:
@@ -312,9 +461,13 @@ def _create_context_management_section(self, parent):
     row1_h = QHBoxLayout(row1)
     row1_h.setContentsMargins(0, 0, 0, 0)
 
-    row1_h.addWidget(QLabel("Role:"))
+    role_label = QLabel("Role:")
+    role_label.setFixedWidth(95)  # Match "Summarize last" label width
+    row1_h.addWidget(role_label)
     role_combo = QComboBox()
     role_combo.addItems(["user", "system"])
+    role_combo.setFixedWidth(60)  # Match input field width
+    self._disable_combobox_mousewheel(role_combo)
     try:
         role_combo.setCurrentText(self.summary_role_var.get())
     except Exception:
@@ -326,11 +479,16 @@ def _create_context_management_section(self, parent):
             pass
     role_combo.currentTextChanged.connect(_on_role_changed)
     row1_h.addWidget(role_combo)
+    row1_h.addWidget(QLabel(" "))  # Spacer to match "exchanges" label
 
-    row1_h.addSpacing(20)
-    row1_h.addWidget(QLabel("Mode:"))
+    row1_h.addSpacing(12)  # Match spacing in row2
+    mode_label = QLabel("Mode:")
+    mode_label.setFixedWidth(45)  # Match "Retain" label width
+    row1_h.addWidget(mode_label)
     mode_combo = QComboBox()
     mode_combo.addItems(["append", "replace"])
+    mode_combo.setFixedWidth(60)  # Match input field width
+    self._disable_combobox_mousewheel(mode_combo)
     try:
         mode_combo.setCurrentText(self.rolling_summary_mode_var.get())
     except Exception:
@@ -342,6 +500,7 @@ def _create_context_management_section(self, parent):
             pass
     mode_combo.currentTextChanged.connect(_on_mode_changed)
     row1_h.addWidget(mode_combo)
+    row1_h.addStretch()  # Add stretch to push everything to the left
 
     settings_v.addWidget(row1)
 
@@ -420,7 +579,7 @@ def _create_context_management_section(self, parent):
     btn_check_updates.clicked.connect(lambda: self.check_for_updates_manual())
     updates_h.addWidget(btn_check_updates)
 
-    auto_cb = QCheckBox("Check on startup")
+    auto_cb = self._create_styled_checkbox("Check on startup")
     try:
         auto_cb.setChecked(bool(self.auto_update_check_var.get()))
     except Exception:
@@ -491,7 +650,7 @@ def _create_response_handling_section(self, parent):
     gpt_h1 = QHBoxLayout(gpt_row1)
     gpt_h1.setContentsMargins(20, 5, 0, 0)
     
-    gpt_enable_cb = QCheckBox("Enable GPT / OR Thinking")
+    gpt_enable_cb = self._create_styled_checkbox("Enable GPT / OR Thinking")
     try:
         gpt_enable_cb.setChecked(bool(self.enable_gpt_thinking_var.get()))
     except Exception:
@@ -510,6 +669,7 @@ def _create_response_handling_section(self, parent):
     self.gpt_effort_combo = QComboBox()
     self.gpt_effort_combo.addItems(["low", "medium", "high"])
     self.gpt_effort_combo.setFixedWidth(100)
+    self._disable_combobox_mousewheel(self.gpt_effort_combo)
     try:
         effort_val = self.gpt_effort_var.get()
         idx = self.gpt_effort_combo.findText(effort_val)
@@ -566,7 +726,7 @@ def _create_response_handling_section(self, parent):
     thinking_h = QHBoxLayout(thinking_row)
     thinking_h.setContentsMargins(20, 5, 0, 0)
     
-    gemini_thinking_cb = QCheckBox("Enable Gemini Thinking")
+    gemini_thinking_cb = self._create_styled_checkbox("Enable Gemini Thinking")
     try:
         gemini_thinking_cb.setChecked(bool(self.enable_gemini_thinking_var.get()))
     except Exception:
@@ -619,7 +779,7 @@ def _create_response_handling_section(self, parent):
     extraction_h = QHBoxLayout(extraction_row)
     extraction_h.setContentsMargins(20, 5, 0, 0)
     
-    parallel_cb = QCheckBox("Enable Parallel Processing")
+    parallel_cb = self._create_styled_checkbox("Enable Parallel Processing")
     try:
         parallel_cb.setChecked(bool(self.enable_parallel_extraction_var.get()))
     except Exception:
@@ -662,7 +822,7 @@ def _create_response_handling_section(self, parent):
     gui_yield_h = QHBoxLayout(gui_yield_row)
     gui_yield_h.setContentsMargins(20, 5, 0, 0)
     
-    gui_yield_cb = QCheckBox("Enable GUI Responsiveness Yield")
+    gui_yield_cb = self._create_styled_checkbox("Enable GUI Responsiveness Yield")
     try:
         gui_yield_cb.setChecked(bool(self.enable_gui_yield_var.get()))
     except Exception:
@@ -732,7 +892,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep3)
     
     # Retry Truncated
-    retry_truncated_cb = QCheckBox("Auto-retry Truncated Responses")
+    retry_truncated_cb = self._create_styled_checkbox("Auto-retry Truncated Responses")
     try:
         retry_truncated_cb.setChecked(bool(self.retry_truncated_var.get()))
     except Exception:
@@ -777,7 +937,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep4)
     
     # Preserve Original Text on Failure
-    preserve_cb = QCheckBox("Preserve Original Text on Failure")
+    preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
     try:
         preserve_cb.setChecked(bool(self.preserve_original_text_var.get()))
     except Exception:
@@ -839,7 +999,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep6)
     
     # Retry Duplicate
-    retry_duplicate_cb = QCheckBox("Auto-retry Duplicate Content")
+    retry_duplicate_cb = self._create_styled_checkbox("Auto-retry Duplicate Content")
     try:
         retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var.get()))
     except Exception:
@@ -970,7 +1130,7 @@ def _create_response_handling_section(self, parent):
     update_ai_hunter_visibility()
     
     # Retry Slow
-    retry_slow_cb = QCheckBox("Auto-retry Slow Chunks")
+    retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Chunks")
     retry_slow_cb.setContentsMargins(0, 15, 0, 0)
     try:
         retry_slow_cb.setChecked(bool(self.retry_timeout_var.get()))
@@ -1029,7 +1189,7 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'enable_http_tuning_var'):
         self.enable_http_tuning_var = tk.BooleanVar(value=self.config.get('enable_http_tuning', False))
     
-    self.http_tuning_checkbox = QCheckBox("Enable HTTP timeout/pooling overrides")
+    self.http_tuning_checkbox = self._create_styled_checkbox("Enable HTTP timeout/pooling overrides")
     try:
         self.http_tuning_checkbox.setChecked(bool(self.enable_http_tuning_var.get()))
     except Exception:
@@ -1128,7 +1288,7 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'ignore_retry_after_var'):
         self.ignore_retry_after_var = tk.BooleanVar(value=bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1')))
     
-    self.ignore_retry_after_checkbox = QCheckBox("Ignore server Retry-After header (use local backoff)")
+    self.ignore_retry_after_checkbox = self._create_styled_checkbox("Ignore server Retry-After header (use local backoff)")
     try:
         self.ignore_retry_after_checkbox.setChecked(bool(self.ignore_retry_after_var.get()))
     except Exception:
@@ -1196,7 +1356,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(retries_desc)
     
     # Indefinite Rate Limit Retry toggle
-    indefinite_retry_cb = QCheckBox("Indefinite Rate Limit Retry")
+    indefinite_retry_cb = self._create_styled_checkbox("Indefinite Rate Limit Retry")
     indefinite_retry_cb.setContentsMargins(20, 0, 0, 0)
     try:
         indefinite_retry_cb.setChecked(bool(self.indefinite_rate_limit_retry_var.get()))
@@ -1536,10 +1696,17 @@ def configure_translation_chunk_prompt(self):
     """Configure the prompt template for translation chunks (PySide6)"""
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
     
     dialog = QDialog(None)
     dialog.setWindowTitle("Configure Translation Chunk Prompt")
     dialog.resize(700, 600)
+    
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
     
     main_layout = QVBoxLayout(dialog)
     main_layout.setContentsMargins(20, 20, 20, 20)
@@ -1644,10 +1811,17 @@ def configure_image_chunk_prompt(self):
     """Configure the prompt template for image chunks (PySide6)"""
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
     
     dialog = QDialog(None)
     dialog.setWindowTitle("Configure Image Chunk Prompt")
     dialog.resize(700, 600)
+    
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
     
     main_layout = QVBoxLayout(dialog)
     main_layout.setContentsMargins(20, 20, 20, 20)
@@ -1753,10 +1927,17 @@ def configure_image_compression(self):
                                    QCheckBox, QLineEdit, QGroupBox, QRadioButton, QSlider, 
                                    QWidget, QScrollArea, QMessageBox, QFrame)
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
     
     dialog = QDialog(None)
     dialog.setWindowTitle("Image Compression Settings")
     dialog.resize(650, 700)
+    
+    # Set icon
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
     
     # Scrollable area
     scroll = QScrollArea()
@@ -1774,7 +1955,7 @@ def configure_image_compression(self):
     main_layout.addSpacing(15)
     
     # Enable compression toggle
-    enable_cb = QCheckBox("Enable Image Compression")
+    enable_cb = self._create_styled_checkbox("Enable Image Compression")
     enable_cb.setChecked(self.config.get('enable_image_compression', False))
     main_layout.addWidget(enable_cb)
     main_layout.addSpacing(20)
@@ -1788,7 +1969,7 @@ def configure_image_compression(self):
     auto_box = QGroupBox("Automatic Compression")
     auto_v = QVBoxLayout(auto_box)
     
-    auto_compress_cb = QCheckBox("Auto-compress to fit token limits")
+    auto_compress_cb = self._create_styled_checkbox("Auto-compress to fit token limits")
     auto_compress_cb.setChecked(self.config.get('auto_compress_enabled', True))
     auto_v.addWidget(auto_compress_cb)
     
@@ -1914,23 +2095,23 @@ def configure_image_compression(self):
     advanced_box = QGroupBox("Advanced Options")
     advanced_v = QVBoxLayout(advanced_box)
     
-    preserve_transparency_cb = QCheckBox("Preserve transparency (PNG/WebP only)")
+    preserve_transparency_cb = self._create_styled_checkbox("Preserve transparency (PNG/WebP only)")
     preserve_transparency_cb.setChecked(self.config.get('preserve_transparency', False))
     advanced_v.addWidget(preserve_transparency_cb)
     
-    preserve_format_cb = QCheckBox("Preserve original image format")
+    preserve_format_cb = self._create_styled_checkbox("Preserve original image format")
     preserve_format_cb.setChecked(self.config.get('preserve_original_format', False))
     advanced_v.addWidget(preserve_format_cb)
     
-    optimize_ocr_cb = QCheckBox("Optimize for OCR (maintain text clarity)")
+    optimize_ocr_cb = self._create_styled_checkbox("Optimize for OCR (maintain text clarity)")
     optimize_ocr_cb.setChecked(self.config.get('optimize_for_ocr', True))
     advanced_v.addWidget(optimize_ocr_cb)
     
-    progressive_cb = QCheckBox("Progressive encoding (JPEG)")
+    progressive_cb = self._create_styled_checkbox("Progressive encoding (JPEG)")
     progressive_cb.setChecked(self.config.get('progressive_encoding', True))
     advanced_v.addWidget(progressive_cb)
     
-    save_compressed_cb = QCheckBox("Save compressed images to disk")
+    save_compressed_cb = self._create_styled_checkbox("Save compressed images to disk")
     save_compressed_cb.setChecked(self.config.get('save_compressed_images', False))
     advanced_v.addWidget(save_compressed_cb)
     
@@ -2030,7 +2211,7 @@ def _create_prompt_management_section(self, parent):
     title_h = QHBoxLayout(title_w)
     title_h.setContentsMargins(0, 10, 0, 10)
     
-    translate_title_cb = QCheckBox("Translate Book Title")
+    translate_title_cb = self._create_styled_checkbox("Translate Book Title")
     try:
         translate_title_cb.setChecked(bool(self.translate_book_title_var.get()))
     except Exception:
@@ -2082,7 +2263,7 @@ def _create_prompt_management_section(self, parent):
     header_h1.setContentsMargins(0, 5, 0, 10)
     
     # Master toggle for batch header translation
-    batch_toggle_cb = QCheckBox("Batch Translate Headers")
+    batch_toggle_cb = self._create_styled_checkbox("Batch Translate Headers")
     try:
         batch_toggle_cb.setChecked(bool(self.batch_translate_headers_var.get()))
     except Exception:
@@ -2114,7 +2295,7 @@ def _create_prompt_management_section(self, parent):
     update_h = QHBoxLayout(update_row)
     update_h.setContentsMargins(20, 0, 0, 0)
     
-    update_cb = QCheckBox("Update headers in HTML files")
+    update_cb = self._create_styled_checkbox("Update headers in HTML files")
     try:
         update_cb.setChecked(bool(self.update_html_headers_var.get()))
     except Exception:
@@ -2129,7 +2310,7 @@ def _create_prompt_management_section(self, parent):
     
     update_h.addSpacing(20)
     
-    save_cb = QCheckBox("Save translations to .txt")
+    save_cb = self._create_styled_checkbox("Save translations to .txt")
     try:
         save_cb.setChecked(bool(self.save_header_translations_var.get()))
     except Exception:
@@ -2150,7 +2331,7 @@ def _create_prompt_management_section(self, parent):
     ignore_h = QHBoxLayout(ignore_row)
     ignore_h.setContentsMargins(20, 5, 0, 0)
     
-    ignore_header_cb = QCheckBox("Ignore header")
+    ignore_header_cb = self._create_styled_checkbox("Ignore header")
     try:
         ignore_header_cb.setChecked(bool(self.ignore_header_var.get()))
     except Exception:
@@ -2165,7 +2346,7 @@ def _create_prompt_management_section(self, parent):
     
     ignore_h.addSpacing(15)
     
-    ignore_title_cb = QCheckBox("Ignore title")
+    ignore_title_cb = self._create_styled_checkbox("Ignore title")
     try:
         ignore_title_cb.setChecked(bool(self.ignore_title_var.get()))
     except Exception:
@@ -2243,7 +2424,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(validate_desc)
     
     # NCX-only navigation toggle
-    ncx_cb = QCheckBox("Use NCX-only Navigation (Compatibility Mode)")
+    ncx_cb = self._create_styled_checkbox("Use NCX-only Navigation (Compatibility Mode)")
     try:
         ncx_cb.setChecked(bool(self.force_ncx_only_var.get()))
     except Exception:
@@ -2258,7 +2439,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(ncx_cb)
     
     # CSS Attachment toggle
-    css_cb = QCheckBox("Attach CSS to Chapters (Fixes styling issues)")
+    css_cb = self._create_styled_checkbox("Attach CSS to Chapters (Fixes styling issues)")
     try:
         css_cb.setChecked(bool(self.attach_css_to_chapters_var.get()))
     except Exception:
@@ -2273,7 +2454,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(css_cb)
     
     # Output file naming
-    retain_cb = QCheckBox("Retain source extension (no 'response_' prefix)")
+    retain_cb = self._create_styled_checkbox("Retain source extension (no 'response_' prefix)")
     try:
         retain_cb.setChecked(bool(self.retain_source_extension_var.get()))
     except Exception:
@@ -2338,7 +2519,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(reinforce_w)
     
     # Emergency Paragraph Restoration
-    emergency_cb = QCheckBox("Emergency Paragraph Restoration")
+    emergency_cb = self._create_styled_checkbox("Emergency Paragraph Restoration")
     try:
         emergency_cb.setChecked(bool(self.emergency_restore_var.get()))
     except Exception:
@@ -2358,7 +2539,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(emergency_desc)
     
     # Enable Decimal Chapter Detection
-    decimal_cb = QCheckBox("Enable Decimal Chapter Detection (EPUBs)")
+    decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
     try:
         decimal_cb.setChecked(bool(self.enable_decimal_chapters_var.get()))
     except Exception:
@@ -2460,7 +2641,7 @@ def _create_processing_options_section(self, parent):
     enhanced_opts_v = QVBoxLayout(self.enhanced_options_frame)
     enhanced_opts_v.setContentsMargins(20, 5, 0, 0)
     
-    preserve_cb = QCheckBox("Preserve Markdown Structure")
+    preserve_cb = self._create_styled_checkbox("Preserve Markdown Structure")
     try:
         preserve_cb.setChecked(bool(self.enhanced_preserve_structure_var.get()))
     except Exception:
@@ -2569,7 +2750,7 @@ def _create_processing_options_section(self, parent):
         self.force_bs_for_traditional_var = tk.BooleanVar(
             value=self.config.get('force_bs_for_traditional', True)
         )
-    force_bs_cb = QCheckBox("Force BeautifulSoup for DeepL / Google Translate / Google Free")
+    force_bs_cb = self._create_styled_checkbox("Force BeautifulSoup for DeepL / Google Translate / Google Free")
     try:
         force_bs_cb.setChecked(bool(self.force_bs_for_traditional_var.get()))
     except Exception:
@@ -2600,7 +2781,7 @@ def _create_processing_options_section(self, parent):
             value=self.config.get('disable_chapter_merging', False)
         )
     
-    disable_merging_cb = QCheckBox("Disable Chapter Merging")
+    disable_merging_cb = self._create_styled_checkbox("Disable Chapter Merging")
     try:
         disable_merging_cb.setChecked(bool(self.disable_chapter_merging_var.get()))
     except Exception:
@@ -2623,7 +2804,7 @@ def _create_processing_options_section(self, parent):
     
     # === REMAINING OPTIONS ===
     # Disable Image Gallery
-    gallery_cb = QCheckBox("Disable Image Gallery in EPUB")
+    gallery_cb = self._create_styled_checkbox("Disable Image Gallery in EPUB")
     try:
         gallery_cb.setChecked(bool(self.disable_epub_gallery_var.get()))
     except Exception:
@@ -2643,7 +2824,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(gallery_desc)
     
     # Disable Automatic Cover Creation
-    cover_cb = QCheckBox("Disable Automatic Cover Creation")
+    cover_cb = self._create_styled_checkbox("Disable Automatic Cover Creation")
     try:
         cover_cb.setChecked(bool(self.disable_automatic_cover_creation_var.get()))
     except Exception:
@@ -2663,7 +2844,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(cover_desc)
     
     # Translate cover.html
-    translate_cover_cb = QCheckBox("Translate cover.html (Skip Override)")
+    translate_cover_cb = self._create_styled_checkbox("Translate cover.html (Skip Override)")
     try:
         translate_cover_cb.setChecked(bool(self.translate_cover_html_var.get()))
     except Exception:
@@ -2683,7 +2864,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(translate_cover_desc)
     
     # Disable 0-based Chapter Detection
-    zero_detect_cb = QCheckBox("Disable 0-based Chapter Detection")
+    zero_detect_cb = self._create_styled_checkbox("Disable 0-based Chapter Detection")
     try:
         zero_detect_cb.setChecked(bool(self.disable_zero_detection_var.get()))
     except Exception:
@@ -2703,7 +2884,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(zero_detect_desc)
     
     # Use Header as Output Name
-    header_output_cb = QCheckBox("Use Header as Output Name")
+    header_output_cb = self._create_styled_checkbox("Use Header as Output Name")
     try:
         header_output_cb.setChecked(bool(self.use_header_as_output_var.get()))
     except Exception:
@@ -2772,7 +2953,7 @@ def _create_processing_options_section(self, parent):
     scan_h = QHBoxLayout(scan_w)
     scan_h.setContentsMargins(0, 10, 0, 0)
     
-    scan_cb = QCheckBox("Enable post-translation Scanning phase")
+    scan_cb = self._create_styled_checkbox("Enable post-translation Scanning phase")
     try:
         scan_cb.setChecked(bool(self.scan_phase_enabled_var.get()))
     except Exception:
@@ -2791,6 +2972,7 @@ def _create_processing_options_section(self, parent):
     scan_combo = QComboBox()
     scan_combo.addItems(["quick-scan", "aggressive", "ai-hunter", "custom"])
     scan_combo.setFixedWidth(120)
+    self._disable_combobox_mousewheel(scan_combo)
     try:
         mode_val = self.scan_phase_mode_var.get()
         idx = scan_combo.findText(mode_val)
@@ -2814,7 +2996,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(scan_desc)
     
     # Conservative Batching
-    batch_cb = QCheckBox("Use Conservative Batching")
+    batch_cb = self._create_styled_checkbox("Use Conservative Batching")
     try:
         batch_cb.setChecked(bool(self.conservative_batching_var.get()))
     except Exception:
@@ -2850,7 +3032,7 @@ def _create_processing_options_section(self, parent):
             value=self.config.get('disable_gemini_safety', False)
         )
     
-    safety_cb = QCheckBox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
+    safety_cb = self._create_styled_checkbox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
     try:
         safety_cb.setChecked(bool(self.disable_gemini_safety_var.get()))
     except Exception:
@@ -2880,7 +3062,7 @@ def _create_processing_options_section(self, parent):
             value=self.config.get('openrouter_use_http_only', False)
         )
     
-    http_only_cb = QCheckBox("Use HTTP-only for OpenRouter (bypass SDK)")
+    http_only_cb = self._create_styled_checkbox("Use HTTP-only for OpenRouter (bypass SDK)")
     try:
         http_only_cb.setChecked(bool(self.openrouter_http_only_var.get()))
     except Exception:
@@ -2905,7 +3087,7 @@ def _create_processing_options_section(self, parent):
             value=self.config.get('openrouter_accept_identity', False)
         )
     
-    accept_identity_cb = QCheckBox("Disable compression for OpenRouter (Accept-Encoding)")
+    accept_identity_cb = self._create_styled_checkbox("Disable compression for OpenRouter (Accept-Encoding)")
     try:
         accept_identity_cb.setChecked(bool(self.openrouter_accept_identity_var.get()))
     except Exception:
@@ -2954,6 +3136,7 @@ def _create_processing_options_section(self, parent):
     provider_combo.setEditable(True)
     provider_combo.addItems(provider_options)
     provider_combo.setFixedWidth(200)
+    self._disable_combobox_mousewheel(provider_combo)
     try:
         idx = provider_combo.findText(self.openrouter_preferred_provider_var.get())
         if idx >= 0:
@@ -3023,7 +3206,7 @@ def _create_image_translation_section(self, parent):
     left_v.setContentsMargins(0, 0, 20, 0)
     
     # Enable Image Translation
-    enable_cb = QCheckBox("Enable Image Translation")
+    enable_cb = self._create_styled_checkbox("Enable Image Translation")
     try:
         enable_cb.setChecked(bool(self.enable_image_translation_var.get()))
     except Exception:
@@ -3042,7 +3225,7 @@ def _create_image_translation_section(self, parent):
     left_v.addWidget(enable_desc)
     
     # Process Long Images
-    webnovel_cb = QCheckBox("Process Long Images (Web Novel Style)")
+    webnovel_cb = self._create_styled_checkbox("Process Long Images (Web Novel Style)")
     try:
         webnovel_cb.setChecked(bool(self.process_webnovel_images_var.get()))
     except Exception:
@@ -3061,7 +3244,7 @@ def _create_image_translation_section(self, parent):
     left_v.addWidget(webnovel_desc)
     
     # Hide labels and remove OCR images
-    hide_cb = QCheckBox("Hide labels and remove OCR images")
+    hide_cb = self._create_styled_checkbox("Hide labels and remove OCR images")
     try:
         hide_cb.setChecked(bool(self.hide_image_translation_label_var.get()))
     except Exception:
@@ -3082,7 +3265,7 @@ def _create_image_translation_section(self, parent):
     left_v.addSpacing(10)
     
     # Watermark Removal
-    watermark_cb = QCheckBox("Enable Watermark Removal")
+    watermark_cb = self._create_styled_checkbox("Enable Watermark Removal")
     try:
         watermark_cb.setChecked(bool(self.enable_watermark_removal_var.get()))
     except Exception:
@@ -3102,7 +3285,7 @@ def _create_image_translation_section(self, parent):
     left_v.addWidget(watermark_desc)
     
     # Save Cleaned Images
-    self.save_cleaned_checkbox = QCheckBox("Save Cleaned Images")
+    self.save_cleaned_checkbox = self._create_styled_checkbox("Save Cleaned Images")
     try:
         self.save_cleaned_checkbox.setChecked(bool(self.save_cleaned_images_var.get()))
     except Exception:
@@ -3122,7 +3305,7 @@ def _create_image_translation_section(self, parent):
     left_v.addWidget(save_desc)
     
     # Advanced Watermark Removal
-    self.advanced_watermark_checkbox = QCheckBox("Advanced Watermark Removal")
+    self.advanced_watermark_checkbox = self._create_styled_checkbox("Advanced Watermark Removal")
     try:
         self.advanced_watermark_checkbox.setChecked(bool(self.advanced_watermark_removal_var.get()))
     except Exception:
@@ -3190,7 +3373,7 @@ def _create_image_translation_section(self, parent):
     right_v.addSpacing(15)
     
     # Send tall image chunks in single API call
-    single_api_cb = QCheckBox("Send tall image chunks in single API call (NOT RECOMMENDED)")
+    single_api_cb = self._create_styled_checkbox("Send tall image chunks in single API call (NOT RECOMMENDED)")
     try:
         single_api_cb.setChecked(bool(self.single_api_image_chunks_var.get()))
     except Exception:
@@ -3305,7 +3488,7 @@ def _create_anti_duplicate_section(self, parent):
     
     # Enable/Disable toggle
     self.enable_anti_duplicate_var = tk.BooleanVar(value=self.config.get('enable_anti_duplicate', False))
-    enable_cb = QCheckBox("Enable Anti-Duplicate Parameters")
+    enable_cb = self._create_styled_checkbox("Enable Anti-Duplicate Parameters")
     try:
         enable_cb.setChecked(bool(self.enable_anti_duplicate_var.get()))
     except Exception:
@@ -3468,7 +3651,7 @@ def _create_anti_duplicate_section(self, parent):
     
     # Logit Bias Enable
     self.logit_bias_enabled_var = tk.BooleanVar(value=self.config.get('logit_bias_enabled', False))
-    bias_cb = QCheckBox("Enable Logit Bias (OpenAI only)")
+    bias_cb = self._create_styled_checkbox("Enable Logit Bias (OpenAI only)")
     try:
         bias_cb.setChecked(bool(self.logit_bias_enabled_var.get()))
     except Exception:
@@ -3493,7 +3676,7 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(preset_title)
     
     self.bias_common_words_var = tk.BooleanVar(value=self.config.get('bias_common_words', False))
-    common_cb = QCheckBox("Bias against common words (the, and, said)")
+    common_cb = self._create_styled_checkbox("Bias against common words (the, and, said)")
     try:
         common_cb.setChecked(bool(self.bias_common_words_var.get()))
     except Exception:
@@ -3507,7 +3690,7 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(common_cb)
     
     self.bias_repetitive_phrases_var = tk.BooleanVar(value=self.config.get('bias_repetitive_phrases', False))
-    phrases_cb = QCheckBox("Bias against repetitive phrases")
+    phrases_cb = self._create_styled_checkbox("Bias against repetitive phrases")
     try:
         phrases_cb.setChecked(bool(self.bias_repetitive_phrases_var.get()))
     except Exception:
@@ -3671,7 +3854,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     section_v = QVBoxLayout(section_box)
     
     # Checkbox to enable/disable custom endpoint
-    enable_cb = QCheckBox("Enable Custom OpenAI Endpoint")
+    enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
     try:
         enable_cb.setChecked(bool(self.use_custom_openai_endpoint_var.get()))
     except Exception:
@@ -3738,6 +3921,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.azure_version_combo = QComboBox()
     self.azure_version_combo.addItems(versions)
     self.azure_version_combo.setFixedWidth(200)
+    self._disable_combobox_mousewheel(self.azure_version_combo)
     try:
         idx = self.azure_version_combo.findText(self.azure_api_version_var.get())
         if idx >= 0:
@@ -3834,7 +4018,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     additional_v.addWidget(info_lbl)
     
     # Gemini OpenAI-Compatible Endpoint
-    gemini_cb = QCheckBox("Enable Gemini OpenAI-Compatible Endpoint")
+    gemini_cb = self._create_styled_checkbox("Enable Gemini OpenAI-Compatible Endpoint")
     try:
         gemini_cb.setChecked(bool(self.use_gemini_openai_endpoint_var.get()))
     except Exception:
@@ -4483,474 +4667,3 @@ def export_profiles(self):
         QMessageBox.information(None, "Exported", f"Profiles exported to {path}.")
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to export profiles: {e}")
-
-
-    def configure_translation_chunk_prompt(self):
-        """Configure the prompt template for translation chunks"""
-        dialog = self.wm.create_simple_dialog(
-            self.master,
-            "Configure Translation Chunk Prompt",
-            width=700,
-            height=None
-        )
-        
-        main_frame = tk.Frame(dialog, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        tk.Label(main_frame, text="Translation Chunk Prompt Template", 
-                font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
-        
-        tk.Label(main_frame, text="Configure how chunks are presented to the AI when chapters are split.",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
-        
-        # Instructions
-        instructions_frame = tk.LabelFrame(main_frame, text="Available Placeholders", padx=10, pady=10)
-        instructions_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        placeholders = [
-            ("{chunk_idx}", "Current chunk number (1-based)"),
-            ("{total_chunks}", "Total number of chunks"),
-            ("{chunk_html}", "The actual HTML content to translate")
-        ]
-        
-        for placeholder, desc in placeholders:
-            placeholder_frame = tk.Frame(instructions_frame)
-            placeholder_frame.pack(anchor=tk.W, pady=2)
-            tk.Label(placeholder_frame, text=f"• {placeholder}:", font=('Courier', 10, 'bold')).pack(side=tk.LEFT)
-            tk.Label(placeholder_frame, text=f" {desc}", font=('TkDefaultFont', 10)).pack(side=tk.LEFT)
-        
-        # Prompt input
-        prompt_frame = tk.LabelFrame(main_frame, text="Chunk Prompt Template", padx=10, pady=10)
-        prompt_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        self.chunk_prompt_text = self.ui.setup_scrollable_text(
-            prompt_frame, height=8, wrap=tk.WORD
-        )
-        self.chunk_prompt_text.pack(fill=tk.BOTH, expand=True)
-        self.chunk_prompt_text.insert('1.0', self.translation_chunk_prompt)
-        
-        # Example
-        example_frame = tk.LabelFrame(main_frame, text="Example Output", padx=10, pady=10)
-        example_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(example_frame, text="With chunk 2 of 5, the prompt would be:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W)
-        
-        self.example_label = tk.Label(example_frame, text="", 
-                                     font=('Courier', 9), fg='blue', 
-                                     wraplength=650, justify=tk.LEFT)
-        self.example_label.pack(anchor=tk.W, pady=(5, 0))
-        
-        def update_example(*args):
-            try:
-                template = self.chunk_prompt_text.get('1.0', tk.END).strip()
-                example = template.replace('{chunk_idx}', '2').replace('{total_chunks}', '5').replace('{chunk_html}', '<p>Chapter content here...</p>')
-                self.example_label.config(text=example[:200] + "..." if len(example) > 200 else example)
-            except:
-                self.example_label.config(text="[Invalid template]")
-        
-        self.chunk_prompt_text.bind('<KeyRelease>', update_example)
-        update_example()
-        
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        def save_chunk_prompt():
-            self.translation_chunk_prompt = self.chunk_prompt_text.get('1.0', tk.END).strip()
-            self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
-            messagebox.showinfo("Success", "Translation chunk prompt saved!")
-            dialog.destroy()
-        
-        def reset_chunk_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset to default chunk prompt?"):
-                self.chunk_prompt_text.delete('1.0', tk.END)
-                self.chunk_prompt_text.insert('1.0', self.default_translation_chunk_prompt)
-                update_example()
-        
-        tb.Button(button_frame, text="Save", command=save_chunk_prompt, 
-                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Reset to Default", command=reset_chunk_prompt, 
-                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-        
-        dialog.deiconify()
-
-    def configure_image_chunk_prompt(self):
-        """Configure the prompt template for image chunks"""
-        dialog = self.wm.create_simple_dialog(
-            self.master,
-            "Configure Image Chunk Prompt",
-            width=700,
-            height=None
-        )
-        
-        main_frame = tk.Frame(dialog, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        tk.Label(main_frame, text="Image Chunk Context Template", 
-                font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
-        
-        tk.Label(main_frame, text="Configure the context provided when tall images are split into chunks.",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
-        
-        # Instructions
-        instructions_frame = tk.LabelFrame(main_frame, text="Available Placeholders", padx=10, pady=10)
-        instructions_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        placeholders = [
-            ("{chunk_idx}", "Current chunk number (1-based)"),
-            ("{total_chunks}", "Total number of chunks"),
-            ("{context}", "Additional context (e.g., chapter info)")
-        ]
-        
-        for placeholder, desc in placeholders:
-            placeholder_frame = tk.Frame(instructions_frame)
-            placeholder_frame.pack(anchor=tk.W, pady=2)
-            tk.Label(placeholder_frame, text=f"• {placeholder}:", font=('Courier', 10, 'bold')).pack(side=tk.LEFT)
-            tk.Label(placeholder_frame, text=f" {desc}", font=('TkDefaultFont', 10)).pack(side=tk.LEFT)
-        
-        # Prompt input
-        prompt_frame = tk.LabelFrame(main_frame, text="Image Chunk Prompt Template", padx=10, pady=10)
-        prompt_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        self.image_chunk_prompt_text = self.ui.setup_scrollable_text(
-            prompt_frame, height=8, wrap=tk.WORD
-        )
-        self.image_chunk_prompt_text.pack(fill=tk.BOTH, expand=True)
-        self.image_chunk_prompt_text.insert('1.0', self.image_chunk_prompt)
-        
-        # Example
-        example_frame = tk.LabelFrame(main_frame, text="Example Output", padx=10, pady=10)
-        example_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(example_frame, text="With chunk 3 of 7 and chapter context, the prompt would be:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W)
-        
-        self.image_example_label = tk.Label(example_frame, text="", 
-                                           font=('Courier', 9), fg='blue', 
-                                           wraplength=650, justify=tk.LEFT)
-        self.image_example_label.pack(anchor=tk.W, pady=(5, 0))
-              
-        
-        def update_image_example(*args):
-            try:
-                template = self.image_chunk_prompt_text.get('1.0', tk.END).strip()
-                example = template.replace('{chunk_idx}', '3').replace('{total_chunks}', '7').replace('{context}', 'Chapter 5: The Great Battle')
-                self.image_example_label.config(text=example)
-            except:
-                self.image_example_label.config(text="[Invalid template]")
-        
-        self.image_chunk_prompt_text.bind('<KeyRelease>', update_image_example)
-        update_image_example()
-        
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        def save_image_chunk_prompt():
-            self.image_chunk_prompt = self.image_chunk_prompt_text.get('1.0', tk.END).strip()
-            self.config['image_chunk_prompt'] = self.image_chunk_prompt
-            messagebox.showinfo("Success", "Image chunk prompt saved!")
-            dialog.destroy()
-        
-        def reset_image_chunk_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset to default image chunk prompt?"):
-                self.image_chunk_prompt_text.delete('1.0', tk.END)
-                self.image_chunk_prompt_text.insert('1.0', self.default_image_chunk_prompt)
-                update_image_example()
-        
-        tb.Button(button_frame, text="Save", command=save_image_chunk_prompt, 
-                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Reset to Default", command=reset_image_chunk_prompt, 
-                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-        
-        dialog.deiconify()
-
-    def configure_image_compression(self):
-        """Open the image compression configuration dialog"""
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.master,
-            "Image Compression Settings",
-            width=None,
-            height=None,
-            max_width_ratio=0.6,
-            max_height_ratio=1.2
-        )
-        
-        # Main container with padding
-        main_frame = tk.Frame(scrollable_frame)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Title
-        title_label = tk.Label(main_frame, text="🗜️ Image Compression Settings", 
-                              font=('TkDefaultFont', 14, 'bold'))
-        title_label.pack(anchor=tk.W, pady=(0, 15))
-        
-        # Enable compression toggle
-        enable_frame = tk.Frame(main_frame)
-        enable_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        self.enable_image_compression_var = tk.BooleanVar(
-            value=self.config.get('enable_image_compression', False)
-        )
-        tb.Checkbutton(enable_frame, text="Enable Image Compression", 
-                      variable=self.enable_image_compression_var,
-                      bootstyle="round-toggle",
-                      command=lambda: self._toggle_compression_options()).pack(anchor=tk.W)
-        
-        # Create container for all compression options
-        self.compression_options_frame = tk.Frame(main_frame)
-        self.compression_options_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Auto Compression Section
-        auto_section = tk.LabelFrame(self.compression_options_frame, text="Automatic Compression", 
-                                    padx=15, pady=10)
-        auto_section.pack(fill=tk.X, pady=(0, 15))
-        
-        self.auto_compress_enabled_var = tk.BooleanVar(
-            value=self.config.get('auto_compress_enabled', True)
-        )
-        tb.Checkbutton(auto_section, text="Auto-compress to fit token limits", 
-                      variable=self.auto_compress_enabled_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W)
-        
-        # Token limit setting
-        token_frame = tk.Frame(auto_section)
-        token_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        tk.Label(token_frame, text="Target tokens per image:").pack(side=tk.LEFT)
-        
-        self.target_image_tokens_var = tk.StringVar(
-            value=str(self.config.get('target_image_tokens', '1000'))
-        )
-        tb.Entry(token_frame, width=10, textvariable=self.target_image_tokens_var).pack(side=tk.LEFT, padx=(10, 0))
-        
-        tk.Label(token_frame, text="(Gemini uses ~258 tokens per image)", 
-                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Format Selection Section
-        format_section = tk.LabelFrame(self.compression_options_frame, text="Output Format", 
-                                      padx=15, pady=10)
-        format_section.pack(fill=tk.X, pady=(0, 15))
-        
-        self.image_format_var = tk.StringVar(
-            value=self.config.get('image_compression_format', 'auto')
-        )
-        
-        formats = [
-            ("Auto (Best quality/size ratio)", "auto"),
-            ("WebP (Best compression)", "webp"),
-            ("JPEG (Wide compatibility)", "jpeg"),
-            ("PNG (Lossless)", "png")
-        ]
-        
-        for text, value in formats:
-            tb.Radiobutton(format_section, text=text, variable=self.image_format_var, 
-                          value=value).pack(anchor=tk.W, pady=2)
-        
-        # Quality Settings Section
-        quality_section = tk.LabelFrame(self.compression_options_frame, text="Quality Settings", 
-                                       padx=15, pady=10)
-        quality_section.pack(fill=tk.X, pady=(0, 15))
-        
-        # WebP Quality
-        webp_frame = tk.Frame(quality_section)
-        webp_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(webp_frame, text="WebP Quality:", width=15, anchor=tk.W).pack(side=tk.LEFT)
-        
-        self.webp_quality_var = tk.IntVar(value=self.config.get('webp_quality', 85))
-        webp_scale = tk.Scale(webp_frame, from_=1, to=100, orient=tk.HORIZONTAL, 
-                             variable=self.webp_quality_var, length=200)
-        webp_scale.pack(side=tk.LEFT, padx=(10, 10))
-        
-        self.webp_quality_label = tk.Label(webp_frame, text=f"{self.webp_quality_var.get()}%")
-        self.webp_quality_label.pack(side=tk.LEFT)
-        
-        webp_scale.config(command=lambda v: self.webp_quality_label.config(text=f"{int(float(v))}%"))
-        
-        # JPEG Quality
-        jpeg_frame = tk.Frame(quality_section)
-        jpeg_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(jpeg_frame, text="JPEG Quality:", width=15, anchor=tk.W).pack(side=tk.LEFT)
-        
-        self.jpeg_quality_var = tk.IntVar(value=self.config.get('jpeg_quality', 85))
-        jpeg_scale = tk.Scale(jpeg_frame, from_=1, to=100, orient=tk.HORIZONTAL, 
-                             variable=self.jpeg_quality_var, length=200)
-        jpeg_scale.pack(side=tk.LEFT, padx=(10, 10))
-        
-        self.jpeg_quality_label = tk.Label(jpeg_frame, text=f"{self.jpeg_quality_var.get()}%")
-        self.jpeg_quality_label.pack(side=tk.LEFT)
-        
-        jpeg_scale.config(command=lambda v: self.jpeg_quality_label.config(text=f"{int(float(v))}%"))
-        
-        # PNG Compression
-        png_frame = tk.Frame(quality_section)
-        png_frame.pack(fill=tk.X)
-        
-        tk.Label(png_frame, text="PNG Compression:", width=15, anchor=tk.W).pack(side=tk.LEFT)
-        
-        self.png_compression_var = tk.IntVar(value=self.config.get('png_compression', 6))
-        png_scale = tk.Scale(png_frame, from_=0, to=9, orient=tk.HORIZONTAL, 
-                            variable=self.png_compression_var, length=200)
-        png_scale.pack(side=tk.LEFT, padx=(10, 10))
-        
-        self.png_compression_label = tk.Label(png_frame, text=f"Level {self.png_compression_var.get()}")
-        self.png_compression_label.pack(side=tk.LEFT)
-        
-        png_scale.config(command=lambda v: self.png_compression_label.config(text=f"Level {int(float(v))}"))
-        
-        # Resolution Limits Section
-        resolution_section = tk.LabelFrame(self.compression_options_frame, text="Resolution Limits", 
-                                          padx=15, pady=10)
-        resolution_section.pack(fill=tk.X, pady=(0, 15))
-        
-        # Max dimension
-        max_dim_frame = tk.Frame(resolution_section)
-        max_dim_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(max_dim_frame, text="Max dimension (px):").pack(side=tk.LEFT)
-        
-        self.max_image_dimension_var = tk.StringVar(
-            value=str(self.config.get('max_image_dimension', '2048'))
-        )
-        tb.Entry(max_dim_frame, width=10, textvariable=self.max_image_dimension_var).pack(side=tk.LEFT, padx=(10, 0))
-        
-        tk.Label(max_dim_frame, text="(Images larger than this will be resized)", 
-                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Max file size
-        max_size_frame = tk.Frame(resolution_section)
-        max_size_frame.pack(fill=tk.X)
-        
-        tk.Label(max_size_frame, text="Max file size (MB):").pack(side=tk.LEFT)
-        
-        self.max_image_size_mb_var = tk.StringVar(
-            value=str(self.config.get('max_image_size_mb', '10'))
-        )
-        tb.Entry(max_size_frame, width=10, textvariable=self.max_image_size_mb_var).pack(side=tk.LEFT, padx=(10, 0))
-        
-        tk.Label(max_size_frame, text="(Larger files will be compressed)", 
-                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Advanced Options Section
-        advanced_section = tk.LabelFrame(self.compression_options_frame, text="Advanced Options", 
-                                        padx=15, pady=10)
-        advanced_section.pack(fill=tk.X, pady=(0, 15))
-        
-        self.preserve_transparency_var = tk.BooleanVar(
-            value=self.config.get('preserve_transparency', False)  # Changed default to False
-        )
-        tb.Checkbutton(advanced_section, text="Preserve transparency (PNG/WebP only)", 
-                      variable=self.preserve_transparency_var).pack(anchor=tk.W, pady=2)
-        
-        self.preserve_original_format_var = tk.BooleanVar(
-            value=self.config.get('preserve_original_format', False)
-        )
-        tb.Checkbutton(advanced_section, text="Preserve original image format", 
-                      variable=self.preserve_original_format_var).pack(anchor=tk.W, pady=2)
-        
-        self.optimize_for_ocr_var = tk.BooleanVar(
-            value=self.config.get('optimize_for_ocr', True)
-        )
-        tb.Checkbutton(advanced_section, text="Optimize for OCR (maintain text clarity)", 
-                      variable=self.optimize_for_ocr_var).pack(anchor=tk.W, pady=2)
-        
-        self.progressive_encoding_var = tk.BooleanVar(
-            value=self.config.get('progressive_encoding', True)
-        )
-        tb.Checkbutton(advanced_section, text="Progressive encoding (JPEG)", 
-                      variable=self.progressive_encoding_var).pack(anchor=tk.W, pady=2)
-        
-        self.save_compressed_images_var = tk.BooleanVar(
-            value=self.config.get('save_compressed_images', False)
-        )
-        tb.Checkbutton(advanced_section, text="Save compressed images to disk", 
-                      variable=self.save_compressed_images_var).pack(anchor=tk.W, pady=2)
-        
-        # Info Section
-        info_frame = tk.Frame(self.compression_options_frame)
-        info_frame.pack(fill=tk.X)
-        
-        info_text = ("💡 Tips:\n"
-                    "• WebP offers the best compression with good quality\n"
-                    "• Use 'Auto' format for intelligent format selection\n"
-                    "• Higher quality = larger file size\n"
-                    "• OCR optimization maintains text readability")
-        
-        tk.Label(info_frame, text=info_text, justify=tk.LEFT, 
-                font=('TkDefaultFont', 9), fg='#666').pack(anchor=tk.W)
-        
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
-        
-        def save_image_compression():
-            try:
-                # Validate numeric inputs
-                try:
-                    int(self.target_image_tokens_var.get())
-                    int(self.max_image_dimension_var.get())
-                    float(self.max_image_size_mb_var.get())
-                except ValueError:
-                    messagebox.showerror("Invalid Input", "Please enter valid numbers for numeric fields")
-                    return
-                
-                # Save all settings
-                self.config['enable_image_compression'] = self.enable_image_compression_var.get()
-                self.config['auto_compress_enabled'] = self.auto_compress_enabled_var.get()
-                self.config['target_image_tokens'] = int(self.target_image_tokens_var.get())
-                self.config['image_compression_format'] = self.image_format_var.get()
-                self.config['webp_quality'] = self.webp_quality_var.get()
-                self.config['jpeg_quality'] = self.jpeg_quality_var.get()
-                self.config['png_compression'] = self.png_compression_var.get()
-                self.config['max_image_dimension'] = int(self.max_image_dimension_var.get())
-                self.config['max_image_size_mb'] = float(self.max_image_size_mb_var.get())
-                self.config['preserve_transparency'] = self.preserve_transparency_var.get()
-                self.config['preserve_original_format'] = self.preserve_original_format_var.get()
-                self.config['optimize_for_ocr'] = self.optimize_for_ocr_var.get()
-                self.config['progressive_encoding'] = self.progressive_encoding_var.get()
-                self.config['save_compressed_images'] = self.save_compressed_images_var.get()
-                
-                self.append_log("✅ Image compression settings saved")
-                dialog._cleanup_scrolling()
-                dialog.destroy()
-                
-            except Exception as e:
-                print(f"❌ Failed to save compression settings: {e}")
-                messagebox.showerror("Error", f"Failed to save settings: {e}")
-        
-        tb.Button(button_frame, text="💾 Save Settings", command=save_image_compression, 
-                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(button_frame, text="❌ Cancel", 
-                 command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
-                 bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
-        
-        # Toggle function for enable/disable
-        def _toggle_compression_options():
-            state = tk.NORMAL if self.enable_image_compression_var.get() else tk.DISABLED
-            for widget in self.compression_options_frame.winfo_children():
-                if isinstance(widget, (tk.LabelFrame, tk.Frame)):
-                    for child in widget.winfo_children():
-                        if isinstance(child, (tb.Checkbutton, tb.Entry, tb.Radiobutton, tk.Scale)):
-                            child.config(state=state)
-                        elif isinstance(child, tk.Frame):
-                            for subchild in child.winfo_children():
-                                if isinstance(subchild, (tb.Checkbutton, tb.Entry, tb.Radiobutton, tk.Scale)):
-                                    subchild.config(state=state)
-        
-        self._toggle_compression_options = _toggle_compression_options
-        
-        # Set initial state
-        _toggle_compression_options()
-        
-        # Auto-resize and show
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.6, max_height_ratio=1.2)
-        
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
