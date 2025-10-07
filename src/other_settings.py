@@ -231,7 +231,17 @@ def configure_rolling_summary_prompts(self):
         os.environ['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.rolling_summary_system_prompt
         os.environ['ROLLING_SUMMARY_USER_PROMPT'] = self.rolling_summary_user_prompt
 
-        QMessageBox.information(dialog, "Success", "Memory prompts saved!")
+        msg_box = QMessageBox(dialog)
+        msg_box.setWindowTitle("Success")
+        msg_box.setText("Memory prompts saved!")
+        msg_box.setIcon(QMessageBox.Information)
+        try:
+            import os
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            msg_box.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"Failed to set icon: {e}")
+        msg_box.exec()
         dialog.close()
 
     def _reset_prompts():
@@ -602,7 +612,7 @@ def _create_context_management_section(self, parent):
     rolling_controls.append(mode_combo)
 
     # Row 1: Summarize last and Retain
-    summ_lbl = QLabel("Summarize last N exchanges: ")
+    summ_lbl = QLabel("Summarize last \n  N exchanges: ")
     settings_grid.addWidget(summ_lbl, 1, 0, alignment=Qt.AlignRight)
     rolling_controls.append(summ_lbl)
     exchanges_edit = QLineEdit()
@@ -1844,23 +1854,40 @@ def _get_ai_hunter_status_text(self):
     return f"AI Hunter: {mode} mode, Avg threshold: {int(avg_threshold)}%"
 
 def show_ai_hunter_settings(self):
-    """Open AI Hunter configuration window"""
-    def on_config_saved():
-        # Save the entire configuration
-        self.save_config()
-        # Update status label if it still exists
-        if hasattr(self, 'ai_hunter_status_label'):
-            try:
-                self.ai_hunter_status_label.winfo_exists()
-                self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
-            except tk.TclError:
-                # Widget has been destroyed
-                pass
-        if hasattr(self, 'ai_hunter_enabled_var'):
-            self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
-    
-    gui = AIHunterConfigGUI(self.master, self.config, on_config_saved)
-    gui.show_ai_hunter_config()
+    """Open AI Hunter configuration window (PySide6)"""
+    try:
+        def on_config_saved():
+            # Save the entire configuration
+            self.save_config()
+            # Update status label if it still exists
+            if hasattr(self, 'ai_hunter_status_label'):
+                try:
+                    if not self.ai_hunter_status_label.isHidden():
+                        self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
+                except RuntimeError:
+                    # Widget has been destroyed
+                    pass
+            if hasattr(self, 'ai_hunter_enabled_var'):
+                self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
+        
+        # Store reference to prevent garbage collection
+        self._ai_hunter_gui = AIHunterConfigGUI(None, self.config, on_config_saved)
+        self._ai_hunter_gui.show_ai_hunter_config()
+    except Exception as e:
+        print(f"Error opening AI Hunter settings: {e}")
+        import traceback
+        traceback.print_exc()
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtGui import QIcon
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Failed to open AI Hunter settings:\n{str(e)}")
+        msg_box.setIcon(QMessageBox.Critical)
+        try:
+            msg_box.setWindowIcon(QIcon("halgakos.ico"))
+        except Exception:
+            pass
+        msg_box.exec()
 
 def configure_translation_chunk_prompt(self):
     """Configure the prompt template for translation chunks (PySide6)"""
@@ -1951,7 +1978,17 @@ def configure_translation_chunk_prompt(self):
     def save_chunk_prompt():
         self.translation_chunk_prompt = chunk_prompt_text.toPlainText().strip()
         self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
-        QMessageBox.information(dialog, "Success", "Translation chunk prompt saved!")
+        msg_box = QMessageBox(dialog)
+        msg_box.setWindowTitle("Success")
+        msg_box.setText("Translation chunk prompt saved!")
+        msg_box.setIcon(QMessageBox.Information)
+        try:
+            import os
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            msg_box.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"Failed to set icon: {e}")
+        msg_box.exec()
         dialog.close()
     
     def reset_chunk_prompt():
@@ -2065,7 +2102,17 @@ def configure_image_chunk_prompt(self):
     def save_image_chunk_prompt():
         self.image_chunk_prompt = image_chunk_prompt_text.toPlainText().strip()
         self.config['image_chunk_prompt'] = self.image_chunk_prompt
-        QMessageBox.information(dialog, "Success", "Image chunk prompt saved!")
+        msg_box = QMessageBox(dialog)
+        msg_box.setWindowTitle("Success")
+        msg_box.setText("Image chunk prompt saved!")
+        msg_box.setIcon(QMessageBox.Information)
+        try:
+            import os
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            msg_box.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"Failed to set icon: {e}")
+        msg_box.exec()
         dialog.close()
     
     def reset_image_chunk_prompt():

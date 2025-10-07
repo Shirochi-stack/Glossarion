@@ -542,6 +542,7 @@ class GlossarionWeb:
         # QA Scanner Settings
         os.environ['ENABLE_POST_TRANSLATION_SCAN'] = '1' if config('enable_post_translation_scan', False) else '0'
         os.environ['QA_MIN_FOREIGN_CHARS'] = str(config('qa_min_foreign_chars', 10))
+        os.environ['QA_TARGET_LANGUAGE'] = config('qa_target_language', 'english')
         os.environ['QA_CHECK_REPETITION'] = '1' if config('qa_check_repetition', True) else '0'
         os.environ['QA_CHECK_GLOSSARY_LEAKAGE'] = '1' if config('qa_check_glossary_leakage', True) else '0'
         os.environ['QA_MIN_FILE_LENGTH'] = str(config('qa_min_file_length', 0))

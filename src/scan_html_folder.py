@@ -584,12 +584,13 @@ def is_korean_separator_pattern(text, excluded_chars=None):
     return all(c in excluded_chars or c.isspace() for c in cleaned)
 
 def detect_non_english_content(text, qa_settings=None):
-    """Detect ONLY non-Latin script characters (not romanized text), excluding Korean separators"""
+    """Detect characters not in the target language script, excluding separators"""
     if qa_settings is None:
-        qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': ''}
+        qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english'}
     
-    # Get threshold and excluded characters
+    # Get threshold, excluded characters, and target language
     threshold = qa_settings.get('foreign_char_threshold', 10)
+    target_language = qa_settings.get('target_language', 'english').lower()
     excluded_chars = set()
     if qa_settings.get('excluded_characters'):
         excluded_chars = set(qa_settings['excluded_characters'].split())
@@ -601,8 +602,8 @@ def detect_non_english_content(text, qa_settings=None):
     issues = []
     filtered_text = filter_dash_lines(text)
     
-    # Define non-Latin script ranges
-    non_latin_ranges = [
+    # Define all script ranges
+    all_script_ranges = [
         (0xAC00, 0xD7AF, 'Korean'), (0x1100, 0x11FF, 'Korean'),
         (0x3130, 0x318F, 'Korean'), (0xA960, 0xA97F, 'Korean'),
         (0xD7B0, 0xD7FF, 'Korean'), (0x3040, 0x309F, 'Japanese'),
@@ -615,8 +616,35 @@ def detect_non_english_content(text, qa_settings=None):
         (0x0400, 0x04FF, 'Cyrillic'), (0x0500, 0x052F, 'Cyrillic'),
     ]
     
+    # Define which scripts are allowed for each target language
+    # Latin-based languages allow basic Latin + extensions
+    language_script_mapping = {
+        'english': [],  # Only Latin (default - everything else is foreign)
+        'spanish': [],  # Latin with Spanish diacritics
+        'french': [],   # Latin with French diacritics  
+        'german': [],   # Latin with German diacritics
+        'portuguese': [],  # Latin with Portuguese diacritics
+        'italian': [],  # Latin with Italian diacritics
+        'russian': ['Cyrillic'],  # Cyrillic only
+        'japanese': ['Japanese', 'Chinese'],  # Japanese uses kanji too
+        'korean': ['Korean'],
+        'chinese': ['Chinese'],
+        'arabic': ['Arabic', 'Syriac'],
+        'hebrew': ['Hebrew'],
+        'thai': ['Thai'],
+    }
+    
+    # Get allowed scripts for target language (empty means Latin-based)
+    allowed_scripts = language_script_mapping.get(target_language, [])
+    
+    # Filter to only check scripts NOT in the target language
+    non_target_ranges = [
+        (start, end, script) for start, end, script in all_script_ranges
+        if script not in allowed_scripts
+    ]
+    
     script_chars = {}
-    total_non_latin = 0
+    total_non_target = 0
     
     # Split text into potential separator patterns and other content
     separator_pattern = r'\[[ㅡ\s―—–\-［］【】〔〕《》「」『』]+\]'
@@ -638,9 +666,9 @@ def detect_non_english_content(text, qa_settings=None):
                 continue
                 
             code_point = ord(char)
-            for start, end, script_name in non_latin_ranges:
+            for start, end, script_name in non_target_ranges:
                 if start <= code_point <= end:
-                    total_non_latin += 1
+                    total_non_target += 1
                     if script_name not in script_chars:
                         script_chars[script_name] = {'count': 0, 'examples': []}
                     script_chars[script_name]['count'] += 1
@@ -649,7 +677,7 @@ def detect_non_english_content(text, qa_settings=None):
                     break
     
     # Check against threshold
-    if total_non_latin > threshold:
+    if total_non_target > threshold:
         for script, data in script_chars.items():
             examples = ''.join(data['examples'][:5])
             count = data['count']
@@ -3835,6 +3863,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         qa_settings = {
             'foreign_char_threshold': 10,
             'excluded_characters': '',
+            'target_language': 'english',
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,

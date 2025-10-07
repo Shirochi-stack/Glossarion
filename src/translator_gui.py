@@ -11431,9 +11431,49 @@ Important rules:
             )
             foreign_section.pack(fill=tk.X, pady=(0, 20))
             
+            # Target Language setting
+            target_lang_frame = tk.Frame(foreign_section)
+            target_lang_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            tk.Label(
+                target_lang_frame,
+                text="Target language:",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            
+            # Capitalize the stored value for display in combobox
+            stored_language = qa_settings.get('target_language', 'english')
+            display_language = stored_language.capitalize()
+            target_language_var = tk.StringVar(value=display_language)
+            target_language_options = [
+                'English', 'Spanish', 'French', 'German', 'Portuguese', 
+                'Italian', 'Russian', 'Japanese', 'Korean', 'Chinese', 
+                'Arabic', 'Hebrew', 'Thai'
+            ]
+            
+            target_language_combo = tb.Combobox(
+                target_lang_frame,
+                textvariable=target_language_var,
+                values=target_language_options,
+                state='readonly',
+                width=15,
+                bootstyle="primary"
+            )
+            target_language_combo.pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Disable mousewheel scrolling to prevent accidental changes
+            UIHelper.disable_spinbox_mousewheel(target_language_combo)
+            
+            tk.Label(
+                target_lang_frame,
+                text="(characters from other scripts will be flagged)",
+                font=('Arial', 9),
+                fg='gray'
+            ).pack(side=tk.LEFT, padx=(10, 0))
+            
             # Threshold setting
             threshold_frame = tk.Frame(foreign_section)
-            threshold_frame.pack(fill=tk.X, pady=(0, 10))
+            threshold_frame.pack(fill=tk.X, pady=(10, 10))
             
             tk.Label(
                 threshold_frame,
@@ -12182,6 +12222,7 @@ Important rules:
                 try:
                     qa_settings['foreign_char_threshold'] = threshold_var.get()
                     qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
+                    qa_settings['target_language'] = target_language_var.get().lower()
                     qa_settings['check_encoding_issues'] = check_encoding_var.get()
                     qa_settings['check_repetition'] = check_repetition_var.get()
                     qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
@@ -12246,6 +12287,7 @@ Important rules:
                 if result:
                     threshold_var.set(10)
                     excluded_text.delete(1.0, tk.END)
+                    target_language_var.set('English')
                     check_encoding_var.set(False)
                     check_repetition_var.set(True)
                     check_artifacts_var.set(False)
@@ -13790,9 +13832,10 @@ Important rules:
                 default_qa_settings = {
                     'foreign_char_threshold': 10,
                     'excluded_characters': '',
+                    'target_language': 'english',
                     'check_encoding_issues': False,
                     'check_repetition': True,
-'check_translation_artifacts': False,
+                    'check_translation_artifacts': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',

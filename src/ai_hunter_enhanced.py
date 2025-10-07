@@ -1,15 +1,22 @@
 # ai_hunter_enhanced.py
 # Combined AI Hunter configuration GUI and detection logic
 
-import tkinter as tk
-from tkinter import ttk
-import ttkbootstrap as tb
 import json
 import os
 import re
 import unicodedata
 from difflib import SequenceMatcher
 from collections import Counter
+
+# PySide6 imports
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QCheckBox, QTabWidget, QWidget, QScrollArea, QFrame,
+    QSlider, QSpinBox, QDoubleSpinBox, QRadioButton, QComboBox,
+    QGroupBox, QMessageBox
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 
 class AIHunterConfigGUI:
     """GUI for configuring AI Hunter detection parameters"""
@@ -120,82 +127,277 @@ class AIHunterConfigGUI:
         """Get AI Hunter configuration from main config"""
         return self.config.get('ai_hunter_config', self.default_ai_hunter)
     
+    def _disable_mousewheel(self, widget):
+        """Disable mousewheel scrolling on a widget (PySide6)"""
+        widget.wheelEvent = lambda event: None
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        from PySide6.QtCore import QTimer
+        
+        checkbox = QCheckBox(text)
+        # Don't set inline stylesheet - use the global stylesheet from container
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                # Check if checkmark still exists and is valid
+                if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        def update_checkmark():
+            try:
+                # Check if both widgets still exist
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        
+        # Use try-except to handle case where widgets are deleted before timer fires
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
+        return checkbox
+    
     def show_ai_hunter_config(self):
-        """Display the AI Hunter configuration window with scrollbar using WindowManager"""
-        if self.window and self.window.winfo_exists():
-            self.window.lift()
-            return
+        """Display the AI Hunter configuration window (PySide6)"""
+        try:
+            if self.window and not self.window.isHidden():
+                self.window.raise_()
+                self.window.activateWindow()
+                return
+        except RuntimeError:
+            # Window was deleted
+            self.window = None
         
-        # Import WindowManager if not already available
-        if not hasattr(self, 'wm'):
-            from translator_gui import WindowManager
-            import sys
-            import os
-            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            self.wm = WindowManager(base_dir)
+        # Create dialog
+        dialog = QDialog(None)
+        dialog.setWindowTitle("AI Hunter Configuration")
+        dialog.resize(900, 750)
         
-        # Create scrollable dialog using WindowManager
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.parent,
-            "AI Hunter Configuration",
-            width=820,
-            height=None,  # Will use default height
-            max_width_ratio=0.9,
-            max_height_ratio=0.85
-        )
+        # Set icon
+        try:
+            dialog.setWindowIcon(QIcon("halgakos.ico"))
+        except Exception:
+            pass
         
         self.window = dialog
         
-        # Create notebook inside scrollable frame
-        notebook = ttk.Notebook(scrollable_frame)
-        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        # Apply global stylesheet for checkboxes, radio buttons, and tabs
+        checkbox_radio_style = """
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QRadioButton {
+                color: white;
+                spacing: 5px;
+            }
+            QRadioButton::indicator {
+                width: 13px;
+                height: 13px;
+                border: 2px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 2px solid #5a9fd4;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QRadioButton:disabled {
+                color: #666666;
+            }
+            QRadioButton::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QTabWidget::pane {
+                border: 1px solid #5a9fd4;
+                background-color: #2d2d2d;
+                border-radius: 3px;
+            }
+            QTabBar::tab {
+                background-color: #1a1a1a;
+                color: #aaaaaa;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border: 1px solid #3a3a3a;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                min-width: 100px;
+            }
+            QTabBar::tab:selected {
+                background-color: #5a9fd4;
+                color: white;
+                font-weight: bold;
+                border: 1px solid #5a9fd4;
+                border-bottom: none;
+            }
+            QTabBar::tab:hover {
+                background-color: #3a3a3a;
+                color: white;
+            }
+            QTabBar::tab:selected:hover {
+                background-color: #7bb3e0;
+            }
+        """
+        
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Create tab widget
+        tabs = QTabWidget()
+        tabs.setStyleSheet(checkbox_radio_style)
+        main_layout.addWidget(tabs)
         
         # Tab 1: Detection Thresholds
-        self.create_thresholds_tab(notebook)
+        self.create_thresholds_tab(tabs)
         
         # Tab 2: Detection Mode
-        self.create_mode_tab(notebook)
+        self.create_mode_tab(tabs)
         
         # Tab 3: Preprocessing
-        self.create_preprocessing_tab(notebook)
+        self.create_preprocessing_tab(tabs)
         
         # Tab 4: Advanced Settings
-        self.create_advanced_tab(notebook)
+        self.create_advanced_tab(tabs)
         
-        # Buttons at the bottom (inside scrollable frame)
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill='x', padx=10, pady=(10, 20))
+        # Buttons at the bottom
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(5, 10, 5, 10)
         
-        tb.Button(button_frame, text="Save", command=self.apply_ai_hunter_settings, 
-                 bootstyle="success").pack(side='right', padx=5)
-        tb.Button(button_frame, text="Cancel", command=self.window.destroy,
-                 bootstyle="secondary").pack(side='right')
-        tb.Button(button_frame, text="Reset to Defaults", command=self.reset_defaults,
-                 bootstyle="warning").pack(side='left')
+        reset_btn = QPushButton("⚠️ Reset to Defaults")
+        reset_btn.clicked.connect(self.reset_defaults)
+        reset_btn.setMinimumHeight(35)
+        reset_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #ffc107; "
+            "  color: black; "
+            "  padding: 8px 20px; "
+            "  font-size: 11pt; "
+            "  font-weight: bold; "
+            "  border-radius: 4px; "
+            "} "
+            "QPushButton:hover { background-color: #e0a800; }"
+        )
+        button_layout.addWidget(reset_btn)
+        button_layout.addStretch()
         
-        # Auto-resize and show
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.1)
+        save_btn = QPushButton("💾 Save")
+        save_btn.clicked.connect(self.apply_ai_hunter_settings)
+        save_btn.setMinimumHeight(35)
+        save_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #28a745; "
+            "  color: white; "
+            "  padding: 8px 20px; "
+            "  font-size: 11pt; "
+            "  font-weight: bold; "
+            "  border-radius: 4px; "
+            "} "
+            "QPushButton:hover { background-color: #218838; }"
+        )
+        button_layout.addWidget(save_btn)
         
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        cancel_btn = QPushButton("❌ Cancel")
+        cancel_btn.clicked.connect(dialog.close)
+        cancel_btn.setMinimumHeight(35)
+        cancel_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #6c757d; "
+            "  color: white; "
+            "  padding: 8px 20px; "
+            "  font-size: 11pt; "
+            "  font-weight: bold; "
+            "  border-radius: 4px; "
+            "} "
+            "QPushButton:hover { background-color: #5a6268; }"
+        )
+        button_layout.addWidget(cancel_btn)
+        
+        main_layout.addLayout(button_layout)
+        
+        dialog.show()
     
-    def create_thresholds_tab(self, notebook):
-        """Create the thresholds configuration tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Detection Thresholds")
+    def create_thresholds_tab(self, tabs):
+        """Create the thresholds configuration tab (PySide6)"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        frame = QWidget()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
         
         # Title
-        tk.Label(frame, text="Detection Method Thresholds", 
-                font=('TkDefaultFont', 12, 'bold')).pack(pady=10)
+        title = QLabel("Detection Method Thresholds")
+        title.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        layout.addWidget(title)
         
-        tk.Label(frame, text="Higher values = fewer false positives (more strict)\n"
-                           "Lower values = more false positives (more sensitive)",
-                font=('TkDefaultFont', 10), fg='gray').pack(pady=(0, 20))
+        desc = QLabel("Higher values = fewer false positives (more strict)\n"
+                     "Lower values = more false positives (more sensitive)")
+        desc.setStyleSheet("color: gray; font-size: 10pt;")
+        layout.addWidget(desc)
+        layout.addSpacing(10)
         
         # Threshold controls
         self.threshold_vars = {}
-        threshold_frame = tk.Frame(frame)
-        threshold_frame.pack(fill='both', expand=True, padx=20)
+        self.threshold_labels = {}
         
         descriptions = {
             'exact': 'Exact Text Match - Direct character-by-character comparison',
@@ -209,74 +411,113 @@ class AIHunterConfigGUI:
         ai_config = self.get_ai_config()
         
         for method, desc in descriptions.items():
-            method_frame = tk.Frame(threshold_frame)
-            method_frame.pack(fill='x', pady=10)
+            method_frame = QWidget()
+            method_layout = QVBoxLayout(method_frame)
+            method_layout.setContentsMargins(0, 10, 0, 10)
             
             # Method name and description
-            label_frame = tk.Frame(method_frame)
-            label_frame.pack(fill='x')
+            label_widget = QWidget()
+            label_layout = QHBoxLayout(label_widget)
+            label_layout.setContentsMargins(0, 0, 0, 0)
             
-            tk.Label(label_frame, text=f"{method.title()}:", 
-                    font=('TkDefaultFont', 10, 'bold')).pack(side='left')
-            tk.Label(label_frame, text=f" {desc}",
-                    font=('TkDefaultFont', 9), fg='gray').pack(side='left', padx=(10, 0))
+            method_label = QLabel(f"{method.title()}:")
+            method_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+            label_layout.addWidget(method_label)
+            
+            desc_label = QLabel(f" {desc}")
+            desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+            label_layout.addWidget(desc_label)
+            label_layout.addStretch()
+            
+            method_layout.addWidget(label_widget)
             
             # Slider and value
-            slider_frame = tk.Frame(method_frame)
-            slider_frame.pack(fill='x', pady=(5, 0))
+            slider_widget = QWidget()
+            slider_layout = QHBoxLayout(slider_widget)
+            slider_layout.setContentsMargins(20, 5, 0, 0)
             
-            self.threshold_vars[method] = tk.IntVar(value=ai_config['thresholds'][method])
+            slider = QSlider(Qt.Horizontal)
+            slider.setMinimum(10)
+            slider.setMaximum(100)
+            slider.setValue(ai_config['thresholds'][method])
+            slider.setFixedWidth(400)
+            self._disable_mousewheel(slider)
+            self.threshold_vars[method] = slider
+            slider_layout.addWidget(slider)
             
-            slider = tb.Scale(slider_frame, from_=10, to=100, 
-                            variable=self.threshold_vars[method],
-                            bootstyle="info", length=400)
-            slider.pack(side='left', padx=(20, 10))
+            value_label = QLabel(f"{slider.value()}%")
+            value_label.setFixedWidth(50)
+            self.threshold_labels[method] = value_label
+            slider_layout.addWidget(value_label)
             
-            value_label = tk.Label(slider_frame, text="", width=4)
-            value_label.pack(side='left')
+            # Connect slider to label update
+            slider.valueChanged.connect(
+                lambda val, lbl=value_label: lbl.setText(f"{val}%")
+            )
             
-            # Update label when slider changes
-            def update_label(val, label=value_label, var=self.threshold_vars[method]):
-                label.config(text=f"{int(var.get())}%")
+            slider_layout.addStretch()
+            method_layout.addWidget(slider_widget)
             
-            self.threshold_vars[method].trace('w', lambda *args, f=update_label: f(None))
-            update_label(None)
+            layout.addWidget(method_frame)
         
         # Weight configuration
-        tk.Label(frame, text="Method Weights (for weighted average mode)", 
-                font=('TkDefaultFont', 11, 'bold')).pack(pady=(30, 10))
+        layout.addSpacing(20)
+        weight_title = QLabel("Method Weights (for weighted average mode)")
+        weight_title.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        layout.addWidget(weight_title)
+        layout.addSpacing(10)
         
         self.weight_vars = {}
-        weight_frame = tk.Frame(frame)
-        weight_frame.pack(fill='x', padx=20)
         
         for method in descriptions.keys():
-            w_frame = tk.Frame(weight_frame)
-            w_frame.pack(fill='x', pady=5)
+            w_widget = QWidget()
+            w_layout = QHBoxLayout(w_widget)
+            w_layout.setContentsMargins(0, 5, 0, 5)
             
-            tk.Label(w_frame, text=f"{method.title()} weight:", width=20, 
-                    anchor='w').pack(side='left')
+            w_label = QLabel(f"{method.title()} weight:")
+            w_label.setFixedWidth(150)
+            w_layout.addWidget(w_label)
             
-            self.weight_vars[method] = tk.DoubleVar(value=ai_config['weights'][method])
+            w_spinbox = QDoubleSpinBox()
+            w_spinbox.setMinimum(0.1)
+            w_spinbox.setMaximum(2.0)
+            w_spinbox.setSingleStep(0.1)
+            w_spinbox.setValue(ai_config['weights'][method])
+            w_spinbox.setFixedWidth(80)
+            self._disable_mousewheel(w_spinbox)
+            self.weight_vars[method] = w_spinbox
+            w_layout.addWidget(w_spinbox)
             
-            tb.Spinbox(w_frame, from_=0.1, to=2.0, increment=0.1,
-                      textvariable=self.weight_vars[method],
-                      width=10).pack(side='left', padx=10)
-    
-    def create_mode_tab(self, notebook):
-        """Create the detection mode configuration tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Detection Mode")
+            w_layout.addStretch()
+            layout.addWidget(w_widget)
         
-        tk.Label(frame, text="Detection Mode Configuration", 
-                font=('TkDefaultFont', 12, 'bold')).pack(pady=10)
+        layout.addStretch()
+        scroll.setWidget(frame)
+        tabs.addTab(scroll, "Detection Thresholds")
+    
+    def create_mode_tab(self, tabs):
+        """Create the detection mode configuration tab (PySide6)"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        frame = QWidget()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+        
+        title = QLabel("Detection Mode Configuration")
+        title.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        layout.addWidget(title)
+        layout.addSpacing(10)
         
         # Detection mode selection
-        mode_frame = tk.LabelFrame(frame, text="Detection Mode", padx=20, pady=20)
-        mode_frame.pack(fill='x', padx=20, pady=10)
+        mode_box = QGroupBox("Detection Mode")
+        mode_layout = QVBoxLayout(mode_box)
+        mode_layout.setSpacing(10)
         
         ai_config = self.get_ai_config()
-        self.mode_var = tk.StringVar(value=ai_config['detection_mode'])
+        self.mode_buttons = {}
         
         modes = [
             ('single_method', 'Single Method', 
@@ -288,55 +529,84 @@ class AIHunterConfigGUI:
         ]
         
         for value, text, desc in modes:
-            rb_frame = tk.Frame(mode_frame)
-            rb_frame.pack(fill='x', pady=10)
+            rb_widget = QWidget()
+            rb_layout = QVBoxLayout(rb_widget)
+            rb_layout.setContentsMargins(0, 10, 0, 10)
             
-            tb.Radiobutton(rb_frame, text=text, variable=self.mode_var, 
-                          value=value, bootstyle="primary").pack(anchor='w')
-            tk.Label(rb_frame, text=desc, font=('TkDefaultFont', 9), 
-                    fg='gray').pack(anchor='w', padx=(25, 0))
+            rb = QRadioButton(text)
+            if value == ai_config['detection_mode']:
+                rb.setChecked(True)
+            self.mode_buttons[value] = rb
+            rb_layout.addWidget(rb)
+            
+            desc_label = QLabel(desc)
+            desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+            desc_label.setContentsMargins(25, 0, 0, 0)
+            rb_layout.addWidget(desc_label)
+            
+            mode_layout.addWidget(rb_widget)
+        
+        layout.addWidget(mode_box)
         
         # Multi-method configuration
-        multi_frame = tk.LabelFrame(frame, text="Multi-Method Settings", padx=20, pady=20)
-        multi_frame.pack(fill='x', padx=20, pady=10)
+        multi_box = QGroupBox("Multi-Method Settings")
+        multi_layout = QVBoxLayout(multi_box)
         
-        tk.Label(multi_frame, text="Number of methods required to agree:",
-                font=('TkDefaultFont', 10)).pack(anchor='w')
+        req_label = QLabel("Number of methods required to agree:")
+        req_label.setStyleSheet("font-size: 10pt;")
+        multi_layout.addWidget(req_label)
         
-        self.methods_required_var = tk.IntVar(
-            value=ai_config['multi_method_requirements']['methods_required'])
+        self.methods_required_spinbox = QSpinBox()
+        self.methods_required_spinbox.setMinimum(1)
+        self.methods_required_spinbox.setMaximum(6)
+        self.methods_required_spinbox.setValue(
+            ai_config['multi_method_requirements']['methods_required'])
+        self.methods_required_spinbox.setFixedWidth(80)
+        self._disable_mousewheel(self.methods_required_spinbox)
+        multi_layout.addWidget(self.methods_required_spinbox)
+        multi_layout.addSpacing(10)
         
-        tb.Spinbox(multi_frame, from_=1, to=6, textvariable=self.methods_required_var,
-                  width=10).pack(anchor='w', pady=5)
+        min_label = QLabel("Required methods (at least one must be included):")
+        min_label.setStyleSheet("font-size: 10pt;")
+        multi_layout.addWidget(min_label)
+        multi_layout.addSpacing(5)
         
-        tk.Label(multi_frame, text="Required methods (at least one must be included):",
-                font=('TkDefaultFont', 10)).pack(anchor='w', pady=(10, 5))
-        
-        self.required_method_vars = {}
+        self.required_method_checkboxes = {}
         for method in ['exact', 'text', 'semantic', 'structural', 'character', 'pattern']:
-            var = tk.BooleanVar(
-                value=method in ai_config['multi_method_requirements']['min_methods'])
-            self.required_method_vars[method] = var
-            
-            tb.Checkbutton(multi_frame, text=method.title(), variable=var,
-                          bootstyle="round-toggle").pack(anchor='w', padx=20)
+            cb = self._create_styled_checkbox(method.title())
+            cb.setChecked(method in ai_config['multi_method_requirements']['min_methods'])
+            cb.setContentsMargins(20, 0, 0, 0)
+            self.required_method_checkboxes[method] = cb
+            multi_layout.addWidget(cb)
+        
+        layout.addWidget(multi_box)
+        layout.addStretch()
+        
+        scroll.setWidget(frame)
+        tabs.addTab(scroll, "Detection Mode")
     
-    def create_preprocessing_tab(self, notebook):
-        """Create the preprocessing configuration tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Preprocessing")
+    def create_preprocessing_tab(self, tabs):
+        """Create the preprocessing configuration tab (PySide6)"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
-        tk.Label(frame, text="Text Preprocessing Options", 
-                font=('TkDefaultFont', 12, 'bold')).pack(pady=10)
+        frame = QWidget()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
         
-        tk.Label(frame, text="Configure how text is processed before comparison",
-                font=('TkDefaultFont', 10), fg='gray').pack(pady=(0, 20))
+        title = QLabel("Text Preprocessing Options")
+        title.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        layout.addWidget(title)
+        
+        desc = QLabel("Configure how text is processed before comparison")
+        desc.setStyleSheet("color: gray; font-size: 10pt;")
+        layout.addWidget(desc)
+        layout.addSpacing(10)
         
         # Preprocessing options
-        prep_frame = tk.Frame(frame)
-        prep_frame.pack(fill='both', expand=True, padx=20)
-        
-        self.prep_vars = {}
+        self.prep_checkboxes = {}
         ai_config = self.get_ai_config()
         
         options = [
@@ -350,180 +620,304 @@ class AIHunterConfigGUI:
              'Collapse multiple spaces/newlines into single spaces')
         ]
         
-        for key, text, desc in options:
-            var = tk.BooleanVar(value=ai_config['preprocessing'][key])
-            self.prep_vars[key] = var
+        for key, text, desc_text in options:
+            opt_widget = QWidget()
+            opt_layout = QVBoxLayout(opt_widget)
+            opt_layout.setContentsMargins(0, 10, 0, 10)
             
-            opt_frame = tk.Frame(prep_frame)
-            opt_frame.pack(fill='x', pady=10)
+            cb = self._create_styled_checkbox(text)
+            cb.setChecked(ai_config['preprocessing'][key])
+            self.prep_checkboxes[key] = cb
+            opt_layout.addWidget(cb)
             
-            tb.Checkbutton(opt_frame, text=text, variable=var,
-                          bootstyle="round-toggle").pack(anchor='w')
-            tk.Label(opt_frame, text=desc, font=('TkDefaultFont', 9),
-                    fg='gray').pack(anchor='w', padx=(25, 0))
+            desc_label = QLabel(desc_text)
+            desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+            desc_label.setContentsMargins(25, 0, 0, 0)
+            opt_layout.addWidget(desc_label)
+            
+            layout.addWidget(opt_widget)
+        
+        layout.addStretch()
+        scroll.setWidget(frame)
+        tabs.addTab(scroll, "Preprocessing")
     
-    def create_advanced_tab(self, notebook):
-        """Create the advanced settings tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Advanced")
+    def create_advanced_tab(self, tabs):
+        """Create the advanced settings tab (PySide6)"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
-        tk.Label(frame, text="Advanced Settings", 
-                font=('TkDefaultFont', 12, 'bold')).pack(pady=10)
+        frame = QWidget()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
         
-        # General settings
-        general_frame = tk.LabelFrame(frame, text="General", padx=20, pady=20)
-        general_frame.pack(fill='x', padx=20, pady=10)
+        title = QLabel("Advanced Settings")
+        title.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        layout.addWidget(title)
+        layout.addSpacing(10)
         
         ai_config = self.get_ai_config()
         
-        # Add separator for better organization
-        ttk.Separator(general_frame, orient='horizontal').pack(fill='x', pady=(0, 10))
-
-        # Sample size
-        ss_frame = tk.Frame(general_frame)
-        ss_frame.pack(fill='x', pady=5)
+        # General settings
+        general_box = QGroupBox("General")
+        general_layout = QVBoxLayout(general_box)
         
-        tk.Label(ss_frame, text="Sample size:", width=20, anchor='w').pack(side='left')
-        self.sample_size_var = tk.IntVar(value=ai_config['sample_size'])
-        tb.Spinbox(ss_frame, from_=1000, to=10000, increment=500,
-                  textvariable=self.sample_size_var, width=10).pack(side='left', padx=10)
-        tk.Label(ss_frame, text="characters",
-                font=('TkDefaultFont', 9)).pack(side='left')
+        # Sample size
+        ss_widget = QWidget()
+        ss_layout = QHBoxLayout(ss_widget)
+        ss_layout.setContentsMargins(0, 0, 0, 0)
+        
+        ss_label = QLabel("Sample size:")
+        ss_label.setFixedWidth(150)
+        ss_layout.addWidget(ss_label)
+        
+        self.sample_size_spinbox = QSpinBox()
+        self.sample_size_spinbox.setMinimum(1000)
+        self.sample_size_spinbox.setMaximum(10000)
+        self.sample_size_spinbox.setSingleStep(500)
+        self.sample_size_spinbox.setValue(ai_config['sample_size'])
+        self.sample_size_spinbox.setFixedWidth(100)
+        self._disable_mousewheel(self.sample_size_spinbox)
+        ss_layout.addWidget(self.sample_size_spinbox)
+        
+        ss_unit = QLabel("characters")
+        ss_unit.setStyleSheet("color: gray; font-size: 9pt;")
+        ss_layout.addWidget(ss_unit)
+        ss_layout.addStretch()
+        general_layout.addWidget(ss_widget)
         
         # AI Hunter Behavior Settings
-        tk.Label(general_frame, text="AI Hunter Behavior", 
-                font=('TkDefaultFont', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        behavior_label = QLabel("AI Hunter Behavior")
+        behavior_label.setStyleSheet("font-size: 10pt; font-weight: bold;")
+        general_layout.addWidget(behavior_label)
+        general_layout.addSpacing(5)
         
         # Retry Attempts
-        retry_frame = tk.Frame(general_frame)
-        retry_frame.pack(fill='x', pady=5)
+        retry_widget = QWidget()
+        retry_layout = QHBoxLayout(retry_widget)
+        retry_layout.setContentsMargins(0, 0, 0, 0)
         
-        tk.Label(retry_frame, text="Retry attempts:", width=20, anchor='w').pack(side='left')
-        self.retry_attempts_var = tk.IntVar(value=ai_config.get('retry_attempts', 3))
-        tb.Spinbox(retry_frame, from_=1, to=10, textvariable=self.retry_attempts_var, width=10).pack(side='left', padx=10)
-        tk.Label(retry_frame, text="attempts", font=('TkDefaultFont', 9)).pack(side='left')
+        retry_label = QLabel("Retry attempts:")
+        retry_label.setFixedWidth(150)
+        retry_layout.addWidget(retry_label)
+        
+        self.retry_attempts_spinbox = QSpinBox()
+        self.retry_attempts_spinbox.setMinimum(1)
+        self.retry_attempts_spinbox.setMaximum(10)
+        self.retry_attempts_spinbox.setValue(ai_config.get('retry_attempts', 3))
+        self.retry_attempts_spinbox.setFixedWidth(100)
+        self._disable_mousewheel(self.retry_attempts_spinbox)
+        retry_layout.addWidget(self.retry_attempts_spinbox)
+        
+        retry_unit = QLabel("attempts")
+        retry_unit.setStyleSheet("color: gray; font-size: 9pt;")
+        retry_layout.addWidget(retry_unit)
+        retry_layout.addStretch()
+        general_layout.addWidget(retry_widget)
         
         # Temperature Change Toggle
-        temp_frame = tk.Frame(general_frame)
-        temp_frame.pack(fill='x', pady=10)
+        temp_widget = QWidget()
+        temp_layout = QVBoxLayout(temp_widget)
+        temp_layout.setContentsMargins(0, 10, 0, 0)
         
-        self.disable_temp_change_var = tk.BooleanVar(value=ai_config.get('disable_temperature_change', False))
-        tb.Checkbutton(temp_frame, text="Disable temperature change behavior",
-                      variable=self.disable_temp_change_var, bootstyle="round-toggle").pack(anchor='w')
-        tk.Label(temp_frame, text="Prevents AI Hunter from modifying temperature settings during retries",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=(25, 0))       
+        self.disable_temp_change_checkbox = self._create_styled_checkbox("Disable temperature change behavior")
+        self.disable_temp_change_checkbox.setChecked(ai_config.get('disable_temperature_change', False))
+        temp_layout.addWidget(self.disable_temp_change_checkbox)
+        
+        temp_desc = QLabel("Prevents AI Hunter from modifying temperature settings during retries")
+        temp_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        temp_desc.setContentsMargins(25, 0, 0, 0)
+        temp_layout.addWidget(temp_desc)
+        general_layout.addWidget(temp_widget)
+        
+        layout.addWidget(general_box)
         
         # Edge filters
-        edge_frame = tk.LabelFrame(frame, text="Edge Case Filters", padx=20, pady=20)
-        edge_frame.pack(fill='x', padx=20, pady=10)
+        edge_box = QGroupBox("Edge Case Filters")
+        edge_layout = QVBoxLayout(edge_box)
         
         # Min text length
-        min_frame = tk.Frame(edge_frame)
-        min_frame.pack(fill='x', pady=5)
+        min_widget = QWidget()
+        min_layout = QHBoxLayout(min_widget)
+        min_layout.setContentsMargins(0, 0, 0, 0)
         
-        tk.Label(min_frame, text="Minimum text length:", width=20, anchor='w').pack(side='left')
-        self.min_length_var = tk.IntVar(value=ai_config['edge_filters']['min_text_length'])
-        tb.Spinbox(min_frame, from_=100, to=2000, increment=100,
-                  textvariable=self.min_length_var, width=10).pack(side='left', padx=10)
-        tk.Label(min_frame, text="characters",
-                font=('TkDefaultFont', 9)).pack(side='left')
+        min_label = QLabel("Minimum text length:")
+        min_label.setFixedWidth(150)
+        min_layout.addWidget(min_label)
+        
+        self.min_length_spinbox = QSpinBox()
+        self.min_length_spinbox.setMinimum(100)
+        self.min_length_spinbox.setMaximum(2000)
+        self.min_length_spinbox.setSingleStep(100)
+        self.min_length_spinbox.setValue(ai_config['edge_filters']['min_text_length'])
+        self.min_length_spinbox.setFixedWidth(100)
+        self._disable_mousewheel(self.min_length_spinbox)
+        min_layout.addWidget(self.min_length_spinbox)
+        
+        min_unit = QLabel("characters")
+        min_unit.setStyleSheet("color: gray; font-size: 9pt;")
+        min_layout.addWidget(min_unit)
+        min_layout.addStretch()
+        edge_layout.addWidget(min_widget)
         
         # Length ratios
-        ratio_frame = tk.Frame(edge_frame)
-        ratio_frame.pack(fill='x', pady=10)
+        ratio_title = QLabel("Length ratio limits:")
+        edge_layout.addWidget(ratio_title)
+        edge_layout.addSpacing(5)
         
-        tk.Label(ratio_frame, text="Length ratio limits:").pack(anchor='w')
+        ratio_widget = QWidget()
+        ratio_layout = QHBoxLayout(ratio_widget)
+        ratio_layout.setContentsMargins(20, 0, 0, 0)
         
-        r_frame = tk.Frame(ratio_frame)
-        r_frame.pack(fill='x', pady=5)
+        min_ratio_label = QLabel("Min ratio:")
+        min_ratio_label.setFixedWidth(80)
+        ratio_layout.addWidget(min_ratio_label)
         
-        tk.Label(r_frame, text="Min ratio:", width=10, anchor='w').pack(side='left', padx=(20, 5))
-        self.min_ratio_var = tk.DoubleVar(value=ai_config['edge_filters']['min_length_ratio'])
-        tb.Spinbox(r_frame, from_=0.5, to=0.9, increment=0.1,
-                  textvariable=self.min_ratio_var, width=8).pack(side='left')
+        self.min_ratio_spinbox = QDoubleSpinBox()
+        self.min_ratio_spinbox.setMinimum(0.5)
+        self.min_ratio_spinbox.setMaximum(0.9)
+        self.min_ratio_spinbox.setSingleStep(0.1)
+        self.min_ratio_spinbox.setValue(ai_config['edge_filters']['min_length_ratio'])
+        self.min_ratio_spinbox.setFixedWidth(80)
+        self._disable_mousewheel(self.min_ratio_spinbox)
+        ratio_layout.addWidget(self.min_ratio_spinbox)
         
-        tk.Label(r_frame, text="Max ratio:", width=10, anchor='w').pack(side='left', padx=(20, 5))
-        self.max_ratio_var = tk.DoubleVar(value=ai_config['edge_filters']['max_length_ratio'])
-        tb.Spinbox(r_frame, from_=1.1, to=2.0, increment=0.1,
-                  textvariable=self.max_ratio_var, width=8).pack(side='left')
+        max_ratio_label = QLabel("Max ratio:")
+        max_ratio_label.setFixedWidth(80)
+        ratio_layout.addWidget(max_ratio_label)
         
-        tk.Label(edge_frame, text="Chapters with vastly different lengths won't be compared",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=20)
+        self.max_ratio_spinbox = QDoubleSpinBox()
+        self.max_ratio_spinbox.setMinimum(1.1)
+        self.max_ratio_spinbox.setMaximum(2.0)
+        self.max_ratio_spinbox.setSingleStep(0.1)
+        self.max_ratio_spinbox.setValue(ai_config['edge_filters']['max_length_ratio'])
+        self.max_ratio_spinbox.setFixedWidth(80)
+        self._disable_mousewheel(self.max_ratio_spinbox)
+        ratio_layout.addWidget(self.max_ratio_spinbox)
+        
+        ratio_layout.addStretch()
+        edge_layout.addWidget(ratio_widget)
+        
+        ratio_desc = QLabel("Chapters with vastly different lengths won't be compared")
+        ratio_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        ratio_desc.setContentsMargins(20, 5, 0, 0)
+        edge_layout.addWidget(ratio_desc)
+        
+        layout.addWidget(edge_box)
         
         # Language Detection
-        lang_frame = tk.LabelFrame(frame, text="Non-Target Language Detection", padx=20, pady=20)
-        lang_frame.pack(fill='x', padx=20, pady=10)
+        lang_box = QGroupBox("Non-Target Language Detection")
+        lang_layout = QVBoxLayout(lang_box)
         
         # Enable toggle
-        enable_frame = tk.Frame(lang_frame)
-        enable_frame.pack(fill='x', pady=5)
+        enable_widget = QWidget()
+        enable_layout = QVBoxLayout(enable_widget)
+        enable_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.lang_enabled_var = tk.BooleanVar(value=ai_config['language_detection']['enabled'])
-        tb.Checkbutton(enable_frame, text="Enable non-target language detection",
-                      variable=self.lang_enabled_var, bootstyle="round-toggle").pack(anchor='w')
-        tk.Label(enable_frame, text="Trigger retranslation when too much non-target language is detected",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=(25, 0))
+        self.lang_enabled_checkbox = self._create_styled_checkbox("Enable non-target language detection")
+        self.lang_enabled_checkbox.setChecked(ai_config['language_detection']['enabled'])
+        enable_layout.addWidget(self.lang_enabled_checkbox)
+        
+        enable_desc = QLabel("Trigger retranslation when too much non-target language is detected")
+        enable_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        enable_desc.setContentsMargins(25, 0, 0, 0)
+        enable_layout.addWidget(enable_desc)
+        lang_layout.addWidget(enable_widget)
+        lang_layout.addSpacing(10)
         
         # Target language selection
-        target_frame = tk.Frame(lang_frame)
-        target_frame.pack(fill='x', pady=10)
+        target_widget = QWidget()
+        target_layout = QHBoxLayout(target_widget)
+        target_layout.setContentsMargins(0, 0, 0, 0)
         
-        tk.Label(target_frame, text="Target language:", width=20, anchor='w').pack(side='left')
-        self.target_lang_var = tk.StringVar(value=ai_config['language_detection']['target_language'])
+        target_label = QLabel("Target language:")
+        target_label.setFixedWidth(150)
+        target_layout.addWidget(target_label)
         
         lang_options = list(ai_config['language_detection']['languages'].keys())
-        target_combo = ttk.Combobox(target_frame, textvariable=self.target_lang_var,
-                                   values=lang_options, state='readonly', width=15)
-        target_combo.pack(side='left', padx=10)
+        self.target_lang_combo = QComboBox()
+        self.target_lang_combo.addItems(lang_options)
+        self.target_lang_combo.setCurrentText(ai_config['language_detection']['target_language'])
+        self.target_lang_combo.setFixedWidth(150)
+        self._disable_mousewheel(self.target_lang_combo)
+        target_layout.addWidget(self.target_lang_combo)
         
-        tk.Label(target_frame, text="Language that should be in the translation",
-                font=('TkDefaultFont', 9), fg='gray').pack(side='left', padx=(10, 0))
+        target_desc = QLabel("Language that should be in the translation")
+        target_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        target_layout.addWidget(target_desc)
+        target_layout.addStretch()
+        lang_layout.addWidget(target_widget)
         
         # Threshold setting
-        thresh_frame = tk.Frame(lang_frame)
-        thresh_frame.pack(fill='x', pady=5)
+        thresh_widget = QWidget()
+        thresh_layout = QHBoxLayout(thresh_widget)
+        thresh_layout.setContentsMargins(0, 5, 0, 0)
         
-        tk.Label(thresh_frame, text="Character threshold:", width=20, anchor='w').pack(side='left')
-        self.lang_threshold_var = tk.IntVar(value=ai_config['language_detection']['threshold_characters'])
-        tb.Spinbox(thresh_frame, from_=100, to=2000, increment=50,
-                  textvariable=self.lang_threshold_var, width=10).pack(side='left', padx=10)
-        tk.Label(thresh_frame, text="non-target language characters to trigger retranslation",
-                font=('TkDefaultFont', 9), fg='gray').pack(side='left')
+        thresh_label = QLabel("Character threshold:")
+        thresh_label.setFixedWidth(150)
+        thresh_layout.addWidget(thresh_label)
+        
+        self.lang_threshold_spinbox = QSpinBox()
+        self.lang_threshold_spinbox.setMinimum(100)
+        self.lang_threshold_spinbox.setMaximum(2000)
+        self.lang_threshold_spinbox.setSingleStep(50)
+        self.lang_threshold_spinbox.setValue(ai_config['language_detection']['threshold_characters'])
+        self.lang_threshold_spinbox.setFixedWidth(100)
+        self._disable_mousewheel(self.lang_threshold_spinbox)
+        thresh_layout.addWidget(self.lang_threshold_spinbox)
+        
+        thresh_desc = QLabel("non-target language characters to trigger retranslation")
+        thresh_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        thresh_layout.addWidget(thresh_desc)
+        thresh_layout.addStretch()
+        lang_layout.addWidget(thresh_widget)
+        
+        layout.addWidget(lang_box)
+        layout.addStretch()
+        
+        scroll.setWidget(frame)
+        tabs.addTab(scroll, "Advanced")
     
     def apply_ai_hunter_settings(self):
-        """Apply AI Hunter settings to the main config"""
+        """Apply AI Hunter settings to the main config (PySide6)"""
         ai_config = self.get_ai_config()
         
         # Update from GUI variables
-        for method, var in self.threshold_vars.items():
-            ai_config['thresholds'][method] = var.get()
+        for method, slider in self.threshold_vars.items():
+            ai_config['thresholds'][method] = slider.value()
         
-        for method, var in self.weight_vars.items():
-            ai_config['weights'][method] = var.get()
+        for method, spinbox in self.weight_vars.items():
+            ai_config['weights'][method] = spinbox.value()
         
-        ai_config['detection_mode'] = self.mode_var.get()
-        ai_config['multi_method_requirements']['methods_required'] = self.methods_required_var.get()
+        # Get selected detection mode
+        for mode_value, radio_btn in self.mode_buttons.items():
+            if radio_btn.isChecked():
+                ai_config['detection_mode'] = mode_value
+                break
         
-        min_methods = [method for method, var in self.required_method_vars.items() if var.get()]
+        ai_config['multi_method_requirements']['methods_required'] = self.methods_required_spinbox.value()
+        
+        min_methods = [method for method, cb in self.required_method_checkboxes.items() if cb.isChecked()]
         ai_config['multi_method_requirements']['min_methods'] = min_methods
         
-        for key, var in self.prep_vars.items():
-            ai_config['preprocessing'][key] = var.get()
+        for key, cb in self.prep_checkboxes.items():
+            ai_config['preprocessing'][key] = cb.isChecked()
         
-        ai_config['sample_size'] = self.sample_size_var.get()
+        ai_config['sample_size'] = self.sample_size_spinbox.value()
         
-        ai_config['edge_filters']['min_text_length'] = self.min_length_var.get()
-        ai_config['edge_filters']['min_length_ratio'] = self.min_ratio_var.get()
-        ai_config['edge_filters']['max_length_ratio'] = self.max_ratio_var.get()
+        ai_config['edge_filters']['min_text_length'] = self.min_length_spinbox.value()
+        ai_config['edge_filters']['min_length_ratio'] = self.min_ratio_spinbox.value()
+        ai_config['edge_filters']['max_length_ratio'] = self.max_ratio_spinbox.value()
         
         # Language detection settings
-        ai_config['language_detection']['enabled'] = self.lang_enabled_var.get()
-        ai_config['language_detection']['target_language'] = self.target_lang_var.get()
-        ai_config['language_detection']['threshold_characters'] = self.lang_threshold_var.get()
+        ai_config['language_detection']['enabled'] = self.lang_enabled_checkbox.isChecked()
+        ai_config['language_detection']['target_language'] = self.target_lang_combo.currentText()
+        ai_config['language_detection']['threshold_characters'] = self.lang_threshold_spinbox.value()
         
         # Update retry attempts and temperature change settings
-        ai_config['retry_attempts'] = self.retry_attempts_var.get()
-        ai_config['disable_temperature_change'] = self.disable_temp_change_var.get()
+        ai_config['retry_attempts'] = self.retry_attempts_spinbox.value()
+        ai_config['disable_temperature_change'] = self.disable_temp_change_checkbox.isChecked()
         
         # Update main config
         self.config['ai_hunter_config'] = ai_config
@@ -532,16 +926,25 @@ class AIHunterConfigGUI:
         if self.callback:
             self.callback()
         
-        self.window.destroy()
+        self.window.close()
     
     def reset_defaults(self):
-        """Reset all values to defaults"""
-        import tkinter.messagebox as messagebox
-        result = messagebox.askyesno("Reset to Defaults", 
-                                   "Are you sure you want to reset all settings to defaults?")
-        if result:
+        """Reset all values to defaults (PySide6)"""
+        msg_box = QMessageBox(self.window)
+        msg_box.setWindowTitle("Reset to Defaults")
+        msg_box.setText("Are you sure you want to reset all settings to defaults?")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        msg_box.setIcon(QMessageBox.Question)
+        try:
+            msg_box.setWindowIcon(QIcon("halgakos.ico"))
+        except Exception:
+            pass
+        reply = msg_box.exec()
+        
+        if reply == QMessageBox.Yes:
             self.config['ai_hunter_config'] = self.default_ai_hunter.copy()
-            self.window.destroy()
+            self.window.close()
             self.show_ai_hunter_config()  # Reopen with default values
 
 
