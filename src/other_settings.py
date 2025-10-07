@@ -329,17 +329,19 @@ def open_other_settings(self):
         from PySide6.QtWidgets import QApplication
         screen = QApplication.primaryScreen().availableGeometry()
         # Use 60% of screen width and 80% of screen height
-        width = int(screen.width() * 0.55)
-        height = int(screen.height() * 0.9)
+        width = int(screen.width() * 0.50)
+        height = int(screen.height() * 0.95)
         dialog.resize(width, height)
     except Exception:
         dialog.resize(950, 850)  # Fallback
     
-    # Add F11 fullscreen toggle
+    # Add F11 fullscreen toggle with stay on top for buttons visibility
     def toggle_fullscreen():
         if dialog.isFullScreen():
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
             dialog.showNormal()
         else:
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             dialog.showFullScreen()
     
     # Override key press event for F11
@@ -2428,7 +2430,8 @@ def _create_prompt_management_section(self, parent):
     
     header_h1.addWidget(batch_toggle_cb)
     header_h1.addSpacing(20)
-    header_h1.addWidget(QLabel("Headers per batch:"))
+    headers_per_batch_label = QLabel("Headers per batch:")
+    header_h1.addWidget(headers_per_batch_label)
     
     batch_entry = QLineEdit()
     batch_entry.setFixedWidth(100)
@@ -2533,6 +2536,8 @@ def _create_prompt_management_section(self, parent):
             self.batch_translate_headers_var.set(bool(checked))
         except Exception:
             pass
+        headers_per_batch_label.setEnabled(checked)
+        batch_entry.setEnabled(checked)
         update_cb.setEnabled(checked)
         save_cb.setEnabled(checked)
         ignore_header_cb.setEnabled(checked)
