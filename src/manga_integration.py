@@ -818,7 +818,11 @@ class MangaTranslationTab:
             # Create PySide6 dialog
             selection_dialog = QDialog(self.dialog)
             selection_dialog.setWindowTitle("Select Qwen2-VL Model Size")
-            selection_dialog.setMinimumSize(600, 500)
+            # Use screen ratios for sizing
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.31)  # 31% of screen width
+            height = int(screen.height() * 0.46)  # 46% of screen height
+            selection_dialog.setMinimumSize(width, height)
             main_layout = QVBoxLayout(selection_dialog)
             
             # Title
@@ -3946,7 +3950,11 @@ class MangaTranslationTab:
         # Create a PySide6 dialog
         help_dialog = QDialog(self.dialog)
         help_dialog.setWindowTitle(title)
-        help_dialog.resize(500, 400)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.26)  # 26% of screen width
+        height = int(screen.height() * 0.37)  # 37% of screen height
+        help_dialog.resize(width, height)
         help_dialog.setModal(True)
         
         # Main layout
@@ -5755,7 +5763,11 @@ class MangaTranslationTab:
         # Create a progress dialog
         progress_dialog = QDialog(self.dialog)
         progress_dialog.setWindowTitle(f"Downloading {model_name.upper()} Model")
-        progress_dialog.setFixedSize(400, 150)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)  # 21% of screen width
+        height = int(screen.height() * 0.14)  # 14% of screen height
+        progress_dialog.setFixedSize(width, height)
         progress_dialog.setModal(True)
         
         # Set window icon
@@ -5968,7 +5980,11 @@ class MangaTranslationTab:
         # Create info dialog
         info_dialog = QDialog(self.dialog)
         info_dialog.setWindowTitle(f"{model_type.upper()} Model Information")
-        info_dialog.setFixedSize(450, 350)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.23)  # 23% of screen width
+        height = int(screen.height() * 0.32)  # 32% of screen height
+        info_dialog.setFixedSize(width, height)
         info_dialog.setModal(True)
         
         layout = QVBoxLayout(info_dialog)
@@ -6028,7 +6044,11 @@ class MangaTranslationTab:
         # Create API key input dialog
         api_dialog = QDialog(self.dialog)
         api_dialog.setWindowTitle("Replicate API Key")
-        api_dialog.setFixedSize(400, 150)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)  # 21% of screen width
+        height = int(screen.height() * 0.14)  # 14% of screen height
+        api_dialog.setFixedSize(width, height)
         api_dialog.setModal(True)
         
         layout = QVBoxLayout(api_dialog)

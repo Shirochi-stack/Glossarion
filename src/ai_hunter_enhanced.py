@@ -202,7 +202,13 @@ class AIHunterConfigGUI:
         # Create dialog
         dialog = QDialog(None)
         dialog.setWindowTitle("AI Hunter Configuration")
-        dialog.resize(900, 750)
+        
+        # Use screen ratios for sizing (more reliable across different displays)
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.47)  # 47% of screen width
+        height = int(screen.height() * 0.69)  # 69% of screen height
+        dialog.resize(width, height)
         
         # Set icon
         try:

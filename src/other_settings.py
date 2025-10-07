@@ -173,9 +173,14 @@ def configure_rolling_summary_prompts(self):
     from PySide6.QtGui import QIcon
     
     # Create a non-modal dialog
+    from PySide6.QtWidgets import QApplication
     dialog = QDialog(None)
     dialog.setWindowTitle("Configure Memory System Prompts")
-    dialog.resize(800, 1050)
+    # Use screen ratios for sizing
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.42)  # 42% of screen width
+    height = int(screen.height() * 0.75)  # 75% of screen height
+    dialog.resize(width, height)
     
     # Set icon
     try:
@@ -1896,7 +1901,12 @@ def configure_translation_chunk_prompt(self):
     
     dialog = QDialog(None)
     dialog.setWindowTitle("Configure Translation Chunk Prompt")
-    dialog.resize(700, 600)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.36)  # 36% of screen width
+    height = int(screen.height() * 0.56)  # 56% of screen height
+    dialog.resize(width, height)
     
     # Set icon
     try:
@@ -2011,7 +2021,12 @@ def configure_image_chunk_prompt(self):
     
     dialog = QDialog(None)
     dialog.setWindowTitle("Configure Image Chunk Prompt")
-    dialog.resize(700, 600)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.36)  # 36% of screen width
+    height = int(screen.height() * 0.56)  # 56% of screen height
+    dialog.resize(width, height)
     
     # Set icon
     try:
@@ -2127,7 +2142,12 @@ def configure_image_compression(self):
     
     dialog = QDialog(None)
     dialog.setWindowTitle("Image Compression Settings")
-    dialog.resize(650, 700)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.34)  # 34% of screen width
+    height = int(screen.height() * 0.65)  # 65% of screen height
+    dialog.resize(width, height)
     
     # Set icon
     try:
@@ -4508,7 +4528,12 @@ def test_api_connections(self):
     # Show immediate feedback
     progress_dialog = QDialog(self.current_dialog if hasattr(self, 'current_dialog') else None)
     progress_dialog.setWindowTitle("Testing Connections...")
-    progress_dialog.setFixedSize(300, 150)
+    # Use screen ratios for sizing
+    from PySide6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen().geometry()
+    width = int(screen.width() * 0.16)  # 16% of screen width
+    height = int(screen.height() * 0.14)  # 14% of screen height
+    progress_dialog.setFixedSize(width, height)
     
     # Set icon
     try:
