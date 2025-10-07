@@ -1531,4 +1531,3 @@ class RetranslationMixin:
                   bootstyle="danger").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
         tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
                   bootstyle="secondary").grid(row=1, column=2, columnspan=2, padx=5, pady=10, sticky="ew")
-        
