@@ -329,8 +329,8 @@ def open_other_settings(self):
         from PySide6.QtWidgets import QApplication
         screen = QApplication.primaryScreen().availableGeometry()
         # Use 60% of screen width and 80% of screen height
-        width = int(screen.width() * 0.50)
-        height = int(screen.height() * 0.95)
+        width = int(screen.width() * 0.48)
+        height = int(screen.height() * 0.97)
         dialog.resize(width, height)
     except Exception:
         dialog.resize(950, 850)  # Fallback
@@ -532,9 +532,16 @@ def _create_context_management_section(self, parent):
         rolling_cb.setChecked(bool(self.rolling_summary_var.get()))
     except Exception:
         pass
+    
+    # Store references to controls that should be enabled/disabled
+    rolling_controls = []
+    
     def _on_rolling_toggled(checked):
         try:
             self.rolling_summary_var.set(bool(checked))
+            # Enable/disable all rolling summary controls
+            for control in rolling_controls:
+                control.setEnabled(bool(checked))
         except Exception:
             pass
     rolling_cb.toggled.connect(_on_rolling_toggled)
@@ -546,17 +553,17 @@ def _create_context_management_section(self, parent):
     desc.setContentsMargins(0, 0, 0, 8)
     section_v.addWidget(desc)
 
-    # Settings container - single column for cleaner layout
+    # Settings container - 2 column grid layout
     settings_w = QWidget()
-    settings_v = QVBoxLayout(settings_w)
-    settings_v.setContentsMargins(0, 5, 0, 5)
-    settings_v.setSpacing(6)
+    settings_grid = QGridLayout(settings_w)
+    settings_grid.setContentsMargins(0, 5, 0, 5)
+    settings_grid.setHorizontalSpacing(0)  # No spacing between label and input
+    settings_grid.setVerticalSpacing(6)
 
-    # Role
-    role_row = QWidget()
-    role_h = QHBoxLayout(role_row)
-    role_h.setContentsMargins(0, 0, 0, 0)
-    role_h.addWidget(QLabel("Role:"))
+    # Row 0: Role and Mode
+    role_lbl = QLabel("Role: ")
+    settings_grid.addWidget(role_lbl, 0, 0, alignment=Qt.AlignRight)
+    rolling_controls.append(role_lbl)
     role_combo = QComboBox()
     role_combo.addItems(["user", "system"])
     role_combo.setFixedWidth(90)
@@ -571,15 +578,12 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     role_combo.currentTextChanged.connect(_on_role_changed)
-    role_h.addWidget(role_combo)
-    role_h.addStretch()
-    settings_v.addWidget(role_row)
-
-    # Mode
-    mode_row = QWidget()
-    mode_h = QHBoxLayout(mode_row)
-    mode_h.setContentsMargins(0, 0, 0, 0)
-    mode_h.addWidget(QLabel("Mode:"))
+    settings_grid.addWidget(role_combo, 0, 1, alignment=Qt.AlignLeft)
+    rolling_controls.append(role_combo)
+    
+    mode_lbl = QLabel(" Mode: ")
+    settings_grid.addWidget(mode_lbl, 0, 2, alignment=Qt.AlignRight)
+    rolling_controls.append(mode_lbl)
     mode_combo = QComboBox()
     mode_combo.addItems(["append", "replace"])
     mode_combo.setFixedWidth(90)
@@ -594,15 +598,13 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     mode_combo.currentTextChanged.connect(_on_mode_changed)
-    mode_h.addWidget(mode_combo)
-    mode_h.addStretch()
-    settings_v.addWidget(mode_row)
+    settings_grid.addWidget(mode_combo, 0, 3, alignment=Qt.AlignLeft)
+    rolling_controls.append(mode_combo)
 
-    # Summarize last N exchanges
-    exchanges_row = QWidget()
-    exchanges_h = QHBoxLayout(exchanges_row)
-    exchanges_h.setContentsMargins(0, 0, 0, 0)
-    exchanges_h.addWidget(QLabel("Summarize last:"))
+    # Row 1: Summarize last and Retain
+    summ_lbl = QLabel("Summarize last N exchanges: ")
+    settings_grid.addWidget(summ_lbl, 1, 0, alignment=Qt.AlignRight)
+    rolling_controls.append(summ_lbl)
     exchanges_edit = QLineEdit()
     exchanges_edit.setFixedWidth(70)
     try:
@@ -615,16 +617,12 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     exchanges_edit.textChanged.connect(_on_exchanges_changed)
-    exchanges_h.addWidget(exchanges_edit)
-    exchanges_h.addWidget(QLabel("exchanges"))
-    exchanges_h.addStretch()
-    settings_v.addWidget(exchanges_row)
-
-    # Retain N entries
-    retain_row = QWidget()
-    retain_h = QHBoxLayout(retain_row)
-    retain_h.setContentsMargins(0, 0, 0, 0)
-    retain_h.addWidget(QLabel("Retain:"))
+    settings_grid.addWidget(exchanges_edit, 1, 1, alignment=Qt.AlignLeft)
+    rolling_controls.append(exchanges_edit)
+    
+    retain_lbl = QLabel(" Retain N entries: ")
+    settings_grid.addWidget(retain_lbl, 1, 2, alignment=Qt.AlignRight)
+    rolling_controls.append(retain_lbl)
     retain_edit = QLineEdit()
     retain_edit.setFixedWidth(70)
     try:
@@ -637,10 +635,8 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     retain_edit.textChanged.connect(_on_retain_changed)
-    retain_h.addWidget(retain_edit)
-    retain_h.addWidget(QLabel("entries"))
-    retain_h.addStretch()
-    settings_v.addWidget(retain_row)
+    settings_grid.addWidget(retain_edit, 1, 3, alignment=Qt.AlignLeft)
+    rolling_controls.append(retain_edit)
 
     section_v.addWidget(settings_w)
     
@@ -655,10 +651,20 @@ def _create_context_management_section(self, parent):
         "  font-size: 10pt; "
         "  border-radius: 3px; "
         "} "
-        "QPushButton:hover { background-color: #138496; }"
+        "QPushButton:hover { background-color: #138496; } "
+        "QPushButton:disabled { "
+        "  background-color: #6c757d; "
+        "  color: #adb5bd; "
+        "}"
     )
     cfg_btn.clicked.connect(self.configure_rolling_summary_prompts)
     section_v.addWidget(cfg_btn)
+    rolling_controls.append(cfg_btn)
+    
+    # Set initial enabled state based on checkbox
+    initial_state = rolling_cb.isChecked()
+    for control in rolling_controls:
+        control.setEnabled(initial_state)
 
     # Separator
     sep1 = QFrame()
@@ -1351,7 +1357,7 @@ def _create_response_handling_section(self, parent):
     http_main_v.addWidget(self.http_tuning_checkbox)
     http_main_v.addSpacing(8)
     
-    # Single column layout for more compact display
+    # 2 column grid layout for more compact display
     if not hasattr(self, 'connect_timeout_var'):
         self.connect_timeout_var = tk.StringVar(value=str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))))
     if not hasattr(self, 'read_timeout_var'):
@@ -1361,12 +1367,16 @@ def _create_response_handling_section(self, parent):
     if not hasattr(self, 'http_pool_maxsize_var'):
         self.http_pool_maxsize_var = tk.StringVar(value=str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))))
     
-    # Connect timeout
-    connect_row = QWidget()
-    connect_h = QHBoxLayout(connect_row)
-    connect_h.setContentsMargins(0, 0, 0, 5)
-    self.connect_timeout_label = QLabel("Connect timeout (s):")
-    connect_h.addWidget(self.connect_timeout_label)
+    # Create grid for 2-column layout
+    http_grid = QWidget()
+    http_grid_layout = QGridLayout(http_grid)
+    http_grid_layout.setContentsMargins(0, 0, 0, 5)
+    http_grid_layout.setHorizontalSpacing(0)  # No spacing between label and input
+    http_grid_layout.setVerticalSpacing(5)
+    
+    # Row 0: Connect timeout and Read timeout
+    self.connect_timeout_label = QLabel("Connect timeout (s): ")
+    http_grid_layout.addWidget(self.connect_timeout_label, 0, 0, alignment=Qt.AlignRight)
     self.connect_timeout_entry = QLineEdit()
     self.connect_timeout_entry.setFixedWidth(70)
     try:
@@ -1379,16 +1389,10 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.connect_timeout_entry.textChanged.connect(_on_connect_timeout_changed)
-    connect_h.addWidget(self.connect_timeout_entry)
-    connect_h.addStretch()
-    http_main_v.addWidget(connect_row)
+    http_grid_layout.addWidget(self.connect_timeout_entry, 0, 1, alignment=Qt.AlignLeft)
     
-    # Read timeout
-    read_row = QWidget()
-    read_h = QHBoxLayout(read_row)
-    read_h.setContentsMargins(0, 0, 0, 5)
-    self.read_timeout_label = QLabel("Read timeout (s):")
-    read_h.addWidget(self.read_timeout_label)
+    self.read_timeout_label = QLabel(" Read timeout (s): ")
+    http_grid_layout.addWidget(self.read_timeout_label, 0, 2, alignment=Qt.AlignRight)
     self.read_timeout_entry = QLineEdit()
     self.read_timeout_entry.setFixedWidth(70)
     try:
@@ -1401,16 +1405,11 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.read_timeout_entry.textChanged.connect(_on_read_timeout_changed)
-    read_h.addWidget(self.read_timeout_entry)
-    read_h.addStretch()
-    http_main_v.addWidget(read_row)
+    http_grid_layout.addWidget(self.read_timeout_entry, 0, 3, alignment=Qt.AlignLeft)
     
-    # Pool connections
-    pool_conn_row = QWidget()
-    pool_conn_h = QHBoxLayout(pool_conn_row)
-    pool_conn_h.setContentsMargins(0, 0, 0, 5)
-    self.http_pool_connections_label = QLabel("Pool connections:")
-    pool_conn_h.addWidget(self.http_pool_connections_label)
+    # Row 1: Pool connections and Pool max size
+    self.http_pool_connections_label = QLabel("Pool connections: ")
+    http_grid_layout.addWidget(self.http_pool_connections_label, 1, 0, alignment=Qt.AlignRight)
     self.http_pool_connections_entry = QLineEdit()
     self.http_pool_connections_entry.setFixedWidth(70)
     try:
@@ -1423,16 +1422,10 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.http_pool_connections_entry.textChanged.connect(_on_pool_conn_changed)
-    pool_conn_h.addWidget(self.http_pool_connections_entry)
-    pool_conn_h.addStretch()
-    http_main_v.addWidget(pool_conn_row)
+    http_grid_layout.addWidget(self.http_pool_connections_entry, 1, 1, alignment=Qt.AlignLeft)
     
-    # Pool max size
-    pool_max_row = QWidget()
-    pool_max_h = QHBoxLayout(pool_max_row)
-    pool_max_h.setContentsMargins(0, 0, 0, 5)
-    self.http_pool_maxsize_label = QLabel("Pool max size:")
-    pool_max_h.addWidget(self.http_pool_maxsize_label)
+    self.http_pool_maxsize_label = QLabel(" Pool max size: ")
+    http_grid_layout.addWidget(self.http_pool_maxsize_label, 1, 2, alignment=Qt.AlignRight)
     self.http_pool_maxsize_entry = QLineEdit()
     self.http_pool_maxsize_entry.setFixedWidth(70)
     try:
@@ -1445,9 +1438,9 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.http_pool_maxsize_entry.textChanged.connect(_on_pool_maxsize_changed)
-    pool_max_h.addWidget(self.http_pool_maxsize_entry)
-    pool_max_h.addStretch()
-    http_main_v.addWidget(pool_max_row)
+    http_grid_layout.addWidget(self.http_pool_maxsize_entry, 1, 3, alignment=Qt.AlignLeft)
+    
+    http_main_v.addWidget(http_grid)
     
     # Optional toggle: ignore server Retry-After header
     if not hasattr(self, 'ignore_retry_after_var'):
