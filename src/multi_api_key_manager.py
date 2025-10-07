@@ -1762,7 +1762,8 @@ class MultiAPIKeyDialog(QDialog):
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
+        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
+        dialog.exec_()
     
     def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
         """Quick toggle individual endpoint on/off for fallback key"""
@@ -2709,7 +2710,8 @@ class MultiAPIKeyDialog(QDialog):
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        IndividualEndpointDialog(self, self.translator_gui, key, self._refresh_key_list, self._show_status)
+        dialog = IndividualEndpointDialog(self, self.translator_gui, key, self._refresh_key_list, self._show_status)
+        dialog.exec_()
     
     def _toggle_endpoint_fields(self, enable_checkbox, endpoint_entry, version_combo):
         """Toggle endpoint configuration fields based on enable state"""

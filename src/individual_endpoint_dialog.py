@@ -5,9 +5,13 @@ Individual Endpoint Configuration Dialog for Glossarion
 - Allows enabling/disabling per-key custom endpoint (e.g., Azure, Ollama/local OpenAI-compatible)
 - Persists changes to the in-memory key object and refreshes the parent list
 """
-import tkinter as tk
-from tkinter import ttk, messagebox
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QCheckBox, QComboBox, QGroupBox, QGridLayout,
+    QFrame, QScrollArea, QWidget, QMessageBox
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from typing import Callable
 
 try:
@@ -17,87 +21,88 @@ except Exception:
     pass
 
 
-class IndividualEndpointDialog:
+class IndividualEndpointDialog(QDialog):
     def __init__(self, parent, translator_gui, key, refresh_callback: Callable[[], None], status_callback: Callable[[str], None]):
-        self.parent = parent
+        super().__init__(parent)
         self.translator_gui = translator_gui
         self.key = key
         self.refresh_callback = refresh_callback
         self.status_callback = status_callback
-        self.dialog = None
-        self.canvas = None
-
+        
         self._build()
 
     def _build(self):
         title = f"Configure Individual Endpoint — {getattr(self.key, 'model', '')}"
-
-        if hasattr(self.translator_gui, 'wm'):
-            # Use WindowManager scrollable dialog for consistency
-            self.dialog, scrollable_frame, self.canvas = self.translator_gui.wm.setup_scrollable(
-                self.parent,
-                title,
-                width=700,
-                height=420,
-                max_width_ratio=0.85,
-                max_height_ratio=0.45
-            )
-        else:
-            self.dialog = tk.Toplevel(self.parent)
-            self.dialog.title(title)
-            self.dialog.geometry("700x420")
-            scrollable_frame = self.dialog
-
-        main = tk.Frame(scrollable_frame, padx=20, pady=16)
-        main.pack(fill=tk.BOTH, expand=True)
-
+        self.setWindowTitle(title)
+        self.setMinimumSize(700, 420)
+        
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(10)
+        
         # Header
-        header = tk.Frame(main)
-        header.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(header, text="Per-Key Custom Endpoint", font=("TkDefaultFont", 14, "bold")).pack(side=tk.LEFT)
-
+        header_layout = QHBoxLayout()
+        header_label = QLabel("Per-Key Custom Endpoint")
+        header_font = QFont()
+        header_font.setPointSize(14)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        header_layout.addWidget(header_label)
+        
         # Enable toggle
-        self.enable_var = tk.BooleanVar(value=bool(getattr(self.key, 'use_individual_endpoint', False)))
-        tb.Checkbutton(header, text="Enable", variable=self.enable_var, bootstyle="round-toggle",
-                       command=self._toggle_fields).pack(side=tk.RIGHT)
-
+        self.enable_checkbox = QCheckBox("Enable")
+        self.enable_checkbox.setChecked(bool(getattr(self.key, 'use_individual_endpoint', False)))
+        self.enable_checkbox.toggled.connect(self._toggle_fields)
+        header_layout.addStretch()
+        header_layout.addWidget(self.enable_checkbox)
+        
+        main_layout.addLayout(header_layout)
+        
         # Description
         desc = (
             "Use a custom endpoint for this API key only. Works with OpenAI-compatible servers\n"
             "like Azure OpenAI or local providers (e.g., Ollama at http://localhost:11434/v1)."
         )
-        tk.Label(main, text=desc, fg='gray', justify=tk.LEFT).pack(anchor=tk.W)
-
-        # Form
-        form = tk.LabelFrame(main, text="Endpoint Settings", padx=14, pady=12)
-        form.pack(fill=tk.BOTH, expand=False, pady=(10, 0))
-
+        desc_label = QLabel(desc)
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        main_layout.addWidget(desc_label)
+        
+        # Form group
+        form_group = QGroupBox("Endpoint Settings")
+        form_layout = QGridLayout(form_group)
+        form_layout.setContentsMargins(14, 12, 14, 12)
+        form_layout.setSpacing(6)
+        
         # Endpoint URL
-        tk.Label(form, text="Endpoint Base URL:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=6)
-        self.endpoint_var = tk.StringVar(value=getattr(self.key, 'azure_endpoint', '') or '')
-        self.endpoint_entry = tb.Entry(form, textvariable=self.endpoint_var)
-        self.endpoint_entry.grid(row=0, column=1, sticky=tk.EW, pady=6)
-
-        # Azure API version (optional; required if using Azure)
-        tk.Label(form, text="Azure API Version:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=6)
-        self.api_version_var = tk.StringVar(value=getattr(self.key, 'azure_api_version', '2025-01-01-preview') or '2025-01-01-preview')
-        self.api_version_combo = ttk.Combobox(
-            form,
-            textvariable=self.api_version_var,
-            values=[
-                '2025-01-01-preview',
-                '2024-12-01-preview',
-                '2024-10-01-preview',
-                '2024-08-01-preview',
-                '2024-06-01',
-                '2024-02-01',
-                '2023-12-01-preview'
-            ],
-            width=24,
-            state='readonly'
-        )
-        self.api_version_combo.grid(row=1, column=1, sticky=tk.W, pady=6)
-
+        endpoint_label = QLabel("Endpoint Base URL:")
+        form_layout.addWidget(endpoint_label, 0, 0, Qt.AlignLeft)
+        
+        self.endpoint_entry = QLineEdit()
+        self.endpoint_entry.setText(getattr(self.key, 'azure_endpoint', '') or '')
+        form_layout.addWidget(self.endpoint_entry, 0, 1)
+        
+        # Azure API version
+        api_version_label = QLabel("Azure API Version:")
+        form_layout.addWidget(api_version_label, 1, 0, Qt.AlignLeft)
+        
+        self.api_version_combo = QComboBox()
+        self.api_version_combo.addItems([
+            '2025-01-01-preview',
+            '2024-12-01-preview',
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ])
+        current_version = getattr(self.key, 'azure_api_version', '2025-01-01-preview') or '2025-01-01-preview'
+        index = self.api_version_combo.findText(current_version)
+        if index >= 0:
+            self.api_version_combo.setCurrentIndex(index)
+        form_layout.addWidget(self.api_version_combo, 1, 1)
+        
         # Helper text
         hint = (
             "Hints:\n"
@@ -105,37 +110,45 @@ class IndividualEndpointDialog:
             "- Azure OpenAI: https://<resource>.openai.azure.com/ (version required)\n"
             "- Other OpenAI-compatible: Provide the base URL ending with /v1 if applicable"
         )
-        tk.Label(form, text=hint, fg='gray', justify=tk.LEFT, font=('TkDefaultFont', 9)).grid(
-            row=2, column=0, columnspan=2, sticky=tk.W, pady=(4, 0)
-        )
-
-        # Grid weights
-        form.columnconfigure(1, weight=1)
-
+        hint_label = QLabel(hint)
+        hint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        hint_label.setWordWrap(True)
+        form_layout.addWidget(hint_label, 2, 0, 1, 2, Qt.AlignLeft)
+        
+        # Make column 1 stretch
+        form_layout.setColumnStretch(1, 1)
+        
+        main_layout.addWidget(form_group)
+        
         # Buttons
-        btns = tk.Frame(main)
-        btns.pack(fill=tk.X, pady=(14, 0))
-
-        tb.Button(btns, text="Save", bootstyle="success", command=self._on_save).pack(side=tk.RIGHT)
-        tb.Button(btns, text="Cancel", bootstyle="secondary", command=self._on_close).pack(side=tk.RIGHT, padx=(0, 8))
-        tb.Button(btns, text="Disable", bootstyle="danger-outline", command=self._on_disable).pack(side=tk.LEFT)
-
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+        
+        disable_button = QPushButton("Disable")
+        disable_button.clicked.connect(self._on_disable)
+        button_layout.addWidget(disable_button)
+        
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self._on_close)
+        button_layout.addWidget(cancel_button)
+        
+        save_button = QPushButton("Save")
+        save_button.setDefault(True)
+        save_button.clicked.connect(self._on_save)
+        button_layout.addWidget(save_button)
+        
+        main_layout.addLayout(button_layout)
+        
         # Initial toggle state
         self._toggle_fields()
 
-        # Window close protocol
-        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Auto-size with WM if available
-        if hasattr(self.translator_gui, 'wm') and self.canvas is not None:
-            self.translator_gui.wm.auto_resize_dialog(self.dialog, self.canvas, max_width_ratio=0.9, max_height_ratio=0.45)
-
     def _toggle_fields(self):
-        enabled = self.enable_var.get()
-        state = tk.NORMAL if enabled else tk.DISABLED
-        self.endpoint_entry.config(state=state)
+        enabled = self.enable_checkbox.isChecked()
+        self.endpoint_entry.setEnabled(enabled)
         # API version is only relevant for Azure but we leave it enabled while toggle is on
-        self.api_version_combo.config(state='readonly' if enabled else 'disabled')
+        self.api_version_combo.setEnabled(enabled)
 
     def _is_azure_endpoint(self, url: str) -> bool:
         if not url:
@@ -144,19 +157,19 @@ class IndividualEndpointDialog:
         return (".openai.azure.com" in url_l) or ("azure.com/openai" in url_l) or ("/openai/deployments/" in url_l)
 
     def _validate(self) -> bool:
-        if not self.enable_var.get():
+        if not self.enable_checkbox.isChecked():
             return True
-        url = (self.endpoint_var.get() or '').strip()
+        url = self.endpoint_entry.text().strip()
         if not url:
-            messagebox.showerror("Validation Error", "Endpoint Base URL is required when Enable is ON.")
+            QMessageBox.critical(self, "Validation Error", "Endpoint Base URL is required when Enable is ON.")
             return False
         if not (url.startswith("http://") or url.startswith("https://")):
-            messagebox.showerror("Validation Error", "Endpoint URL must start with http:// or https://")
+            QMessageBox.critical(self, "Validation Error", "Endpoint URL must start with http:// or https://")
             return False
         if self._is_azure_endpoint(url):
-            ver = (self.api_version_var.get() or '').strip()
+            ver = self.api_version_combo.currentText().strip()
             if not ver:
-                messagebox.showerror("Validation Error", "Azure API Version is required for Azure endpoints.")
+                QMessageBox.critical(self, "Validation Error", "Azure API Version is required for Azure endpoints.")
                 return False
         return True
 
@@ -188,9 +201,9 @@ class IndividualEndpointDialog:
     def _on_save(self):
         if not self._validate():
             return
-        enabled = self.enable_var.get()
-        url = (self.endpoint_var.get() or '').strip()
-        ver = (self.api_version_var.get() or '').strip()
+        enabled = self.enable_checkbox.isChecked()
+        url = self.endpoint_entry.text().strip()
+        ver = self.api_version_combo.currentText().strip()
 
         # Apply to key object
         self.key.use_individual_endpoint = enabled
@@ -216,14 +229,14 @@ class IndividualEndpointDialog:
         # Best-effort persistence to config
         self._persist_to_config_if_possible()
 
-        self.dialog.destroy()
+        self.accept()
 
     def _on_disable(self):
         # Disable quickly
-        self.enable_var.set(False)
+        self.enable_checkbox.setChecked(False)
         self._toggle_fields()
         # Apply immediately and close
         self._on_save()
 
     def _on_close(self):
-        self.dialog.destroy()
+        self.reject()
