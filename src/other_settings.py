@@ -324,8 +324,16 @@ def open_other_settings(self):
     except Exception:
         pass
     
-    # Set initial size
-    dialog.resize(950, 850)
+    # Set initial size based on screen ratio
+    try:
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().availableGeometry()
+        # Use 60% of screen width and 80% of screen height
+        width = int(screen.width() * 0.55)
+        height = int(screen.height() * 0.9)
+        dialog.resize(width, height)
+    except Exception:
+        dialog.resize(950, 850)  # Fallback
     
     # Add F11 fullscreen toggle
     def toggle_fullscreen():
@@ -808,7 +816,7 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for GPT controls
     self.toggle_gpt_reasoning_controls()
     
-    gpt_desc = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models; GPT-5 only uses Effort (low/medium/high).")
+    gpt_desc = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 only uses Effort (low/medium/high).")
     gpt_desc.setStyleSheet("color: gray; font-size: 10pt;")
     gpt_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(gpt_desc)
@@ -1442,7 +1450,7 @@ def _create_response_handling_section(self, parent):
     if hasattr(self, '_toggle_http_tuning_controls'):
         self._toggle_http_tuning_controls()
     
-    http_desc = QLabel("Controls network behavior to reduce 500/503s: connection establishment timeout, read timeout,\nHTTP connection pool sizes.")
+    http_desc = QLabel("Controls network behavior for connection establishment timeout, read timeout,\nHTTP connection pool sizes.")
     http_desc.setStyleSheet("color: gray; font-size: 10pt;")
     http_desc.setContentsMargins(20, 2, 0, 5)
     section_v.addWidget(http_desc)
@@ -2916,7 +2924,7 @@ def _create_processing_options_section(self, parent):
     force_bs_cb.setContentsMargins(0, 0, 0, 5)
     extraction_v.addWidget(force_bs_cb)
     
-    force_bs_desc = QLabel("When enabled, DeepL/Google Translate/Google Free always use BeautifulSoup extraction even if Enhanced is selected.")
+    force_bs_desc = QLabel("Overrides HTML2Text.")
     force_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
     force_bs_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(force_bs_desc)
@@ -2990,7 +2998,7 @@ def _create_processing_options_section(self, parent):
     cover_cb.setContentsMargins(0, 2, 0, 0)
     section_v.addWidget(cover_cb)
     
-    cover_desc = QLabel("When enabled: no auto-generated cover page is created.")
+    cover_desc = QLabel("No auto-generated cover page is created.")
     cover_desc.setStyleSheet("color: gray; font-size: 10pt;")
     cover_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(cover_desc)
@@ -3010,7 +3018,7 @@ def _create_processing_options_section(self, parent):
     translate_cover_cb.setContentsMargins(0, 2, 0, 0)
     section_v.addWidget(translate_cover_cb)
     
-    translate_cover_desc = QLabel("When enabled: existing cover.html/cover.xhtml will be included and translated (not skipped).")
+    translate_cover_desc = QLabel("Disables cover.html/cover.xhtml skip lopgic.")
     translate_cover_desc.setStyleSheet("color: gray; font-size: 10pt;")
     translate_cover_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(translate_cover_desc)
@@ -3162,7 +3170,7 @@ def _create_processing_options_section(self, parent):
     batch_cb.setContentsMargins(0, 10, 0, 0)
     section_v.addWidget(batch_cb)
     
-    batch_desc = QLabel("When enabled: Groups chapters in batches of 3x batch size for memory management\nWhen disabled (default): Uses direct batch size for faster processing")
+    batch_desc = QLabel("Groups chapters in batches of 3x batch size for memory management\nWhen disabled (default): Uses direct batch size for faster processing")
     batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     batch_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(batch_desc)
@@ -3228,7 +3236,7 @@ def _create_processing_options_section(self, parent):
     http_only_cb.setContentsMargins(0, 8, 0, 0)
     section_v.addWidget(http_only_cb)
     
-    http_only_desc = QLabel("When enabled, requests to OpenRouter use direct HTTP POST with explicit headers (Accept, Referer, X-Title).")
+    http_only_desc = QLabel("Requests to OpenRouter use direct HTTP POST with explicit headers")
     http_only_desc.setStyleSheet("color: gray; font-size: 9pt;")
     http_only_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(http_only_desc)
@@ -3523,11 +3531,6 @@ def _create_image_translation_section(self, parent):
             return _cb
         entry.textChanged.connect(_make_entry_callback(var))
         settings_grid.addWidget(entry, row, 1, Qt.AlignLeft)
-        
-        if has_tip:
-            tip = QLabel("1-10% recommended")
-            tip.setStyleSheet("color: gray; font-size: 8pt;")
-            settings_grid.addWidget(tip, row, 2, Qt.AlignLeft)
     
     right_v.addWidget(settings_w)
     right_v.addSpacing(15)
