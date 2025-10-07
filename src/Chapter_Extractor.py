@@ -8,7 +8,7 @@ import time
 import shutil
 import hashlib
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
 
 # Stop request function (can be overridden)
@@ -852,92 +852,17 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     
     print(f"📚 Processing {len(files_to_process)} files after merge analysis")
     
-    # Thread-safe collections
-    sample_texts_lock = threading.Lock()
-    file_size_groups_lock = threading.Lock()
-    h1_count_lock = threading.Lock()
-    h2_count_lock = threading.Lock()
-    
-    # Initialize counters
+    # Initialize collections for aggregating results
     file_size_groups = {}
     h1_count = 0
     h2_count = 0
-    processed_count = 0
-    processed_count_lock = threading.Lock()
+    skipped_files = []
     
     # Progress tracking
     total_files = len(files_to_process)
     
-    # Shared counters for aggregating results from parallel workers
-    skipped_files = []
-    skipped_files_lock = threading.Lock()
-    
-    # Wrapper function to call module-level function with progress tracking
-    def process_single_html_file_wrapper(file_path, file_index):
-        nonlocal h1_count, h2_count, processed_count
-        
-        # Call the module-level function
-        result = _process_single_html_file(
-            file_path=file_path,
-            file_index=file_index,
-            zip_file_path=zf.filename,  # Use the ZipFile's filename attribute
-            parser=parser,
-            merge_candidates=merge_candidates,
-            disable_merging=disable_merging,
-            enhanced_extractor=enhanced_extractor,
-            extraction_mode=extraction_mode,
-            enhanced_filtering=enhanced_filtering,
-            preserve_structure=preserve_structure,
-            protect_angle_brackets_func=protect_angle_brackets_with_korean,
-            extract_chapter_info_func=lambda soup, fp, ct, hc: _extract_chapter_info(soup, fp, ct, hc, pattern_manager),
-            files_to_process=files_to_process,
-            is_stop_requested=is_stop_requested
-        )
-        
-        # Unpack result
-        chapter_info, h1_found, h2_found, file_size, sample_text, skipped_info = result
-        
-        # Update progress
-        with processed_count_lock:
-            processed_count += 1
-            current_count = processed_count
-            if current_count % 5 == 0:
-                if progress_callback:
-                    progress_msg = f"Processing chapters: {current_count}/{total_files} ({current_count*100//total_files}%)"
-                    progress_callback(progress_msg)
-                else:
-                    # Print progress bar in terminal
-                    ProgressBar.update(current_count, total_files, prefix="📚 Processing chapters")
-        
-        # Aggregate header counts (thread-safe)
-        if h1_found:
-            with h1_count_lock:
-                h1_count += 1
-        if h2_found:
-            with h2_count_lock:
-                h2_count += 1
-        
-        # Collect file size groups (thread-safe)
-        if chapter_info:
-            effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
-            if effective_mode == "smart" and file_size > 0:
-                with file_size_groups_lock:
-                    if file_size not in file_size_groups:
-                        file_size_groups[file_size] = []
-                    file_size_groups[file_size].append(file_path)
-                
-                # Collect sample texts (thread-safe)
-                if sample_text:
-                    with sample_texts_lock:
-                        if len(sample_texts) < 5:
-                            sample_texts.append(sample_text)
-        
-        # Collect skipped info (thread-safe)
-        if skipped_info:
-            with skipped_files_lock:
-                skipped_files.append(skipped_info)
-        
-        return chapter_info
+    # Prepare arguments for parallel processing
+    zip_file_path = zf.filename
     
     # Process files in parallel or sequentially based on file count
     # Only print if no callback (avoid duplicates)
@@ -957,17 +882,33 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         max_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
         print(f"📦 Using parallel processing with {max_workers} workers...")
         
-        # Use ThreadPoolExecutor (ProcessPoolExecutor requires picklable functions)
-        # The module-level function _process_single_html_file is picklable,
-        # but methods (_extract_chapter_info) are not, so we stick with threads
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Use ProcessPoolExecutor for true multi-process parallelism
+        # Now that all functions are at module level and picklable, we can use processes
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all files for processing
             future_to_file = {
-                executor.submit(process_single_html_file_wrapper, file_path, idx): (file_path, idx)
+                executor.submit(
+                    _process_single_html_file,
+                    file_path=file_path,
+                    file_index=idx,
+                    zip_file_path=zip_file_path,
+                    parser=parser,
+                    merge_candidates=merge_candidates,
+                    disable_merging=disable_merging,
+                    enhanced_extractor=enhanced_extractor,
+                    extraction_mode=extraction_mode,
+                    enhanced_filtering=enhanced_filtering,
+                    preserve_structure=preserve_structure,
+                    protect_angle_brackets_func=protect_angle_brackets_with_korean,
+                    pattern_manager=pattern_manager,
+                    files_to_process=files_to_process,
+                    is_stop_requested=is_stop_requested
+                ): (file_path, idx)
                 for idx, file_path in enumerate(files_to_process)
             }
             
-            # Collect results as they complete
+            # Collect results as they complete with progress tracking
+            processed_count = 0
             for future in as_completed(future_to_file):
                 if is_stop_requested():
                     print("❌ Chapter processing stopped by user")
@@ -975,9 +916,38 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     return [], 'unknown'
                 
                 try:
-                    chapter_info = future.result()
+                    # Unpack result from _process_single_html_file
+                    result = future.result()
+                    chapter_info, h1_found, h2_found, file_size, sample_text, skipped_info = result
+                    
+                    # Update progress
+                    processed_count += 1
+                    if processed_count % 5 == 0:
+                        if progress_callback:
+                            progress_msg = f"Processing chapters: {processed_count}/{total_files} ({processed_count*100//total_files}%)"
+                            progress_callback(progress_msg)
+                        else:
+                            # Print progress bar in terminal
+                            ProgressBar.update(processed_count, total_files, prefix="📚 Processing chapters")
+                    
+                    # Aggregate header counts
+                    if h1_found:
+                        h1_count += 1
+                    if h2_found:
+                        h2_count += 1
+                    
+                    # Collect file size groups and sample texts
                     if chapter_info:
                         effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                        if effective_mode == "smart" and file_size > 0:
+                            if file_size not in file_size_groups:
+                                file_size_groups[file_size] = []
+                            file_path, _ = future_to_file[future]
+                            file_size_groups[file_size].append(file_path)
+                            
+                            # Collect sample texts
+                            if sample_text and len(sample_texts) < 5:
+                                sample_texts.append(sample_text)
                         
                         # For smart mode when merging is enabled, collect candidates
                         # Otherwise, add directly to chapters
@@ -985,9 +955,16 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                             candidate_chapters.append(chapter_info)
                         else:
                             chapters_direct.append(chapter_info)
+                    
+                    # Collect skipped info
+                    if skipped_info:
+                        skipped_files.append(skipped_info)
+                        
                 except Exception as e:
                     file_path, idx = future_to_file[future]
-                    print(f"[ERROR] Thread error processing {file_path}: {e}")
+                    print(f"[ERROR] Process error processing {file_path}: {e}")
+                    import traceback
+                    traceback.print_exc()
     else:
         print("📦 Using sequential processing (small file count)...")
         
@@ -997,9 +974,53 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                 print("❌ Chapter processing stopped by user")
                 return [], 'unknown'
             
-            chapter_info = process_single_html_file_wrapper(file_path, idx)
+            # Call the module-level function directly
+            result = _process_single_html_file(
+                file_path=file_path,
+                file_index=idx,
+                zip_file_path=zip_file_path,
+                parser=parser,
+                merge_candidates=merge_candidates,
+                disable_merging=disable_merging,
+                enhanced_extractor=enhanced_extractor,
+                extraction_mode=extraction_mode,
+                enhanced_filtering=enhanced_filtering,
+                preserve_structure=preserve_structure,
+                protect_angle_brackets_func=protect_angle_brackets_with_korean,
+                pattern_manager=pattern_manager,
+                files_to_process=files_to_process,
+                is_stop_requested=is_stop_requested
+            )
+            
+            # Unpack result
+            chapter_info, h1_found, h2_found, file_size, sample_text, skipped_info = result
+            
+            # Update progress
+            if (idx + 1) % 5 == 0:
+                if progress_callback:
+                    progress_msg = f"Processing chapters: {idx+1}/{total_files} ({(idx+1)*100//total_files}%)"
+                    progress_callback(progress_msg)
+                else:
+                    # Print progress bar in terminal
+                    ProgressBar.update(idx+1, total_files, prefix="📚 Processing chapters")
+            
+            # Aggregate header counts
+            if h1_found:
+                h1_count += 1
+            if h2_found:
+                h2_count += 1
+            
+            # Collect file size groups and sample texts
             if chapter_info:
                 effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                if effective_mode == "smart" and file_size > 0:
+                    if file_size not in file_size_groups:
+                        file_size_groups[file_size] = []
+                    file_size_groups[file_size].append(file_path)
+                    
+                    # Collect sample texts
+                    if sample_text and len(sample_texts) < 5:
+                        sample_texts.append(sample_text)
                 
                 # For smart mode when merging is enabled, collect candidates
                 # Otherwise, add directly to chapters
@@ -1007,6 +1028,10 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     candidate_chapters.append(chapter_info)
                 else:
                     chapters_direct.append(chapter_info)
+            
+            # Collect skipped info
+            if skipped_info:
+                skipped_files.append(skipped_info)
     
     # Final progress update and cleanup progress bar
     if not progress_callback:
@@ -2032,7 +2057,7 @@ def _process_single_html_file(
     enhanced_filtering,
     preserve_structure,
     protect_angle_brackets_func,
-    extract_chapter_info_func,
+    pattern_manager,
     files_to_process,
     is_stop_requested
 ):
@@ -2252,8 +2277,8 @@ def _process_single_html_file(
                 h2_found = len(h2_tags) > 0
                 
                 # Extract chapter number and title
-                chapter_num, extracted_title, detection_method = extract_chapter_info_func(
-                    soup, file_path, content_text, html_content
+                chapter_num, extracted_title, detection_method = _extract_chapter_info(
+                    soup, file_path, content_text, html_content, pattern_manager
                 )
                 
                 # Use extracted title if we don't have one
