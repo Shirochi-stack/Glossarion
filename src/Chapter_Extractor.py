@@ -7,7 +7,13 @@ import threading
 import time
 import shutil
 import hashlib
+import warnings
 from bs4 import BeautifulSoup
+try:
+    from bs4 import XMLParsedAsHTMLWarning
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+except ImportError:
+    pass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
 
@@ -342,7 +348,7 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         parser = _get_best_parser()
     if pattern_manager is None:
         from TransateKRtoEN import PatternManager
-        pattern_manager = PatternManager()
+        pattern_manager = None  # No longer needed
     
     # Check stop at the very beginning
     if is_stop_requested():
@@ -646,7 +652,7 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         parser = _get_best_parser()
     if pattern_manager is None:
         from TransateKRtoEN import PatternManager
-        pattern_manager = PatternManager()
+        pattern_manager = None  # No longer needed
     
     # Check stop at the beginning
     if is_stop_requested():
@@ -1256,7 +1262,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
     # If not handled by special logic, continue with normal extraction
     if not chapter_num:
         # Try filename first - use parallel pattern matching for better performance
-        chapter_patterns = [(pattern, flags, method) for pattern, flags, method in pattern_manager.CHAPTER_PATTERNS 
+        chapter_patterns = [(pattern, flags, method) for pattern, flags, method in PM.CHAPTER_PATTERNS 
                           if method.endswith('_number')]
         
         if len(chapter_patterns) > 3:  # Only parallelize if we have enough patterns
@@ -1272,7 +1278,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                                 return int(num_str), f"filename_{method}"
                             elif method == 'chinese_chapter_cn':
                                 from TransateKRtoEN import PatternManager
-                                pm = PatternManager()
+                                pm = None  # No longer needed
                                 converted = _convert_chinese_number(num_str, pm)
                                 if converted:
                                     return converted, f"filename_{method}"
@@ -1309,7 +1315,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                             break
                         elif method == 'chinese_chapter_cn':
                             from TransateKRtoEN import PatternManager
-                            pm = PatternManager()
+                            pm = None  # No longer needed
                             converted = _convert_chinese_number(num_str, pm)
                             if converted:
                                 chapter_num = converted
@@ -1391,8 +1397,8 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
         if not chapter_num:
             filename_base = os.path.basename(file_path)
             # Parallel pattern matching for filename extraction
-            if len(pattern_manager.FILENAME_EXTRACT_PATTERNS) > 3:
-                with ThreadPoolExecutor(max_workers=min(4, len(pattern_manager.FILENAME_EXTRACT_PATTERNS))) as executor:
+            if len(PM.FILENAME_EXTRACT_PATTERNS) > 3:
+                with ThreadPoolExecutor(max_workers=min(4, len(PM.FILENAME_EXTRACT_PATTERNS))) as executor:
                     def try_filename_pattern(pattern):
                         match = re.search(pattern, filename_base, re.IGNORECASE)
                         if match:
@@ -1403,7 +1409,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                         return None
                     
                     futures = [executor.submit(try_filename_pattern, pattern) 
-                             for pattern in pattern_manager.FILENAME_EXTRACT_PATTERNS]
+                             for pattern in PM.FILENAME_EXTRACT_PATTERNS]
                     
                     for future in as_completed(futures):
                         try:
@@ -1418,7 +1424,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
                             continue
             else:
                 # Sequential for small pattern sets
-                for pattern in pattern_manager.FILENAME_EXTRACT_PATTERNS:
+                for pattern in PM.FILENAME_EXTRACT_PATTERNS:
                     match = re.search(pattern, filename_base, re.IGNORECASE)
                     if match:
                         chapter_num = int(match.group(1))
@@ -1456,7 +1462,7 @@ def _extract_chapter_info(soup, file_path, content_text, html_content, pattern_m
 def _extract_from_text(text, source_type, pattern_manager):
     """Extract chapter number from text using patterns with parallel matching for large pattern sets"""
     # Get patterns that don't end with '_number'
-    text_patterns = [(pattern, flags, method) for pattern, flags, method in pattern_manager.CHAPTER_PATTERNS
+    text_patterns = [(pattern, flags, method) for pattern, flags, method in PM.CHAPTER_PATTERNS
                     if not method.endswith('_number')]
     
     # Only use parallel processing if we have many patterns
@@ -1472,7 +1478,7 @@ def _extract_from_text(text, source_type, pattern_manager):
                             return int(num_str), f"{source_type}_{method}"
                         elif method == 'chinese_chapter_cn':
                             from TransateKRtoEN import PatternManager
-                            pm = PatternManager()
+                            pm = None  # No longer needed
                             converted = _convert_chinese_number(num_str, pm)
                             if converted:
                                 return converted, f"{source_type}_{method}"
@@ -1505,7 +1511,7 @@ def _extract_from_text(text, source_type, pattern_manager):
                         return int(num_str), f"{source_type}_{method}"
                     elif method == 'chinese_chapter_cn':
                         from TransateKRtoEN import PatternManager
-                        pm = PatternManager()
+                        pm = None  # No longer needed
                         converted = _convert_chinese_number(num_str, pm)
                         if converted:
                             return converted, f"{source_type}_{method}"
@@ -1516,14 +1522,14 @@ def _extract_from_text(text, source_type, pattern_manager):
 
 def _convert_chinese_number(cn_num, pattern_manager):
     """Convert Chinese number to integer"""
-    if cn_num in pattern_manager.CHINESE_NUMS:
-        return pattern_manager.CHINESE_NUMS[cn_num]
+    if cn_num in PM.CHINESE_NUMS:
+        return PM.CHINESE_NUMS[cn_num]
     
     if '十' in cn_num:
         parts = cn_num.split('十')
         if len(parts) == 2:
-            tens = pattern_manager.CHINESE_NUMS.get(parts[0], 1) if parts[0] else 1
-            ones = pattern_manager.CHINESE_NUMS.get(parts[1], 0) if parts[1] else 0
+            tens = PM.CHINESE_NUMS.get(parts[0], 1) if parts[0] else 1
+            ones = PM.CHINESE_NUMS.get(parts[1], 0) if parts[1] else 0
             return tens * 10 + ones
     
     return None

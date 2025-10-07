@@ -98,8 +98,22 @@ class ChapterExtractionManager:
             env['PYTHONIOENCODING'] = 'utf-8'
             env['PYTHONLEGACYWINDOWSSTDIO'] = '0'  # Use new Windows console API
             
-            # Set default worker count if not already set
-            env.setdefault('EXTRACTION_WORKERS', '2')
+            # Cap worker count for subprocess mode based on CPU count
+            # Very high worker counts can cause access violations on Windows
+            import multiprocessing
+            cpu_count = multiprocessing.cpu_count()
+            max_safe_workers = max(2, cpu_count - 2)  # Leave 2 cores for system
+            
+            current_workers = env.get('EXTRACTION_WORKERS', '2')
+            try:
+                workers = int(current_workers)
+                # Cap based on CPU count for stability
+                if workers > max_safe_workers:
+                    self._log(f"⚠️ Reducing workers from {workers} to {max_safe_workers} (based on {cpu_count} CPUs)")
+                    workers = max_safe_workers
+                env['EXTRACTION_WORKERS'] = str(workers)
+            except ValueError:
+                env['EXTRACTION_WORKERS'] = '2'
             
             self._log(f"🚀 Starting chapter extraction subprocess...")
             self._log(f"📚 EPUB: {os.path.basename(epub_path)}")

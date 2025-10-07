@@ -33,6 +33,11 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
         dict: Extraction results including chapters and metadata
     """
     try:
+        # Suppress XML parsing warnings that can crash the subprocess
+        import warnings
+        from bs4 import XMLParsedAsHTMLWarning
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+        
         # Import here to avoid loading heavy modules until needed
         import Chapter_Extractor
         

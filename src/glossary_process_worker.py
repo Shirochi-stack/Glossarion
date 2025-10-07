@@ -73,14 +73,11 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
             os.environ[key] = str(value)
         
         # Import here to avoid circular imports
-        from TransateKRtoEN import GlossaryManager
+        import GlossaryManager
         
-        # Create glossary manager instance
-        glossary_manager = GlossaryManager()
-        
-        # Generate glossary
+        # Generate glossary using module function (not a class)
         print(f"📑 Starting glossary generation in subprocess...")
-        result = glossary_manager.save_glossary(output_dir, chapters_data, instructions)
+        result = GlossaryManager.save_glossary(output_dir, chapters_data, instructions)
         
         print(f"📑 Glossary generation completed")
         
