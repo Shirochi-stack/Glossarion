@@ -86,8 +86,18 @@ def _restore_config_from_backup(self):
         # Copy backup to config file
         shutil.copy2(latest_backup, CONFIG_FILE)
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(None, "Config Restored", 
-                          f"Configuration was restored from backup: {os.path.basename(latest_backup)}")
+        from PySide6.QtGui import QIcon
+        
+        # Get icon path
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Config Restored")
+        msg_box.setText(f"Configuration was restored from backup: {os.path.basename(latest_backup)}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
         
         # Reload config
         try:
@@ -95,11 +105,26 @@ def _restore_config_from_backup(self):
                 self.config = json.load(f)
                 self.config = decrypt_config(self.config)
         except Exception as e:
-            QMessageBox.critical(None, "Error", f"Failed to reload configuration: {e}")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText(f"Failed to reload configuration: {e}")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
             
     except Exception as e:
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.critical(None, "Restore Failed", f"Could not restore config from backup: {e}")
+        from PySide6.QtGui import QIcon
+        
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Restore Failed")
+        msg_box.setText(f"Could not restore config from backup: {e}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
         
 def _create_manual_config_backup(self):
     """Create a manual config backup."""
@@ -107,14 +132,41 @@ def _create_manual_config_backup(self):
         # Force create backup even if config file doesn't exist
         self._backup_config_file()
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(None, "Backup Created", "Configuration backup created successfully!")
+        from PySide6.QtGui import QIcon
+        
+        # Get icon path
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Backup Created")
+        msg_box.setText("Configuration backup created successfully!")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
     except Exception as e:
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.critical(None, "Backup Failed", f"Failed to create backup: {e}")
+        from PySide6.QtGui import QIcon
+        
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Backup Failed")
+        msg_box.setText(f"Failed to create backup: {e}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
 
 def _open_backup_folder(self):
     """Open the config backups folder in file explorer."""
     try:
+        from PySide6.QtGui import QIcon
+        
+        # Get icon path
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
         if os.path.isabs(CONFIG_FILE):
             config_dir = os.path.dirname(CONFIG_FILE)
         else:
@@ -124,7 +176,13 @@ def _open_backup_folder(self):
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir, exist_ok=True)
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(None, "Backup Folder", f"Created backup folder: {backup_dir}")
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("Backup Folder")
+            msg_box.setText(f"Created backup folder: {backup_dir}")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
         
         # Open folder in explorer (cross-platform)
         import subprocess
@@ -139,7 +197,17 @@ def _open_backup_folder(self):
             
     except Exception as e:
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.critical(None, "Error", f"Could not open backup folder: {e}")
+        from PySide6.QtGui import QIcon
+        
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Could not open backup folder: {e}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
 
 def _manual_restore_config(self):
     """Show dialog to manually select and restore a config backup."""
@@ -152,7 +220,17 @@ def _manual_restore_config(self):
         
         if not os.path.exists(backup_dir):
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(None, "No Backups", "No backup folder found. No backups have been created yet.")
+            from PySide6.QtGui import QIcon
+            
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Backups")
+            msg_box.setText("No backup folder found. No backups have been created yet.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
             return
         
         # Get list of available backups
@@ -161,7 +239,17 @@ def _manual_restore_config(self):
         
         if not backups:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(None, "No Backups", "No config backups found.")
+            from PySide6.QtGui import QIcon
+            
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Backups")
+            msg_box.setText("No config backups found.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
             return
         
         # Sort by creation time (newest first)

@@ -4865,20 +4865,42 @@ def delete_translated_headers_file(self):
 def validate_epub_structure_gui(self):
     """GUI wrapper for EPUB structure validation"""
     from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QIcon
+    import os
+    
+    # Get icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    
     input_path = self.entry_epub.get()
     if not input_path:
-        QMessageBox.critical(None, "Error", "Please select a file first.")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText("Please select a file first.")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
         return
     
     if input_path.lower().endswith('.txt'):
-        QMessageBox.information(None, "Info", "Structure validation is only available for EPUB files.")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Info")
+        msg_box.setText("Structure validation is only available for EPUB files.")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
         return
     
     epub_base = os.path.splitext(os.path.basename(input_path))[0]
     output_dir = epub_base
     
     if not os.path.exists(output_dir):
-        QMessageBox.information(None, "Info", f"No output directory found: {output_dir}")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Info")
+        msg_box.setText(f"No output directory found: {output_dir}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
         return
     
     self.append_log("🔍 Validating EPUB structure...")
@@ -4891,27 +4913,49 @@ def validate_epub_structure_gui(self):
         
         if structure_ok and readiness_ok:
             self.append_log("✅ EPUB validation PASSED - Ready for compilation!")
-            QMessageBox.information(None, "Validation Passed", 
-                              "✅ All EPUB structure files are present!\n\n"
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("Validation Passed")
+            msg_box.setText("✅ All EPUB structure files are present!\n\n"
                               "Your translation is ready for EPUB compilation.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
         elif structure_ok:
             self.append_log("⚠️ EPUB structure OK, but some issues found")
-            QMessageBox.warning(None, "Validation Warning", 
-                                 "⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Validation Warning")
+            msg_box.setText("⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
                                  "Check the log for details.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
         else:
             self.append_log("❌ EPUB validation FAILED - Missing critical files")
-            QMessageBox.critical(None, "Validation Failed", 
-                               "❌ Missing critical EPUB files!\n\n"
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Validation Failed")
+            msg_box.setText("❌ Missing critical EPUB files!\n\n"
                                "container.xml and/or OPF files are missing.\n"
                                "Try re-running the translation to extract them.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
     
     except ImportError as e:
         self.append_log(f"❌ Could not import validation functions: {e}")
-        QMessageBox.critical(None, "Error", "Validation functions not available.")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText("Validation functions not available.")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
     except Exception as e:
         self.append_log(f"❌ Validation error: {e}")
-        QMessageBox.critical(None, "Error", f"Validation failed: {e}")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Validation failed: {e}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
 
 def on_profile_select(self, event=None):
     """Load the selected profile's prompt into the text area."""
@@ -5002,3 +5046,143 @@ def export_profiles(self):
         QMessageBox.information(None, "Exported", f"Profiles exported to {path}.")
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to export profiles: {e}")
+        
+        
+def configure_title_prompt(self):
+    """Configure the book title translation prompt"""
+    from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+                                   QTextEdit, QPushButton, QGroupBox, QMessageBox)
+    from PySide6.QtGui import QFont, QIcon
+    from PySide6.QtCore import Qt
+    
+    dialog = QDialog(self.master)
+    dialog.setWindowTitle("Configure Book Title Translation")
+    dialog.resize(950, 850)
+    
+    # Set window icon
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+    if os.path.exists(icon_path):
+        dialog.setWindowIcon(QIcon(icon_path))
+    
+    main_layout = QVBoxLayout()
+    main_layout.setContentsMargins(20, 20, 20, 20)
+    main_layout.setSpacing(15)
+    
+    # System Prompt Section
+    system_label = QLabel("System Prompt (AI Instructions)")
+    system_font = QFont()
+    system_font.setPointSize(12)
+    system_font.setBold(True)
+    system_label.setFont(system_font)
+    main_layout.addWidget(system_label)
+    
+    system_desc = QLabel("This defines how the AI should behave when translating titles:")
+    system_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    main_layout.addWidget(system_desc)
+    
+    self.title_system_prompt_text = QTextEdit()
+    self.title_system_prompt_text.setMinimumHeight(100)
+    self.title_system_prompt_text.setPlainText(self.config.get('book_title_system_prompt', 
+        "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."))
+    main_layout.addWidget(self.title_system_prompt_text)
+    
+    # User Prompt Section
+    user_label = QLabel("User Prompt (Translation Request)")
+    user_font = QFont()
+    user_font.setPointSize(12)
+    user_font.setBold(True)
+    user_label.setFont(user_font)
+    main_layout.addWidget(user_label)
+    
+    user_desc = QLabel("This prompt will be used when translating book titles.\n"
+                       "The book title will be appended after this prompt.")
+    user_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    main_layout.addWidget(user_desc)
+    
+    self.title_prompt_text = QTextEdit()
+    self.title_prompt_text.setMinimumHeight(150)
+    self.title_prompt_text.setPlainText(self.book_title_prompt)
+    main_layout.addWidget(self.title_prompt_text)
+    
+    # Tip Label
+    tip_label = QLabel("💡 Tip: Modify the prompts above to translate to other languages")
+    tip_label.setStyleSheet("color: blue; font-size: 10pt;")
+    main_layout.addWidget(tip_label)
+    
+    # Example Prompts Section
+    example_group = QGroupBox("Example Prompts")
+    example_layout = QHBoxLayout()
+    example_layout.setSpacing(5)
+    
+    examples = [
+        ("Spanish", "Traduce este título de libro al español manteniendo los acrónimos:"),
+        ("French", "Traduisez ce titre de livre en français en conservant les acronymes:"),
+        ("German", "Übersetzen Sie diesen Buchtitel ins Deutsche und behalten Sie Akronyme bei:"),
+        ("Keep Original", "Return the title exactly as provided without any translation:")
+    ]
+    
+    for lang, prompt in examples:
+        btn = QPushButton(f"Use {lang}")
+        btn.setMinimumWidth(120)
+        btn.clicked.connect(lambda checked, p=prompt: self.title_prompt_text.setPlainText(p))
+        example_layout.addWidget(btn)
+    
+    example_group.setLayout(example_layout)
+    main_layout.addWidget(example_group)
+    
+    # Button Section
+    button_layout = QHBoxLayout()
+    button_layout.setSpacing(10)
+    
+    def save_title_prompt():
+        self.book_title_prompt = self.title_prompt_text.toPlainText().strip()
+        self.config['book_title_prompt'] = self.book_title_prompt
+        
+        # Save the system prompt too
+        self.config['book_title_system_prompt'] = self.title_system_prompt_text.toPlainText().strip()
+        
+        dialog.accept()
+    
+    def reset_title_prompt():
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setWindowTitle("Reset Prompts")
+        msg_box.setText("Reset both prompts to defaults?")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        if os.path.exists(icon_path):
+            msg_box.setWindowIcon(QIcon(icon_path))
+        
+        if msg_box.exec() == QMessageBox.Yes:
+            # Reset system prompt
+            default_system = "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."
+            self.title_system_prompt_text.setPlainText(default_system)
+            
+            # Reset user prompt
+            default_prompt = "Translate this book title to English while retaining any acronyms:"
+            self.title_prompt_text.setPlainText(default_prompt)
+    
+    save_btn = QPushButton("Save")
+    save_btn.setMinimumWidth(120)
+    save_btn.clicked.connect(save_title_prompt)
+    save_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 8px; }")
+    button_layout.addWidget(save_btn)
+    
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.setMinimumWidth(120)
+    reset_btn.clicked.connect(reset_title_prompt)
+    reset_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 8px; }")
+    button_layout.addWidget(reset_btn)
+    
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.setMinimumWidth(120)
+    cancel_btn.clicked.connect(dialog.reject)
+    cancel_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 8px; }")
+    button_layout.addWidget(cancel_btn)
+    
+    button_layout.addStretch()
+    
+    main_layout.addLayout(button_layout)
+    
+    dialog.setLayout(main_layout)
+    dialog.exec()
