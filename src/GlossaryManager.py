@@ -2,10 +2,15 @@
 # This is for automatic glossary generation only, unrelated to the more thorough glossary generation you get from clicking the "Extract Glossary" button
 
 import os
+import re
 import threading
 import tempfile
+import time
 from bs4 import BeautifulSoup
 import PatternManager as PM
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+
 
 # Class-level shared lock for API submission timing
 _api_submission_lock = threading.Lock()
@@ -25,6 +30,10 @@ _io_time = 0
 def is_stop_requested():
     """Check if stop has been requested - default implementation"""
     return False
+
+def is_traditional_translation_api(model: str) -> bool:
+    """Check if the model is a traditional translation API"""
+    return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
 
 
 # Class-level shared lock for API submission timing

@@ -154,10 +154,6 @@ class ProgressBar:
         """Finish progress bar and move to next line"""
         print()  # Move to next line
         cls._last_line_length = 0
-
-def is_traditional_translation_api(model: str) -> bool:
-    """Check if the model is a traditional translation API"""
-    return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
     
 def get_chapter_terminology(is_text_file, chapter_data=None):
     """Get appropriate terminology (Chapter/Section) based on source type"""
