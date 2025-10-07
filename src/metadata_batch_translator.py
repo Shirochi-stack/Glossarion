@@ -538,8 +538,8 @@ class MetadataBatchTranslatorUI:
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.35)  # Reduced from 70% to 35%
-        dialog_height = int(screen.height() * 0.85)
+        dialog_width = int(screen.width() * 0.3)  # Reduced from 70% to 35%
+        dialog_height = int(screen.height() * 0.8)
         dialog.resize(dialog_width, dialog_height)
         
         # Apply global stylesheet for checkboxes and radio buttons

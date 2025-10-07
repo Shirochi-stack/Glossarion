@@ -9,9 +9,13 @@ import sys
 import time
 import shutil
 import json
-import tkinter as tk
-from tkinter import messagebox, ttk
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QTreeWidget, QTreeWidgetItem, QMessageBox, QFrame, QGroupBox,
+    QApplication
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QFont
 
 # Import required from translator_gui
 from translator_gui import CONFIG_FILE, decrypt_config
@@ -212,19 +216,25 @@ def _open_backup_folder(self):
 def _manual_restore_config(self):
     """Show dialog to manually select and restore a config backup."""
     try:
+        # Ensure QApplication exists
+        app = QApplication.instance()
+        if not app:
+            try:
+                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+            except:
+                pass
+            app = QApplication(sys.argv)
+        
         if os.path.isabs(CONFIG_FILE):
             config_dir = os.path.dirname(CONFIG_FILE)
         else:
             config_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
         backup_dir = os.path.join(config_dir, "config_backups")
         
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
         if not os.path.exists(backup_dir):
-            from PySide6.QtWidgets import QMessageBox
-            from PySide6.QtGui import QIcon
-            
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
-            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-            
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setWindowTitle("No Backups")
@@ -238,12 +248,6 @@ def _manual_restore_config(self):
                   if f.startswith("config_") and f.endswith(".json.bak")]
         
         if not backups:
-            from PySide6.QtWidgets import QMessageBox
-            from PySide6.QtGui import QIcon
-            
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
-            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-            
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setWindowTitle("No Backups")
@@ -255,64 +259,63 @@ def _manual_restore_config(self):
         # Sort by creation time (newest first)
         backups.sort(key=lambda x: os.path.getmtime(os.path.join(backup_dir, x)), reverse=True)
         
-        # Use WindowManager to create scrollable dialog
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.master,
-            "Config Backup Manager",
-            width=0,
-            height=None,
-            max_width_ratio=0.6,
-            max_height_ratio=0.8
-        )
+        # Create PySide6 dialog
+        dialog = QDialog(None)
+        dialog.setWindowTitle("Config Backup Manager")
+        dialog.setWindowIcon(icon)
         
-        # Main content
-        header_frame = tk.Frame(scrollable_frame)
-        header_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
+        # Get screen dimensions and calculate size
+        screen = app.primaryScreen().geometry()
+        dialog_width = int(screen.width() * 0.3)  # Reduced from 0.6 to 0.3
+        dialog_height = int(screen.height() * 0.4)  # Reduced from 0.8 to 0.4
+        dialog.resize(dialog_width, dialog_height)
         
-        tk.Label(header_frame, text="Configuration Backup Manager", 
-                font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W)
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
         
-        tk.Label(header_frame, 
-                text="Select a backup to restore or manage your configuration backups.",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(5, 0))
+        # Header
+        title_label = QLabel("Configuration Backup Manager")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        main_layout.addWidget(title_label)
+        
+        desc_label = QLabel("Select a backup to restore or manage your configuration backups.")
+        desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+        main_layout.addWidget(desc_label)
         
         # Info section
-        info_frame = tk.LabelFrame(scrollable_frame, text="Backup Information", padx=10, pady=10)
-        info_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+        info_group = QGroupBox("Backup Information")
+        info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(10, 10, 10, 10)
         
         info_text = f"📁 Backup Location: {backup_dir}\n📊 Total Backups: {len(backups)}"
-        tk.Label(info_frame, text=info_text, font=('TkDefaultFont', 10), 
-                fg='#333', justify=tk.LEFT).pack(anchor=tk.W)
+        info_label = QLabel(info_text)
+        info_label.setStyleSheet("color: white; font-size: 10pt;")
+        info_layout.addWidget(info_label)
+        info_group.setLayout(info_layout)
+        main_layout.addWidget(info_group)
         
         # Backup list section
-        list_frame = tk.LabelFrame(scrollable_frame, text="Available Backups (Newest First)", padx=10, pady=10)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+        list_group = QGroupBox("Available Backups (Newest First)")
+        list_layout = QVBoxLayout()
+        list_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Create treeview for better display
-        columns = ('timestamp', 'filename', 'size')
-        tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=8)
+        # Create QTreeWidget for better display
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(['Date & Time', 'Backup File', 'Size'])
+        tree.setColumnWidth(0, 200)
+        tree.setColumnWidth(1, 300)
+        tree.setColumnWidth(2, 100)
+        tree.setMinimumHeight(300)
+        tree.setSelectionMode(QTreeWidget.SingleSelection)
+        tree.setAlternatingRowColors(True)
         
-        # Define headings
-        tree.heading('timestamp', text='Date & Time')
-        tree.heading('filename', text='Backup File')
-        tree.heading('size', text='Size')
-        
-        # Configure column widths
-        tree.column('timestamp', width=150, anchor='center')
-        tree.column('filename', width=200)
-        tree.column('size', width=80, anchor='center')
-        
-        # Add scrollbars for treeview
-        v_scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=tree.yview)
-        h_scrollbar = ttk.Scrollbar(list_frame, orient='horizontal', command=tree.xview)
-        tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-        
-        # Pack treeview and scrollbars
-        tree.pack(side='left', fill='both', expand=True)
-        v_scrollbar.pack(side='right', fill='y')
-        h_scrollbar.pack(side='bottom', fill='x')
-        
-        # Populate treeview with backup information
+        # Populate tree with backup information
         backup_items = []
         for backup in backups:
             backup_path = os.path.join(backup_dir, backup)
@@ -337,54 +340,71 @@ def _manual_restore_config(self):
             except:
                 size_str = "Unknown"
             
-            # Insert into treeview
-            item_id = tree.insert('', 'end', values=(formatted_time, backup, size_str))
-            backup_items.append((item_id, backup, formatted_time))
+            # Insert into tree
+            item = QTreeWidgetItem([formatted_time, backup, size_str])
+            tree.addTopLevelItem(item)
+            backup_items.append((item, backup, formatted_time))
         
         # Select first item by default
         if backup_items:
-            tree.selection_set(backup_items[0][0])
-            tree.focus(backup_items[0][0])
+            tree.setCurrentItem(backup_items[0][0])
         
-        # Action buttons frame
-        button_frame = tk.LabelFrame(scrollable_frame, text="Actions", padx=10, pady=10)
-        button_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+        list_layout.addWidget(tree)
+        list_group.setLayout(list_layout)
+        main_layout.addWidget(list_group)
         
-        # Create button layout
-        button_row1 = tk.Frame(button_frame)
-        button_row1.pack(fill=tk.X, pady=(0, 5))
+        # Action buttons
+        button_group = QGroupBox("Actions")
+        button_main_layout = QVBoxLayout()
+        button_main_layout.setContentsMargins(10, 10, 10, 10)
+        button_main_layout.setSpacing(10)
         
-        button_row2 = tk.Frame(button_frame)
-        button_row2.pack(fill=tk.X)
+        # Button row 1
+        button_row1 = QHBoxLayout()
+        button_row1.setSpacing(10)
+        
+        # Button row 2
+        button_row2 = QHBoxLayout()
+        button_row2.setSpacing(10)
         
         def get_selected_backup():
-            """Get currently selected backup from treeview"""
-            selection = tree.selection()
-            if not selection:
+            """Get currently selected backup from tree"""
+            current_item = tree.currentItem()
+            if not current_item:
                 return None
                 
-            selected_item = selection[0]
-            for item_id, backup_filename, formatted_time in backup_items:
-                if item_id == selected_item:
+            for item, backup_filename, formatted_time in backup_items:
+                if item == current_item:
                     return backup_filename, formatted_time
             return None
         
         def restore_selected():
             selected = get_selected_backup()
             if not selected:
-                messagebox.showwarning("No Selection", "Please select a backup to restore.")
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("No Selection")
+                msg.setText("Please select a backup to restore.")
+                msg.setWindowIcon(icon)
+                msg.exec()
                 return
             
             selected_backup, formatted_time = selected
             backup_path = os.path.join(backup_dir, selected_backup)
             
             # Confirm restore
-            if messagebox.askyesno("Confirm Restore", 
-                                 f"This will replace your current configuration with the backup from:\n\n"
-                                 f"{formatted_time}\n{selected_backup}\n\n"
-                                 f"A backup of your current config will be created first.\n\n"
-                                 f"Are you sure you want to continue?"):
-                
+            confirm = QMessageBox(dialog)
+            confirm.setIcon(QMessageBox.Question)
+            confirm.setWindowTitle("Confirm Restore")
+            confirm.setText(f"This will replace your current configuration with the backup from:\n\n"
+                          f"{formatted_time}\n{selected_backup}\n\n"
+                          f"A backup of your current config will be created first.\n\n"
+                          f"Are you sure you want to continue?")
+            confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            confirm.setDefaultButton(QMessageBox.No)
+            confirm.setWindowIcon(icon)
+            
+            if confirm.exec() == QMessageBox.Yes:
                 try:
                     # Create backup of current config before restore
                     self._backup_config_file()
@@ -392,87 +412,222 @@ def _manual_restore_config(self):
                     # Copy backup to config file
                     shutil.copy2(backup_path, CONFIG_FILE)
                     
-                    messagebox.showinfo("Restore Complete", 
-                                      f"Configuration restored from: {selected_backup}\n\n"
-                                      f"Please restart the application for changes to take effect.")
-                    dialog._cleanup_scrolling()
-                    dialog.destroy()
+                    msg = QMessageBox(dialog)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setWindowTitle("Restore Complete")
+                    msg.setText(f"Configuration restored from: {selected_backup}\n\n"
+                              f"Please restart the application for changes to take effect.")
+                    msg.setWindowIcon(icon)
+                    msg.exec()
+                    dialog.close()
                     
                 except Exception as e:
-                    messagebox.showerror("Restore Failed", f"Failed to restore backup: {e}")
+                    msg = QMessageBox(dialog)
+                    msg.setIcon(QMessageBox.Critical)
+                    msg.setWindowTitle("Restore Failed")
+                    msg.setText(f"Failed to restore backup: {e}")
+                    msg.setWindowIcon(icon)
+                    msg.exec()
         
         def delete_selected():
             selected = get_selected_backup()
             if not selected:
-                messagebox.showwarning("No Selection", "Please select a backup to delete.")
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("No Selection")
+                msg.setText("Please select a backup to delete.")
+                msg.setWindowIcon(icon)
+                msg.exec()
                 return
             
             selected_backup, formatted_time = selected
             
-            if messagebox.askyesno("Confirm Delete", 
-                                 f"Delete backup from {formatted_time}?\n\n{selected_backup}\n\n"
-                                 f"This action cannot be undone."):
+            confirm = QMessageBox(dialog)
+            confirm.setIcon(QMessageBox.Question)
+            confirm.setWindowTitle("Confirm Delete")
+            confirm.setText(f"Delete backup from {formatted_time}?\n\n{selected_backup}\n\n"
+                          f"This action cannot be undone.")
+            confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            confirm.setDefaultButton(QMessageBox.No)
+            confirm.setWindowIcon(icon)
+            
+            if confirm.exec() == QMessageBox.Yes:
                 try:
                     os.remove(os.path.join(backup_dir, selected_backup))
                     
-                    # Remove from treeview
-                    selection = tree.selection()
-                    if selection:
-                        tree.delete(selection[0])
+                    # Remove from tree
+                    current_item = tree.currentItem()
+                    if current_item:
+                        index = tree.indexOfTopLevelItem(current_item)
+                        tree.takeTopLevelItem(index)
                     
                     # Update backup items list
-                    backup_items[:] = [(item_id, backup, time_str) 
-                                     for item_id, backup, time_str in backup_items 
+                    backup_items[:] = [(item, backup, time_str) 
+                                     for item, backup, time_str in backup_items 
                                      if backup != selected_backup]
                     
-                    messagebox.showinfo("Deleted", "Backup deleted successfully.")
+                    msg = QMessageBox(dialog)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setWindowTitle("Deleted")
+                    msg.setText("Backup deleted successfully.")
+                    msg.setWindowIcon(icon)
+                    msg.exec()
                 except Exception as e:
-                    messagebox.showerror("Delete Failed", f"Failed to delete backup: {e}")
+                    msg = QMessageBox(dialog)
+                    msg.setIcon(QMessageBox.Critical)
+                    msg.setWindowTitle("Delete Failed")
+                    msg.setText(f"Failed to delete backup: {e}")
+                    msg.setWindowIcon(icon)
+                    msg.exec()
         
         def create_new_backup():
             """Create a new manual backup"""
             try:
                 self._backup_config_file()
-                messagebox.showinfo("Backup Created", "New configuration backup created successfully!")
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Information)
+                msg.setWindowTitle("Backup Created")
+                msg.setText("New configuration backup created successfully!")
+                msg.setWindowIcon(icon)
+                msg.exec()
                 # Refresh the dialog
-                dialog._cleanup_scrolling()
-                dialog.destroy()
+                dialog.close()
                 self._manual_restore_config()  # Reopen with updated list
             except Exception as e:
-                messagebox.showerror("Backup Failed", f"Failed to create backup: {e}")
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Backup Failed")
+                msg.setText(f"Failed to create backup: {e}")
+                msg.setWindowIcon(icon)
+                msg.exec()
         
         def open_backup_folder():
             """Open backup folder in file explorer"""
             self._open_backup_folder()
         
         # Primary action buttons (Row 1)
-        tb.Button(button_row1, text="✅ Restore Selected", 
-                 command=restore_selected, bootstyle="success", 
-                 width=20).pack(side=tk.LEFT, padx=(0, 10))
-                 
-        tb.Button(button_row1, text="💾 Create New Backup", 
-                 command=create_new_backup, bootstyle="primary-outline", 
-                 width=20).pack(side=tk.LEFT, padx=(0, 10))
-                 
-        tb.Button(button_row1, text="📁 Open Folder", 
-                 command=open_backup_folder, bootstyle="info-outline", 
-                 width=20).pack(side=tk.LEFT)
+        restore_btn = QPushButton("✅ Restore Selected")
+        restore_btn.setMinimumWidth(180)
+        restore_btn.setMinimumHeight(35)
+        restore_btn.clicked.connect(restore_selected)
+        restore_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        button_row1.addWidget(restore_btn)
+        
+        create_btn = QPushButton("💾 Create New Backup")
+        create_btn.setMinimumWidth(180)
+        create_btn.setMinimumHeight(35)
+        create_btn.clicked.connect(create_new_backup)
+        create_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        button_row1.addWidget(create_btn)
+        
+        folder_btn = QPushButton("📁 Open Folder")
+        folder_btn.setMinimumWidth(180)
+        folder_btn.setMinimumHeight(35)
+        folder_btn.clicked.connect(open_backup_folder)
+        folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #117a8b;
+            }
+        """)
+        button_row1.addWidget(folder_btn)
+        button_row1.addStretch()
         
         # Secondary action buttons (Row 2)
-        tb.Button(button_row2, text="🗑️ Delete Selected", 
-                 command=delete_selected, bootstyle="danger-outline", 
-                 width=20).pack(side=tk.LEFT, padx=(0, 10))
-                 
-        tb.Button(button_row2, text="❌ Close", 
-                 command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
-                 bootstyle="secondary", 
-                 width=20).pack(side=tk.RIGHT)
+        delete_btn = QPushButton("🗑️ Delete Selected")
+        delete_btn.setMinimumWidth(180)
+        delete_btn.setMinimumHeight(35)
+        delete_btn.clicked.connect(delete_selected)
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        button_row2.addWidget(delete_btn)
+        button_row2.addStretch()
         
-        # Auto-resize and show dialog
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.9)
+        close_btn = QPushButton("❌ Close")
+        close_btn.setMinimumWidth(120)
+        close_btn.setMinimumHeight(35)
+        close_btn.clicked.connect(dialog.close)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 8px 20px;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        button_row2.addWidget(close_btn)
         
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        button_main_layout.addLayout(button_row1)
+        button_main_layout.addLayout(button_row2)
+        button_group.setLayout(button_main_layout)
+        main_layout.addWidget(button_group)
+        
+        # Set dialog layout and show
+        dialog.setLayout(main_layout)
+        
+        # Run dialog in separate thread to avoid GIL conflicts
+        import threading
+        def run_dialog():
+            dialog.exec()
+        
+        thread = threading.Thread(target=run_dialog, daemon=True)
+        thread.start()
+        
+        # Keep reference to prevent garbage collection
+        self._backup_dialog = dialog
         
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to open backup restore dialog: {e}")
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("Error")
+        msg.setText(f"Failed to open backup restore dialog: {e}")
+        if icon:
+            msg.setWindowIcon(icon)
+        msg.exec()
