@@ -6748,8 +6748,11 @@ class UnifiedClient:
             return False
         
         # Pattern 1: Check for incomplete sentence endings (with improved logic)
-        # Skip this check for code contexts, JSON, or when content contains code blocks
-        if context not in ['code', 'json', 'data', 'list', 'python', 'javascript', 'programming']:
+        # Skip this check for very short content (like titles), code contexts, JSON, etc.
+        if len(content_stripped) < 100:
+            # Very short content is likely a title, label, or short answer - skip check
+            pass
+        elif context not in ['code', 'json', 'data', 'list', 'python', 'javascript', 'programming']:
             # Also skip if content appears to contain code
             if '```' in content or 'def ' in content or 'class ' in content or 'import ' in content or 'function ' in content:
                 pass  # Skip punctuation check for code content
