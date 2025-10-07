@@ -55,6 +55,12 @@ app_files = [
     ('translator_gui.py', '.'),
     ('splash_utils.py', '.'),
     ('other_settings.py', '.'),
+    ('GlossaryManager.py', '.'),
+    ('GlossaryManager_GUI.py', '.'),
+    ('Retranslation_GUI.py', '.'),
+    ('QA_Scanner_GUI.py', '.'),
+    ('Chapter_Extracter.py', '.'),
+    ('PatternManager.py', '.'),
     
     # Translation modules
     ('TransateKRtoEN.py', '.'),
@@ -120,6 +126,12 @@ app_modules = [
     'glossary_process_worker',  # Glossary subprocess worker
     'chapter_extraction_worker',  # Chapter extraction subprocess worker
     'chapter_extraction_manager',  # Chapter extraction manager
+    'GlossaryManager',
+    'GlossaryManager_GUI',
+    'Retranslation_GUI',
+    'QA_Scanner_GUI',
+    'Chapter_Extracter',
+    'PatternManager',
     'epub_converter',
     'txt_processor',
     'scan_html_folder',
