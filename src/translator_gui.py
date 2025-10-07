@@ -10349,12 +10349,17 @@ Important rules:
             # Optionally skip mode dialog if a mode override was provided (e.g., scanning phase)
             selected_mode_value = mode_override if mode_override else None
             if selected_mode_value is None:
-                # Show mode selection dialog with settings
+                # Show mode selection dialog with settings - calculate proportional sizing
+                screen_width = self.master.winfo_screenwidth()
+                screen_height = self.master.winfo_screenheight()
+                dialog_width = int(screen_width * 0.98)  # 98% of screen width
+                dialog_height = int(screen_height * 0.80)  # 80% of screen height
+                
                 mode_dialog = self.wm.create_simple_dialog(
                     self.master,
                     "Select QA Scanner Mode",
-                    width=1500,  # Optimal width for 4 cards
-                    height=720,  # Compact height to ensure buttons are visible
+                    width=dialog_width,  # Proportional width for 4-card layout
+                    height=dialog_height,  # Proportional height
                     hide_initially=True
                 )
             
