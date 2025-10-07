@@ -34,15 +34,12 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
     """
     try:
         # Import here to avoid loading heavy modules until needed
-        from TransateKRtoEN import ChapterExtractor
+        import Chapter_Extractor
         
         # Create progress callback that prints to stdout for IPC
         def worker_progress_callback(message):
             # Use special prefix for progress messages
             print(f"[PROGRESS] {message}", flush=True)
-        
-        # Create extractor with progress callback
-        extractor = ChapterExtractor(progress_callback=worker_progress_callback)
         
         # Set extraction mode
         os.environ["EXTRACTION_MODE"] = extraction_mode
@@ -54,11 +51,11 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
         
         with zipfile.ZipFile(epub_path, 'r') as zf:
             # Extract metadata first
-            metadata = extractor._extract_epub_metadata(zf)
+            metadata = Chapter_Extractor._extract_epub_metadata(zf)
             print(f"[INFO] Extracted metadata: {list(metadata.keys())}", flush=True)
             
-            # Extract chapters
-            chapters = extractor.extract_chapters(zf, output_dir)
+            # Extract chapters using module-level function
+            chapters = Chapter_Extractor.extract_chapters(zf, output_dir, progress_callback=worker_progress_callback)
             
             print(f"[INFO] Extracted {len(chapters)} chapters", flush=True)
             
