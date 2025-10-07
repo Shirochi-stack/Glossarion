@@ -459,6 +459,17 @@ def _create_response_handling_section(self, parent):
     tb.Entry(retry_frame, width=8, textvariable=self.max_retry_tokens_var).pack(side=tk.LEFT, padx=5)
     tk.Label(section_frame, text="Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+    
+    # Add separator line
+    ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+    
+    # Preserve Original Text on Failure
+    tb.Checkbutton(section_frame, text="Preserve Original Text on Failure", 
+                      variable=self.preserve_original_text_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+    tk.Label(section_frame, text="Return original untranslated text when translation fails.\n⚠️ May mix source language into translated output",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
+    
     # Compression Factor
     # Add separator line for clarity
     ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)

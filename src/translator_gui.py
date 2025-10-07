@@ -1438,7 +1438,7 @@ class TranslatorGUI:
         self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
         self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 2))
         # GUI yield toggle - disabled by default for maximum speed
-        self.enable_gui_yield_var = tk.BooleanVar(value=self.config.get('enable_gui_yield', False))
+        self.enable_gui_yield_var = tk.BooleanVar(value=self.config.get('enable_gui_yield', True))
 
         # Set initial environment variable and ensure executor
         if self.enable_parallel_extraction_var.get():
@@ -2340,6 +2340,7 @@ Recent translations to summarize:
             ('append_glossary_var', 'append_glossary', False),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
+            ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             # NEW: QA scanning helpers
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
             ('scan_phase_enabled_var', 'scan_phase_enabled', False),
@@ -8908,6 +8909,7 @@ Provide translations in the same numbered format."""
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
             'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
+            'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var.get() else "0",
             'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
             'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
             'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
@@ -13748,6 +13750,8 @@ Important rules:
                 self.config['max_retry_tokens'] = safe_int(self.max_retry_tokens_var.get(), 16384)
             if hasattr(self, 'retry_timeout_var'):
                 self.config['retry_timeout'] = self.retry_timeout_var.get()
+            if hasattr(self, 'preserve_original_text_var'):
+                self.config['preserve_original_text_on_failure'] = self.preserve_original_text_var.get()
             
             # Save rolling summary settings (from Other Settings)
             if hasattr(self, 'rolling_summary_exchanges_var'):

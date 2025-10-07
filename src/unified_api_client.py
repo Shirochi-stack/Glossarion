@@ -4670,18 +4670,32 @@ class UnifiedClient:
             return "[]"
             
         elif context == 'translation':
-            # Extract the original text and return it with a marker
-            original_text = self._extract_user_content(messages)
+            # Check if user wants original text preserved on failure (disabled by default)
+            preserve_original = os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') == '1'
             
-            # Add more specific error info if available
-            if is_extraction_failure:
-                return f"[EXTRACTION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
-            elif 'rate' in error_type.lower():
-                return f"[RATE LIMITED - ORIGINAL TEXT PRESERVED]\n{original_text}"
-            elif 'safety' in error_type.lower() or 'prohibited' in error_type.lower():
-                return f"[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+            if preserve_original:
+                # Extract the original text and return it with a marker
+                original_text = self._extract_user_content(messages)
+                
+                # Add more specific error info if available
+                if is_extraction_failure:
+                    return f"[EXTRACTION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+                elif 'rate' in error_type.lower():
+                    return f"[RATE LIMITED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+                elif 'safety' in error_type.lower() or 'prohibited' in error_type.lower():
+                    return f"[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+                else:
+                    return f"[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
             else:
-                return f"[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+                # Return clear error message without original text
+                if is_extraction_failure:
+                    return "[EXTRACTION FAILED]"
+                elif 'rate' in error_type.lower():
+                    return "[RATE LIMITED]"
+                elif 'safety' in error_type.lower() or 'prohibited' in error_type.lower():
+                    return "[CONTENT BLOCKED]"
+                else:
+                    return "[TRANSLATION FAILED]"
                 
         elif context == 'image_translation':
             # Provide more specific error messages for image translation
