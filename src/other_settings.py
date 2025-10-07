@@ -38,6 +38,14 @@ from PySide6.QtCore import Qt
 # Import UIHelper and CONFIG_FILE from translator_gui for use in the methods
 from translator_gui import UIHelper, CONFIG_FILE
 from ai_hunter_enhanced import AIHunterConfigGUI
+# Bring in backup management methods
+from config_backup import (
+    _backup_config_file,
+    _restore_config_from_backup,
+    _create_manual_config_backup,
+    _open_backup_folder,
+    _manual_restore_config,
+)
 
 
 def setup_other_settings_methods(gui_instance):
@@ -75,6 +83,7 @@ def setup_other_settings_methods(gui_instance):
         '_create_custom_api_endpoints_section',
         # Helper methods
         '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
+        '_open_backup_folder', '_backup_config_file', '_restore_config_from_backup',
         '_check_azure_endpoint', '_update_azure_api_version_env',
         '_reset_anti_duplicate_defaults', '_get_ai_hunter_status_text',
         'create_ai_hunter_section', 'test_api_connections',
