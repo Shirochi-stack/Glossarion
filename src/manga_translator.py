@@ -11244,7 +11244,21 @@ class MangaTranslator:
                         self._block_if_over_cap("inpainting")
                     except Exception:
                         pass
-                    inpainted_local = self.inpaint_regions(image, mask_local)
+                    # Offload inpainting to subprocess if configured and pool is available
+                    try:
+                        offload = self.manga_settings.get('advanced', {}).get('inpaint_in_subprocess', True)
+                    except Exception:
+                        offload = True
+                    if offload and hasattr(self, '_inpaint_proc_pool') and self._inpaint_proc_pool is not None:
+                        try:
+                            from local_inpainter import proc_inpaint
+                            fut = self._inpaint_proc_pool.submit(proc_inpaint, image, mask_local, 'normal')
+                            inpainted_local = fut.result()
+                        except Exception as _pe:
+                            self._log(f"⚠️ Subprocess inpaint failed, falling back to in-process: {_pe}", "warning")
+                            inpainted_local = self.inpaint_regions(image, mask_local)
+                    else:
+                        inpainted_local = self.inpaint_regions(image, mask_local)
                     
                     if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                         try:

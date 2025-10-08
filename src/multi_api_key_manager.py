@@ -4,6 +4,7 @@ Multi API Key Manager for Glossarion
 Handles multiple API keys with round-robin load balancing and rate limit management
 """
 
+from PySide6.QtCore import QMetaObject, Q_ARG
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit, 
     QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
@@ -147,8 +148,11 @@ class APIKeyEntry:
             'google_region': self.google_region,
             'azure_api_version': self.azure_api_version,
             'use_individual_endpoint': self.use_individual_endpoint,
-            # Persist times used optionally (non-breaking if ignored elsewhere)
-            'times_used': getattr(self, 'times_used', 0)
+            # Persist times used and test results
+            'times_used': getattr(self, 'times_used', 0),
+            'last_test_result': getattr(self, 'last_test_result', None),
+            'last_test_time': getattr(self, 'last_test_time', None),
+            'last_test_message': getattr(self, 'last_test_message', None)
         }
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
@@ -192,6 +196,11 @@ class APIKeyPool:
                     azure_api_version=key_data.get('azure_api_version'),
                     use_individual_endpoint=key_data.get('use_individual_endpoint', False)
                 )
+                # Load saved test results and usage counter
+                entry.times_used = key_data.get('times_used', 0)
+                entry.last_test_result = key_data.get('last_test_result', None)
+                entry.last_test_time = key_data.get('last_test_time', None)
+                entry.last_test_message = key_data.get('last_test_message', None)
                 # Restore counters if we had this key before
                 old = old_map.get((api_key, model))
                 if old is not None:
@@ -736,8 +745,8 @@ class MultiAPIKeyDialog(QDialog):
                 padding: 4px;
             }
             QTreeWidget::item:selected {
-                background-color: #4a7ba7;
-                color: #ffffff;
+                background-color: #3a3a3a;
+                color: #e0e0e0;
             }
             QTreeWidget::item:hover {
                 background-color: #3a3a3a;
@@ -827,9 +836,10 @@ class MultiAPIKeyDialog(QDialog):
         scrollable_layout.setSpacing(10)  # Set spacing between widgets
         scroll_area.setWidget(scrollable_widget)
         
-        # Set main layout
+        # Set main layout - will have scroll area AND button bar
         dialog_layout = QVBoxLayout(self)
         dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.setSpacing(0)
         dialog_layout.addWidget(scroll_area)
         
         # Store references
@@ -928,14 +938,17 @@ class MultiAPIKeyDialog(QDialog):
         # Create fallback container (hidden by default)
         self._create_fallback_section(scrollable_layout)
         
-        # Add stretch to push button bar to bottom (will expand when content is minimal)
+        # Add stretch to fill remaining space in scroll area
         scrollable_layout.addStretch(1)
         
-        # Button bar at the bottom
-        self._create_button_bar(scrollable_layout)
+        # Button bar at the bottom - moved outside scroll area below
+        # (will be added to dialog_layout instead)
         
         # Load existing keys into tree
         self._refresh_key_list()
+        
+        # Create button bar outside scroll area (fixed at bottom)
+        self._create_button_bar(dialog_layout)
         
         # Set icon
         self._set_icon(self)
@@ -1566,10 +1579,9 @@ class MultiAPIKeyDialog(QDialog):
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        # Run test in thread
-        thread = threading.Thread(target=self._test_single_fallback_key, args=(key_data, index))
-        thread.daemon = True
-        thread.start()
+        
+        # Run test on main thread using QTimer (non-blocking)
+        QTimer.singleShot(100, lambda: self._test_single_fallback_key(key_data, index))
 
     def _update_fallback_test_result(self, index, success):
         """Update fallback tree item with test result and bump times used"""
@@ -1597,41 +1609,62 @@ class MultiAPIKeyDialog(QDialog):
                     item.setText(3, "1")
 
     def _test_single_fallback_key(self, key_data, index):
-        """Test a single fallback key"""
-        from unified_api_client import UnifiedClient
-        
+        """Test a single fallback key - REAL API TEST"""
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
         
-        try:
-            client = UnifiedClient(
-                api_key=api_key,
-                model=model,
-                output_dir=None
-            )
-            
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Say 'API test successful' and nothing else."}
-            ]
-            
-            response = client.send(
-                messages,
-                temperature=0.7,
-                max_tokens=100
-            )
-            
-            if response and isinstance(response, tuple):
-                content, _ = response
-                if content and "test successful" in content.lower():
-                    # Update tree item to show success
-                    QTimer.singleShot(0, lambda: self._update_fallback_test_result(index, True))
-                    return
-        except Exception as e:
-            print(f"Fallback key test failed: {e}")
+        print(f"[DEBUG] Starting REAL fallback key test for {model}")
         
-        # Update tree item to show failure
-        QTimer.singleShot(0, lambda: self._update_fallback_test_result(index, False))
+        # Run REAL API test using executor like translation does
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+        
+        # Use shared executor from main GUI
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+        
+        def run_api_test():
+            try:
+                client = UnifiedClient(
+                    api_key=api_key,
+                    model=model,
+                    output_dir=None
+                )
+                
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                ]
+                
+                response = client.send(
+                    messages,
+                    temperature=0.7,
+                    max_tokens=100
+                )
+                
+                if response and isinstance(response, tuple):
+                    content, _ = response
+                    if content and "test successful" in content.lower():
+                        print(f"[DEBUG] Fallback key test completed for {model}: PASSED")
+                        # Update directly - we're in executor thread
+                        self._update_fallback_test_result(index, True)
+                        return
+                
+                # Failed
+                print(f"[DEBUG] Fallback key test completed for {model}: FAILED")
+                self._update_fallback_test_result(index, False)
+            except Exception as e:
+                print(f"[DEBUG] Fallback key test error for {model}: {e}")
+                self._update_fallback_test_result(index, False)
+        
+        # Submit to shared executor like translation does
+        if executor:
+            executor.submit(run_api_test)
+        else:
+            # Fallback to thread if no executor
+            thread = threading.Thread(target=run_api_test, daemon=True)
+            thread.start()
 
     def _remove_selected_fallback(self):
         """Remove selected fallback key"""
@@ -1818,17 +1851,41 @@ class MultiAPIKeyDialog(QDialog):
         self._show_status(f"Individual endpoint {status} for fallback key ({model})")
 
     def _create_button_bar(self, parent_layout):
-        """Create the bottom button bar"""
+        """Create the bottom button bar as a fixed section"""
+        # Create container for separator and buttons
+        button_container = QWidget()
+        button_container_layout = QVBoxLayout(button_container)
+        button_container_layout.setContentsMargins(0, 0, 0, 0)
+        button_container_layout.setSpacing(0)
+        
+        # Add separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("QFrame { color: #3a3a3a; background-color: #3a3a3a; }")
+        button_container_layout.addWidget(separator)
+        
+        # Create button frame
         self.button_frame = QWidget()
+        self.button_frame.setStyleSheet("""
+            QWidget {
+                background-color: #252525;
+                padding: 0px;
+            }
+        """)
         button_layout = QHBoxLayout(self.button_frame)
-        button_layout.setContentsMargins(0, 20, 0, 0)
+        button_layout.setContentsMargins(20, 15, 20, 15)
         
         # Import/Export
         import_btn = QPushButton("Import")
+        import_btn.setMinimumHeight(40)
+        import_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
         import_btn.clicked.connect(self._import_keys)
         button_layout.addWidget(import_btn)
         
         export_btn = QPushButton("Export")
+        export_btn.setMinimumHeight(40)
+        export_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
         export_btn.clicked.connect(self._export_keys)
         button_layout.addWidget(export_btn)
         
@@ -1836,15 +1893,34 @@ class MultiAPIKeyDialog(QDialog):
         
         # Cancel button
         cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumHeight(40)
+        cancel_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
         cancel_btn.clicked.connect(self._on_close)
         button_layout.addWidget(cancel_btn)
         
         # Save button
         save_btn = QPushButton("Save & Close")
+        save_btn.setMinimumHeight(40)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a7ba7;
+                color: white;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #5a9fd4;
+            }
+        """)
         save_btn.clicked.connect(self._save_and_close)
         button_layout.addWidget(save_btn)
         
-        parent_layout.addWidget(self.button_frame)
+        # Add button frame to container
+        button_container_layout.addWidget(self.button_frame)
+        
+        # Add button container to parent layout
+        parent_layout.addWidget(button_container)
  
     def _create_key_list_section(self, parent_layout):
         """Create the key list section with inline editing and rearrangement controls"""
@@ -1859,7 +1935,7 @@ class MultiAPIKeyDialog(QDialog):
             QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #2d5a7b, stop:0.5 #4a7ba7, stop:1 #2d5a7b);
-                border: 2px solid #3a5a7a;
+                border: none;
                 border-radius: 6px;
             }
         """)
@@ -3084,10 +3160,11 @@ class MultiAPIKeyDialog(QDialog):
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        # Start testing in thread
-        thread = threading.Thread(target=self._run_inline_tests, args=(indices,))
-        thread.daemon = True
-        thread.start()
+        
+        # Run tests on main thread using QTimer to avoid blocking
+        self._test_queue = list(indices)
+        self._test_results = []
+        QTimer.singleShot(100, self._process_next_test)
 
     def _test_all(self):
         """Test all API keys with inline progress"""
@@ -3116,11 +3193,117 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
         
-        # Start testing in thread
-        thread = threading.Thread(target=self._run_inline_tests, args=(indices,))
-        thread.daemon = True
-        thread.start()
+        # Run tests on main thread using QTimer to avoid blocking
+        self._test_queue = list(indices)
+        self._test_results = []
+        QTimer.singleShot(100, self._process_next_test)
 
+    def _process_next_test(self):
+        """Process next test in queue (runs on main thread via QTimer)"""
+        if not self._test_queue:
+            # All tests complete
+            self._finalize_tests()
+            return
+        
+        # Get next index to test
+        index = self._test_queue.pop(0)
+        
+        if index >= len(self.key_pool.keys):
+            # Invalid index, skip to next
+            QTimer.singleShot(10, self._process_next_test)
+            return
+        
+        key = self.key_pool.keys[index]
+        print(f"[DEBUG] Testing key {index}: {key.model}")
+        
+        # Run REAL API test using executor like translation does
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+        
+        # Use shared executor from main GUI
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+        
+        def run_api_test():
+            try:
+                client = UnifiedClient(
+                    api_key=key.api_key,
+                    model=key.model,
+                    output_dir=None
+                )
+                
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                ]
+                
+                response = client.send(
+                    messages,
+                    temperature=0.7,
+                    max_tokens=100
+                )
+                
+                if response and isinstance(response, tuple):
+                    content, _ = response
+                    if content and "test successful" in content.lower():
+                        # Success - update directly from executor thread
+                        self._handle_test_result(index, True, "Test passed")
+                        return
+                
+                # Failed - update directly
+                self._handle_test_result(index, False, "Unexpected response")
+            except Exception as e:
+                error_msg = str(e)[:50]
+                self._handle_test_result(index, False, f"Error: {error_msg}")
+        
+        # Submit to shared executor like translation does
+        if executor:
+            executor.submit(run_api_test)
+        else:
+            # Fallback to thread if no executor
+            thread = threading.Thread(target=run_api_test, daemon=True)
+            thread.start()
+    
+    def _handle_test_result(self, index, success, message):
+        """Handle test result from background thread"""
+        if index < len(self.key_pool.keys):
+            key = self.key_pool.keys[index]
+            if success:
+                key.mark_success()
+                key.set_test_result('passed', message)
+            else:
+                key.mark_error()
+                key.set_test_result('failed', message)
+            
+            self._test_results.append((index, success, message))
+            print(f"[DEBUG] Key {index} test completed - {'PASSED' if success else 'FAILED'}: {message}")
+            
+            # Update UI
+            self._refresh_key_list()
+        
+        # Schedule next test
+        QTimer.singleShot(10, self._process_next_test)
+    
+    def _finalize_tests(self):
+        """Finalize after all tests complete"""
+        # Clear testing flags
+        for i, key in enumerate(self.key_pool.keys):
+            if hasattr(key, '_testing'):
+                delattr(key, '_testing')
+        
+        # Calculate summary
+        success_count = sum(1 for _, success, _ in self._test_results if success)
+        total_count = len(self._test_results)
+        
+        # Final UI update
+        self._refresh_key_list()
+        self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
+        
+        # Auto-save to persist test results
+        self._save_keys_to_config()
+        print(f"[DEBUG] All tests completed and saved: {success_count}/{total_count} passed")
+    
     def _run_inline_tests(self, indices: List[int]):
         """Run API tests with persistent inline results"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3170,18 +3353,17 @@ class MultiAPIKeyDialog(QDialog):
                 key.set_test_result('error', str(e)[:30])
                 return (index, False, f"Error: {str(e)[:50]}...")
         
-        # Run tests in parallel
+        # Run tests sequentially to avoid threading issues
         results = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all test tasks
-            future_to_index = {executor.submit(test_single_key, i): i for i in indices}
-            
-            # Process results as they complete
-            for future in as_completed(future_to_index):
-                result = future.result()
-                if result:
-                    results.append(result)
-                    print(f"[DEBUG] Got result: {result}")
+        for index in indices:
+            print(f"[DEBUG] Starting test for key {index}")
+            result = test_single_key(index)
+            if result:
+                results.append(result)
+                print(f"[DEBUG] Got result: {result}")
+                # Update UI immediately
+                self._refresh_key_list()
+                QApplication.processEvents()
         
         print(f"[DEBUG] All tests complete. Results: {len(results)}")
         
@@ -3197,11 +3379,14 @@ class MultiAPIKeyDialog(QDialog):
                     delattr(key, '_testing')
                     print(f"[DEBUG] Cleared testing flag for key {index}")
         
-        # Update UI in main thread
+        # Final update - we're already in a thread, just update directly
         print(f"[DEBUG] Refreshing UI with results")
-        QTimer.singleShot(0, self._refresh_key_list)
-        QTimer.singleShot(0, lambda: self.stats_label.setText(
-            f"Test complete: {success_count}/{total_count} passed"))
+        self._refresh_key_list()
+        self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
+        # Auto-save to persist test results
+        self._save_keys_to_config()
+        QApplication.processEvents()
+        print(f"[DEBUG] UI refresh and save completed")
         
 
 
@@ -3365,10 +3550,12 @@ class MultiAPIKeyDialog(QDialog):
                     if content and "test successful" in content.lower():
                         QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
                         key.mark_success()
+                        key.set_test_result('passed', 'Test successful')
                         return (index, True, "Test passed")
                     else:
                         QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
                         key.mark_error()
+                        key.set_test_result('failed', 'Unexpected response')
                         return (index, False, "Unexpected response")
                 else:
                     # Use UnifiedClient for non-Gemini or regular Gemini
@@ -3394,14 +3581,17 @@ class MultiAPIKeyDialog(QDialog):
                         if content and "test successful" in content.lower():
                             QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
                             key.mark_success()
+                            key.set_test_result('passed', 'Test successful')
                             return (index, True, "Test passed")
                         else:
                             QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
                             key.mark_error()
+                            key.set_test_result('failed', 'Unexpected response')
                             return (index, False, "Unexpected response")
                     else:
                         QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False))
                         key.mark_error()
+                        key.set_test_result('failed', 'No response')
                         return (index, False, "No response")
                         
             except Exception as e:
@@ -3410,6 +3600,9 @@ class MultiAPIKeyDialog(QDialog):
                 
                 if "429" in error_msg or "rate limit" in error_msg.lower():
                     error_code = 429
+                    key.set_test_result('rate_limited', error_msg[:30])
+                else:
+                    key.set_test_result('error', error_msg[:30])
                     
                 QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False, error=True))
                 key.mark_error(error_code)

@@ -1270,6 +1270,21 @@ Text to analyze:
             QMessageBox.critical(self, "Missing Dependency", 
                                "PySide6 is required for manga translation. Please install it:\npip install PySide6")
             return
+
+        # If dialog already exists, just show and focus it to preserve exact state
+        try:
+            if hasattr(self, "_manga_dialog") and self._manga_dialog is not None:
+                self._manga_dialog.show()
+                # Bring to front and focus
+                try:
+                    self._manga_dialog.raise_()
+                    self._manga_dialog.activateWindow()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            # If the old reference is invalid, recreate below
+            self._manga_dialog = None
         
         # Create or get QApplication instance
         app = QApplication.instance()
@@ -1287,11 +1302,13 @@ Text to analyze:
         
         # Enable maximize button and standard window controls (minimize, maximize, close)
         dialog.setWindowFlags(
-            Qt.Window | 
-            Qt.WindowMinimizeButtonHint | 
-            Qt.WindowMaximizeButtonHint | 
+            Qt.Window |
+            Qt.WindowMinimizeButtonHint |
+            Qt.WindowMaximizeButtonHint |
             Qt.WindowCloseButtonHint
         )
+        # Do not delete widgets on close; we'll hide instead to retain exact state
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
         
         # Set icon if available
         try:
@@ -1332,26 +1349,26 @@ Text to analyze:
         # Initialize the manga translator interface with PySide6 widget
         self.manga_translator = MangaTranslationTab(content_widget, self, dialog, scroll_area)
         
-        # Handle window close
-        def on_close():
+        # Intercept window close: hide instead of destroy to preserve state
+        def _handle_close(event):
             try:
-                if self.manga_translator:
-                    # Stop any running translations
-                    if hasattr(self.manga_translator, 'stop_translation'):
-                        self.manga_translator.stop_translation()
-                    self.manga_translator = None
-                dialog.close()
-            except Exception as e:
-                print(f"Error closing manga translator: {e}")
-        
-        dialog.finished.connect(on_close)
+                event.ignore()
+                dialog.hide()
+            except Exception:
+                # Best-effort: still hide on any error
+                try:
+                    event.ignore()
+                except Exception:
+                    pass
+                dialog.hide()
+        dialog.closeEvent = _handle_close
         
         # Show the dialog
         dialog.show()
         
-        # Keep reference to prevent garbage collection
+        # Keep reference to prevent garbage collection and allow reuse
         self._manga_dialog = dialog
-      
+
         
     def _init_default_prompts(self):
         """Initialize all default prompt templates"""

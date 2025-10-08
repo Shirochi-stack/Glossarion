@@ -24,6 +24,105 @@ import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
 
+# Optional: psutil/ctypes helpers to reduce GUI lag by lowering background thread priority
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
+
+import ctypes
+import platform
+
+_IS_WINDOWS = platform.system().lower().startswith('win')
+
+# Windows thread priority constants
+if _IS_WINDOWS:
+    _THREAD_PRIORITY_IDLE = -15
+    _THREAD_PRIORITY_LOWEST = -2
+    _THREAD_PRIORITY_BELOW_NORMAL = -1
+    _THREAD_PRIORITY_NORMAL = 0
+    _THREAD_SET_INFORMATION = 0x0020
+    _THREAD_QUERY_INFORMATION = 0x0040
+
+    _kernel32 = ctypes.windll.kernel32
+
+    def _win_set_current_thread_priority(level=_THREAD_PRIORITY_BELOW_NORMAL):
+        try:
+            _kernel32.SetThreadPriority(_kernel32.GetCurrentThread(), ctypes.c_int(level))
+        except Exception:
+            pass
+
+    def _win_set_current_thread_affinity(reserve_cores: int = 1):
+        try:
+            # Build an affinity mask that leaves some low-index cores free for the GUI
+            cpu_count = psutil.cpu_count(logical=True) if psutil else os.cpu_count() or 1
+            allow = max(1, cpu_count - max(0, reserve_cores))
+            mask = 0
+            for i in range(allow):
+                mask |= (1 << i)
+            _kernel32.SetThreadAffinityMask(_kernel32.GetCurrentThread(), ctypes.c_size_t(mask))
+        except Exception:
+            pass
+
+    def _win_set_thread_priority_by_tid(tid: int, level=_THREAD_PRIORITY_BELOW_NORMAL):
+        try:
+            handle = _kernel32.OpenThread(_THREAD_SET_INFORMATION | _THREAD_QUERY_INFORMATION, False, ctypes.c_uint32(tid))
+            if handle:
+                _kernel32.SetThreadPriority(handle, ctypes.c_int(level))
+                _kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+    def _win_set_thread_affinity_by_tid(tid: int, reserve_cores: int = 1):
+        try:
+            handle = _kernel32.OpenThread(_THREAD_SET_INFORMATION | _THREAD_QUERY_INFORMATION, False, ctypes.c_uint32(tid))
+            if handle:
+                cpu_count = psutil.cpu_count(logical=True) if psutil else os.cpu_count() or 1
+                allow = max(1, cpu_count - max(0, reserve_cores))
+                mask = 0
+                for i in range(allow):
+                    mask |= (1 << i)
+                _kernel32.SetThreadAffinityMask(handle, ctypes.c_size_t(mask))
+                _kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+    def _lower_current_thread_priority_and_affinity(reserve_env_key: str = 'MANGA_RESERVE_CORES'):
+        try:
+            reserve = 1
+            try:
+                reserve = int(os.environ.get(reserve_env_key, '1'))
+            except Exception:
+                reserve = 1
+            _win_set_current_thread_priority(_THREAD_PRIORITY_BELOW_NORMAL)
+            _win_set_current_thread_affinity(reserve)
+        except Exception:
+            pass
+
+    def _demote_non_main_threads(main_tid: int, reserve_env_key: str = 'MANGA_RESERVE_CORES'):
+        try:
+            reserve = 1
+            try:
+                reserve = int(os.environ.get(reserve_env_key, '1'))
+            except Exception:
+                reserve = 1
+            if psutil is None:
+                return
+            p = psutil.Process()
+            for th in p.threads():
+                tid = int(th.id)
+                if tid != main_tid:
+                    _win_set_thread_priority_by_tid(tid, _THREAD_PRIORITY_BELOW_NORMAL)
+                    _win_set_thread_affinity_by_tid(tid, reserve)
+        except Exception:
+            pass
+else:
+    def _lower_current_thread_priority_and_affinity(reserve_env_key: str = 'MANGA_RESERVE_CORES'):
+        # Non-Windows: no-op (per-thread priority not easily portable without extra deps)
+        return
+
+    def _demote_non_main_threads(main_tid: int, reserve_env_key: str = 'MANGA_RESERVE_CORES'):
+        return
 
 # Try to import UnifiedClient for API initialization
 try:
@@ -245,6 +344,12 @@ class MangaTranslationTab:
         self.main_gui = main_gui
         self.dialog = dialog
         self.scroll_area = scroll_area
+        
+        # Record main GUI thread native id for selective demotion of background threads (Windows)
+        try:
+            self._main_thread_tid = threading.get_native_id()
+        except Exception:
+            self._main_thread_tid = None
         
         # Translation state
         self.translator = None
@@ -6690,6 +6795,35 @@ class MangaTranslationTab:
         # Schedule next update with QTimer
         QTimer.singleShot(100, self._process_updates)
 
+    # Periodic demoter to keep UI responsive by lowering new worker thread priorities (Windows-only).
+    def _start_periodic_thread_demoter(self):
+        try:
+            if not _IS_WINDOWS:
+                return
+            self._demoter_active = True
+            def _tick():
+                try:
+                    if not getattr(self, '_demoter_active', False):
+                        return
+                    if getattr(self, 'is_running', False) is False:
+                        return
+                    if getattr(self, '_main_thread_tid', None):
+                        _demote_non_main_threads(self._main_thread_tid, 'MANGA_RESERVE_CORES')
+                except Exception:
+                    pass
+                finally:
+                    # Schedule next demotion pass
+                    QTimer.singleShot(750, _tick)
+            QTimer.singleShot(0, _tick)
+        except Exception:
+            pass
+
+    def _stop_periodic_thread_demoter(self):
+        try:
+            self._demoter_active = False
+        except Exception:
+            pass
+
     def load_local_inpainting_model(self, model_path):
         """Load a local inpainting model
         
@@ -6832,6 +6966,12 @@ class MangaTranslationTab:
         except Exception:
             pass
         
+        # Begin periodic demotion of background threads while translation runs (Windows only)
+        try:
+            self._start_periodic_thread_demoter()
+        except Exception:
+            pass
+        
         # Run the heavy preparation and kickoff in a background thread to avoid GUI freeze
         threading.Thread(target=self._start_translation_heavy, name="MangaStartHeavy", daemon=True).start()
         return
@@ -6839,6 +6979,11 @@ class MangaTranslationTab:
     def _start_translation_heavy(self):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
         try:
+            # Lower priority & restrict affinity for this launcher thread (Windows)
+            try:
+                _lower_current_thread_priority_and_affinity('MANGA_RESERVE_CORES')
+            except Exception:
+                pass
             # Set thread limits based on parallel processing settings
             try:
                 advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
