@@ -42,6 +42,50 @@ def print_env_var_status():
         'GLOSSARY_TRANSLATION_PROMPT': 'Glossary translation prompt',
         'GLOSSARY_FORMAT_INSTRUCTIONS': 'Glossary formatting instructions',
     }
+
+    # Manga-related environment variables (Settings Dialog + Integration)
+    manga_env_vars = {
+        'MANGA_FULL_PAGE_CONTEXT': 'Enable full page context translation',
+        'MANGA_VISUAL_CONTEXT_ENABLED': 'Include page image in requests',
+        'MANGA_CREATE_SUBFOLDER': "Create 'translated' subfolder for output",
+        'MANGA_BG_OPACITY': 'Background opacity (0-255)',
+        'MANGA_BG_STYLE': 'Background style (box/circle/wrap)',
+        'MANGA_BG_REDUCTION': 'Background reduction factor',
+        'MANGA_FONT_SIZE': 'Fixed font size (0=auto)',
+        'MANGA_FONT_STYLE': 'Font style name',
+        'MANGA_FONT_PATH': 'Selected font path',
+        'MANGA_FONT_SIZE_MODE': 'Font size mode (fixed/multiplier)',
+        'MANGA_FONT_SIZE_MULTIPLIER': 'Font size multiplier (for multiplier mode)',
+        'MANGA_MAX_FONT_SIZE': 'Maximum font size',
+        'MANGA_AUTO_MIN_SIZE': 'Automatic minimum readable font size',
+        'MANGA_FREE_TEXT_ONLY_BG_OPACITY': 'Apply BG opacity only to free text',
+        'MANGA_FORCE_CAPS_LOCK': 'Force caps lock',
+        'MANGA_STRICT_TEXT_WRAPPING': 'Strict text wrapping (force fit)',
+        'MANGA_CONSTRAIN_TO_BUBBLE': 'Constrain text to bubble bounds',
+        'MANGA_TEXT_COLOR': 'Text color RGB (R,G,B)',
+        'MANGA_SHADOW_ENABLED': 'Shadow enabled',
+        'MANGA_SHADOW_COLOR': 'Shadow color RGB (R,G,B)',
+        'MANGA_SHADOW_OFFSET_X': 'Shadow offset X',
+        'MANGA_SHADOW_OFFSET_Y': 'Shadow offset Y',
+        'MANGA_SHADOW_BLUR': 'Shadow blur radius',
+        'MANGA_INPAINT_SKIP': 'Skip inpainting',
+        'MANGA_INPAINT_QUALITY': 'Inpainting quality preset',
+        'MANGA_INPAINT_DILATION': 'Inpainting dilation (px)',
+        'MANGA_INPAINT_PASSES': 'Inpainting passes',
+        'MANGA_INPAINT_METHOD': 'Inpainting method (local/cloud/hybrid/skip)',
+        'MANGA_LOCAL_INPAINT_METHOD': 'Local inpainting model type',
+        'MANGA_FONT_ALGORITHM': 'Font sizing algorithm preset',
+        'MANGA_PREFER_LARGER': 'Prefer larger font sizing',
+        'MANGA_BUBBLE_SIZE_FACTOR': 'Use bubble size factor for sizing',
+        'MANGA_LINE_SPACING': 'Line spacing multiplier',
+        'MANGA_MAX_LINES': 'Maximum lines per bubble',
+        'MANGA_QWEN2VL_MODEL_SIZE': 'Qwen2-VL model size selection',
+        'MANGA_RAPIDOCR_USE_RECOGNITION': 'RapidOCR: use recognition step',
+        'MANGA_RAPIDOCR_LANGUAGE': 'RapidOCR detection language',
+        'MANGA_RAPIDOCR_DETECTION_MODE': 'RapidOCR detection mode',
+        'MANGA_FULL_PAGE_CONTEXT_PROMPT_LEN': 'Length of full page context prompt',
+        'MANGA_OCR_PROMPT_LEN': 'Length of OCR system prompt',
+    }
     
     missing_critical = []
     empty_critical = []
@@ -79,11 +123,27 @@ def print_env_var_status():
             value_preview = str(value)[:80] + ('...' if len(str(value)) > 80 else '')
             print(f"🔍 {var_name}: {value_preview}")
     
+    # Manga section
+    print(f"\n🎎 MANGA ENVIRONMENT VARIABLES:")
+    print("-" * 40)
+    manga_set = 0
+    for var_name, description in manga_env_vars.items():
+        value = os.environ.get(var_name)
+        if value is None:
+            print(f"🔍 Not set: {var_name}")
+        elif not str(value).strip():
+            print(f"⚠️  Empty: {var_name}")
+        else:
+            value_preview = str(value)[:80] + ('...' if len(str(value)) > 80 else '')
+            print(f"🔍 {var_name}: {value_preview}")
+            manga_set += 1
+    
     # Summary
     total_critical = len(critical_env_vars)
     print(f"\n📊 SUMMARY:")
     print("-" * 20)
     print(f"Critical variables set: {len(set_critical)}/{total_critical}")
+    print(f"Manga variables set: {manga_set}/{len(manga_env_vars)}")
     
     if missing_critical:
         print(f"❌ Missing ({len(missing_critical)}): {', '.join(missing_critical)}")

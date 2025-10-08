@@ -3215,7 +3215,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.button_run.config(text="⏹ Stop", state="normal")
         
         # Delay auto-scroll so first log is readable
-        self._start_autoscroll_delay(600)
+        self._start_autoscroll_delay(100)
         # Show immediate feedback that translation is starting
         self.append_log("🚀 Initializing translation process...")
         
@@ -4591,7 +4591,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.glossary_thread.start()
         
         # Delay auto-scroll so first log is readable
-        self._start_autoscroll_delay(600)
+        self._start_autoscroll_delay(100)
         # Update button IMMEDIATELY after thread starts (synchronous)
         self.update_run_button()
 
@@ -6019,7 +6019,7 @@ Important rules:
             self.close()
             sys.exit(0)
 
-    def _start_autoscroll_delay(self, ms=100):
+    def _start_autoscroll_delay(self, ms=500):
         try:
             import time as _time
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
@@ -7851,6 +7851,48 @@ Important rules:
             'GLOSSARY_CUSTOM_FIELDS': 'Custom glossary fields (JSON)',
             'GLOSSARY_TRANSLATION_PROMPT': 'Glossary translation prompt',
             'GLOSSARY_FORMAT_INSTRUCTIONS': 'Glossary formatting instructions',
+            
+            # Manga Integration and Manga Settings Dialog variables
+            'MANGA_FULL_PAGE_CONTEXT': 'Enable full page context translation',
+            'MANGA_VISUAL_CONTEXT_ENABLED': 'Include page image in requests',
+            'MANGA_CREATE_SUBFOLDER': "Create 'translated' subfolder for output",
+            'MANGA_BG_OPACITY': 'Background opacity (0-255)',
+            'MANGA_BG_STYLE': 'Background style (box/circle/wrap)',
+            'MANGA_BG_REDUCTION': 'Background reduction factor',
+            'MANGA_FONT_SIZE': 'Fixed font size (0=auto)',
+            'MANGA_FONT_STYLE': 'Font style name',
+            'MANGA_FONT_PATH': 'Selected font path',
+            'MANGA_FONT_SIZE_MODE': 'Font size mode (fixed/multiplier)',
+            'MANGA_FONT_SIZE_MULTIPLIER': 'Font size multiplier (for multiplier mode)',
+            'MANGA_MAX_FONT_SIZE': 'Maximum font size',
+            'MANGA_AUTO_MIN_SIZE': 'Automatic minimum readable font size',
+            'MANGA_FREE_TEXT_ONLY_BG_OPACITY': 'Apply BG opacity only to free text',
+            'MANGA_FORCE_CAPS_LOCK': 'Force caps lock',
+            'MANGA_STRICT_TEXT_WRAPPING': 'Strict text wrapping (force fit)',
+            'MANGA_CONSTRAIN_TO_BUBBLE': 'Constrain text to bubble bounds',
+            'MANGA_TEXT_COLOR': 'Text color RGB (R,G,B)',
+            'MANGA_SHADOW_ENABLED': 'Shadow enabled',
+            'MANGA_SHADOW_COLOR': 'Shadow color RGB (R,G,B)',
+            'MANGA_SHADOW_OFFSET_X': 'Shadow offset X',
+            'MANGA_SHADOW_OFFSET_Y': 'Shadow offset Y',
+            'MANGA_SHADOW_BLUR': 'Shadow blur radius',
+            'MANGA_INPAINT_SKIP': 'Skip inpainting',
+            'MANGA_INPAINT_QUALITY': 'Inpainting quality preset',
+            'MANGA_INPAINT_DILATION': 'Inpainting dilation (px)',
+            'MANGA_INPAINT_PASSES': 'Inpainting passes',
+            'MANGA_INPAINT_METHOD': 'Inpainting method (local/cloud/hybrid/skip)',
+            'MANGA_LOCAL_INPAINT_METHOD': 'Local inpainting model type',
+            'MANGA_FONT_ALGORITHM': 'Font sizing algorithm preset',
+            'MANGA_PREFER_LARGER': 'Prefer larger font sizing',
+            'MANGA_BUBBLE_SIZE_FACTOR': 'Use bubble size factor for sizing',
+            'MANGA_LINE_SPACING': 'Line spacing multiplier',
+            'MANGA_MAX_LINES': 'Maximum lines per bubble',
+            'MANGA_QWEN2VL_MODEL_SIZE': 'Qwen2-VL model size selection',
+            'MANGA_RAPIDOCR_USE_RECOGNITION': 'RapidOCR: use recognition step',
+            'MANGA_RAPIDOCR_LANGUAGE': 'RapidOCR detection language',
+            'MANGA_RAPIDOCR_DETECTION_MODE': 'RapidOCR detection mode',
+            'MANGA_FULL_PAGE_CONTEXT_PROMPT_LEN': 'Length of full page context prompt',
+            'MANGA_OCR_PROMPT_LEN': 'Length of OCR system prompt',
         }
         
         # Check critical variables
@@ -7961,8 +8003,68 @@ Important rules:
                 ('AI_HUNTER_MAX_WORKERS', str(ai_hunter_config.get('ai_hunter_max_workers', 1))),
             ]
             
+            # Add Manga Integration and Manga Settings Dialog environment variables
+            ms = self.config.get('manga_settings', {}) if isinstance(self.config.get('manga_settings', {}), dict) else {}
+            inpaint = ms.get('inpainting', {}) if isinstance(ms.get('inpainting', {}), dict) else {}
+            rendering = ms.get('rendering', {}) if isinstance(ms.get('rendering', {}), dict) else {}
+            font_cfg = ms.get('font_sizing', {}) if isinstance(ms.get('font_sizing', {}), dict) else {}
+
+            # Convenience getters with fallbacks to top-level keys used by MangaIntegration
+            def _rgb_list_to_str(lst, default):
+                try:
+                    if isinstance(lst, (list, tuple)) and len(lst) == 3:
+                        return f"{int(lst[0])},{int(lst[1])},{int(lst[2])}"
+                except Exception:
+                    pass
+                return default
+
+            manga_env_mappings = [
+                ('MANGA_FULL_PAGE_CONTEXT', '1' if self.config.get('manga_full_page_context', False) else '0'),
+                ('MANGA_VISUAL_CONTEXT_ENABLED', '1' if self.config.get('manga_visual_context_enabled', True) else '0'),
+                ('MANGA_CREATE_SUBFOLDER', '1' if self.config.get('manga_create_subfolder', True) else '0'),
+                ('MANGA_BG_OPACITY', str(self.config.get('manga_bg_opacity', 130))),
+                ('MANGA_BG_STYLE', str(self.config.get('manga_bg_style', 'circle'))),
+                ('MANGA_BG_REDUCTION', str(self.config.get('manga_bg_reduction', 1.0))),
+                ('MANGA_FONT_SIZE', str(self.config.get('manga_font_size', 0))),
+                ('MANGA_FONT_STYLE', str(self.config.get('manga_font_style', 'Default'))),
+                ('MANGA_FONT_PATH', str(self.config.get('manga_font_path', ''))),
+                ('MANGA_FONT_SIZE_MODE', str(self.config.get('manga_font_size_mode', 'fixed'))),
+                ('MANGA_FONT_SIZE_MULTIPLIER', str(self.config.get('manga_font_size_multiplier', 1.0))),
+                ('MANGA_MAX_FONT_SIZE', str(self.config.get('manga_max_font_size', rendering.get('auto_max_size', font_cfg.get('max_size', 48))))),
+                ('MANGA_AUTO_MIN_SIZE', str(rendering.get('auto_min_size', font_cfg.get('min_size', 10)))),
+                ('MANGA_FREE_TEXT_ONLY_BG_OPACITY', '1' if self.config.get('manga_free_text_only_bg_opacity', True) else '0'),
+                ('MANGA_FORCE_CAPS_LOCK', '1' if self.config.get('manga_force_caps_lock', True) else '0'),
+                ('MANGA_STRICT_TEXT_WRAPPING', '1' if self.config.get('manga_strict_text_wrapping', True) else '0'),
+                ('MANGA_CONSTRAIN_TO_BUBBLE', '1' if self.config.get('manga_constrain_to_bubble', True) else '0'),
+                ('MANGA_TEXT_COLOR', _rgb_list_to_str(self.config.get('manga_text_color', [102,0,0]), '102,0,0')),
+                ('MANGA_SHADOW_ENABLED', '1' if self.config.get('manga_shadow_enabled', True) else '0'),
+                ('MANGA_SHADOW_COLOR', _rgb_list_to_str(self.config.get('manga_shadow_color', [204,128,128]), '204,128,128')),
+                ('MANGA_SHADOW_OFFSET_X', str(self.config.get('manga_shadow_offset_x', 2))),
+                ('MANGA_SHADOW_OFFSET_Y', str(self.config.get('manga_shadow_offset_y', 2))),
+                ('MANGA_SHADOW_BLUR', str(self.config.get('manga_shadow_blur', 0))),
+                ('MANGA_INPAINT_SKIP', '1' if self.config.get('manga_skip_inpainting', False) else '0'),
+                ('MANGA_INPAINT_QUALITY', str(self.config.get('manga_inpaint_quality', 'high'))),
+                ('MANGA_INPAINT_DILATION', str(self.config.get('manga_inpaint_dilation', 15))),
+                ('MANGA_INPAINT_PASSES', str(self.config.get('manga_inpaint_passes', 2))),
+                ('MANGA_INPAINT_METHOD', str(inpaint.get('method', 'local'))),
+                ('MANGA_LOCAL_INPAINT_METHOD', str(inpaint.get('local_method', 'anime_onnx'))),
+                ('MANGA_FONT_ALGORITHM', str(font_cfg.get('algorithm', 'smart'))),
+                ('MANGA_PREFER_LARGER', '1' if font_cfg.get('prefer_larger', True) else '0'),
+                ('MANGA_BUBBLE_SIZE_FACTOR', '1' if font_cfg.get('bubble_size_factor', True) else '0'),
+                ('MANGA_LINE_SPACING', str(font_cfg.get('line_spacing', 1.3))),
+                ('MANGA_MAX_LINES', str(font_cfg.get('max_lines', 10))),
+                ('MANGA_QWEN2VL_MODEL_SIZE', str(self.config.get('qwen2vl_model_size', '1'))),
+                ('MANGA_RAPIDOCR_USE_RECOGNITION', '1' if self.config.get('rapidocr_use_recognition', True) else '0'),
+                ('MANGA_RAPIDOCR_LANGUAGE', str(self.config.get('rapidocr_language', 'auto'))),
+                ('MANGA_RAPIDOCR_DETECTION_MODE', str(self.config.get('rapidocr_detection_mode', 'document'))),
+                # Prompt lengths for quick sanity without leaking content
+                ('MANGA_FULL_PAGE_CONTEXT_PROMPT_LEN', str(len(self.config.get('manga_full_page_context_prompt', '') or ''))),
+                ('MANGA_OCR_PROMPT_LEN', str(len(self.config.get('manga_ocr_prompt', '') or ''))),
+            ]
+
             # Combine all environment variable mappings
             env_mappings.extend(qa_env_mappings)
+            env_mappings.extend(manga_env_mappings)
             
             initialized_count = 0
             for env_key, env_value in env_mappings:

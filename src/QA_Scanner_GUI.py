@@ -193,7 +193,7 @@ class QAScannerMixin:
             try:
                 import time as _time
                 if hasattr(self, '_start_autoscroll_delay'):
-                    self._start_autoscroll_delay(600)
+                    self._start_autoscroll_delay(100)
                 elif hasattr(self, '_autoscroll_delay_until'):
                     self._autoscroll_delay_until = _time.time() + 0.6
             except Exception:
@@ -1010,7 +1010,7 @@ class QAScannerMixin:
         # Persist latest auto-search preference
         try:
             self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_checkbox.isChecked())
-            self.save_config(show_message=False)
+            self.save_config(show_message=True)
         except Exception:
             pass
         
