@@ -600,7 +600,7 @@ class QAScannerMixin:
             custom_dialog.setModal(True)
             # Use screen ratios: 20% width, 50% height for better content fit
             screen = QApplication.primaryScreen().geometry()
-            custom_width = int(screen.width() * 0.40)
+            custom_width = int(screen.width() * 0.41)
             custom_height = int(screen.height() * 0.60)
             custom_dialog.resize(custom_width, custom_height)
             # Set window icon
