@@ -6,6 +6,7 @@ These methods can be integrated into TranslatorGUI or used standalone
 import os
 import sys
 import re
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as tb
@@ -2094,62 +2095,226 @@ class QAScannerMixin:
         button_inner.pack()
         
         def save_settings():
-            """Save QA scanner settings"""
+            """Save QA scanner settings with comprehensive debugging"""
             try:
-                qa_settings['foreign_char_threshold'] = threshold_var.get()
-                qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
-                qa_settings['target_language'] = target_language_var.get().lower()
-                qa_settings['check_encoding_issues'] = check_encoding_var.get()
-                qa_settings['check_repetition'] = check_repetition_var.get()
-                qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
-                qa_settings['check_glossary_leakage'] = check_glossary_var.get()
-                qa_settings['min_file_length'] = min_length_var.get()
-                qa_settings['report_format'] = format_var.get()
-                qa_settings['auto_save_report'] = auto_save_var.get()
-                qa_settings['check_word_count_ratio'] = check_word_count_var.get()
-                qa_settings['check_multiple_headers'] = check_multiple_headers_var.get()
-                qa_settings['warn_name_mismatch'] = warn_mismatch_var.get()
-                qa_settings['check_missing_html_tag'] = check_missing_html_tag_var.get()
-                qa_settings['check_paragraph_structure'] = check_paragraph_structure_var.get()
-                qa_settings['check_invalid_nesting'] = check_invalid_nesting_var.get()
+                self.append_log("🔍 [DEBUG] Starting QA Scanner settings save process...")
                 
-                # Save cache settings
-                qa_settings['cache_enabled'] = cache_enabled_var.get()
-                qa_settings['cache_auto_size'] = auto_size_var.get()
-                qa_settings['cache_show_stats'] = show_stats_var.get()
+                # Core QA Settings with debugging
+                core_settings_to_save = {
+                    'foreign_char_threshold': (threshold_var, lambda x: x.get()),
+                    'excluded_characters': (excluded_text, lambda x: x.get(1.0, tk.END).strip()),
+                    'target_language': (target_language_var, lambda x: x.get().lower()),
+                    'check_encoding_issues': (check_encoding_var, lambda x: x.get()),
+                    'check_repetition': (check_repetition_var, lambda x: x.get()),
+                    'check_translation_artifacts': (check_artifacts_var, lambda x: x.get()),
+                    'check_glossary_leakage': (check_glossary_var, lambda x: x.get()),
+                    'min_file_length': (min_length_var, lambda x: x.get()),
+                    'report_format': (format_var, lambda x: x.get()),
+                    'auto_save_report': (auto_save_var, lambda x: x.get()),
+                    'check_word_count_ratio': (check_word_count_var, lambda x: x.get()),
+                    'check_multiple_headers': (check_multiple_headers_var, lambda x: x.get()),
+                    'warn_name_mismatch': (warn_mismatch_var, lambda x: x.get()),
+                    'check_missing_html_tag': (check_missing_html_tag_var, lambda x: x.get()),
+                    'check_paragraph_structure': (check_paragraph_structure_var, lambda x: x.get()),
+                    'check_invalid_nesting': (check_invalid_nesting_var, lambda x: x.get()),
+                }
                 
-                # Save individual cache sizes
+                failed_core_settings = []
+                for setting_name, (var_obj, converter) in core_settings_to_save.items():
+                    try:
+                        old_value = qa_settings.get(setting_name, '<NOT SET>')
+                        new_value = converter(var_obj)
+                        qa_settings[setting_name] = new_value
+                        
+                        if old_value != new_value:
+                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
+                        else:
+                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
+                            
+                    except Exception as e:
+                        failed_core_settings.append(f"{setting_name} ({str(e)})")
+                        self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
+                
+                if failed_core_settings:
+                    self.append_log(f"⚠️ [DEBUG] Failed QA core settings: {', '.join(failed_core_settings)}")
+                
+                # Cache settings with debugging
+                self.append_log("🔍 [DEBUG] Saving QA cache settings...")
+                cache_settings_to_save = {
+                    'cache_enabled': (cache_enabled_var, lambda x: x.get()),
+                    'cache_auto_size': (auto_size_var, lambda x: x.get()),
+                    'cache_show_stats': (show_stats_var, lambda x: x.get()),
+                }
+                
+                failed_cache_settings = []
+                for setting_name, (var_obj, converter) in cache_settings_to_save.items():
+                    try:
+                        old_value = qa_settings.get(setting_name, '<NOT SET>')
+                        new_value = converter(var_obj)
+                        qa_settings[setting_name] = new_value
+                        
+                        if old_value != new_value:
+                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
+                        else:
+                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
+                    except Exception as e:
+                        failed_cache_settings.append(f"{setting_name} ({str(e)})")
+                        self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
+                
+                # Save individual cache sizes with debugging
+                saved_cache_vars = []
+                failed_cache_vars = []
                 for cache_name, cache_var in cache_vars.items():
-                    qa_settings[f'cache_{cache_name}'] = cache_var.get()
-
-                if 'ai_hunter_config' not in self.config:
-                    self.config['ai_hunter_config'] = {}
-                self.config['ai_hunter_config']['ai_hunter_max_workers'] = ai_hunter_workers_var.get()
+                    try:
+                        cache_key = f'cache_{cache_name}'
+                        old_value = qa_settings.get(cache_key, '<NOT SET>')
+                        new_value = cache_var.get()
+                        qa_settings[cache_key] = new_value
+                        saved_cache_vars.append(cache_name)
+                        
+                        if old_value != new_value:
+                            self.append_log(f"🔍 [DEBUG] QA {cache_key}: '{old_value}' → '{new_value}'")
+                    except Exception as e:
+                        failed_cache_vars.append(f"{cache_name} ({str(e)})")
+                        self.append_log(f"❌ [DEBUG] Failed to save QA cache_{cache_name}: {e}")
+                
+                if saved_cache_vars:
+                    self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
+                if failed_cache_vars:
+                    self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
+                
+                # AI Hunter config with debugging
+                self.append_log("🔍 [DEBUG] Saving AI Hunter config...")
+                try:
+                    if 'ai_hunter_config' not in self.config:
+                        self.config['ai_hunter_config'] = {}
+                        self.append_log("🔍 [DEBUG] Created new ai_hunter_config section")
+                    
+                    old_workers = self.config['ai_hunter_config'].get('ai_hunter_max_workers', '<NOT SET>')
+                    new_workers = ai_hunter_workers_var.get()
+                    self.config['ai_hunter_config']['ai_hunter_max_workers'] = new_workers
+                    
+                    if old_workers != new_workers:
+                        self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: '{old_workers}' → '{new_workers}'")
+                    else:
+                        self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: unchanged ('{new_workers}')")
+                        
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Failed to save AI Hunter config: {e}")
     
-                # Validate and save paragraph threshold
+                # Validate and save paragraph threshold with debugging
+                self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
                 try:
                     threshold_value = paragraph_threshold_var.get()
+                    old_threshold = qa_settings.get('paragraph_threshold', '<NOT SET>')
+                    
                     if 0 <= threshold_value <= 100:
-                        qa_settings['paragraph_threshold'] = threshold_value / 100.0  # Convert to decimal
+                        new_threshold = threshold_value / 100.0  # Convert to decimal
+                        qa_settings['paragraph_threshold'] = new_threshold
+                        
+                        if old_threshold != new_threshold:
+                            self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: '{old_threshold}' → '{new_threshold}' ({threshold_value}%)")
+                        else:
+                            self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: unchanged ('{new_threshold}' / {threshold_value}%)")
                     else:
                         raise ValueError("Threshold must be between 0 and 100")
+                        
                 except (tk.TclError, ValueError) as e:
                     # Default to 30% if invalid
                     qa_settings['paragraph_threshold'] = 0.3
+                    self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
                     self.append_log("⚠️ Invalid paragraph threshold, using default 30%")
 
+                # Save to main config with debugging
+                self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
+                try:
+                    old_qa_config = self.config.get('qa_scanner_settings', {})
+                    self.config['qa_scanner_settings'] = qa_settings
+                    
+                    # Count changed settings
+                    changed_settings = []
+                    for key, new_value in qa_settings.items():
+                        if old_qa_config.get(key) != new_value:
+                            changed_settings.append(key)
+                    
+                    if changed_settings:
+                        self.append_log(f"🔍 [DEBUG] Changed {len(changed_settings)} QA settings: {', '.join(changed_settings[:5])}{'...' if len(changed_settings) > 5 else ''}")
+                    else:
+                        self.append_log("🔍 [DEBUG] No QA settings changed")
+                        
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Failed to update main config: {e}")
                 
-                # Save to main config
-                self.config['qa_scanner_settings'] = qa_settings
+                # Environment variables setup for QA Scanner
+                self.append_log("🔍 [DEBUG] Setting QA Scanner environment variables...")
+                qa_env_vars_set = []
+                
+                try:
+                    # QA Scanner environment variables
+                    qa_env_mappings = [
+                        ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 10))),
+                        ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
+                        ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
+                        ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
+                        ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
+                        ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
+                        ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
+                        ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
+                        ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
+                        ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
+                        ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                        ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 1))),
+                    ]
+                    
+                    for env_key, env_value in qa_env_mappings:
+                        try:
+                            old_value = os.environ.get(env_key, '<NOT SET>')
+                            os.environ[env_key] = str(env_value)
+                            new_value = os.environ[env_key]
+                            qa_env_vars_set.append(env_key)
+                            
+                            if old_value != new_value:
+                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value}'")
+                            else:
+                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{new_value}')")
+                                
+                        except Exception as e:
+                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+                    
+                    self.append_log(f"🔍 [DEBUG] Successfully set {len(qa_env_vars_set)} QA environment variables")
+                    
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] QA environment variable setup failed: {e}")
+                    import traceback
+                    self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
                 
                 # Call save_config with show_message=False to avoid the error
-                self.save_config(show_message=False)
+                self.append_log("🔍 [DEBUG] Calling main save_config method...")
+                try:
+                    self.save_config(show_message=False)
+                    self.append_log("🔍 [DEBUG] Main save_config completed successfully")
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
+                    raise
                 
-                self.append_log("✅ QA Scanner settings saved")
+                # Final QA environment variable verification
+                self.append_log("🔍 [DEBUG] Final QA environment variable check:")
+                critical_qa_vars = ['QA_FOREIGN_CHAR_THRESHOLD', 'QA_TARGET_LANGUAGE', 'QA_REPORT_FORMAT', 'AI_HUNTER_MAX_WORKERS']
+                for var in critical_qa_vars:
+                    value = os.environ.get(var, '<NOT SET>')
+                    if value == '<NOT SET>' or not value:
+                        self.append_log(f"❌ [DEBUG] CRITICAL QA: {var} is not set or empty!")
+                    else:
+                        self.append_log(f"✅ [DEBUG] QA {var}: {value}")
+                
+                self.append_log("✅ QA Scanner settings saved successfully")
                 dialog._cleanup_scrolling()  # Clean up scrolling bindings
                 dialog.destroy()
                 
             except Exception as e:
+                self.append_log(f"❌ [DEBUG] QA save_settings full exception: {str(e)}")
+                import traceback
+                self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
                 self.append_log(f"❌ Error saving QA settings: {str(e)}")
                 messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
         

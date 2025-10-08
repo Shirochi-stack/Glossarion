@@ -55,6 +55,8 @@ class GlossaryManagerMixin:
         
         def save_glossary_settings():
             try:
+                self.append_log("🔍 [DEBUG] Starting glossary settings save process...")
+                
                 # Update prompts from text widgets
                 self.update_glossary_prompts()
                 
@@ -70,64 +72,162 @@ class GlossaryManagerMixin:
                 # Save custom entry types
                 self.config['custom_entry_types'] = self.custom_entry_types
                 
-                # Save all glossary-related settings
-                self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
-                self.config['append_glossary'] = self.append_glossary_var.get()
-                self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
-                self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
-                self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
-                self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
+                # Save all glossary-related settings with validation
+                settings_to_save = {
+                    'enable_auto_glossary': (self.enable_auto_glossary_var, lambda x: x.get()),
+                    'append_glossary': (self.append_glossary_var, lambda x: x.get()),
+                    'glossary_min_frequency': (self.glossary_min_frequency_var, lambda x: int(x.get())),
+                    'glossary_max_names': (self.glossary_max_names_var, lambda x: int(x.get())),
+                    'glossary_max_titles': (self.glossary_max_titles_var, lambda x: int(x.get())),
+                    'glossary_batch_size': (self.glossary_batch_size_var, lambda x: int(x.get())),
+                    'glossary_max_text_size': (self.glossary_max_text_size_var, lambda x: x.get()),
+                    'glossary_max_sentences': (self.glossary_max_sentences_var, lambda x: int(x.get())),
+                }
+                
+                failed_settings = []
+                for setting_name, (var_obj, converter) in settings_to_save.items():
+                    try:
+                        if hasattr(self, var_obj.get.__self__.__class__.__name__.lower() + '_var'):
+                            self.config[setting_name] = converter(var_obj)
+                            self.append_log(f"🔍 [DEBUG] Saved {setting_name}: {self.config[setting_name]}")
+                        else:
+                            failed_settings.append(f"{setting_name} (variable not found)")
+                    except Exception as e:
+                        failed_settings.append(f"{setting_name} ({str(e)})")
+                
+                if failed_settings:
+                    self.append_log(f"⚠️ [DEBUG] Failed to save settings: {', '.join(failed_settings)}")
+                
+                # Save additional settings with error handling
                 self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
-                self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
-                self.config['glossary_max_sentences'] = int(self.glossary_max_sentences_var.get())
-
                 
                 # Honorifics and other settings
                 if hasattr(self, 'strip_honorifics_var'):
                     self.config['strip_honorifics'] = self.strip_honorifics_var.get()
+                    self.append_log(f"🔍 [DEBUG] Saved strip_honorifics: {self.config['strip_honorifics']}")
+                else:
+                    self.append_log("⚠️ [DEBUG] strip_honorifics_var not found")
+                    
                 if hasattr(self, 'disable_honorifics_var'):
                     self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
+                    self.append_log(f"🔍 [DEBUG] Saved glossary_disable_honorifics_filter: {self.config['glossary_disable_honorifics_filter']}")
+                else:
+                    self.append_log("⚠️ [DEBUG] disable_honorifics_var not found")
                 
                 # Save format preference
                 if hasattr(self, 'use_legacy_csv_var'):
                     self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var.get()
+                    self.append_log(f"🔍 [DEBUG] Saved glossary_use_legacy_csv: {self.config['glossary_use_legacy_csv']}")
+                else:
+                    self.append_log("⚠️ [DEBUG] use_legacy_csv_var not found")
                     
                 # Temperature and context limit
                 try:
                     self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
                     self.config['manual_context_limit'] = int(self.manual_context_var.get())
-                except ValueError:
+                    self.append_log(f"🔍 [DEBUG] Saved temperature: {self.config['manual_glossary_temperature']}, context: {self.config['manual_context_limit']}")
+                except ValueError as e:
+                    self.append_log(f"❌ [DEBUG] Temperature/context validation failed: {e}")
                     messagebox.showwarning("Invalid Input", 
                         "Please enter valid numbers for temperature and context limit")
                     return
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Temperature/context error: {e}")
                 
                 # Fuzzy matching threshold
-                self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_var.get()
+                try:
+                    self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_var.get()
+                    self.append_log(f"🔍 [DEBUG] Saved fuzzy_threshold: {self.config['glossary_fuzzy_threshold']}")
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Fuzzy threshold error: {e}")
                 
-                # Save prompts
-                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
-                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
-                self.config['append_glossary_prompt'] = self.append_glossary_prompt
-                self.config['glossary_translation_prompt'] = getattr(self, 'glossary_translation_prompt', '')
+                # Save prompts with validation
+                prompts_to_save = {
+                    'manual_glossary_prompt': 'manual_glossary_prompt',
+                    'auto_glossary_prompt': 'auto_glossary_prompt', 
+                    'append_glossary_prompt': 'append_glossary_prompt',
+                    'glossary_translation_prompt': 'glossary_translation_prompt'
+                }
                 
-                # Update environment variables for immediate use
-                os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
-                os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
-                os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.disable_honorifics_var.get() else '0'
-                os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if self.strip_honorifics_var.get() else '0'
-                os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(self.fuzzy_threshold_var.get())
-                os.environ['GLOSSARY_TRANSLATION_PROMPT'] = getattr(self, 'glossary_translation_prompt', '')
-                os.environ['GLOSSARY_FORMAT_INSTRUCTIONS'] = getattr(self, 'glossary_format_instructions', '')
-                os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if self.use_legacy_csv_var.get() else '0'
-                os.environ['GLOSSARY_MAX_SENTENCES'] = str(self.glossary_max_sentences_var.get())
+                for config_key, attr_name in prompts_to_save.items():
+                    try:
+                        prompt_value = getattr(self, attr_name, '')
+                        self.config[config_key] = prompt_value
+                        self.append_log(f"🔍 [DEBUG] Saved {config_key}: {len(prompt_value)} chars")
+                    except Exception as e:
+                        self.append_log(f"❌ [DEBUG] Failed to save {config_key}: {e}")
                 
-                # Set custom entry types and fields as environment variables
-                os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
-                if self.custom_glossary_fields:
-                    os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+                # Environment variables setup with comprehensive debugging
+                self.append_log("🔍 [DEBUG] Setting environment variables...")
+                env_vars_to_set = []
+                
+                try:
+                    # Core environment variables
+                    env_mappings = [
+                        ('GLOSSARY_SYSTEM_PROMPT', self.manual_glossary_prompt),
+                        ('AUTO_GLOSSARY_PROMPT', self.auto_glossary_prompt),
+                        ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if hasattr(self, 'disable_honorifics_var') and self.disable_honorifics_var.get() else '0'),
+                        ('GLOSSARY_STRIP_HONORIFICS', '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '0'),
+                        ('GLOSSARY_FUZZY_THRESHOLD', str(self.fuzzy_threshold_var.get()) if hasattr(self, 'fuzzy_threshold_var') else '0.90'),
+                        ('GLOSSARY_TRANSLATION_PROMPT', getattr(self, 'glossary_translation_prompt', '')),
+                        ('GLOSSARY_FORMAT_INSTRUCTIONS', getattr(self, 'glossary_format_instructions', '')),
+                        ('GLOSSARY_USE_LEGACY_CSV', '1' if hasattr(self, 'use_legacy_csv_var') and self.use_legacy_csv_var.get() else '0'),
+                        ('GLOSSARY_MAX_SENTENCES', str(self.glossary_max_sentences_var.get()) if hasattr(self, 'glossary_max_sentences_var') else '10'),
+                    ]
+                    
+                    for env_key, env_value in env_mappings:
+                        try:
+                            old_value = os.environ.get(env_key, '<NOT SET>')
+                            os.environ[env_key] = str(env_value)
+                            new_value = os.environ[env_key]
+                            env_vars_to_set.append(env_key)
+                            
+                            if old_value != new_value:
+                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value[:100]}{'...' if len(str(new_value)) > 100 else ''}'")
+                            else:
+                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{str(new_value)[:50]}{'...' if len(str(new_value)) > 50 else ''}')") 
+                                
+                        except Exception as e:
+                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+                    
+                    # JSON environment variables
+                    try:
+                        custom_types_json = json.dumps(self.custom_entry_types)
+                        old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
+                        os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
+                        env_vars_to_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
+                        self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                        if old_types != custom_types_json:
+                            self.append_log(f"🔍 [DEBUG] Custom entry types changed")
+                    except Exception as e:
+                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
+                    
+                    if self.custom_glossary_fields:
+                        try:
+                            custom_fields_json = json.dumps(self.custom_glossary_fields)
+                            os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
+                            env_vars_to_set.append('GLOSSARY_CUSTOM_FIELDS')
+                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                        except Exception as e:
+                            self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
+                    else:
+                        self.append_log("🔍 [DEBUG] No custom glossary fields to set")
+                
+                    self.append_log(f"🔍 [DEBUG] Successfully set {len(env_vars_to_set)} environment variables: {', '.join(env_vars_to_set)}")
+                    
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Environment variable setup failed: {e}")
+                    import traceback
+                    self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
                 
                 # Save config using the main save_config method to ensure encryption
-                self.save_config(show_message=False)
+                self.append_log("🔍 [DEBUG] Calling main save_config method...")
+                try:
+                    self.save_config(show_message=False)
+                    self.append_log("🔍 [DEBUG] Main save_config completed successfully")
+                except Exception as e:
+                    self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
+                    raise
                 
                 self.append_log("✅ Glossary settings saved successfully")
                 
@@ -135,13 +235,27 @@ class GlossaryManagerMixin:
                 enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
                 if not enabled_types:
                     messagebox.showwarning("Warning", "No entry types selected! The glossary extraction will not find any entries.")
+                    self.append_log("⚠️ [DEBUG] No enabled types found!")
                 else:
                     self.append_log(f"📑 Enabled types: {', '.join(enabled_types)}")
+                
+                # Final environment variable verification
+                self.append_log("🔍 [DEBUG] Final environment variable check:")
+                critical_vars = ['GLOSSARY_SYSTEM_PROMPT', 'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_CUSTOM_ENTRY_TYPES']
+                for var in critical_vars:
+                    value = os.environ.get(var, '<NOT SET>')
+                    if value == '<NOT SET>' or not value:
+                        self.append_log(f"❌ [DEBUG] CRITICAL: {var} is not set or empty!")
+                    else:
+                        self.append_log(f"✅ [DEBUG] {var}: {len(str(value))} chars")
                 
                 messagebox.showinfo("Success", "Glossary settings saved!")
                 dialog.destroy()
                 
             except Exception as e:
+                self.append_log(f"❌ [DEBUG] Full exception details: {str(e)}")
+                import traceback
+                self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
                 self.append_log(f"❌ Failed to save glossary settings: {e}")
                 

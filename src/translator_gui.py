@@ -7735,6 +7735,10 @@ Important rules:
     def save_config(self, show_message=True):
         """Persist all settings to config.json."""
         try:
+            # Add comprehensive environment variable debugging for all saves
+            if show_message:
+                self.append_log("🔍 [SAVE_CONFIG] Starting comprehensive config save with environment variable debugging...")
+            
             # Create backup of existing config before saving
             self._backup_config_file()
             def safe_int(value, default):
@@ -7837,16 +7841,49 @@ Important rules:
             self.config['conservative_batching'] = self.conservative_batching_var.get()
             self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
 
-            # OpenRouter transport/compression toggles (ensure persisted even when dialog not open)
+            # OpenRouter transport/compression toggles with debugging
+            if show_message:  # Only log debug info when not called silently
+                self.append_log("🔍 [DEBUG] Setting OpenRouter environment variables...")
+                
+            openrouter_env_vars_set = []
             if hasattr(self, 'openrouter_http_only_var'):
                 self.config['openrouter_use_http_only'] = bool(self.openrouter_http_only_var.get())
-                os.environ['OPENROUTER_USE_HTTP_ONLY'] = '1' if self.openrouter_http_only_var.get() else '0'
+                old_val = os.environ.get('OPENROUTER_USE_HTTP_ONLY', '<NOT SET>')
+                new_val = '1' if self.openrouter_http_only_var.get() else '0'
+                os.environ['OPENROUTER_USE_HTTP_ONLY'] = new_val
+                openrouter_env_vars_set.append('OPENROUTER_USE_HTTP_ONLY')
+                if show_message and old_val != new_val:
+                    self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_USE_HTTP_ONLY: '{old_val}' → '{new_val}'")
+            else:
+                if show_message:
+                    self.append_log("⚠️ [DEBUG] openrouter_http_only_var not found")
+                    
             if hasattr(self, 'openrouter_accept_identity_var'):
                 self.config['openrouter_accept_identity'] = bool(self.openrouter_accept_identity_var.get())
-                os.environ['OPENROUTER_ACCEPT_IDENTITY'] = '1' if self.openrouter_accept_identity_var.get() else '0'
+                old_val = os.environ.get('OPENROUTER_ACCEPT_IDENTITY', '<NOT SET>')
+                new_val = '1' if self.openrouter_accept_identity_var.get() else '0'
+                os.environ['OPENROUTER_ACCEPT_IDENTITY'] = new_val
+                openrouter_env_vars_set.append('OPENROUTER_ACCEPT_IDENTITY')
+                if show_message and old_val != new_val:
+                    self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_ACCEPT_IDENTITY: '{old_val}' → '{new_val}'")
+            else:
+                if show_message:
+                    self.append_log("⚠️ [DEBUG] openrouter_accept_identity_var not found")
+                    
             if hasattr(self, 'openrouter_preferred_provider_var'):
                 self.config['openrouter_preferred_provider'] = self.openrouter_preferred_provider_var.get()
-                os.environ['OPENROUTER_PREFERRED_PROVIDER'] = self.openrouter_preferred_provider_var.get()
+                old_val = os.environ.get('OPENROUTER_PREFERRED_PROVIDER', '<NOT SET>')
+                new_val = self.openrouter_preferred_provider_var.get()
+                os.environ['OPENROUTER_PREFERRED_PROVIDER'] = new_val
+                openrouter_env_vars_set.append('OPENROUTER_PREFERRED_PROVIDER')
+                if show_message and old_val != new_val:
+                    self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_PREFERRED_PROVIDER: '{old_val}' → '{new_val}'")
+            else:
+                if show_message:
+                    self.append_log("⚠️ [DEBUG] openrouter_preferred_provider_var not found")
+                    
+            if show_message and openrouter_env_vars_set:
+                self.append_log(f"🔍 [DEBUG] Set {len(openrouter_env_vars_set)} OpenRouter env vars: {', '.join(openrouter_env_vars_set)}")
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var.get()
@@ -7879,11 +7916,18 @@ Important rules:
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
             self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
             
-            # Save additional important missing settings
+            # Save additional important missing settings with debugging
             if hasattr(self, 'retain_source_extension_var'):
                 self.config['retain_source_extension'] = self.retain_source_extension_var.get()
-                # Update environment variable
-                os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var.get() else '0'
+                # Update environment variable with debugging
+                old_val = os.environ.get('RETAIN_SOURCE_EXTENSION', '<NOT SET>')
+                new_val = '1' if self.retain_source_extension_var.get() else '0'
+                os.environ['RETAIN_SOURCE_EXTENSION'] = new_val
+                if show_message and old_val != new_val:
+                    self.append_log(f"🔍 [DEBUG] ENV RETAIN_SOURCE_EXTENSION: '{old_val}' → '{new_val}'")
+            else:
+                if show_message:
+                    self.append_log("⚠️ [DEBUG] retain_source_extension_var not found")
             
             if hasattr(self, 'use_fallback_keys_var'):
                 self.config['use_fallback_keys'] = self.use_fallback_keys_var.get()
@@ -7911,10 +7955,17 @@ Important rules:
             # Save extraction worker settings
             self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
             self.config['extraction_workers'] = self.extraction_workers_var.get()
-            # Save GUI yield setting and set environment variable
+            # Save GUI yield setting and set environment variable with debugging
             if hasattr(self, 'enable_gui_yield_var'):
                 self.config['enable_gui_yield'] = self.enable_gui_yield_var.get()
-                os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var.get() else '0'
+                old_val = os.environ.get('ENABLE_GUI_YIELD', '<NOT SET>')
+                new_val = '1' if self.enable_gui_yield_var.get() else '0'
+                os.environ['ENABLE_GUI_YIELD'] = new_val
+                if show_message and old_val != new_val:
+                    self.append_log(f"🔍 [DEBUG] ENV ENABLE_GUI_YIELD: '{old_val}' → '{new_val}'")
+            else:
+                if show_message:
+                    self.append_log("⚠️ [DEBUG] enable_gui_yield_var not found")
             self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
             self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var.get()
             self.config['glossary_filter_mode'] = self.glossary_filter_mode_var.get()
@@ -8033,11 +8084,17 @@ Important rules:
                 except:
                     pass
                     
-            # Update environment variable when saving
+            # Update environment variable when saving with debugging
+            old_workers = os.environ.get('EXTRACTION_WORKERS', '<NOT SET>')
             if self.enable_parallel_extraction_var.get():
-                os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
+                new_workers = str(self.extraction_workers_var.get())
+                os.environ["EXTRACTION_WORKERS"] = new_workers
             else:
-                os.environ["EXTRACTION_WORKERS"] = "1"
+                new_workers = "1"
+                os.environ["EXTRACTION_WORKERS"] = new_workers
+                
+            if show_message and old_workers != new_workers:
+                self.append_log(f"🔍 [DEBUG] ENV EXTRACTION_WORKERS: '{old_workers}' → '{new_workers}'")
                 
             # Chapter Extraction Settings - Save all extraction-related settings
             # These are the critical settings shown in the screenshot
@@ -8156,6 +8213,62 @@ Important rules:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
             
+            # Comprehensive environment variable verification after save
+            if show_message:
+                self.append_log("🔍 [SAVE_CONFIG] Verifying environment variables after config save...")
+                
+                # Critical environment variables that should be set from config
+                critical_vars_to_check = [
+                    ('OPENROUTER_USE_HTTP_ONLY', self.config.get('openrouter_use_http_only', False)),
+                    ('OPENROUTER_ACCEPT_IDENTITY', self.config.get('openrouter_accept_identity', False)),
+                    ('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')),
+                    ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
+                    ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
+                    ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
+                ]
+                
+                env_issues_found = []
+                for env_key, expected_value in critical_vars_to_check:
+                    actual_value = os.environ.get(env_key, '<NOT SET>')
+                    expected_str = str(expected_value) if not isinstance(expected_value, bool) else ('1' if expected_value else '0')
+                    
+                    if actual_value == '<NOT SET>':
+                        env_issues_found.append(f"{env_key} (not set)")
+                        self.append_log(f"❌ [SAVE_CONFIG] {env_key} not set in environment!")
+                    elif actual_value != expected_str:
+                        env_issues_found.append(f"{env_key} (mismatch)")
+                        self.append_log(f"⚠️ [SAVE_CONFIG] {env_key}: expected '{expected_str}', got '{actual_value}'")
+                    else:
+                        self.append_log(f"✅ [SAVE_CONFIG] {env_key}: '{actual_value}' (correct)")
+                
+                # Check glossary environment variables
+                glossary_vars = [
+                    'GLOSSARY_SYSTEM_PROMPT', 'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_CUSTOM_ENTRY_TYPES',
+                    'GLOSSARY_DISABLE_HONORIFICS_FILTER', 'GLOSSARY_STRIP_HONORIFICS', 'GLOSSARY_FUZZY_THRESHOLD'
+                ]
+                
+                missing_glossary_vars = []
+                for var in glossary_vars:
+                    value = os.environ.get(var, '<NOT SET>')
+                    if value == '<NOT SET>' or not value.strip():
+                        missing_glossary_vars.append(var)
+                        self.append_log(f"❌ [SAVE_CONFIG] Glossary var {var} not properly initialized")
+                    else:
+                        char_count = len(str(value))
+                        self.append_log(f"✅ [SAVE_CONFIG] Glossary var {var}: {char_count} chars")
+                
+                # Summary
+                total_issues = len(env_issues_found) + len(missing_glossary_vars)
+                if total_issues > 0:
+                    self.append_log(f"❌ [SAVE_CONFIG] {total_issues} environment variable issues found!")
+                    if env_issues_found:
+                        self.append_log(f"⚠️ [SAVE_CONFIG] Config-related issues: {', '.join(env_issues_found)}")
+                    if missing_glossary_vars:
+                        self.append_log(f"⚠️ [SAVE_CONFIG] Missing glossary vars: {', '.join(missing_glossary_vars)}")
+                    self.append_log("🔧 [SAVE_CONFIG] Try: Other Settings → Debug Environment Variables button")
+                else:
+                    self.append_log("✅ [SAVE_CONFIG] All environment variables appear to be properly set!")
+            
             # Only show message if requested
             if show_message:
                 from PySide6.QtWidgets import QMessageBox
@@ -8185,6 +8298,170 @@ Important rules:
             # Try to restore from backup if save failed
             self._restore_config_from_backup()
             
+    def debug_environment_variables(self, show_all=False):
+        """Debug and verify all critical environment variables are set correctly.
+        
+        Args:
+            show_all (bool): If True, shows all environment variables. If False, only shows critical ones.
+        """
+        self.append_log("🔍 [ENV_DEBUG] Starting comprehensive environment variable check...")
+        
+        # Critical environment variables that should always be set
+        critical_env_vars = {
+            # Glossary-related
+            'GLOSSARY_SYSTEM_PROMPT': 'Manual glossary extraction prompt',
+            'AUTO_GLOSSARY_PROMPT': 'Auto glossary generation prompt', 
+            'GLOSSARY_CUSTOM_ENTRY_TYPES': 'Custom entry types configuration (JSON)',
+            'GLOSSARY_DISABLE_HONORIFICS_FILTER': 'Honorifics filter disable flag',
+            'GLOSSARY_STRIP_HONORIFICS': 'Strip honorifics flag',
+            'GLOSSARY_FUZZY_THRESHOLD': 'Fuzzy matching threshold',
+            'GLOSSARY_USE_LEGACY_CSV': 'Legacy CSV format flag',
+            'GLOSSARY_MAX_SENTENCES': 'Maximum sentences for glossary processing',
+            
+            # OpenRouter settings
+            'OPENROUTER_USE_HTTP_ONLY': 'OpenRouter HTTP-only transport',
+            'OPENROUTER_ACCEPT_IDENTITY': 'OpenRouter identity encoding',
+            'OPENROUTER_PREFERRED_PROVIDER': 'OpenRouter preferred provider',
+            
+            # General application settings
+            'EXTRACTION_WORKERS': 'Number of extraction worker threads',
+            'ENABLE_GUI_YIELD': 'GUI yield during processing',
+            'RETAIN_SOURCE_EXTENSION': 'Retain source file extension',
+        }
+        
+        # Optional environment variables
+        optional_env_vars = {
+            'GLOSSARY_CUSTOM_FIELDS': 'Custom glossary fields (JSON)',
+            'GLOSSARY_TRANSLATION_PROMPT': 'Glossary translation prompt',
+            'GLOSSARY_FORMAT_INSTRUCTIONS': 'Glossary formatting instructions',
+        }
+        
+        # Check critical variables
+        missing_critical = []
+        empty_critical = []
+        set_critical = []
+        
+        for var_name, description in critical_env_vars.items():
+            value = os.environ.get(var_name)
+            
+            if value is None:
+                missing_critical.append(var_name)
+                self.append_log(f"❌ [ENV_DEBUG] CRITICAL MISSING: {var_name} - {description}")
+            elif not value.strip():
+                empty_critical.append(var_name)
+                self.append_log(f"⚠️ [ENV_DEBUG] CRITICAL EMPTY: {var_name} - {description}")
+            else:
+                set_critical.append(var_name)
+                value_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
+                self.append_log(f"✅ [ENV_DEBUG] {var_name}: {value_preview}")
+        
+        # Check optional variables if requested or if any are set
+        if show_all:
+            for var_name, description in optional_env_vars.items():
+                value = os.environ.get(var_name)
+                if value is None:
+                    self.append_log(f"🔍 [ENV_DEBUG] Optional not set: {var_name} - {description}")
+                elif not value.strip():
+                    self.append_log(f"⚠️ [ENV_DEBUG] Optional empty: {var_name} - {description}")
+                else:
+                    value_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
+                    self.append_log(f"🔍 [ENV_DEBUG] Optional {var_name}: {value_preview}")
+        
+        # Summary
+        total_critical = len(critical_env_vars)
+        self.append_log(f"🔍 [ENV_DEBUG] Summary: {len(set_critical)}/{total_critical} critical vars set")
+        
+        if missing_critical:
+            self.append_log(f"❌ [ENV_DEBUG] {len(missing_critical)} MISSING: {', '.join(missing_critical)}")
+            
+        if empty_critical:
+            self.append_log(f"⚠️ [ENV_DEBUG] {len(empty_critical)} EMPTY: {', '.join(empty_critical)}")
+            
+        # Check for initialization issues
+        if missing_critical or empty_critical:
+            self.append_log("❌ [ENV_DEBUG] RECOMMENDATION: Some variables are not initialized!")
+            self.append_log("🔧 [ENV_DEBUG] Try calling self.initialize_environment_variables() on startup")
+            return False
+        else:
+            self.append_log("✅ [ENV_DEBUG] All critical environment variables are properly set")
+            return True
+    
+    def initialize_environment_variables(self):
+        """Initialize all environment variables from config on startup.
+        Call this method during application initialization to ensure all environment variables are set.
+        """
+        self.append_log("🚀 [INIT] Initializing all environment variables from config...")
+        
+        try:
+            # Initialize glossary-related environment variables
+            env_mappings = [
+                ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
+                ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
+                ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
+                ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
+                ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
+                ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
+                ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
+                ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv', False) else '0'),
+                ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 10))),
+                
+                # OpenRouter settings
+                ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only', False) else '0'),
+                ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity', False) else '0'),
+                ('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')),
+                
+                # General settings
+                ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
+                ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
+                ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
+            ]
+            
+            initialized_count = 0
+            for env_key, env_value in env_mappings:
+                try:
+                    old_value = os.environ.get(env_key, '<NOT SET>')
+                    os.environ[env_key] = str(env_value) if env_value is not None else ''
+                    new_value = os.environ[env_key]
+                    
+                    if old_value != new_value:
+                        self.append_log(f"🔍 [INIT] ENV {env_key}: '{old_value}' → '{new_value[:50]}{'...' if len(str(new_value)) > 50 else ''}'")
+                    
+                    initialized_count += 1
+                except Exception as e:
+                    self.append_log(f"❌ [INIT] Failed to initialize {env_key}: {e}")
+            
+            # JSON environment variables
+            try:
+                custom_entry_types = self.config.get('custom_entry_types', {})
+                if custom_entry_types:
+                    custom_types_json = json.dumps(custom_entry_types)
+                    os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
+                    self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                    initialized_count += 1
+            except Exception as e:
+                self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
+            
+            try:
+                custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+                if custom_glossary_fields:
+                    custom_fields_json = json.dumps(custom_glossary_fields)
+                    os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
+                    self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                    initialized_count += 1
+            except Exception as e:
+                self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_FIELDS: {e}")
+                
+            self.append_log(f"✅ [INIT] Successfully initialized {initialized_count} environment variables")
+            
+            # Verify initialization
+            return self.debug_environment_variables(show_all=False)
+            
+        except Exception as e:
+            self.append_log(f"❌ [INIT] Environment variable initialization failed: {e}")
+            import traceback
+            self.append_log(f"❌ [INIT] Traceback: {traceback.format_exc()}")
+            return False
+    
     def _ensure_executor(self):
         """Ensure a ThreadPoolExecutor exists and matches configured worker count.
         Also updates EXTRACTION_WORKERS environment variable.
