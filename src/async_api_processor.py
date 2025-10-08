@@ -1325,6 +1325,84 @@ class AsyncAPIProcessor:
 class AsyncProcessingDialog:
     """GUI dialog for async processing"""
     
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay - from manga integration"""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt, QTimer
+        
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly after widget is shown
+        def position_checkmark():
+            try:
+                # Check if checkmark still exists and is valid
+                if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark():
+            try:
+                # Check if both widgets still exist
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        # Delay initial positioning to ensure widget is properly rendered
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        
+        return checkbox
+    
     def __init__(self, parent, translator_gui):
         """Initialize dialog
         
@@ -1518,31 +1596,9 @@ class AsyncProcessingDialog:
         config_layout = QVBoxLayout()
         config_group.setLayout(config_layout)
         
-        # Wait for completion checkbox
-        self.wait_for_completion_checkbox = QCheckBox("Wait for completion (blocks GUI)")
+        # Wait for completion checkbox using styled version
+        self.wait_for_completion_checkbox = self._create_styled_checkbox("Wait for completion (blocks GUI)")
         self.wait_for_completion_checkbox.setChecked(False)
-        self.wait_for_completion_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 10pt;
-                color: #ffffff;
-                spacing: 0.4em;
-            }
-            QCheckBox::indicator {
-                width: 0.9em;
-                height: 0.9em;
-                border-radius: 0.15em;
-                border: 0.1em solid #555555;
-                background-color: #2b2b2b;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #007bff;
-                background-color: #333333;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #007bff;
-                border-color: #007bff;
-            }
-        """)
         config_layout.addWidget(self.wait_for_completion_checkbox)
         
         # Poll interval

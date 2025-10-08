@@ -91,6 +91,74 @@ def normalize_name_for_comparison(name):
 class QAScannerMixin:
     """Mixin class containing QA Scanner methods for TranslatorGUI"""
     
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QFont
+        
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2d2d2d;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly after widget is shown
+        def position_checkmark():
+            # Position over the checkbox indicator
+            checkmark.setGeometry(2, 1, 14, 14)
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark():
+            if checkbox.isChecked():
+                position_checkmark()
+                checkmark.show()
+            else:
+                checkmark.hide()
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        # Delay initial positioning to ensure widget is properly rendered
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        
+        return checkbox
+    
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
         # Create a small loading window with icon
@@ -274,21 +342,6 @@ class QAScannerMixin:
                 }
                 QPushButton:pressed {
                     background-color: #1a202c;
-                }
-                QCheckBox {
-                    color: #e2e8f0;
-                    spacing: 8px;
-                }
-                QCheckBox::indicator {
-                    width: 18px;
-                    height: 18px;
-                    border: 2px solid #4a5568;
-                    border-radius: 3px;
-                    background-color: #2d3748;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #3b82f6;
-                    border-color: #3b82f6;
                 }
             """)
         
@@ -513,7 +566,7 @@ class QAScannerMixin:
             
             # Auto-search checkbox
             if not hasattr(self, 'qa_auto_search_output_checkbox'):
-                self.qa_auto_search_output_checkbox = QCheckBox("Auto-search output")
+                self.qa_auto_search_output_checkbox = self._create_styled_checkbox("Auto-search output")
                 self.qa_auto_search_output_checkbox.setChecked(self.config.get('qa_auto_search_output', True))
             button_layout.addWidget(self.qa_auto_search_output_checkbox)
             button_layout.addSpacing(10)
@@ -775,7 +828,7 @@ class QAScannerMixin:
             custom_widgets['min_text_length'] = min_length_spinbox
             
             # Check all file pairs option
-            check_all_checkbox = QCheckBox("Check all file pairs (slower but more thorough)")
+            check_all_checkbox = self._create_styled_checkbox("Check all file pairs (slower but more thorough)")
             check_all_checkbox.setChecked(custom_settings['check_all_pairs'])
             options_layout.addWidget(check_all_checkbox)
             custom_widgets['check_all_pairs'] = check_all_checkbox
@@ -1457,115 +1510,34 @@ class QAScannerMixin:
         except Exception:
             pass
         
-        # Apply global dark stylesheet for consistent appearance
+        # Apply basic dark stylesheet
         dialog.setStyleSheet("""
             QDialog {
-                background-color: #0f172a; /* slate-900 */
+                background-color: #2d2d2d;
+                color: white;
             }
             QGroupBox {
-                font-weight: bold;
-                border: 1px solid #374151; /* slate-700 */
-                border-radius: 6px;
-                margin-top: 12px;
-                padding-top: 15px;
-                background-color: #111827; /* slate-800 */
+                color: white;
+                border: 1px solid #555;
+                margin: 10px;
+                padding-top: 10px;
             }
             QGroupBox::title {
-                subcontrol-origin: margin;
+                color: white;
                 left: 10px;
-                padding: 0 8px 0 8px;
-                color: #e5e7eb; /* text-slate-200 */
+                padding: 0 5px;
             }
             QLabel {
-                background-color: transparent;
-                color: #e5e7eb; /* text-slate-200 */
+                color: white;
             }
             QPushButton {
-                border: 1px solid #4b5563; /* slate-600 */
-                border-radius: 4px;
-                padding: 6px 12px;
-                background-color: #1f2937; /* slate-800 */
-                color: #e5e7eb;
-                font-weight: normal;
+                background-color: #404040;
+                color: white;
+                border: 1px solid #555;
+                padding: 5px;
             }
             QPushButton:hover {
-                background-color: #374151; /* slate-700 */
-                border-color: #6b7280; /* slate-500 */
-            }
-            QPushButton:pressed {
-                background-color: #111827; /* slate-900 */
-            }
-            QCheckBox {
-                spacing: 8px;
-                color: #e5e7eb;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #4b5563;
-                border-radius: 3px;
-                background-color: #1f2937;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #6b7280;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #3b82f6; /* blue-500 */
-                border-color: #3b82f6;
-            }
-            QSpinBox, QComboBox, QTextEdit {
-                border: 1px solid #374151;
-                border-radius: 4px;
-                padding: 6px 8px;
-                background-color: #111827;
-                color: #e5e7eb;
-                min-height: 22px;
-            }
-            QSpinBox:hover, QComboBox:hover, QTextEdit:hover {
-                border-color: #6b7280;
-            }
-            QSpinBox:focus, QComboBox:focus, QTextEdit:focus {
-                border-color: #3b82f6;
-            }
-            QScrollArea {
-                border: none;
-                background: transparent;
-            }
-            #scroll_widget {
-                background-color: #0f172a;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background-color: #111827;
-                width: 10px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #374151;
-                border-radius: 5px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #4b5563;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QSlider::groove:horizontal {
-                border: 1px solid #374151;
-                height: 6px;
-                background: #1f2937;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #3b82f6;
-                border: 1px solid #2563eb;
-                width: 18px;
-                margin: -6px 0;
-                border-radius: 9px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #2563eb;
+                background-color: #505050;
             }
         """)
         
@@ -1687,19 +1659,19 @@ class QAScannerMixin:
         scroll_layout.addWidget(detection_group)
         
         # Checkboxes for detection options
-        check_encoding_checkbox = QCheckBox("Check for encoding issues (�, □, ◇)")
+        check_encoding_checkbox = self._create_styled_checkbox("Check for encoding issues (�, □, ◇)")
         check_encoding_checkbox.setChecked(qa_settings.get('check_encoding_issues', False))
         detection_layout.addWidget(check_encoding_checkbox)
         
-        check_repetition_checkbox = QCheckBox("Check for excessive repetition")
+        check_repetition_checkbox = self._create_styled_checkbox("Check for excessive repetition")
         check_repetition_checkbox.setChecked(qa_settings.get('check_repetition', True))
         detection_layout.addWidget(check_repetition_checkbox)
         
-        check_artifacts_checkbox = QCheckBox("Check for translation artifacts (MTL notes, watermarks)")
+        check_artifacts_checkbox = self._create_styled_checkbox("Check for translation artifacts (MTL notes, watermarks)")
         check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', False))
         detection_layout.addWidget(check_artifacts_checkbox)
         
-        check_glossary_checkbox = QCheckBox("Check for glossary leakage (raw glossary entries in translation)")
+        check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
         check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
         detection_layout.addWidget(check_glossary_checkbox)
         
@@ -1740,7 +1712,7 @@ class QAScannerMixin:
         wordcount_layout.setContentsMargins(20, 15, 20, 15)
         scroll_layout.addWidget(wordcount_group)
         
-        check_word_count_checkbox = QCheckBox("Cross-reference word counts with original EPUB")
+        check_word_count_checkbox = self._create_styled_checkbox("Cross-reference word counts with original EPUB")
         check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', False))
         wordcount_layout.addWidget(check_word_count_checkbox)
         
@@ -1809,7 +1781,7 @@ class QAScannerMixin:
         wordcount_layout.addWidget(epub_widget)
 
         # Add option to disable mismatch warning
-        warn_mismatch_checkbox = QCheckBox("Warn when EPUB and folder names don't match")
+        warn_mismatch_checkbox = self._create_styled_checkbox("Warn when EPUB and folder names don't match")
         warn_mismatch_checkbox.setChecked(qa_settings.get('warn_name_mismatch', True))
         wordcount_layout.addWidget(warn_mismatch_checkbox)
 
@@ -1823,7 +1795,7 @@ class QAScannerMixin:
         scroll_layout.addWidget(additional_group)
 
         # Multiple headers check
-        check_multiple_headers_checkbox = QCheckBox("Detect files with 2 or more headers (h1-h6 tags)")
+        check_multiple_headers_checkbox = self._create_styled_checkbox("Detect files with 2 or more headers (h1-h6 tags)")
         check_multiple_headers_checkbox.setChecked(qa_settings.get('check_multiple_headers', True))
         additional_layout.addWidget(check_multiple_headers_checkbox)
 
@@ -1841,7 +1813,7 @@ class QAScannerMixin:
         html_tag_layout = QHBoxLayout(html_tag_widget)
         html_tag_layout.setContentsMargins(0, 0, 0, 5)
 
-        check_missing_html_tag_checkbox = QCheckBox("Flag HTML files with missing <html> tag")
+        check_missing_html_tag_checkbox = self._create_styled_checkbox("Flag HTML files with missing <html> tag")
         check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
         html_tag_layout.addWidget(check_missing_html_tag_checkbox)
 
@@ -1853,7 +1825,7 @@ class QAScannerMixin:
         additional_layout.addWidget(html_tag_widget)
 
         # Invalid nesting check (separate toggle)
-        check_invalid_nesting_checkbox = QCheckBox("Check for invalid tag nesting")
+        check_invalid_nesting_checkbox = self._create_styled_checkbox("Check for invalid tag nesting")
         check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
         additional_layout.addWidget(check_invalid_nesting_checkbox)
 
@@ -1868,7 +1840,7 @@ class QAScannerMixin:
         additional_layout.addSpacing(10)
         
         # Checkbox for paragraph structure check
-        check_paragraph_structure_checkbox = QCheckBox("Check for insufficient paragraph tags")
+        check_paragraph_structure_checkbox = self._create_styled_checkbox("Check for insufficient paragraph tags")
         check_paragraph_structure_checkbox.setChecked(qa_settings.get('check_paragraph_structure', True))
         additional_layout.addWidget(check_paragraph_structure_checkbox)
         
@@ -1969,7 +1941,7 @@ class QAScannerMixin:
         report_layout.addWidget(format_widget)
         
         # Auto-save report
-        auto_save_checkbox = QCheckBox("Automatically save report after scan")
+        auto_save_checkbox = self._create_styled_checkbox("Automatically save report after scan")
         auto_save_checkbox.setChecked(qa_settings.get('auto_save_report', True))
         report_layout.addWidget(auto_save_checkbox)
 
@@ -1983,7 +1955,7 @@ class QAScannerMixin:
         scroll_layout.addWidget(cache_group)
         
         # Enable cache checkbox
-        cache_enabled_checkbox = QCheckBox("Enable performance cache (speeds up duplicate detection)")
+        cache_enabled_checkbox = self._create_styled_checkbox("Enable performance cache (speeds up duplicate detection)")
         cache_enabled_checkbox.setChecked(qa_settings.get('cache_enabled', True))
         cache_layout.addWidget(cache_enabled_checkbox)
         cache_layout.addSpacing(10)
@@ -2090,7 +2062,7 @@ class QAScannerMixin:
         auto_size_layout = QHBoxLayout(auto_size_widget)
         auto_size_layout.setContentsMargins(0, 0, 0, 5)
         
-        auto_size_checkbox = QCheckBox("Auto-size caches based on available RAM")
+        auto_size_checkbox = self._create_styled_checkbox("Auto-size caches based on available RAM")
         auto_size_checkbox.setChecked(qa_settings.get('cache_auto_size', False))
         auto_size_layout.addWidget(auto_size_checkbox)
         
@@ -2104,7 +2076,7 @@ class QAScannerMixin:
         cache_layout.addSpacing(10)
         
         # Cache statistics display
-        show_stats_checkbox = QCheckBox("Show cache hit/miss statistics after scan")
+        show_stats_checkbox = self._create_styled_checkbox("Show cache hit/miss statistics after scan")
         show_stats_checkbox.setChecked(qa_settings.get('cache_show_stats', False))
         cache_layout.addWidget(show_stats_checkbox)
         

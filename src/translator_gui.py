@@ -482,6 +482,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
+        # Track fullscreen state
+        self.is_fullscreen = False
+        
         # Get screen dimensions
         screen = QApplication.primaryScreen()
         rect = screen.availableGeometry()
@@ -1494,7 +1497,8 @@ Recent translations to summarize:
         # Create main layout (QGridLayout for precise control)
         self.frame = QGridLayout(central_widget)
         self.frame.setContentsMargins(10, 10, 10, 10)
-        self.frame.setSpacing(5)
+        self.frame.setVerticalSpacing(8)
+        self.frame.setHorizontalSpacing(5)
         
         # Configure grid column stretches
         for i in range(5):
@@ -1507,6 +1511,9 @@ Recent translations to summarize:
                 self.frame.setRowMinimumHeight(r, 200)
             elif r == 10:
                 self.frame.setRowMinimumHeight(r, 150)
+        
+        # Store row stretch defaults for fullscreen toggle
+        self._default_row_stretches = {r: (1 if r in [9, 10] else 0) for r in range(12)}
         
         # Create UI elements using helper methods
         self.create_file_section()
@@ -1543,6 +1550,84 @@ Recent translations to summarize:
         except Exception:
             pass
     
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay - from manga integration"""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt, QTimer
+        
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly after widget is shown
+        def position_checkmark():
+            try:
+                # Check if checkmark still exists and is valid
+                if checkmark and not checkmark.isHidden() or True:  # Always try to set geometry
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark():
+            try:
+                # Check if both widgets still exist
+                if checkbox and checkmark:
+                    if checkbox.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                # Widget was already deleted
+                pass
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        # Delay initial positioning to ensure widget is properly rendered
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        
+        return checkbox
+
     def create_file_section(self):
         """Create file selection section with multi-file support"""
         # Initialize file selection variables
@@ -1609,7 +1694,7 @@ Recent translations to summarize:
         
         # Deep scan option for folders
         self.deep_scan_var = False
-        self.deep_scan_check = QCheckBox("include subfolders")
+        self.deep_scan_check = self._create_styled_checkbox("include subfolders")
         self.deep_scan_check.setChecked(self.deep_scan_var)
         self.deep_scan_check.stateChanged.connect(self._on_deep_scan_changed)
         options_layout.addWidget(self.deep_scan_check)
@@ -1757,7 +1842,26 @@ Recent translations to summarize:
         self.model_combo.setEditable(True)
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
-        self.model_combo.setMinimumWidth(200)
+        self.model_combo.setMaximumWidth(550)
+        # Add dropdown arrow styling
+        self.model_combo.setStyleSheet("""
+            QComboBox {
+                padding-right: 20px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #ffffff;
+                width: 0;
+                height: 0;
+                margin-right: 5px;
+            }
+        """)
         self.frame.addWidget(self.model_combo, 1, 1, 1, 2)  # row, col, rowspan, colspan
         
         # Track previous text to make autocomplete less aggressive
@@ -1784,24 +1888,54 @@ Recent translations to summarize:
         self.profile_menu.setEditable(True)
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
-        self.profile_menu.setMinimumWidth(150)
+        self.profile_menu.setMaximumWidth(380)
+        # Add dropdown arrow styling
+        self.profile_menu.setStyleSheet("""
+            QComboBox {
+                padding-right: 20px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #ffffff;
+                width: 0;
+                height: 0;
+                margin-right: 5px;
+            }
+        """)
         self.frame.addWidget(self.profile_menu, 2, 1)
         
         # Connect signals for profile selection
         self.profile_menu.currentIndexChanged.connect(lambda: self.on_profile_select())
         self.profile_menu.lineEdit().returnPressed.connect(lambda: self.on_profile_select())
         
+        # Create a horizontal layout for profile buttons to keep them close together
+        profile_buttons_widget = QWidget()
+        profile_buttons_layout = QHBoxLayout(profile_buttons_widget)
+        profile_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        profile_buttons_layout.setSpacing(10)
+        
         # Save Profile button
         save_profile_btn = QPushButton("Save Profile")
         save_profile_btn.clicked.connect(self.save_profile)
-        save_profile_btn.setMinimumWidth(100)
-        self.frame.addWidget(save_profile_btn, 2, 2)
+        save_profile_btn.setFixedWidth(95)
+        profile_buttons_layout.addWidget(save_profile_btn)
         
         # Delete Profile button
         delete_profile_btn = QPushButton("Delete Profile")
         delete_profile_btn.clicked.connect(self.delete_profile)
-        delete_profile_btn.setMinimumWidth(100)
-        self.frame.addWidget(delete_profile_btn, 2, 3)
+        delete_profile_btn.setFixedWidth(95)
+        profile_buttons_layout.addWidget(delete_profile_btn)
+        
+        profile_buttons_layout.addStretch()
+        
+        # Add the buttons widget spanning columns 2-3
+        self.frame.addWidget(profile_buttons_widget, 2, 2, 1, 2)
     
     def _create_settings_section(self):
         """Create all settings controls"""
@@ -1853,7 +1987,7 @@ Recent translations to summarize:
         self.frame.addWidget(self.toggle_token_btn, 7, 1, Qt.AlignLeft)
         
         # Contextual Translation (right side, row 3) - with extra padding on top
-        self.contextual_checkbox = QCheckBox("Contextual Translation")
+        self.contextual_checkbox = self._create_styled_checkbox("Contextual Translation")
         self.contextual_checkbox.setChecked(self.contextual_var)
         self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
         self.frame.addWidget(self.contextual_checkbox, 3, 2, 1, 2, Qt.AlignLeft)
@@ -1868,7 +2002,7 @@ Recent translations to summarize:
         self.frame.addWidget(self.trans_history, 4, 3, Qt.AlignLeft)
         
         # Rolling History (row 5)
-        self.rolling_checkbox = QCheckBox("Rolling History Window")
+        self.rolling_checkbox = self._create_styled_checkbox("Rolling History Window")
         self.rolling_checkbox.setChecked(self.translation_history_rolling_var)
         self.frame.addWidget(self.rolling_checkbox, 5, 2, Qt.AlignLeft)
         
@@ -1886,7 +2020,7 @@ Recent translations to summarize:
         self.frame.addWidget(self.trans_temp, 6, 3, Qt.AlignLeft)
         
         # Batch Translation (row 7)
-        self.batch_checkbox = QCheckBox("Batch Translation")
+        self.batch_checkbox = self._create_styled_checkbox("Batch Translation")
         self.batch_checkbox.setChecked(self.batch_translation_var)
         self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
         self.frame.addWidget(self.batch_checkbox, 7, 2, Qt.AlignLeft)
@@ -2006,7 +2140,7 @@ Recent translations to summarize:
         self.frame.addWidget(other_settings_btn, 7, 4)
         
         # Remove AI Artifacts checkbox (row 7, spans all columns)
-        self.remove_artifacts_checkbox = QCheckBox("Remove AI Artifacts")
+        self.remove_artifacts_checkbox = self._create_styled_checkbox("Remove AI Artifacts")
         self.remove_artifacts_checkbox.setChecked(self.REMOVE_AI_ARTIFACTS_var)
         self.remove_artifacts_checkbox.stateChanged.connect(self._on_remove_artifacts_toggle)
         self.frame.addWidget(self.remove_artifacts_checkbox, 7, 0, 1, 5, Qt.AlignLeft)
@@ -2676,21 +2810,22 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         self.qa_button = QPushButton("QA Scan")
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setStyleSheet("background-color: #ffc107; color: black; padding: 6px;")
+        self.qa_button.setStyleSheet("background-color: #e67e22; color: white; padding: 6px; font-weight: bold;")
         
-        # Define toolbar items with button styles
+        # Define toolbar items with button styles - modern color scheme
         style_colors = {
-            "info": "#17a2b8",
-            "warning": "#ffc107",
-            "secondary": "#6c757d",
-            "primary": "#007bff",
-            "success": "#28a745"
+            "info": "#3498db",      # Modern blue
+            "warning": "#e67e22",   # Modern orange (replacing yellow)
+            "secondary": "#95a5a6", # Modern gray
+            "primary": "#9b59b6",   # Modern purple
+            "success": "#27ae60",   # Modern green
+            "glossary": "#f39c12"   # Yellow/gold for glossary
         }
         
         toolbar_items = [
             ("EPUB Converter", self.epub_converter, "info"),
             ("Extract Glossary", self.run_glossary_extraction_thread, "warning"),
-            ("Glossary Manager", self.glossary_manager, "secondary"),
+            ("Glossary Manager", self.glossary_manager, "glossary"),
         ]
         
         # Add Manga Translator if available
@@ -2703,27 +2838,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
         toolbar_items.extend([
             ("Retranslate", self.force_retranslation, "warning"),
             ("Save Config", self.save_config, "secondary"),
-            ("Load Glossary", self.load_glossary, "secondary"),
+            ("Load Glossary", self.load_glossary, "glossary"),
             ("Import Profiles", self.import_profiles, "secondary"),
             ("Export Profiles", self.export_profiles, "secondary"),
-            ("📐 1080p: OFF", self.toggle_safe_ratios, "secondary"), 
         ])
         
         # Create buttons
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
             btn = QPushButton(lbl)
             btn.clicked.connect(cmd)
-            color = style_colors.get(style, "#6c757d")
-            text_color = "black" if style == "warning" else "white"
-            btn.setStyleSheet(f"background-color: {color}; color: {text_color}; padding: 6px;")
+            color = style_colors.get(style, "#95a5a6")
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
             btn_layout.addWidget(btn)
             
             if lbl == "Extract Glossary":
                 self.glossary_button = btn
             elif lbl == "EPUB Converter":
                 self.epub_button = btn
-            elif "1080p" in lbl:
-                self.safe_ratios_btn = btn
             elif lbl == "Async Processing (50% Off)":
                 self.async_button = btn
         
@@ -2734,11 +2865,38 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Note: This will need to be integrated into the main GUI layout in _setup_gui
         return btn_frame
 
-    def toggle_safe_ratios(self):
-        """Toggle 1080p Windows ratios mode - not needed in PySide6"""
-        # This feature is not needed in PySide6 as Qt handles window sizing appropriately
-        self.append_log("ℹ️ Window ratio toggle not needed in PySide6 - Qt handles sizing automatically")
  
+    def keyPressEvent(self, event):
+        """Handle key press events for shortcuts"""
+        if event.key() == Qt.Key_F11:
+            self.toggle_fullscreen()
+        else:
+            super().keyPressEvent(event)
+    
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode and expand log area"""
+        if not self.is_fullscreen:
+            # Enter fullscreen
+            self.showFullScreen()
+            self.is_fullscreen = True
+            
+            # Make log area expand more in fullscreen
+            # Give the log (row 9) more stretch to use extra space
+            self.frame.setRowStretch(9, 3)  # Increased from 1 to 3
+            self.frame.setRowStretch(10, 2)  # Increased from 1 to 2
+            
+            self.append_log("🖥️ Fullscreen mode enabled (Press F11 to exit)")
+        else:
+            # Exit fullscreen
+            self.showNormal()
+            self.is_fullscreen = False
+            
+            # Restore default log area size
+            self.frame.setRowStretch(9, self._default_row_stretches.get(9, 1))
+            self.frame.setRowStretch(10, self._default_row_stretches.get(10, 1))
+            
+            self.append_log("🖥️ Fullscreen mode disabled")
+    
     def _get_opf_file_order(self, file_list):
         """
         Sort files based on OPF spine order if available.
