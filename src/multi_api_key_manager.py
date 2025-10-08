@@ -903,7 +903,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Rotation description
         self.rotation_desc_label = QLabel()
-        self.rotation_desc_label.setStyleSheet("color: blue;")
+        self.rotation_desc_label.setStyleSheet("color: #5a9fd4; font-style: italic;")
         rotation_frame_layout.addWidget(self.rotation_desc_label)
         self._update_rotation_display()
         

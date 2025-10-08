@@ -1966,7 +1966,7 @@ def configure_translation_chunk_prompt(self):
     example_v.addWidget(example_desc)
     
     example_label = QLabel()
-    example_label.setStyleSheet("color: blue; font-family: Courier; font-size: 9pt;")
+    example_label.setStyleSheet("color: #5a9fd4; font-family: Courier; font-size: 9pt; font-style: italic;")
     example_label.setWordWrap(True)
     example_v.addWidget(example_label)
     
@@ -2086,7 +2086,7 @@ def configure_image_chunk_prompt(self):
     example_v.addWidget(example_desc)
     
     example_label = QLabel()
-    example_label.setStyleSheet("color: blue; font-family: Courier; font-size: 9pt;")
+    example_label.setStyleSheet("color: #5a9fd4; font-family: Courier; font-size: 9pt; font-style: italic;")
     example_label.setWordWrap(True)
     example_v.addWidget(example_label)
     

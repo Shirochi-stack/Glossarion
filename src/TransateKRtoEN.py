@@ -4134,28 +4134,7 @@ def main(log_callback=None, stop_callback=None):
     _json.load = debug_json_load
     
     if log_callback:
-        # TEST: Verify the callback works IMMEDIATELY
-        try:
-            log_callback("="*60)
-            log_callback("🔍 [TEST] log_callback is WORKING - you should see this!")
-            log_callback("🔍 [TEST] About to call set_output_redirect()")
-            log_callback("="*60)
-        except Exception as e:
-            print(f"❌ [TEST] log_callback FAILED: {e}")
-        
         set_output_redirect(log_callback)
-        
-        # TEST: Verify print() redirection works
-        try:
-            print("="*60)
-            print("🔍 [TEST] print() redirection is WORKING - you should see this!")
-            print("="*60)
-        except Exception as e:
-            # Fallback if print fails
-            try:
-                log_callback(f"❌ [TEST] print() redirection FAILED: {e}")
-            except:
-                pass
     
     def check_stop():
         if stop_callback and stop_callback():

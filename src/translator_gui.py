@@ -514,6 +514,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")
         
+        # Auto-scroll control: delay forcing scroll on new runs
+        self._autoscroll_delay_until = 0.0  # epoch seconds
+        
         self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
         self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
@@ -1535,7 +1538,7 @@ Recent translations to summarize:
         if self.token_limit_disabled:
             self.token_limit_entry.setEnabled(False)
             self.toggle_token_btn.setText("Enable Input Token Limit")
-            self.toggle_token_btn.setStyleSheet("background-color: #28a745;")  # success-outline
+            self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
         
         self.on_profile_select()
         self.append_log("🚀 Glossarion v5.2.0 - Ready to use!")
@@ -1650,7 +1653,7 @@ Recent translations to summarize:
         # Create browse menu button with dropdown
         self.btn_browse_menu = QPushButton("Browse ▼")
         self.btn_browse_menu.setMinimumWidth(100)
-        self.btn_browse_menu.setStyleSheet("background-color: #007bff; color: white;")  # primary
+        self.btn_browse_menu.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")  # primary
         
         # Create browse menu
         self.browse_menu = QMenu(self)
@@ -1673,7 +1676,7 @@ Recent translations to summarize:
         self.gcloud_button.clicked.connect(self.select_google_credentials)
         self.gcloud_button.setMinimumWidth(100)
         self.gcloud_button.setEnabled(False)
-        self.gcloud_button.setStyleSheet("background-color: #6c757d; color: white;")  # secondary
+        self.gcloud_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")  # secondary
         self.frame.addWidget(self.gcloud_button, 2, 4)
         
         # Vertex AI Location text entry
@@ -1845,7 +1848,7 @@ Recent translations to summarize:
         self.model_combo.setEditable(True)
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
-        self.model_combo.setMaximumWidth(550)
+        self.model_combo.setMaximumWidth(450)
         # Add dropdown arrow styling
         self.model_combo.setStyleSheet("""
             QComboBox {
@@ -1985,7 +1988,7 @@ Recent translations to summarize:
         
         self.toggle_token_btn = QPushButton("Disable Input Token Limit")
         self.toggle_token_btn.clicked.connect(self.toggle_token_limit)
-        self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white;")
+        self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
         self.toggle_token_btn.setMinimumWidth(150)
         self.frame.addWidget(self.toggle_token_btn, 7, 1, Qt.AlignLeft)
         
@@ -2138,7 +2141,7 @@ Recent translations to summarize:
         # Other Settings button (row 7, column 4)
         other_settings_btn = QPushButton("⚙️  Other Setting")
         other_settings_btn.clicked.connect(self.open_other_settings)
-        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white;")  # info-outline
+        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")  # info-outline
         other_settings_btn.setMinimumWidth(120)
         self.frame.addWidget(other_settings_btn, 7, 4)
         
@@ -3211,6 +3214,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if hasattr(self, 'button_run'):
             self.button_run.config(text="⏹ Stop", state="normal")
         
+        # Delay auto-scroll so first log is readable
+        self._start_autoscroll_delay(600)
         # Show immediate feedback that translation is starting
         self.append_log("🚀 Initializing translation process...")
         
@@ -4585,6 +4590,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
             self.glossary_thread.start()
         
+        # Delay auto-scroll so first log is readable
+        self._start_autoscroll_delay(600)
         # Update button IMMEDIATELY after thread starts (synchronous)
         self.update_run_button()
 
@@ -5716,6 +5723,7 @@ Important rules:
        if not self.token_limit_disabled:
            self.token_limit_entry.setEnabled(False)
            self.toggle_token_btn.setText("Enable Input Token Limit")
+           self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
            self.token_limit_disabled = True
        else:
@@ -5723,6 +5731,7 @@ Important rules:
            if not self.token_limit_entry.text().strip():
                self.token_limit_entry.setText(str(self.config.get('token_limit', 1000000)))
            self.toggle_token_btn.setText("Disable Input Token Limit")
+           self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
 
@@ -6010,6 +6019,13 @@ Important rules:
             self.close()
             sys.exit(0)
 
+    def _start_autoscroll_delay(self, ms=500):
+        try:
+            import time as _time
+            self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
+        except Exception:
+            self._autoscroll_delay_until = 0.0
+    
     def append_log_direct(self, message):
         """Direct append - MUST be called from main thread only"""
         try:
@@ -6031,10 +6047,12 @@ Important rules:
             
             cursor.insertText(message)
             
-            # Scroll to bottom
+            # Scroll to bottom (respect delay to allow user to read first log)
             try:
-                scrollbar = self.log_text.verticalScrollBar()
-                scrollbar.setValue(scrollbar.maximum())
+                import time as _time
+                if _time.time() >= getattr(self, '_autoscroll_delay_until', 0):
+                    scrollbar = self.log_text.verticalScrollBar()
+                    scrollbar.setValue(scrollbar.maximum())
             except Exception:
                 pass
         except Exception as e:
@@ -6093,11 +6111,13 @@ Important rules:
                    # Regular text append
                    self.log_text.append(message)
                
-               # Always try to scroll to bottom to ensure visibility
+               # Try to scroll to bottom to ensure visibility, but respect delayed auto-scroll window
                try:
-                   scrollbar = self.log_text.verticalScrollBar()
-                   if at_bottom or True:  # Always scroll for now to ensure visibility
-                       scrollbar.setValue(scrollbar.maximum())
+                   import time as _time
+                   if _time.time() >= getattr(self, '_autoscroll_delay_until', 0):
+                       scrollbar = self.log_text.verticalScrollBar()
+                       if at_bottom or True:
+                           scrollbar.setValue(scrollbar.maximum())
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()

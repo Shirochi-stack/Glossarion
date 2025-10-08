@@ -189,6 +189,15 @@ class QAScannerMixin:
         QApplication.processEvents()
         
         try:
+            # Start a brief auto-scroll delay so first log lines are readable
+            try:
+                import time as _time
+                if hasattr(self, '_start_autoscroll_delay'):
+                    self._start_autoscroll_delay(600)
+                elif hasattr(self, '_autoscroll_delay_until'):
+                    self._autoscroll_delay_until = _time.time() + 0.6
+            except Exception:
+                pass
             # Update status
             if status_label:
                 status_label.setText("Loading translation modules...")

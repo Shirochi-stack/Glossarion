@@ -1208,28 +1208,9 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
 
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
-    # TEST: Verify the callback works IMMEDIATELY
+    # Redirect print/logs to callback if provided
     if log_callback:
-        try:
-            log_callback("="*60)
-            log_callback("🔍 [GLOSSARY TEST] log_callback is WORKING - you should see this!")
-            log_callback("🔍 [GLOSSARY TEST] About to call set_output_redirect()")
-            log_callback("="*60)
-        except Exception as e:
-            print(f"❌ [GLOSSARY TEST] log_callback FAILED: {e}")
-        
         set_output_redirect(log_callback)
-        
-        # TEST: Verify print() redirection works
-        try:
-            print("="*60)
-            print("🔍 [GLOSSARY TEST] print() redirection is WORKING - you should see this!")
-            print("="*60)
-        except Exception as e:
-            try:
-                log_callback(f"❌ [GLOSSARY TEST] print() redirection FAILED: {e}")
-            except:
-                pass
     """Modified main function that can accept a logging callback and stop callback"""
     if log_callback:
         set_output_redirect(log_callback)

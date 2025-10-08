@@ -1415,7 +1415,7 @@ Rules:
         extraction_prompt_tab_layout.addWidget(auto_prompt_frame)
         
         placeholder_label = QLabel("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}")
-        placeholder_label.setStyleSheet("color: blue; font-size: 9pt;")
+        placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
         auto_prompt_frame_layout.addWidget(placeholder_label)
         
         self.auto_prompt_text = QTextEdit()
@@ -1471,7 +1471,7 @@ Rules:
         format_prompt_frame_layout.addWidget(format_desc_label)
         
         format_placeholder_label = QLabel("Available placeholders: {text_sample}")
-        format_placeholder_label.setStyleSheet("color: blue; font-size: 9pt;")
+        format_placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
         format_prompt_frame_layout.addWidget(format_placeholder_label)
         
         # Initialize format instructions variable and text widget
@@ -1553,7 +1553,7 @@ Text to analyze:
         trans_prompt_frame_layout.addWidget(trans_desc_label)
         
         trans_placeholder_label = QLabel("Available placeholders: {language}, {terms_list}, {batch_size}")
-        trans_placeholder_label.setStyleSheet("color: blue; font-size: 9pt;")
+        trans_placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
         trans_prompt_frame_layout.addWidget(trans_placeholder_label)
         
         # Initialize translation prompt variable and text widget
@@ -2509,9 +2509,7 @@ Provide translations in the same numbered format."""
                 
                 removed = entry_count - matching
                 preview_label.setText(f"Filter matches: {matching} entries ({removed} will be removed)")
-                preview_label.setStyleSheet(
-                    f"color: {'blue' if matching > 0 else 'red'}; font-size: 10pt;"
-                )
+                preview_label.setStyleSheet(f"color: {'#5a9fd4' if matching > 0 else 'red'}; font-size: 10pt; font-style: italic;")
             
             preview_btn = QPushButton("Preview Filter")
             preview_btn.clicked.connect(preview_filter)
