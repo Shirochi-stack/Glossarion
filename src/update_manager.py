@@ -574,27 +574,27 @@ class UpdateManager(QObject):
             print("[ERROR] No QApplication instance found - update dialog cannot be shown")
             return
         
-        # Determine parent window - use active modal widget or main GUI
+        # Determine parent window for positioning reference only
         from PySide6.QtWidgets import QWidget
-        parent_widget = None
+        reference_widget = None
         try:
             # Check if there's an active modal widget (e.g., Other Settings dialog)
-            parent_widget = app.activeModalWidget()
-            if not parent_widget:
+            reference_widget = app.activeModalWidget()
+            if not reference_widget:
                 # Fall back to active window
-                parent_widget = app.activeWindow()
-            if not parent_widget:
+                reference_widget = app.activeWindow()
+            if not reference_widget:
                 # Fall back to main GUI if it's a proper QWidget
                 if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
-                    parent_widget = self.dialog
+                    reference_widget = self.dialog
         except Exception:
             if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
-                parent_widget = self.dialog
+                reference_widget = self.dialog
         
-        # Create simple non-blocking dialog with appropriate parent
-        dialog = QDialog(parent_widget)
+        # Create dialog with parent to prevent it from minimizing the parent
+        dialog = QDialog(reference_widget)
         dialog.setWindowTitle(title)
-        dialog.setModal(False)  # Ensure non-modal
+        dialog.setModal(False)  # Non-modal so it doesn't block other windows
         
         # Apply dark theme styling to fix white background
         dialog.setStyleSheet("""
@@ -672,9 +672,9 @@ class UpdateManager(QObject):
         """)
         
         # Populate content
-        self._populate_update_dialog(dialog)
+        self._populate_update_dialog(dialog, reference_widget)
 
-    def _populate_update_dialog(self, dialog):
+    def _populate_update_dialog(self, dialog, reference_widget=None):
         """Populate the update dialog content"""
         # Main layout
         main_layout = QVBoxLayout()
@@ -1075,13 +1075,27 @@ class UpdateManager(QObject):
         # Add button layout to main layout
         main_layout.addLayout(button_layout)
         
-        # Set dialog layout and show
+        # Set dialog layout
         dialog.setLayout(main_layout)
         
-        # Show dialog as non-modal window that won't block other dialogs
+        # Position dialog relative to reference window if available
+        if reference_widget:
+            # Center the dialog on the reference widget
+            reference_geometry = reference_widget.geometry()
+            dialog_geometry = dialog.frameGeometry()
+            center_point = reference_geometry.center()
+            dialog_geometry.moveCenter(center_point)
+            dialog.move(dialog_geometry.topLeft())
+        else:
+            # Center on screen
+            screen = app.primaryScreen().geometry()
+            dialog.move(
+                (screen.width() - dialog.width()) // 2,
+                (screen.height() - dialog.height()) // 2
+            )
+        
+        # Show dialog - simple and clean
         dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
         
         # Keep reference to prevent garbage collection
         self._update_dialog = dialog

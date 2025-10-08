@@ -211,11 +211,33 @@ def _setup_file_logging():
                 pass
 
         # Log uncaught exceptions as critical errors
+        _original_excepthook = sys.excepthook
+        
+        # Use a mutable container to avoid global scope issues
+        _excepthook_state = {'in_progress': False}
+        
         def _log_excepthook(exc_type, exc_value, exc_tb):
+            # Prevent recursion if the excepthook itself raises an exception
+            if _excepthook_state['in_progress']:
+                # Fall back to original excepthook to avoid infinite recursion
+                try:
+                    _original_excepthook(exc_type, exc_value, exc_tb)
+                except Exception:
+                    pass
+                return
+            
+            _excepthook_state['in_progress'] = True
             try:
                 logging.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
             except Exception:
-                pass
+                # If logging fails, try to use the original excepthook
+                try:
+                    _original_excepthook(exc_type, exc_value, exc_tb)
+                except Exception:
+                    pass
+            finally:
+                _excepthook_state['in_progress'] = False
+        
         sys.excepthook = _log_excepthook
 
         logging.getLogger(__name__).info("File logging initialized at %s", log_file)

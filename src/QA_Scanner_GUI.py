@@ -695,6 +695,8 @@ class QAScannerMixin:
                 slider.setMaximum(100)
                 slider.setValue(custom_settings[setting_key])
                 slider.setMinimumWidth(300)
+                # Disable mousewheel scrolling on slider
+                slider.wheelEvent = lambda event: event.ignore()
                 slider_layout.addWidget(slider)
                 
                 # Percentage label (shows current value)
@@ -745,6 +747,8 @@ class QAScannerMixin:
             consec_spinbox.setMaximum(10)
             consec_spinbox.setValue(custom_settings['consecutive_chapters'])
             consec_spinbox.setMinimumWidth(100)
+            # Disable mousewheel scrolling
+            consec_spinbox.wheelEvent = lambda event: event.ignore()
             consec_layout.addWidget(consec_spinbox)
             consec_layout.addStretch()
             options_layout.addWidget(consec_widget)
@@ -766,6 +770,8 @@ class QAScannerMixin:
             sample_spinbox.setSingleStep(500)
             sample_spinbox.setValue(custom_settings['sample_size'])
             sample_spinbox.setMinimumWidth(100)
+            # Disable mousewheel scrolling
+            sample_spinbox.wheelEvent = lambda event: event.ignore()
             sample_layout.addWidget(sample_spinbox)
             sample_layout.addStretch()
             options_layout.addWidget(sample_widget)
@@ -787,6 +793,8 @@ class QAScannerMixin:
             min_length_spinbox.setSingleStep(100)
             min_length_spinbox.setValue(custom_settings['min_text_length'])
             min_length_spinbox.setMinimumWidth(100)
+            # Disable mousewheel scrolling
+            min_length_spinbox.wheelEvent = lambda event: event.ignore()
             min_length_layout.addWidget(min_length_spinbox)
             min_length_layout.addStretch()
             options_layout.addWidget(min_length_widget)

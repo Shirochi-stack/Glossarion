@@ -43,6 +43,12 @@ import concurrent.futures
 import multiprocessing
 from threading import Lock
 
+# Optional: psutil for process priority and CPU affinity control
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
+
 # Add a global lock for thread-safe operations
 merge_lock = Lock()
 
@@ -1760,7 +1766,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batches.append(('chapter_comparison', batch, worker_data))
         
         # Process with ProcessPoolExecutor
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
             futures = []
             
             for batch_args in batches:
@@ -1855,7 +1861,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batches.append(('preview_comparison', batch, worker_data))
         
         # Process with ProcessPoolExecutor
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
             futures = []
             
             for batch_args in batches:
@@ -3833,6 +3839,57 @@ def process_html_file_batch(args):
     return batch_results
 
 
+def _init_worker_process():
+    """Initializer for worker processes to keep GUI responsive.
+    - On Windows: lower priority to BELOW_NORMAL and reserve some cores via affinity
+    - On POSIX: increase niceness
+    Uses environment var QA_RESERVE_CORES to decide how many logical cores to leave free (default 1).
+    """
+    try:
+        # Reserve some CPUs for the GUI/main process
+        reserve = 1
+        try:
+            reserve_env = int(os.environ.get('QA_RESERVE_CORES', '1'))
+            if reserve_env >= 0:
+                reserve = reserve_env
+        except Exception:
+            pass
+
+        if psutil is not None:
+            p = psutil.Process()
+            # Lower process priority
+            if os.name == 'nt':
+                try:
+                    p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                except Exception:
+                    pass
+            else:
+                try:
+                    p.nice(10)
+                except Exception:
+                    pass
+
+            # Set CPU affinity to leave some cores free if possible
+            try:
+                all_cpus = list(range(psutil.cpu_count(logical=True) or 1))
+                if len(all_cpus) > reserve:
+                    allowed = all_cpus[:max(1, len(all_cpus) - reserve)]
+                    if allowed:
+                        p.cpu_affinity(allowed)
+            except Exception:
+                pass
+        else:
+            # Fallback without psutil: best-effort niceness on POSIX
+            if os.name != 'nt':
+                try:
+                    os.nice(10)
+                except Exception:
+                    pass
+    except Exception:
+        # Silent best-effort
+        pass
+
+
 def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
@@ -3988,7 +4045,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     results = []
     processed_count = 0
     
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
         # Submit all batches
         futures = []
         
@@ -4715,7 +4772,7 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     batch_args = [(batch, worker_data) for batch in batches]
     
     # Process with ProcessPoolExecutor
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
         # Submit all batches
         futures = []
         for args in batch_args:
