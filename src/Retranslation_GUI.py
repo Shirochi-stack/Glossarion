@@ -691,7 +691,7 @@ class RetranslationMixin:
         def remove_qa_failed_mark():
             selected_items = data['listbox'].selectedItems()
             if not selected_items:
-                QMessageBox.warning(self, "No Selection", "Please select at least one chapter.")
+                QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
@@ -699,12 +699,12 @@ class RetranslationMixin:
             qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
             
             if not qa_failed_chapters:
-                QMessageBox.warning(self, "No QA Failed Chapters", 
+                QMessageBox.warning(data.get('dialog', self), "No QA Failed Chapters", 
                                      "None of the selected chapters have 'qa_failed' status.")
                 return
             
             count = len(qa_failed_chapters)
-            reply = QMessageBox.question(self, "Confirm Remove QA Failed Mark", 
+            reply = QMessageBox.question(data.get('dialog', self), "Confirm Remove QA Failed Mark", 
                                       f"Remove QA failed mark from {count} chapters?",
                                       QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
@@ -742,14 +742,12 @@ class RetranslationMixin:
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
                 json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
-            QMessageBox.information(self, "Success", f"Removed QA failed mark from {cleared_count} chapters.")
-            if data.get('dialog'):
-                data['dialog'].close()
+            QMessageBox.information(data.get('dialog', self), "Success", f"Removed QA failed mark from {cleared_count} chapters.")
         
         def retranslate_selected():
             selected_items = data['listbox'].selectedItems()
             if not selected_items:
-                QMessageBox.warning(self, "No Selection", "Please select at least one chapter.")
+                QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
@@ -776,7 +774,7 @@ class RetranslationMixin:
                     confirm_msg += f"• {existing_count} existing chapters will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
-            reply = QMessageBox.question(self, "Confirm Retranslation", confirm_msg,
+            reply = QMessageBox.question(data.get('dialog', self), "Confirm Retranslation", confirm_msg,
                                        QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
@@ -864,52 +862,49 @@ class RetranslationMixin:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
                 if deleted_count > 0 or marked_count > 0:
                     success_msg += f"\n\nTotal {len(selected_indices)} chapters ready for translation."
-                QMessageBox.information(self, "Success", success_msg)
+                QMessageBox.information(data.get('dialog', self), "Success", success_msg)
             else:
-                QMessageBox.information(self, "Info", "No changes made.")
-            
-            if data.get('dialog'):
-                data['dialog'].close()
+                QMessageBox.information(data.get('dialog', self), "Info", "No changes made.")
         
         # Add buttons - First row
         btn_select_all = QPushButton("Select All")
-        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_select_all.clicked.connect(select_all)
         button_layout.addWidget(btn_select_all, 0, 0)
         
         btn_clear = QPushButton("Clear")
-        btn_clear.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_clear.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_clear.clicked.connect(clear_selection)
         button_layout.addWidget(btn_clear, 0, 1)
         
         btn_select_completed = QPushButton("Select Completed")
-        btn_select_completed.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        btn_select_completed.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_select_completed.clicked.connect(lambda: select_status('completed'))
         button_layout.addWidget(btn_select_completed, 0, 2)
         
         btn_select_missing = QPushButton("Select Missing")
-        btn_select_missing.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+        btn_select_missing.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_select_missing.clicked.connect(lambda: select_status('missing'))
         button_layout.addWidget(btn_select_missing, 0, 3)
         
         btn_select_failed = QPushButton("Select Failed")
-        btn_select_failed.setStyleSheet("QPushButton { background-color: #ffc107; color: white; padding: 5px 15px; }")
+        btn_select_failed.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_select_failed.clicked.connect(lambda: select_status('failed'))
         button_layout.addWidget(btn_select_failed, 0, 4)
         
         # Second row
         btn_retranslate = QPushButton("Retranslate Selected")
-        btn_retranslate.setStyleSheet("QPushButton { background-color: #ffc107; color: white; padding: 5px 15px; }")
+        btn_retranslate.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_retranslate.clicked.connect(retranslate_selected)
         button_layout.addWidget(btn_retranslate, 1, 0, 1, 2)
         
         btn_remove_qa = QPushButton("Remove QA Failed Mark")
-        btn_remove_qa.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        btn_remove_qa.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_remove_qa.clicked.connect(remove_qa_failed_mark)
         button_layout.addWidget(btn_remove_qa, 1, 2, 1, 1)
         
         btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 3, 1, 2)
 
