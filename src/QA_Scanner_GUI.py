@@ -1010,7 +1010,7 @@ class QAScannerMixin:
         # Persist latest auto-search preference
         try:
             self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_checkbox.isChecked())
-            self.save_config(show_message=True)
+            self.save_config(show_message=False)
         except Exception:
             pass
         

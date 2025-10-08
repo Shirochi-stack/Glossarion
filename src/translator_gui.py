@@ -2881,7 +2881,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Create buttons
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
             btn = QPushButton(lbl)
-            btn.clicked.connect(cmd)
+            # Special-case Save Config for inline feedback
+            if lbl == "Save Config":
+                self.save_config_button = btn
+                btn.clicked.connect(self._on_save_config_clicked)
+                btn.setToolTip("Save all settings to config.json")
+            else:
+                btn.clicked.connect(cmd)
             btn.setMinimumHeight(40)  # Increased button height for all toolbar buttons
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
             color = style_colors.get(style, "#95a5a6")
@@ -2917,6 +2923,69 @@ If you see multiple p-b cookies, use the one with the longest value."""
         return btn_frame
 
  
+    def _on_save_config_clicked(self):
+        """Provide inline feedback when saving config from the toolbar button."""
+        try:
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import QTimer
+            btn = getattr(self, 'save_config_button', None)
+            original_text = None
+            original_style = None
+            if btn is not None:
+                original_text = btn.text()
+                original_style = btn.styleSheet()
+                btn.setEnabled(False)
+                btn.setText("Saving…")
+                # Subtle highlight during save
+                btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
+                QApplication.processEvents()
+            # Log feedback
+            try:
+                self.append_log("💾 Saving configuration…")
+            except Exception:
+                pass
+            # Perform save (keep message box behavior as-is)
+            self.save_config(show_message=True)
+            if btn is not None:
+                btn.setText("Saved ✓")
+                btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+                # Restore after a short delay
+                def _restore():
+                    try:
+                        btn.setText(original_text or "Save Config")
+                        if original_style:
+                            btn.setStyleSheet(original_style)
+                        btn.setEnabled(True)
+                    except Exception:
+                        pass
+                QTimer.singleShot(900, _restore)
+            try:
+                self.append_log("✅ Configuration saved")
+            except Exception:
+                pass
+        except Exception as e:
+            # Best-effort restore on failure
+            try:
+                if getattr(self, 'save_config_button', None):
+                    self.save_config_button.setText("Save Failed")
+                    self.save_config_button.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+                    def _restore_fail():
+                        try:
+                            self.save_config_button.setText("Save Config")
+                            # Do not assume original style on failure
+                            self.save_config_button.setEnabled(True)
+                        except Exception:
+                            pass
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(1500, _restore_fail)
+            except Exception:
+                pass
+            # Surface error minimally in log
+            try:
+                self.append_log(f"❌ Save failed: {e}")
+            except Exception:
+                pass
+    
     def keyPressEvent(self, event):
         """Handle key press events for shortcuts"""
         if event.key() == Qt.Key_F11:

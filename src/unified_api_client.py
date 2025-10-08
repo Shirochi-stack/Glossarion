@@ -1706,7 +1706,7 @@ class UnifiedClient:
                                  self.current_key_use_individual_endpoint and 
                                  self.current_key_azure_endpoint)
         
-        print(f"[DEBUG] _apply_individual_key_endpoint_if_needed: has_individual_endpoint={has_individual_endpoint}")
+        #print(f"[DEBUG] _apply_individual_key_endpoint_if_needed: has_individual_endpoint={has_individual_endpoint}")
         if has_individual_endpoint:
             print(f"[DEBUG] Individual endpoint: {self.current_key_azure_endpoint}")
             # Use individual endpoint - works independently of global custom endpoint toggle
@@ -2852,8 +2852,9 @@ class UnifiedClient:
         
         # Debug: Show individual endpoint status
         if self._multi_key_mode:
-            print(f"[DEBUG] _setup_client: has_individual_endpoint={has_individual_endpoint}, "
-                  f"current_key_use_individual_endpoint={getattr(self, 'current_key_use_individual_endpoint', 'NOT SET')}")
+            pass
+            #print(f"[DEBUG] _setup_client: has_individual_endpoint={has_individual_endpoint}, "
+            #      f"current_key_use_individual_endpoint={getattr(self, 'current_key_use_individual_endpoint', 'NOT SET')}")
         
         # Apply custom endpoint logic when enabled - override any model type (except Gemini which has its own toggle)
         # BUT: Skip if this key has its own individual endpoint configured
@@ -2932,7 +2933,7 @@ class UnifiedClient:
                 # Set base_url for Gemini OpenAI endpoint
                 base_url = gemini_endpoint
                 
-                print(f"[DEBUG] Gemini will use OpenAI-compatible endpoint: {gemini_endpoint}")
+                #print(f"[DEBUG] Gemini will use OpenAI-compatible endpoint: {gemini_endpoint}")
                 
                 disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
                 
