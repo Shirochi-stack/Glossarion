@@ -2504,10 +2504,9 @@ class QAScannerMixin:
         # Add a dummy _cleanup_scrolling method for compatibility
         dialog._cleanup_scrolling = lambda: None
         
-        # Handle window close
+        # Handle window close - just cleanup, don't call reject() to avoid recursion
         def handle_close():
             dialog._cleanup_scrolling()
-            dialog.reject()
         dialog.rejected.connect(handle_close)
         
         # Show the dialog and return result
