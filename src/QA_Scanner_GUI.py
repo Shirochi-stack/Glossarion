@@ -1192,10 +1192,6 @@ class QAScannerMixin:
         }
  
         def run_scan():
-            # Update UI on the main thread
-            QTimer.singleShot(0, self.update_run_button)
-            QTimer.singleShot(0, lambda: self.qa_button.setText("Stop Scan") or self.qa_button.clicked.disconnect() or self.qa_button.clicked.connect(self.stop_qa_scan))
-            
             try:
                 # Extract cache configuration from qa_settings
                 cache_config = {
@@ -1417,17 +1413,17 @@ class QAScannerMixin:
                         self.qa_future = None
                     except Exception:
                         pass
-                # Let update_run_button handle the state change properly
-                QTimer.singleShot(0, self.update_run_button)
+                # Emit signal to update button (thread-safe)
+                self.thread_complete_signal.emit()
         
         # Run via shared executor
         self._ensure_executor()
         if self.executor:
             self.qa_future = self.executor.submit(run_scan)
-            # Ensure UI is refreshed when QA work completes
+            # Ensure UI is refreshed when QA work completes (button update handled by thread_complete_signal in finally block)
             def _qa_done_callback(f):
                 try:
-                    QTimer.singleShot(0, lambda: (setattr(self, 'qa_future', None), self.update_run_button()))
+                    self.qa_future = None
                 except Exception:
                     pass
             try:
@@ -1438,8 +1434,8 @@ class QAScannerMixin:
             self.qa_thread = threading.Thread(target=run_scan, daemon=True)
             self.qa_thread.start()
         
-        # Update button immediately to show Stop state
-        QTimer.singleShot(0, self.update_run_button)
+        # Update button IMMEDIATELY after starting thread (synchronous)
+        self.update_run_button()
 
     def show_qa_scanner_settings(self, parent_dialog, qa_settings):
         """Show QA Scanner settings dialog"""

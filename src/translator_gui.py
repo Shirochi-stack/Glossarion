@@ -356,9 +356,19 @@ from Retranslation_GUI import RetranslationMixin
 from GlossaryManager_GUI import GlossaryManagerMixin
 
 class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QMainWindow):
+    # Qt Signal for thread-safe logging
+    log_signal = Signal(str)
+    # Qt Signal for notifying when threads complete
+    thread_complete_signal = Signal()
+    
     def __init__(self, parent=None):
         # Initialize QMainWindow
         super().__init__(parent)
+        
+        # Connect the log signal to append_log_direct
+        self.log_signal.connect(self.append_log_direct)
+        # Connect thread complete signal to update buttons
+        self.thread_complete_signal.connect(self.update_run_button)
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -2124,7 +2134,8 @@ Recent translations to summarize:
         
         # System Prompt Text Edit (row 9, spans 3 columns)
         self.prompt_text = QTextEdit()
-        self.prompt_text.setMinimumHeight(150)
+        self.prompt_text.setMinimumHeight(105)  # Reduced by 30% (from 150 to 105)
+        self.prompt_text.setMaximumHeight(200)  # Add max height to prevent it from growing too large
         self.prompt_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
         
@@ -2142,20 +2153,20 @@ Recent translations to summarize:
         output_layout.addStretch()
         self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
         
-        # Run Translation button (row 9, column 4)
+        # Run Translation button (row 9, column 4) - Fill the space
         self.run_button = QPushButton("Run Translation")
         self.run_button.clicked.connect(self.run_translation_thread)
         self.run_button.setStyleSheet("background-color: #28a745; color: white; font-size: 14pt; font-weight: bold;")  # success
         self.run_button.setMinimumWidth(150)
-        self.run_button.setMinimumHeight(100)
-        self.frame.addWidget(self.run_button, 9, 4)
+        self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Fill available space
+        self.frame.addWidget(self.run_button, 9, 4, Qt.AlignmentFlag(0))  # No alignment = fill
     
     def _create_log_section(self):
         """Create log text area"""
         # Log Text Edit (row 10, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        self.log_text.setMinimumHeight(200)
+        self.log_text.setMinimumHeight(400)  
         self.log_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.log_text, 10, 0, 1, 5)  # row, col, rowspan, colspan
         
@@ -3109,149 +3120,45 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Show immediate feedback that translation is starting
         self.append_log("🚀 Initializing translation process...")
         
-        # Start worker immediately - no heavy operations here
-        # IMPORTANT: Do NOT call _ensure_executor() here as it may be slow
-        # Just start the thread directly
+        # SIMPLIFIED: Skip the wrapper and call run_translation_direct in a thread
+        def simple_thread_target():
+            try:
+                self.append_log("🟢 Thread started successfully!")
+                
+                # Load modules if needed
+                if not self._modules_loaded:
+                    self.append_log("📬 Loading translation modules...")
+                    if not self._lazy_load_modules():
+                        self.append_log("❌ Failed to load modules")
+                        return
+                    self.append_log("✅ Modules loaded")
+                
+                # Call the direct function
+                self.append_log("🚀 Starting translation...")
+                self.run_translation_direct()
+                self.append_log("✅ Translation complete")
+                
+            except Exception as e:
+                self.append_log(f"❌ Error in thread: {e}")
+                import traceback
+                self.append_log(traceback.format_exc())
+            finally:
+                self.translation_thread = None
+                # Emit signal to update button (thread-safe)
+                self.thread_complete_signal.emit()
+        
         thread_name = f"TranslationThread_{int(time.time())}"
         self.translation_thread = threading.Thread(
-            target=self.run_translation_wrapper,
+            target=simple_thread_target,
             name=thread_name,
             daemon=True
         )
         self.translation_thread.start()
         
-        # Update button immediately to show Stop state
-        QTimer.singleShot(0, self.update_run_button)
-
-    def run_translation_wrapper(self):
-        """Wrapper that handles ALL initialization in background thread"""
-        try:
-            # Ensure executor is available (do this in background thread)
-            if not hasattr(self, 'executor') or self.executor is None:
-                try:
-                    self._ensure_executor()
-                except Exception as e:
-                    self.append_log(f"⚠️ Could not initialize executor: {e}")
-            
-            # Load modules in background thread (not main thread!)
-            if not self._modules_loaded:
-                self.append_log("📦 Loading translation modules (this may take a moment)...")
-                
-                # Create a progress callback that uses append_log
-                def module_progress(msg):
-                    self.append_log(f"   {msg}")
-                
-                # Load modules with progress feedback
-                if not self._lazy_load_modules(splash_callback=module_progress):
-                    self.append_log("❌ Failed to load required modules")
-                    return
-                
-                self.append_log("✅ Translation modules loaded successfully")
-            
-            # Check for large EPUBs and set optimization parameters
-            epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
-            
-            for epub_path in epub_files:
-                try:
-                    import zipfile
-                    with zipfile.ZipFile(epub_path, 'r') as zf:
-                        # Quick count without reading content
-                        html_files = [f for f in zf.namelist() if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                        file_count = len(html_files)
-                        
-                        if file_count > 50:
-                            self.append_log(f"📚 Large EPUB detected: {file_count} chapters")
-                            
-                            # Get user-configured worker count
-                            if hasattr(self, 'config') and 'extraction_workers' in self.config:
-                                max_workers = self.config.get('extraction_workers', 2)
-                            else:
-                                # Fallback to environment variable or default
-                                max_workers = int(os.environ.get('EXTRACTION_WORKERS', '2'))
-                            
-                            # Set extraction parameters
-                            os.environ['EXTRACTION_WORKERS'] = str(max_workers)
-                            os.environ['EXTRACTION_PROGRESS_CALLBACK'] = 'enabled'
-                            
-                            # Set progress interval based on file count
-                            if file_count > 500:
-                                progress_interval = 50
-                                os.environ['EXTRACTION_BATCH_SIZE'] = '100'
-                                self.append_log(f"⚡ Using {max_workers} workers with batch size 100")
-                            elif file_count > 200:
-                                progress_interval = 25
-                                os.environ['EXTRACTION_BATCH_SIZE'] = '50'
-                                self.append_log(f"⚡ Using {max_workers} workers with batch size 50")
-                            elif file_count > 100:
-                                progress_interval = 20
-                                os.environ['EXTRACTION_BATCH_SIZE'] = '25'
-                                self.append_log(f"⚡ Using {max_workers} workers with batch size 25")
-                            else:
-                                progress_interval = 10
-                                os.environ['EXTRACTION_BATCH_SIZE'] = '20'
-                                self.append_log(f"⚡ Using {max_workers} workers with batch size 20")
-                            
-                            os.environ['EXTRACTION_PROGRESS_INTERVAL'] = str(progress_interval)
-                            
-                            # Enable performance flags for large files
-                            os.environ['FAST_EXTRACTION'] = '1'
-                            os.environ['PARALLEL_PARSE'] = '1'
-                            
-                            # For very large files, enable aggressive optimization
-                            #if file_count > 300:
-                            #    os.environ['SKIP_VALIDATION'] = '1'
-                            #    os.environ['LAZY_LOAD_CONTENT'] = '1'
-                            #    self.append_log("🚀 Enabled aggressive optimization for very large file")
-                            
-                except Exception as e:
-                    # If we can't check, just continue
-                    pass
-            
-            # Set essential environment variables from current config before translation
-            os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
-            os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
-            os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
-            
-            # Now run the actual translation
-            translation_completed = self.run_translation_direct()
-            
-            # If scanning phase toggle is enabled, launch scanner after translation
-            # BUT only if translation completed successfully (not stopped by user)
-            try:
-                if (getattr(self, 'scan_phase_enabled_var', None) and self.scan_phase_enabled_var and 
-                    translation_completed and not self.stop_requested):
-                    mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
-                    self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode (post-translation)...")
-                    # Non-interactive: skip dialogs and use auto-search
-                    QTimer.singleShot(0, lambda: self.run_qa_scan(mode_override=mode, non_interactive=True))
-            except Exception:
-                pass
-            
-        except Exception as e:
-            self.append_log(f"❌ Translation error: {e}")
-            import traceback
-            self.append_log(f"❌ Full error: {traceback.format_exc()}")
-        finally:
-            # Clean up environment variables
-            env_vars = [
-                'EXTRACTION_WORKERS', 'EXTRACTION_BATCH_SIZE',
-                'EXTRACTION_PROGRESS_CALLBACK', 'EXTRACTION_PROGRESS_INTERVAL',
-                'FAST_EXTRACTION', 'PARALLEL_PARSE', 'SKIP_VALIDATION',
-                'LAZY_LOAD_CONTENT'
-            ]
-            for var in env_vars:
-                if var in os.environ:
-                    del os.environ[var]
-            
-            # Clear thread reference
-            self.translation_thread = None
-            if hasattr(self, 'translation_future'):
-                try:
-                    self.translation_future = None
-                except Exception:
-                    pass
-            # Update button state on main thread
-            QTimer.singleShot(0, self.update_run_button)
+        # Update button IMMEDIATELY after starting thread (synchronous)
+        self.update_run_button()
+        
+        self.append_log("🟡 Thread started...")
 
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
@@ -3417,7 +3324,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
             self.translation_thread = None
             self.current_file_index = 0
-            QTimer.singleShot(0, self.update_run_button)
+            # Emit signal to update button (thread-safe)
+            self.thread_complete_signal.emit()
 
     def _process_image_file(self, image_path, combined_output_dir=None):
         """Process a single image file using the direct image translation API with progress tracking"""
@@ -4261,11 +4169,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Ensure Payloads directory exists
                 os.makedirs("Payloads", exist_ok=True)
                 
+                # CRITICAL TEST: Are we even reaching this point?
+                self.append_log("="*60)
+                self.append_log("🔴 [CRITICAL TEST] About to call translation_main()")
+                self.append_log(f"🔴 [CRITICAL TEST] translation_main = {translation_main}")
+                self.append_log(f"🔴 [CRITICAL TEST] self.append_log = {self.append_log}")
+                self.append_log("="*60)
+                
                 # Run translation
+                self.append_log("🚀 Calling translation_main NOW...")
                 translation_main(
                     log_callback=self.append_log,
                     stop_callback=lambda: self.stop_requested
                 )
+                self.append_log("✅ translation_main returned!")
                 
                 if not self.stop_requested:
                     self.append_log("✅ Translation completed successfully!")
@@ -4358,11 +4275,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var else "0",
             'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var) else ("1" if self.config.get('use_rolling_summary') else "0"),
             'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
-            'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var,
-            'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var,
-            'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
-            'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
-            'ROLLING_SUMMARY_MAX_ENTRIES': self.rolling_summary_max_entries_var,
+            'ROLLING_SUMMARY_EXCHANGES': str(self.rolling_summary_exchanges_var),
+            'ROLLING_SUMMARY_MODE': str(self.rolling_summary_mode_var),
+            'ROLLING_SUMMARY_SYSTEM_PROMPT': str(self.rolling_summary_system_prompt),
+            'ROLLING_SUMMARY_USER_PROMPT': str(self.rolling_summary_user_prompt),
+            'ROLLING_SUMMARY_MAX_ENTRIES': str(self.rolling_summary_max_entries_var),
             'PROFILE_NAME': self.lang_var.lower(),
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
@@ -4370,18 +4287,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
-            'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var,
+            'REINFORCEMENT_FREQUENCY': str(self.reinforcement_freq_var),
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
-            'MAX_RETRY_TOKENS': self.max_retry_tokens_var,
+            'MAX_RETRY_TOKENS': str(self.max_retry_tokens_var),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
-            'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var,
-            'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var,
-            'GLOSSARY_MAX_NAMES': self.glossary_max_names_var,
-            'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var,
-            'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var,
+            'DUPLICATE_LOOKBACK_CHAPTERS': str(self.duplicate_lookback_var),
+            'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
+            'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
+            'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
+            'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var),
             'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var else "0",
-            'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': self.glossary_chapter_split_threshold_var,
+            'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': str(self.glossary_chapter_split_threshold_var),
             'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var,
             'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
             'AUTO_GLOSSARY_PROMPT': self.auto_glossary_prompt if hasattr(self, 'auto_glossary_prompt') else '',
@@ -4391,14 +4308,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
-            'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var,
-            'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var,
+            'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
+            'MAX_IMAGES_PER_CHAPTER': str(self.max_images_per_chapter_var),
             'IMAGE_API_DELAY': '1.0',
             'SAVE_IMAGE_TRANSLATIONS': '1',
-            'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var,
+            'IMAGE_CHUNK_HEIGHT': str(self.image_chunk_height_var),
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
             'RETRY_TIMEOUT': "1" if self.retry_timeout_var else "0",
-            'CHUNK_TIMEOUT': self.chunk_timeout_var,
+            'CHUNK_TIMEOUT': str(self.chunk_timeout_var),
             # New network/HTTP controls
             'ENABLE_HTTP_TUNING': '1' if self.config.get('enable_http_tuning', False) else '0',
             'CONNECT_TIMEOUT': str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))),
@@ -4413,7 +4330,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SCAN_PHASE_MODE': self.config.get('scan_phase_mode', 'quick-scan'),
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
-            'BATCH_SIZE': self.batch_size_var,
+            'BATCH_SIZE': str(self.batch_size_var),
             'CONSERVATIVE_BATCHING': "1" if self.conservative_batching_var else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
@@ -4421,8 +4338,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else '',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
-            'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var,
-            'GLOSSARY_MAX_SENTENCES': self.glossary_max_sentences_var,
+            'GLOSSARY_MAX_TEXT_SIZE': str(self.glossary_max_text_size_var),
+            'GLOSSARY_MAX_SENTENCES': str(self.glossary_max_sentences_var),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
@@ -4439,14 +4356,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
             'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', False) else "0",
-            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var,
+            'DUPLICATE_DETECTION_MODE': str(self.duplicate_detection_mode_var),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var), 
             'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var else "0",
             'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var else "0",
             'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var else "0",
             'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var else "0",
             'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var else "0",
-            'COMPRESSION_FACTOR': self.compression_factor_var,
+            'COMPRESSION_FACTOR': str(self.compression_factor_var),
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
@@ -4482,14 +4399,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
-            'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var,
+            'IMAGE_CHUNK_OVERLAP_PERCENT': str(self.image_chunk_overlap_var),
 
 
             # Metadata and batch header translation settings
             'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
             'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
             'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var else "0",
-            'HEADERS_PER_BATCH': self.headers_per_batch_var,
+            'HEADERS_PER_BATCH': str(self.headers_per_batch_var),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
             'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
@@ -4516,7 +4433,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var else '0',
             'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
-            'VERTEX_AI_LOCATION': self.vertex_location_var.text() if hasattr(self, 'vertex_location_var') else 'us-east5',
+            'VERTEX_AI_LOCATION': self.vertex_location_var if hasattr(self, 'vertex_location_var') and isinstance(self.vertex_location_var, str) else (self.vertex_location_var.text() if hasattr(self, 'vertex_location_var') and hasattr(self.vertex_location_var, 'text') else 'us-east5'),
             'IS_AZURE_ENDPOINT': '1' if (self.use_custom_openai_endpoint_var and 
                                   ('.azure.com' in self.openai_base_url_var or 
                                    '.cognitiveservices' in self.openai_base_url_var)) else '0',
@@ -4568,10 +4485,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._ensure_executor()
         if self.executor:
             self.glossary_future = self.executor.submit(self.run_glossary_extraction_direct)
-            # Add callback to clean up and update button when done
+            # Add callback to clean up when done (button update handled by thread_complete_signal in finally block)
             def _glossary_done_callback(f):
                 try:
-                    QTimer.singleShot(0, lambda: (setattr(self, 'glossary_future', None), self.update_run_button()))
+                    self.glossary_future = None
                 except Exception:
                     pass
             try:
@@ -4582,7 +4499,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             thread_name = f"GlossaryThread_{int(time.time())}"
             self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
             self.glossary_thread.start()
-        QTimer.singleShot(0, self.update_run_button)
+        
+        # Update button IMMEDIATELY after thread starts (synchronous)
+        self.update_run_button()
 
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly - handles multiple files and different file types"""
@@ -4704,7 +4623,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 except Exception:
                     pass
             self.current_file_index = 0
-            QTimer.singleShot(0, self.update_run_button)
+            # Emit signal to update button (thread-safe)
+            self.thread_complete_signal.emit()
 
     def _process_image_folder_for_glossary(self, folder_name, image_files):
         """Process all images from a folder and create a combined glossary with new format"""
@@ -5514,11 +5434,20 @@ Important rules:
                     # Import traceback for better error info
                     import traceback
                     
+                    # CRITICAL TEST: Are we even reaching this point?
+                    self.append_log("="*60)
+                    self.append_log("🔴 [GLOSSARY CRITICAL TEST] About to call glossary_main()")
+                    self.append_log(f"🔴 [GLOSSARY CRITICAL TEST] glossary_main = {glossary_main}")
+                    self.append_log(f"🔴 [GLOSSARY CRITICAL TEST] self.append_log = {self.append_log}")
+                    self.append_log("="*60)
+                    
                     # Run glossary extraction with enhanced stop callback
+                    self.append_log("🚀 Calling glossary_main NOW...")
                     glossary_main(
                         log_callback=self.append_log,
                         stop_callback=enhanced_stop_callback
                     )
+                    self.append_log("✅ glossary_main returned!")
                 except Exception as e:
                     # Get the full traceback
                     tb_lines = traceback.format_exc()
@@ -5587,10 +5516,10 @@ Important rules:
        self._ensure_executor()
        if self.executor:
            self.epub_future = self.executor.submit(self.run_epub_converter_direct)
-           # Ensure button state is refreshed when the future completes
+           # Ensure button state is refreshed when the future completes (button update handled by thread_complete_signal in finally block)
            def _epub_done_callback(f):
                try:
-                   QTimer.singleShot(0, lambda: (setattr(self, 'epub_future', None), self.update_run_button()))
+                   self.epub_future = None
                except Exception:
                    pass
            try:
@@ -5600,7 +5529,9 @@ Important rules:
        else:
            self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
            self.epub_thread.start()
-       QTimer.singleShot(0, self.update_run_button)
+       
+       # Update button IMMEDIATELY after starting thread (synchronous)
+       self.update_run_button()
  
     def run_epub_converter_direct(self):
         """Run EPUB converter directly without blocking GUI"""
@@ -5701,8 +5632,8 @@ Important rules:
                 except Exception:
                     pass
             self.stop_requested = False
-            # Schedule GUI update on main thread
-            QTimer.singleShot(0, self.update_run_button)
+            # Emit signal to update button (thread-safe)
+            self.thread_complete_signal.emit()
         
     def toggle_token_limit(self):
        """Toggle whether the token-limit entry is active or not."""
@@ -5862,7 +5793,7 @@ Important rules:
         
         self.append_log("❌ Translation stop requested.")
         self.append_log("⏳ Please wait... stopping after current operation completes.")
-        self.update_run_button()
+        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
         
         if current_file and hasattr(self, 'entry_epub'):
             QTimer.singleShot(100, lambda: self.preserve_file_path(current_file))
@@ -5894,7 +5825,7 @@ Important rules:
        
        self.append_log("❌ Glossary extraction stop requested.")
        self.append_log("⏳ Please wait... stopping after current API call completes.")
-       self.update_run_button()
+       # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
 
     def stop_epub_converter(self):
@@ -5908,7 +5839,7 @@ Important rules:
         self.stop_requested = True
         self.append_log("❌ EPUB converter stop requested.")
         self.append_log("⏳ Please wait... stopping after current operation completes.")
-        self.update_run_button()
+        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
     def stop_qa_scan(self):
         # Disable button immediately to prevent multiple clicks
@@ -5926,7 +5857,7 @@ Important rules:
             self.append_log(f"❌ Failed to stop scan: {e}")
         self.append_log("⛔ QA scan stop requested.")
         self.append_log("⏳ Please wait... stopping after current operation completes.")
-        self.update_run_button()
+        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
        
 
     def on_close(self):
@@ -5951,6 +5882,36 @@ Important rules:
             self.close()
             sys.exit(0)
 
+    def append_log_direct(self, message):
+        """Direct append - MUST be called from main thread only"""
+        try:
+            if not hasattr(self, 'log_text') or not self.log_text:
+                return
+            
+            try:
+                _ = self.log_text.document()
+            except RuntimeError:
+                return
+            
+            # Use textCursor for more compact logging (no extra spacing)
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            
+            # Add newline if not first message
+            if not cursor.atStart():
+                cursor.insertText("\n")
+            
+            cursor.insertText(message)
+            
+            # Scroll to bottom
+            try:
+                scrollbar = self.log_text.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+            except Exception:
+                pass
+        except Exception as e:
+            pass  # Silent failure
+    
     def append_log(self, message):
        """Append message to log with safety checks (fallback to print if GUI is gone)."""
        def _append():
@@ -6024,15 +5985,11 @@ Important rules:
        if threading.current_thread() is threading.main_thread():
            _append()
        else:
+           # Use Qt Signal for thread-safe logging
            try:
-               from PySide6.QtCore import QTimer
-               QTimer.singleShot(0, _append)
-           except Exception as e:
-               # If scheduling fails, just print
-               try:
-                   print(f"{message} [QTimer error: {e}]")
-               except Exception:
-                   pass
+               self.log_signal.emit(message)
+           except Exception:
+               pass  # Silent failure
 
     def update_status_line(self, message, progress_percent=None):
        """Update a status line in the log safely (fallback to print)."""
