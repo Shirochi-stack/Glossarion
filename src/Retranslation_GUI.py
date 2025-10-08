@@ -759,7 +759,7 @@ class RetranslationMixin:
             missing_count = sum(1 for ch in selected_chapters if ch['status'] == 'not_translated')
             existing_count = sum(1 for ch in selected_chapters if ch['status'] != 'not_translated')
             
-            count = len(selected)
+            count = len(selected_chapters)
             if count > 10:
                 if missing_count > 0 and existing_count > 0:
                     confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters\n\nTotal: {count} chapters\n\nContinue?"
