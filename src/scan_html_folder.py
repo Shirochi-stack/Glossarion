@@ -4025,9 +4025,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         # Debug: Check stop flag states periodically (like original)
                         if processed_count % 50 == 0 and processed_count > 0:
                             log(f"   [DEBUG] Global stop flag: {_stop_flag}, Stop function: {stop_flag() if stop_flag else 'N/A'}")
-                    else:
-                        # Less verbose for other files - show every file but compact
-                        print(f"\r📄 Scanning: {filename} [{processed_count}/{len(html_files)}]", end='', flush=True)
+                    elif processed_count % 5 == 0:
+                        # Show progress every 5 files for GUI visibility
+                        progress = int((processed_count / len(html_files)) * 100)
+                        log(f"📄 [{processed_count}/{len(html_files)}] {filename}... ({progress}%)")
                     
                     # Log issues found (like original)
                     if result.get('issues'):

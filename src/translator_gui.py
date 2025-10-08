@@ -2039,17 +2039,26 @@ Recent translations to summarize:
         if state is not None:
             self.contextual_var = (state == Qt.Checked)
         
-        is_contextual = self.contextual_var
+        # Always get the current checkbox state to be sure
+        if hasattr(self, 'contextual_checkbox'):
+            is_contextual = self.contextual_checkbox.isChecked()
+            self.contextual_var = is_contextual
+        else:
+            is_contextual = self.contextual_var
         
-        # Disable/enable translation history limit entry and gray out label
-        self.trans_history.setEnabled(is_contextual)
-        label_color = 'white' if is_contextual else 'gray'
-        self.trans_history_label.setStyleSheet(f"color: {label_color};")
+        # Enable/disable translation history limit entry and update label color
+        if hasattr(self, 'trans_history'):
+            self.trans_history.setEnabled(is_contextual)
+        if hasattr(self, 'trans_history_label'):
+            label_color = 'white' if is_contextual else 'gray'
+            self.trans_history_label.setStyleSheet(f"color: {label_color};")
         
-        # Disable/enable rolling history checkbox and gray out description
-        self.rolling_checkbox.setEnabled(is_contextual)
-        desc_color = 'gray' if is_contextual else '#404040'
-        self.rolling_history_desc.setStyleSheet(f"color: {desc_color}; font-size: 9pt;")
+        # Enable/disable rolling history checkbox and update description color
+        if hasattr(self, 'rolling_checkbox'):
+            self.rolling_checkbox.setEnabled(is_contextual)
+        if hasattr(self, 'rolling_history_desc'):
+            desc_color = 'gray' if is_contextual else '#404040'
+            self.rolling_history_desc.setStyleSheet(f"color: {desc_color}; font-size: 9pt;")
     
     def _on_batch_toggle(self, state=None):
         """Handle batch translation toggle - enable/disable batch size entry"""
@@ -2057,8 +2066,16 @@ Recent translations to summarize:
         if state is not None:
             self.batch_translation_var = (state == Qt.Checked)
         
+        # Always get the current checkbox state to be sure
+        if hasattr(self, 'batch_checkbox'):
+            is_batch = self.batch_checkbox.isChecked()
+            self.batch_translation_var = is_batch
+        else:
+            is_batch = self.batch_translation_var
+        
         # Enable/disable batch size entry based on checkbox state
-        self.batch_size_entry.setEnabled(self.batch_translation_var)
+        if hasattr(self, 'batch_size_entry'):
+            self.batch_size_entry.setEnabled(is_batch)
     
     def _on_remove_artifacts_toggle(self, state=None):
         """Handle Remove AI Artifacts toggle"""
@@ -3103,8 +3120,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         )
         self.translation_thread.start()
         
-        # Schedule button update check
-        QTimer.singleShot(100, self.update_run_button)
+        # Update button immediately to show Stop state
+        QTimer.singleShot(0, self.update_run_button)
 
     def run_translation_wrapper(self):
         """Wrapper that handles ALL initialization in background thread"""
@@ -3226,6 +3243,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if var in os.environ:
                     del os.environ[var]
             
+            # Clear thread reference
+            self.translation_thread = None
+            if hasattr(self, 'translation_future'):
+                try:
+                    self.translation_future = None
+                except Exception:
+                    pass
             # Update button state on main thread
             QTimer.singleShot(0, self.update_run_button)
 
@@ -4544,11 +4568,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._ensure_executor()
         if self.executor:
             self.glossary_future = self.executor.submit(self.run_glossary_extraction_direct)
+            # Add callback to clean up and update button when done
+            def _glossary_done_callback(f):
+                try:
+                    QTimer.singleShot(0, lambda: (setattr(self, 'glossary_future', None), self.update_run_button()))
+                except Exception:
+                    pass
+            try:
+                self.glossary_future.add_done_callback(_glossary_done_callback)
+            except Exception:
+                pass
         else:
             thread_name = f"GlossaryThread_{int(time.time())}"
             self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
             self.glossary_thread.start()
-        QTimer.singleShot(100, self.update_run_button)
+        QTimer.singleShot(0, self.update_run_button)
 
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly - handles multiple files and different file types"""
@@ -4664,6 +4698,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 pass
                 
             self.glossary_thread = None
+            if hasattr(self, 'glossary_future'):
+                try:
+                    self.glossary_future = None
+                except Exception:
+                    pass
             self.current_file_index = 0
             QTimer.singleShot(0, self.update_run_button)
 
@@ -5561,7 +5600,7 @@ Important rules:
        else:
            self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
            self.epub_thread.start()
-       QTimer.singleShot(100, self.update_run_button)
+       QTimer.singleShot(0, self.update_run_button)
  
     def run_epub_converter_direct(self):
         """Run EPUB converter directly without blocking GUI"""
@@ -5702,83 +5741,85 @@ Important rules:
        any_process_running = translation_running or glossary_running or qa_running or epub_running
        
        # Translation button
+       try:
+           self.run_button.clicked.disconnect()
+       except:
+           pass
+       
        if translation_running:
            self.run_button.setText("Stop Translation")
-           try:
-               self.run_button.clicked.disconnect()
-           except:
-               pass
+           self.run_button.setStyleSheet("background-color: #dc3545; color: white; font-size: 14pt; font-weight: bold;")  # red
            self.run_button.clicked.connect(self.stop_translation)
            self.run_button.setEnabled(True)
        else:
            self.run_button.setText("Run Translation")
-           try:
-               self.run_button.clicked.disconnect()
-           except:
-               pass
+           self.run_button.setStyleSheet("background-color: #28a745; color: white; font-size: 14pt; font-weight: bold;")  # green
            self.run_button.clicked.connect(self.run_translation_thread)
            self.run_button.setEnabled(translation_main and not any_process_running)
        
        # Glossary button
        if hasattr(self, 'glossary_button'):
+           try:
+               self.glossary_button.clicked.disconnect()
+           except:
+               pass
+           
            if glossary_running:
                self.glossary_button.setText("Stop Glossary")
-               try:
-                   self.glossary_button.clicked.disconnect()
-               except:
-                   pass
+               self.glossary_button.setStyleSheet("background-color: #dc3545; color: white; padding: 6px;")  # red
                self.glossary_button.clicked.connect(self.stop_glossary_extraction)
                self.glossary_button.setEnabled(True)
            else:
                self.glossary_button.setText("Extract Glossary")
-               try:
-                   self.glossary_button.clicked.disconnect()
-               except:
-                   pass
+               self.glossary_button.setStyleSheet("background-color: #ffc107; color: black; padding: 6px;")  # yellow
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
                self.glossary_button.setEnabled(glossary_main and not any_process_running)
     
        # EPUB button
        if hasattr(self, 'epub_button'):
+           try:
+               self.epub_button.clicked.disconnect()
+           except:
+               pass
+           
            if epub_running:
                self.epub_button.setText("Stop EPUB")
-               try:
-                   self.epub_button.clicked.disconnect()
-               except:
-                   pass
+               self.epub_button.setStyleSheet("background-color: #dc3545; color: white; padding: 6px;")  # red
                self.epub_button.clicked.connect(self.stop_epub_converter)
                self.epub_button.setEnabled(True)
            else:
                self.epub_button.setText("EPUB Converter")
-               try:
-                   self.epub_button.clicked.disconnect()
-               except:
-                   pass
+               self.epub_button.setStyleSheet("background-color: #17a2b8; color: white; padding: 6px;")  # info blue
                self.epub_button.clicked.connect(self.epub_converter)
                self.epub_button.setEnabled(fallback_compile_epub and not any_process_running)
        
        # QA button
        if hasattr(self, 'qa_button'):
+           try:
+               self.qa_button.clicked.disconnect()
+           except:
+               pass
+           
            if qa_running:
                self.qa_button.setText("Stop Scan")
-               try:
-                   self.qa_button.clicked.disconnect()
-               except:
-                   pass
+               self.qa_button.setStyleSheet("background-color: #dc3545; color: white; padding: 6px;")  # red
                self.qa_button.clicked.connect(self.stop_qa_scan)
                self.qa_button.setEnabled(True)
            else:
                self.qa_button.setText("QA Scan")
-               try:
-                   self.qa_button.clicked.disconnect()
-               except:
-                   pass
+               self.qa_button.setStyleSheet("background-color: #ffc107; color: black; padding: 6px;")  # yellow
                self.qa_button.clicked.connect(self.run_qa_scan)
                self.qa_button.setEnabled(scan_html_folder and not any_process_running)
 
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
+        
+        # Disable button immediately to prevent multiple clicks
+        if hasattr(self, 'run_button'):
+            self.run_button.setEnabled(False)
+            self.run_button.setText("Stopping...")
+            self.run_button.setStyleSheet("background-color: #6c757d; color: white; font-size: 14pt; font-weight: bold;")
         
         # Set environment variable to suppress multi-key logging
         os.environ['TRANSLATION_CANCELLED'] = '1'
@@ -5835,6 +5876,12 @@ Important rules:
 
     def stop_glossary_extraction(self):
        """Stop glossary extraction specifically"""
+       # Disable button immediately to prevent multiple clicks
+       if hasattr(self, 'glossary_button'):
+           self.glossary_button.setEnabled(False)
+           self.glossary_button.setText("Stopping...")
+           self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+       
        self.stop_requested = True
        if glossary_stop_flag:
            glossary_stop_flag(True)
@@ -5845,12 +5892,6 @@ Important rules:
                extract_glossary_from_epub.set_stop_flag(True)
        except: pass
        
-       # Important: Reset the thread/future references so button updates properly
-       if hasattr(self, 'glossary_thread'):
-           self.glossary_thread = None
-       if hasattr(self, 'glossary_future'):
-           self.glossary_future = None
-       
        self.append_log("❌ Glossary extraction stop requested.")
        self.append_log("⏳ Please wait... stopping after current API call completes.")
        self.update_run_button()
@@ -5858,17 +5899,24 @@ Important rules:
 
     def stop_epub_converter(self):
         """Stop EPUB converter"""
+        # Disable button immediately to prevent multiple clicks
+        if hasattr(self, 'epub_button'):
+            self.epub_button.setEnabled(False)
+            self.epub_button.setText("Stopping...")
+            self.epub_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        
         self.stop_requested = True
         self.append_log("❌ EPUB converter stop requested.")
         self.append_log("⏳ Please wait... stopping after current operation completes.")
-        
-        # Important: Reset the thread reference so button updates properly
-        if hasattr(self, 'epub_thread'):
-            self.epub_thread = None
-        
         self.update_run_button()
 
     def stop_qa_scan(self):
+        # Disable button immediately to prevent multiple clicks
+        if hasattr(self, 'qa_button'):
+            self.qa_button.setEnabled(False)
+            self.qa_button.setText("Stopping...")
+            self.qa_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
+        
         self.stop_requested = True
         try:
             from scan_html_folder import stop_scan
@@ -5877,6 +5925,8 @@ Important rules:
         except Exception as e:
             self.append_log(f"❌ Failed to stop scan: {e}")
         self.append_log("⛔ QA scan stop requested.")
+        self.append_log("⏳ Please wait... stopping after current operation completes.")
+        self.update_run_button()
        
 
     def on_close(self):
@@ -5910,11 +5960,17 @@ Important rules:
                    print(message)
                    return
                try:
-                   # Check if widget still exists (QTextEdit doesn't have winfo_exists)
-                   if not self.log_text.isVisible() and not self.log_text.parent():
+                   # Check if widget still exists and is visible
+                   # QTextEdit may not be visible initially but should still accept text
+                   if not self.log_text:
                        exists = False
                    else:
-                       exists = True
+                       # Try to access the widget - if it throws RuntimeError, it's been deleted
+                       try:
+                           _ = self.log_text.document()
+                           exists = True
+                       except RuntimeError:
+                           exists = False
                except Exception:
                    exists = False
                if not exists:
@@ -5927,7 +5983,7 @@ Important rules:
                    scrollbar = self.log_text.verticalScrollBar()
                    at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
                except Exception:
-                   at_bottom = False
+                   at_bottom = True  # Default to scrolling to bottom
                
                is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
                
@@ -5948,14 +6004,20 @@ Important rules:
                    # Regular text append
                    self.log_text.append(message)
                
-               if at_bottom:
-                   # Scroll to bottom
+               # Always try to scroll to bottom to ensure visibility
+               try:
                    scrollbar = self.log_text.verticalScrollBar()
-                   scrollbar.setValue(scrollbar.maximum())
-           except Exception:
+                   if at_bottom or True:  # Always scroll for now to ensure visibility
+                       scrollbar.setValue(scrollbar.maximum())
+                   # Force immediate update of the widget
+                   self.log_text.update()
+                   self.log_text.repaint()
+               except Exception:
+                   pass
+           except Exception as e:
                # As a last resort, print to stdout to avoid crashing callbacks
                try:
-                   print(message)
+                   print(f"{message} [append_log error: {e}]")
                except Exception:
                    pass
        
@@ -5963,11 +6025,12 @@ Important rules:
            _append()
        else:
            try:
+               from PySide6.QtCore import QTimer
                QTimer.singleShot(0, _append)
-           except Exception:
-               # If the master window is gone, just print
+           except Exception as e:
+               # If scheduling fails, just print
                try:
-                   print(message)
+                   print(f"{message} [QTimer error: {e}]")
                except Exception:
                    pass
 

@@ -94,7 +94,7 @@ class QAScannerMixin:
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
         # Create a small loading window with icon
-        loading_window = QDialog(None)  # None parent for Tkinter compatibility
+        loading_window = QDialog(self)
         loading_window.setWindowTitle("Loading QA Scanner")
         loading_window.setModal(True)
         # Use screen ratios: 15% width, 10% height for better label fit
@@ -242,7 +242,7 @@ class QAScannerMixin:
             dialog_width = int(screen_width * 0.60)  # 60% of screen width (increased for better layout)
             dialog_height = int(screen_height * 0.55)  # 55% of screen height for better content fit
             
-            mode_dialog = QDialog(None)  # None parent for Tkinter compatibility
+            mode_dialog = QDialog(self)
             mode_dialog.setWindowTitle("Select QA Scanner Mode")
             mode_dialog.resize(dialog_width, dialog_height)
             mode_dialog.setModal(True)
@@ -577,7 +577,7 @@ class QAScannerMixin:
         # Show custom settings dialog if custom mode is selected
         if selected_mode_value == "custom":
             # Create custom settings dialog
-            custom_dialog = QDialog(None)  # None parent for Tkinter compatibility
+            custom_dialog = QDialog(self)
             custom_dialog.setWindowTitle("Custom Mode Settings")
             custom_dialog.setModal(True)
             # Use screen ratios: 20% width, 50% height for better content fit
@@ -939,7 +939,7 @@ class QAScannerMixin:
             # Check if we have EPUBs for word count analysis
             if not epub_files_to_scan:
                 # No EPUBs available for word count analysis
-                msg = QMessageBox(None)  # None parent for Tkinter compatibility
+                msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Warning)
                 msg.setWindowTitle("No Source EPUB Selected")
                 msg.setText("Word count cross-reference is enabled but no source EPUB file is selected.")
@@ -955,7 +955,7 @@ class QAScannerMixin:
                     return
                 elif result == QMessageBox.No:  # No - Select EPUB now
                     epub_path, _ = QFileDialog.getOpenFileName(
-                        None,  # None parent for Tkinter compatibility
+                        self,
                         "Select Source EPUB File",
                         "",
                         "EPUB files (*.epub);;All files (*.*)"
@@ -963,7 +963,7 @@ class QAScannerMixin:
                     
                     if not epub_path:
                         retry = QMessageBox.question(
-                            None,  # None parent for Tkinter compatibility
+                            self,
                             "No File Selected",
                             "No EPUB file was selected.\n\n" +
                             "Do you want to continue the scan without word count analysis?",
@@ -1304,7 +1304,7 @@ class QAScannerMixin:
                         if not check_epub_folder_match(epub_name, folder_name_for_check, current_qa_settings.get('custom_output_suffixes', '')):
                             if len(folders_to_scan) == 1:
                                 # Interactive dialog for single folder scans
-                                msg = QMessageBox(None)  # None parent for Tkinter compatibility
+                                msg = QMessageBox(self)
                                 msg.setIcon(QMessageBox.Warning)
                                 msg.setWindowTitle("EPUB/Folder Name Mismatch")
                                 msg.setText(f"The source EPUB and output folder names don't match:\n\n"
@@ -1323,7 +1323,7 @@ class QAScannerMixin:
                                     return
                                 elif result == QMessageBox.No:  # No - select different EPUB
                                     new_epub_path, _ = QFileDialog.getOpenFileName(
-                                        None,  # None parent for Tkinter compatibility
+                                        self,
                                         "Select Different Source EPUB File",
                                         "",
                                         "EPUB files (*.epub);;All files (*.*)"
@@ -1337,7 +1337,7 @@ class QAScannerMixin:
                                         self.append_log(f"✅ Updated EPUB: {os.path.basename(new_epub_path)}")
                                     else:
                                         proceed = QMessageBox.question(
-                                            None,  # None parent for Tkinter compatibility
+                                            self,
                                             "No File Selected",
                                             "No EPUB file was selected.\n\n" +
                                             "Continue scan without word count analysis?",
@@ -1417,19 +1417,8 @@ class QAScannerMixin:
                         self.qa_future = None
                     except Exception:
                         pass
+                # Let update_run_button handle the state change properly
                 QTimer.singleShot(0, self.update_run_button)
-                # Check if scan_html_folder is available in translator_gui
-                import translator_gui
-                scan_available = hasattr(translator_gui, 'scan_html_folder') and translator_gui.scan_html_folder is not None
-                def reset_button():
-                    self.qa_button.setText("QA Scan")
-                    try:
-                        self.qa_button.clicked.disconnect()
-                    except:
-                        pass
-                    self.qa_button.clicked.connect(self.run_qa_scan)
-                    self.qa_button.setEnabled(scan_available)
-                QTimer.singleShot(0, reset_button)
         
         # Run via shared executor
         self._ensure_executor()
@@ -1448,6 +1437,9 @@ class QAScannerMixin:
         else:
             self.qa_thread = threading.Thread(target=run_scan, daemon=True)
             self.qa_thread.start()
+        
+        # Update button immediately to show Stop state
+        QTimer.singleShot(0, self.update_run_button)
 
     def show_qa_scanner_settings(self, parent_dialog, qa_settings):
         """Show QA Scanner settings dialog"""
