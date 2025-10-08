@@ -504,7 +504,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "6.0.0"
+        __version__ = "6.0.1"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1166,9 +1166,48 @@ Text to analyze:
                 pass
 
     def append_log_with_api_error_detection(self, message):
-        """Enhanced log appending - now just appends the actual log without adding extra messages"""
-        # Just append the regular log message - no extra "helpful" messages
+        """Enhanced log appending that detects and highlights API errors"""
+        # First append the regular log message
         self.append_log(message)
+        
+        # Check for API error patterns
+        message_lower = message.lower()
+        
+        if "429" in message or "rate limit" in message_lower:
+            # Rate limit error detected
+            self.append_log("⚠️ RATE LIMIT ERROR DETECTED (HTTP 429)")
+            self.append_log("   The API is throttling your requests.")
+            self.append_log("   Please wait before continuing or increase the delay between requests.")
+            self.append_log("   You can increase 'Delay between API calls' in settings.")
+            
+        elif "401" in message or "unauthorized" in message_lower:
+            # Authentication error
+            self.append_log("❌ AUTHENTICATION ERROR (HTTP 401)")
+            self.append_log("   Your API key is invalid or missing.")
+            self.append_log("   Please check your API key in the settings.")
+            
+        elif "403" in message or "forbidden" in message_lower:
+            # Forbidden error
+            self.append_log("❌ ACCESS FORBIDDEN ERROR (HTTP 403)")
+            self.append_log("   You don't have permission to access this API.")
+            self.append_log("   Please check your API subscription and permissions.")
+            
+        elif "400" in message or "bad request" in message_lower:
+            # Bad request error
+            self.append_log("❌ BAD REQUEST ERROR (HTTP 400)")
+            self.append_log("   The API request was malformed or invalid.")
+            self.append_log("   This might be due to unsupported model settings.")
+            
+        elif "timeout" in message_lower:
+            # Timeout error — suppress helper hints if a stop was requested
+            try:
+                if getattr(self, 'stop_requested', False):
+                    return
+            except Exception:
+                pass
+            self.append_log("⏱️ TIMEOUT ERROR")
+            self.append_log("   The API request took too long to respond.")
+            self.append_log("   Consider increasing timeout settings or retrying.")
 
     
     def create_glossary_backup(self, operation_name="manual"):
@@ -1456,9 +1495,8 @@ Recent translations to summarize:
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
         self.api_key_visible = False  # Default to hidden
         
-        # NOTE: glossary_duplicate_key_mode is managed by Glossary Manager GUI
-        # if 'glossary_duplicate_key_mode' not in self.config:
-        #     self.config['glossary_duplicate_key_mode'] = 'fuzzy'
+        if 'glossary_duplicate_key_mode' not in self.config:
+            self.config['glossary_duplicate_key_mode'] = 'fuzzy'
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
@@ -1587,8 +1625,9 @@ Recent translations to summarize:
                 # Log row minimum; will expand aggressively due to stretch factor
                 self.frame.setRowMinimumHeight(r, 200)
             elif r == 11:
-                # Keep toolbar row at fixed height (no stretch, no minimum to allow widget to control)
-                pass
+                # Toolbar row - ensure it stays visible with minimum height
+                self.frame.setRowMinimumHeight(r, 55)  # Ensure toolbar is always visible
+                # Keep stretch at 0 to prevent it from expanding
         
         # Store row stretch defaults for fullscreen toggle
         self._default_row_stretches = {r: (10 if r == 10 else (1 if r == 9 else 0)) for r in range(12)}
@@ -1613,7 +1652,7 @@ Recent translations to summarize:
             self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v6.0.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.0.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -2276,8 +2315,8 @@ Recent translations to summarize:
         # Log Text Edit (row 10, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        self.log_text.setMinimumHeight(300)
-        # Make sure it greedily expands vertically and horizontally
+        self.log_text.setMinimumHeight(200)  # Reduced from 300 to ensure toolbar visibility on low-res screens
+        # Make sure it greedily expands vertically and horizontally but respects minimum/maximum constraints
         self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.log_text, 10, 0, 1, 5)  # row, col, rowspan, colspan
@@ -2899,7 +2938,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         btn_frame = QWidget()
         btn_frame.setMinimumHeight(50)  # Increased for taller buttons
         btn_frame.setMaximumHeight(60)  # Increased for taller buttons
-        btn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Fixed vertical size
+        # Ensure toolbar never overlaps with log by using MinimumExpanding policy
+        btn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setContentsMargins(0, 5, 0, 5)
         btn_layout.setSpacing(2)
@@ -7468,8 +7508,24 @@ Important rules:
                     return
             self.config['translation_history_limit'] = safe_int(self.trans_history.text().strip(), 2)
             
-            # NOTE: All glossary-related settings are managed by Glossary Manager GUI only.
-            # Do not save glossary settings here to avoid overwriting user's Glossary Manager settings.
+            # Add fuzzy matching threshold
+            if hasattr(self, 'fuzzy_threshold_var'):
+                fuzzy_val = self.fuzzy_threshold_var
+                if 0.5 <= fuzzy_val <= 1.0:
+                    self.config['glossary_fuzzy_threshold'] = fuzzy_val
+                else:
+                    self.config['glossary_fuzzy_threshold'] = 0.90  # default
+
+            # Add glossary format preference
+            if hasattr(self, 'use_legacy_csv_var'):
+                self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var
+    
+             # Add after saving translation_prompt_text:
+            if hasattr(self, 'format_instructions_text'):
+                try:
+                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
+                except:
+                    pass
  
             if hasattr(self, 'azure_api_version_var'):
                 self.config['azure_api_version'] = self.azure_api_version_var
@@ -7484,15 +7540,16 @@ Important rules:
             self.config['max_output_tokens'] = self.max_output_tokens
             self.config['translate_book_title'] = self.translate_book_title_var
             self.config['book_title_prompt'] = self.book_title_prompt
-            # NOTE: append_glossary is managed by Glossary Manager GUI
-            # self.config['append_glossary'] = self.append_glossary_var
+            self.config['append_glossary'] = self.append_glossary_var
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var
             self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var, 10)
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var
             self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var, 5)
             self.config['token_limit_disabled'] = self.token_limit_disabled
-            # NOTE: glossary extraction settings (min_frequency, max_names, max_titles, batch_size, max_text_size, chapter_split_threshold)
-            # are managed by Glossary Manager GUI only. Do not save them here to avoid overwriting user's Glossary Manager settings.
+            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var, 2)
+            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var, 50)
+            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var, 30)
+            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var, 50)
             self.config['enable_image_translation'] = self.enable_image_translation_var
             self.config['process_webnovel_images'] = self.process_webnovel_images_var
             self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var, 1000)
@@ -7554,13 +7611,11 @@ Important rules:
             if show_message and debug_enabled and openrouter_env_vars_set:
                 self.append_log(f"🔍 [DEBUG] Set {len(openrouter_env_vars_set)} OpenRouter env vars: {', '.join(openrouter_env_vars_set)}")
             
-            # NOTE: glossary_history_rolling is managed by Glossary Manager GUI
-            # self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
+            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var
             self.config['translate_cover_html'] = self.translate_cover_html_var
-            # NOTE: enable_auto_glossary is managed by Glossary Manager GUI
-            # self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
+            self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var, 0)
             self.config['use_header_as_output'] = self.use_header_as_output_var
@@ -7636,9 +7691,9 @@ Important rules:
             else:
                 if show_message:
                     self.append_log("⚠️ [DEBUG] enable_gui_yield_var not found")
-            # NOTE: glossary_filter_mode is managed by Glossary Manager GUI only
-            # Do not save it here to avoid overwriting user's Glossary Manager settings
-            # self.config['glossary_max_text_size'] and self.config['glossary_chapter_split_threshold'] already handled above
+            self.config['glossary_max_text_size'] = self.glossary_max_text_size_var
+            self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var
+            self.config['glossary_filter_mode'] = self.glossary_filter_mode_var
             self.config['image_chunk_overlap'] = safe_float(self.image_chunk_overlap_var, 1.0)
 
             # Save HTTP/Network tuning settings (from Other Settings)
@@ -7687,11 +7742,17 @@ Important rules:
             if hasattr(self, 'disable_gemini_safety_var'):
                 self.config['disable_gemini_safety'] = self.disable_gemini_safety_var
 
-            # NOTE: strip_honorifics is managed by Glossary Manager GUI
-            # self.config['strip_honorifics'] = self.strip_honorifics_var
+            # NEW: Save strip honorifics setting
+            self.config['strip_honorifics'] = self.strip_honorifics_var
             
-            # NOTE: glossary backup settings are managed by Glossary Manager GUI
-            # Do not initialize defaults here
+            # Save glossary backup settings
+            if hasattr(self, 'config') and 'glossary_auto_backup' in self.config:
+                # These might be set from the glossary backup dialog
+                pass  # Already in config, don't overwrite
+            else:
+                # Set defaults if not already set
+                self.config.setdefault('glossary_auto_backup', True)
+                self.config.setdefault('glossary_max_backups', 50)
                 
             # Save QA Scanner settings if they exist
             if hasattr(self, 'config') and 'qa_scanner_settings' in self.config:
@@ -7729,8 +7790,31 @@ Important rules:
             # Ensure ai_hunter_max_workers has a default value
             self.config['ai_hunter_config'].setdefault('ai_hunter_max_workers', 1)
             
-            # NOTE: Glossary prompts (auto_glossary_prompt, append_glossary_prompt, translation_prompt, format_instructions)
-            # are managed by Glossary Manager GUI only. Do not save them here.
+            # NEW: Save prompts from text widgets if they exist
+            if hasattr(self, 'auto_prompt_text'):
+                try:
+                    self.config['auto_glossary_prompt'] = self.auto_prompt_text.toPlainText().strip()
+                except:
+                    pass
+            
+            if hasattr(self, 'append_prompt_text'):
+                try:
+                    self.config['append_glossary_prompt'] = self.append_prompt_text.toPlainText().strip()
+                except:
+                    pass
+            
+            if hasattr(self, 'translation_prompt_text'):
+                try:
+                    self.config['glossary_translation_prompt'] = self.translation_prompt_text.toPlainText().strip()
+                except:
+                    pass
+
+            # If format instructions text widget exists, ensure config is updated
+            if hasattr(self, 'format_instructions_text'):
+                try:
+                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
+                except:
+                    pass
 
             # Wire verbose payload saving to GUI debug mode at save time
             try:
@@ -7751,13 +7835,9 @@ Important rules:
                 # Normalize and align glossary prompts across keys with safe fallbacks
                 manual_prompt = (
                     self.config.get('manual_glossary_prompt') or
-                    (self.manual_prompt_text.toPlainText().strip() if hasattr(self, 'manual_prompt_text') else None) or
-                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
-                )
-                append_prompt = (
                     self.config.get('append_glossary_prompt') or
                     (self.append_prompt_text.toPlainText().strip() if hasattr(self, 'append_prompt_text') else None) or
-                    getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
+                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
                 )
                 auto_prompt = (
                     self.config.get('auto_glossary_prompt') or
@@ -7775,14 +7855,16 @@ Important rules:
                     getattr(self, 'glossary_format_instructions', '')
                 )
 
-                # NOTE: Glossary prompts are managed by Glossary Manager GUI only.
-                # Do not persist them here to avoid overwriting user's settings.
-                # Just use them for environment variables below.
+                # Persist normalized values under both legacy and current keys
+                self.config['manual_glossary_prompt'] = manual_prompt or ''
+                self.config['append_glossary_prompt'] = manual_prompt or ''
+                self.config['auto_glossary_prompt'] = auto_prompt or ''
+                self.config['glossary_translation_prompt'] = trans_prompt or ''
+                self.config['glossary_format_instructions'] = format_instr or ''
 
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
-                    ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
@@ -8628,7 +8710,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.0.0...")
+    print("🚀 Starting Glossarion v6.0.1...")
     
     # Initialize splash screen
     splash_manager = None
