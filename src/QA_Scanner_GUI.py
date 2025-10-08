@@ -7,9 +7,13 @@ import os
 import sys
 import re
 import json
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton, 
+                               QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, 
+                               QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
+                               QRadioButton, QButtonGroup, QGroupBox, QComboBox,
+                               QFileDialog, QMessageBox, QSizePolicy)
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject
+from PySide6.QtGui import QFont, QPixmap, QIcon
 import threading
 import traceback
 
@@ -96,97 +100,112 @@ class QAScannerMixin:
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
         # Create a small loading window with icon
-        loading_window = self.wm.create_simple_dialog(
-            self.master,
-            "Loading QA Scanner",
-            width=300,
-            height=120,
-            modal=True,
-            hide_initially=False
-        )
+        loading_window = QDialog(None)  # None parent for Tkinter compatibility
+        loading_window.setWindowTitle("Loading QA Scanner")
+        loading_window.setModal(True)
+        # Use screen ratios: 15% width, 10% height for better label fit
+        screen = QApplication.primaryScreen().geometry()
+        loading_width = int(screen.width() * 0.15)
+        loading_height = int(screen.height() * 0.10)
+        loading_window.setFixedSize(loading_width, loading_height)
         
-        # Create content frame
-        content_frame = tk.Frame(loading_window, padx=20, pady=20)
-        content_frame.pack(fill=tk.BOTH, expand=True)
+        # Create content layout
+        layout = QVBoxLayout(loading_window)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # Try to add icon image if available
         status_label = None
         try:
-            from PIL import Image, ImageTk
+            from PIL import Image
             ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
             if os.path.isfile(ico_path):
+                loading_window.setWindowIcon(QIcon(ico_path))
                 # Load icon at small size
                 icon_image = Image.open(ico_path)
                 icon_image = icon_image.resize((32, 32), Image.Resampling.LANCZOS)
-                icon_photo = ImageTk.PhotoImage(icon_image)
                 
                 # Create horizontal layout
-                icon_label = tk.Label(content_frame, image=icon_photo)
-                icon_label.image = icon_photo  # Keep reference
-                icon_label.pack(side=tk.LEFT, padx=(0, 10))
+                h_layout = QHBoxLayout()
+                
+                icon_label = QLabel()
+                # Convert PIL to QPixmap
+                icon_pixmap = QPixmap(ico_path).scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon_label.setPixmap(icon_pixmap)
+                h_layout.addWidget(icon_label)
                 
                 # Text on the right
-                text_frame = tk.Frame(content_frame)
-                text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-                tk.Label(text_frame, text="Initializing QA Scanner...", 
-                        font=('TkDefaultFont', 11)).pack(anchor=tk.W)
-                status_label = tk.Label(text_frame, text="Loading modules...", 
-                                      font=('TkDefaultFont', 9), fg='gray')
-                status_label.pack(anchor=tk.W, pady=(5, 0))
+                text_layout = QVBoxLayout()
+                main_label = QLabel("Initializing QA Scanner...")
+                main_label.setFont(QFont("Arial", 11))
+                text_layout.addWidget(main_label)
+                
+                status_label = QLabel("Loading modules...")
+                status_label.setFont(QFont("Arial", 9))
+                status_label.setStyleSheet("color: gray;")
+                text_layout.addWidget(status_label)
+                
+                h_layout.addLayout(text_layout)
+                layout.addLayout(h_layout)
             else:
                 # Fallback without icon
-                tk.Label(content_frame, text="Initializing QA Scanner...", 
-                        font=('TkDefaultFont', 11)).pack()
-                status_label = tk.Label(content_frame, text="Loading modules...", 
-                                      font=('TkDefaultFont', 9), fg='gray')
-                status_label.pack(pady=(10, 0))
+                main_label = QLabel("Initializing QA Scanner...")
+                main_label.setFont(QFont("Arial", 11))
+                layout.addWidget(main_label)
+                
+                status_label = QLabel("Loading modules...")
+                status_label.setFont(QFont("Arial", 9))
+                status_label.setStyleSheet("color: gray;")
+                layout.addWidget(status_label)
         except ImportError:
             # No PIL, simple text only
-            tk.Label(content_frame, text="Initializing QA Scanner...", 
-                    font=('TkDefaultFont', 11)).pack()
-            status_label = tk.Label(content_frame, text="Loading modules...", 
-                                  font=('TkDefaultFont', 9), fg='gray')
-            status_label.pack(pady=(10, 0))
+            main_label = QLabel("Initializing QA Scanner...")
+            main_label.setFont(QFont("Arial", 11))
+            layout.addWidget(main_label)
+            
+            status_label = QLabel("Loading modules...")
+            status_label.setFont(QFont("Arial", 9))
+            status_label.setStyleSheet("color: gray;")
+            layout.addWidget(status_label)
         
-
-        self.master.update_idletasks()
+        loading_window.show()
+        QApplication.processEvents()
         
         try:
             # Update status
             if status_label:
-                status_label.config(text="Loading translation modules...")
-            loading_window.update_idletasks()
+                status_label.setText("Loading translation modules...")
+            QApplication.processEvents()
             
             if not self._lazy_load_modules():
-                loading_window.destroy()
+                loading_window.close()
                 self.append_log("❌ Failed to load QA scanner modules")
                 return
             
             if status_label:
-                status_label.config(text="Preparing scanner...")
-            loading_window.update_idletasks()
+                status_label.setText("Preparing scanner...")
+            QApplication.processEvents()
             
             # Check for scan_html_folder in the global scope from translator_gui
             import sys
             translator_module = sys.modules.get('translator_gui')
             if translator_module is None or not hasattr(translator_module, 'scan_html_folder') or translator_module.scan_html_folder is None:
-                loading_window.destroy()
+                loading_window.close()
                 self.append_log("❌ QA scanner module is not available")
-                messagebox.showerror("Module Error", "QA scanner module is not available.")
+                QMessageBox.critical(None, "Module Error", "QA scanner module is not available.")
                 return
             
             if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
-                loading_window.destroy()
+                loading_window.close()
                 self.stop_requested = True
                 self.append_log("⛔ QA scan stop requested.")
                 return
             
             # Close loading window
-            loading_window.destroy()
+            loading_window.close()
             self.append_log("✅ QA scanner initialized successfully")
             
         except Exception as e:
-            loading_window.destroy()
+            loading_window.close()
             self.append_log(f"❌ Error initializing QA scanner: {e}")
             return
         
@@ -222,47 +241,102 @@ class QAScannerMixin:
         # Optionally skip mode dialog if a mode override was provided (e.g., scanning phase)
         selected_mode_value = mode_override if mode_override else None
         if selected_mode_value is None:
-            # Show mode selection dialog with settings - calculate proportional sizing
-            screen_width = self.master.winfo_screenwidth()
-            screen_height = self.master.winfo_screenheight()
-            dialog_width = int(screen_width * 0.98)  # 98% of screen width
-            dialog_height = int(screen_height * 0.80)  # 80% of screen height
+            # Show mode selection dialog with settings - calculate proportional sizing (halved)
+            screen = QApplication.primaryScreen().geometry()
+            screen_width = screen.width()
+            screen_height = screen.height()
+            dialog_width = int(screen_width * 0.60)  # 60% of screen width (increased for better layout)
+            dialog_height = int(screen_height * 0.55)  # 55% of screen height for better content fit
             
-            mode_dialog = self.wm.create_simple_dialog(
-                self.master,
-                "Select QA Scanner Mode",
-                width=dialog_width,  # Proportional width for 4-card layout
-                height=dialog_height,  # Proportional height
-                hide_initially=True
-            )
+            mode_dialog = QDialog(None)  # None parent for Tkinter compatibility
+            mode_dialog.setWindowTitle("Select QA Scanner Mode")
+            mode_dialog.resize(dialog_width, dialog_height)
+            mode_dialog.setModal(True)
+            # Set window icon
+            try:
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    mode_dialog.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
+            
+            # Apply global stylesheet for consistent appearance
+            mode_dialog.setStyleSheet("""
+                QDialog {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #1a1a2e, stop:1 #16213e);
+                }
+                QPushButton {
+                    border: 1px solid #4a5568;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    background-color: #2d3748;
+                    color: white;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #4a5568;
+                    border-color: #718096;
+                }
+                QPushButton:pressed {
+                    background-color: #1a202c;
+                }
+                QCheckBox {
+                    color: #e2e8f0;
+                    spacing: 8px;
+                }
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                    border: 2px solid #4a5568;
+                    border-radius: 3px;
+                    background-color: #2d3748;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #3b82f6;
+                    border-color: #3b82f6;
+                }
+            """)
         
         if selected_mode_value is None:
-            # Set minimum size to prevent dialog from being too small
-            mode_dialog.minsize(1200, 600)
+            # Set minimum size to prevent dialog from being too small (using ratios)
+            # 40% width, 40% height for better content fit
+            min_width = int(screen_width * 0.40)
+            min_height = int(screen_height * 0.40)
+            mode_dialog.setMinimumSize(min_width, min_height)
             
             # Variables
             # selected_mode_value already set above
             
             # Main container with constrained expansion
-            main_container = tk.Frame(mode_dialog)
-            main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)  # Add padding
+            main_layout = QVBoxLayout(mode_dialog)
+            main_layout.setContentsMargins(10, 10, 10, 10)
             
-            # Content with padding
-            main_frame = tk.Frame(main_container, padx=30, pady=20)  # Reduced padding
-            main_frame.pack(fill=tk.X)  # Only fill horizontally, don't expand
+            # Content widget with padding
+            content_widget = QWidget()
+            content_layout = QVBoxLayout(content_widget)
+            content_layout.setContentsMargins(30, 20, 30, 20)
+            main_layout.addWidget(content_widget)
             
             # Title with subtitle
-            title_frame = tk.Frame(main_frame)
-            title_frame.pack(pady=(0, 15))  # Further reduced
+            title_label = QLabel("Select Detection Mode")
+            title_label.setFont(QFont("Arial", 28, QFont.Bold))
+            title_label.setStyleSheet("color: #f0f0f0;")
+            title_label.setAlignment(Qt.AlignCenter)
+            content_layout.addWidget(title_label)
             
-            tk.Label(title_frame, text="Select Detection Mode", 
-                     font=('Arial', 28, 'bold'), fg='#f0f0f0').pack()  # Further reduced
-            tk.Label(title_frame, text="Choose how sensitive the duplicate detection should be",
-                     font=('Arial', 16), fg='#d0d0d0').pack(pady=(3, 0))  # Further reduced
+            subtitle_label = QLabel("Choose how sensitive the duplicate detection should be")
+            subtitle_label.setFont(QFont("Arial", 16))
+            subtitle_label.setStyleSheet("color: #d0d0d0;")
+            subtitle_label.setAlignment(Qt.AlignCenter)
+            content_layout.addWidget(subtitle_label)
+            content_layout.addSpacing(15)
             
-            # Mode cards container - don't expand vertically to leave room for buttons
-            modes_container = tk.Frame(main_frame)
-            modes_container.pack(fill=tk.X, pady=(0, 10))  # Reduced bottom padding
+            # Mode cards container
+            modes_widget = QWidget()
+            modes_layout = QGridLayout(modes_widget)
+            modes_layout.setSpacing(10)
+            content_layout.addWidget(modes_widget)
                     
             mode_data = [
             {
@@ -320,7 +394,7 @@ class QAScannerMixin:
                 "hover_color": "#374151",  # Medium gray
                 "border_color": "#059669",
                 "accent_color": "#10b981",
-                "recommendation": "✅ Recommended for quick checks & large folders"
+                "recommendation": "✅ Recommended for average use"
             },
             {
                 "value": "custom",
@@ -347,153 +421,158 @@ class QAScannerMixin:
         if selected_mode_value is None:
             # Make each column share space evenly
             for col in range(len(mode_data)):
-                modes_container.columnconfigure(col, weight=1)
-            # Keep row height stable
-            modes_container.rowconfigure(0, weight=0)
+                modes_layout.setColumnStretch(col, 1)
             
             for idx, mi in enumerate(mode_data):
-                # Main card frame with initial background
-                card = tk.Frame(
-                    modes_container,
-                    bg=mi["bg_color"],
-                    highlightbackground=mi["border_color"],
-                    highlightthickness=2,
-                    relief='flat'
-                )
-                card.grid(row=0, column=idx, padx=10, pady=5, sticky='nsew')
+                # Main card frame with initial background and border
+                card = QFrame()
+                card.setFrameShape(QFrame.StyledPanel)
+                card.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {mi["bg_color"]};
+                        border: 2px solid {mi["border_color"]};
+                        border-radius: 5px;
+                    }}
+                    QFrame:hover {{
+                        background-color: {mi["hover_color"]};
+                    }}
+                """)
+                card.setCursor(Qt.PointingHandCursor)
+                modes_layout.addWidget(card, 0, idx)
                 
-                # Content frame
-                content_frame = tk.Frame(card, bg=mi["bg_color"], cursor='hand2')
-                content_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+                # Content layout
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(15, 15, 15, 15)
                 
                 # Emoji
-                emoji_label = tk.Label(content_frame, text=mi["emoji"], font=('Arial', 48), bg=mi["bg_color"]) 
-                emoji_label.pack(pady=(0, 5))
+                emoji_label = QLabel(mi["emoji"])
+                emoji_label.setFont(QFont("Arial", 48))
+                emoji_label.setAlignment(Qt.AlignCenter)
+                emoji_label.setStyleSheet(f"background-color: transparent; color: white; border: none;")
+                card_layout.addWidget(emoji_label)
                 
                 # Title
-                title_label = tk.Label(content_frame, text=mi["title"], font=('Arial', 24, 'bold'), fg='white', bg=mi["bg_color"]) 
-                title_label.pack()
+                title_label = QLabel(mi["title"])
+                title_label.setFont(QFont("Arial", 24, QFont.Bold))
+                title_label.setAlignment(Qt.AlignCenter)
+                title_label.setStyleSheet(f"background-color: transparent; color: white; border: none;")
+                card_layout.addWidget(title_label)
                 
                 # Subtitle
-                tk.Label(content_frame, text=mi["subtitle"], font=('Arial', 14), fg=mi["accent_color"], bg=mi["bg_color"]).pack(pady=(3, 10))
+                subtitle_label = QLabel(mi["subtitle"])
+                subtitle_label.setFont(QFont("Arial", 14))
+                subtitle_label.setAlignment(Qt.AlignCenter)
+                subtitle_label.setStyleSheet(f"background-color: transparent; color: {mi['accent_color']}; border: none;")
+                card_layout.addWidget(subtitle_label)
+                card_layout.addSpacing(10)
                 
                 # Features
-                features_frame = tk.Frame(content_frame, bg=mi["bg_color"]) 
-                features_frame.pack(fill=tk.X)
                 for feature in mi["features"]:
-                    tk.Label(features_frame, text=feature, font=('Arial', 11), fg='#e0e0e0', bg=mi["bg_color"], justify=tk.LEFT).pack(anchor=tk.W, pady=1)
+                    feature_label = QLabel(feature)
+                    feature_label.setFont(QFont("Arial", 11))
+                    feature_label.setStyleSheet(f"background-color: transparent; color: #e0e0e0; border: none;")
+                    card_layout.addWidget(feature_label)
                 
                 # Recommendation badge if present
-                rec_frame = None
-                rec_label = None
                 if mi["recommendation"]:
-                    rec_frame = tk.Frame(content_frame, bg=mi["accent_color"]) 
-                    rec_frame.pack(pady=(10, 0), fill=tk.X)
-                    rec_label = tk.Label(rec_frame, text=mi["recommendation"], font=('Arial', 11, 'bold'), fg='white', bg=mi["accent_color"], padx=8, pady=4)
-                    rec_label.pack()
+                    card_layout.addSpacing(10)
+                    rec_label = QLabel(mi["recommendation"])
+                    rec_label.setFont(QFont("Arial", 11, QFont.Bold))
+                    rec_label.setStyleSheet(f"""
+                        background-color: {mi['accent_color']};
+                        color: white;
+                        padding: 4px 8px;
+                        border-radius: 3px;
+                    """)
+                    rec_label.setAlignment(Qt.AlignCenter)
+                    card_layout.addWidget(rec_label)
+                
+                card_layout.addStretch()
                 
                 # Click handler
                 def make_click_handler(mode_value):
-                    def handler(event=None):
+                    def handler():
                         nonlocal selected_mode_value
                         selected_mode_value = mode_value
-                        mode_dialog.destroy()
+                        mode_dialog.accept()
                     return handler
-                click_handler = make_click_handler(mi["value"]) 
                 
-                # Hover effects for this card only
-                def create_hover_handlers(md, widgets):
-                    def on_enter(event=None):
-                        for w in widgets:
-                            try:
-                                w.config(bg=md["hover_color"])
-                            except Exception:
-                                pass
-                    def on_leave(event=None):
-                        for w in widgets:
-                            try:
-                                w.config(bg=md["bg_color"])
-                            except Exception:
-                                pass
-                    return on_enter, on_leave
-                
-                all_widgets = [content_frame, emoji_label, title_label, features_frame]
-                all_widgets += [child for child in features_frame.winfo_children() if isinstance(child, tk.Label)]
-                if rec_frame is not None:
-                    all_widgets += [rec_frame, rec_label]
-                on_enter, on_leave = create_hover_handlers(mi, all_widgets)
-                
-                for widget in [card, content_frame, emoji_label, title_label, features_frame] + list(features_frame.winfo_children()):
-                    widget.bind("<Enter>", on_enter)
-                    widget.bind("<Leave>", on_leave)
-                    widget.bind("<Button-1>", click_handler)
-                    try:
-                        widget.config(cursor='hand2')
-                    except Exception:
-                        pass
+                # Make card clickable with mouse press event
+                card.mousePressEvent = lambda event, handler=make_click_handler(mi["value"]): handler()
         
         if selected_mode_value is None:
             # Add separator line before buttons
-            separator = tk.Frame(main_frame, height=1, bg='#cccccc')  # Thinner separator
-            separator.pack(fill=tk.X, pady=(10, 0))
+            separator = QFrame()
+            separator.setFrameShape(QFrame.HLine)
+            separator.setStyleSheet("background-color: #cccccc;")
+            separator.setFixedHeight(1)
+            content_layout.addWidget(separator)
+            content_layout.addSpacing(10)
             
-            # Add settings button at the bottom
-            button_frame = tk.Frame(main_frame)
-            button_frame.pack(fill=tk.X, pady=(10, 5))  # Reduced padding
-            
-            # Create inner frame for centering buttons
-            button_inner = tk.Frame(button_frame)
-            button_inner.pack()
+            # Add settings button layout
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
             
             def show_qa_settings():
                 """Show QA Scanner settings dialog"""
                 self.show_qa_scanner_settings(mode_dialog, qa_settings)
             
-            # Auto-search checkbox - moved to left side of Scanner Settings
-            if not hasattr(self, 'qa_auto_search_output_var'):
-                self.qa_auto_search_output_var = tk.BooleanVar(value=self.config.get('qa_auto_search_output', True))
-            tb.Checkbutton(
-                button_inner,
-                text="Auto-search output",  # Renamed from "Auto-search output folder"
-                variable=self.qa_auto_search_output_var,
-                bootstyle="round-toggle"
-            ).pack(side=tk.LEFT, padx=10)
+            # Auto-search checkbox
+            if not hasattr(self, 'qa_auto_search_output_checkbox'):
+                self.qa_auto_search_output_checkbox = QCheckBox("Auto-search output")
+                self.qa_auto_search_output_checkbox.setChecked(self.config.get('qa_auto_search_output', True))
+            button_layout.addWidget(self.qa_auto_search_output_checkbox)
+            button_layout.addSpacing(10)
             
-            settings_btn = tb.Button(
-                button_inner,
-                text="⚙️  Scanner Settings",  # Added extra space
-                command=show_qa_settings,
-                bootstyle="info-outline",  # Changed to be more visible
-                width=18,  # Slightly smaller
-                padding=(8, 10)  # Reduced padding
-            )
-            settings_btn.pack(side=tk.LEFT, padx=10)
+            settings_btn = QPushButton("⚙️  Scanner Settings")
+            settings_btn.setMinimumWidth(140)
+            settings_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #0d6efd;
+                    color: white;
+                    border: 1px solid #0d6efd;
+                    padding: 8px 10px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #0b5ed7;
+                }
+            """)
+            settings_btn.clicked.connect(show_qa_settings)
+            button_layout.addWidget(settings_btn)
+            button_layout.addSpacing(10)
             
-            cancel_btn = tb.Button(
-                button_inner,
-                text="Cancel",
-                command=lambda: mode_dialog.destroy(),
-                bootstyle="danger",  # Changed from outline to solid
-                width=12,  # Smaller
-                padding=(8, 10)  # Reduced padding
-            )
-            cancel_btn.pack(side=tk.LEFT, padx=10)
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setMinimumWidth(100)
+            cancel_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #dc3545;
+                    color: white;
+                    border: 1px solid #dc3545;
+                    padding: 8px 10px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #bb2d3b;
+                }
+            """)
+            cancel_btn.clicked.connect(mode_dialog.reject)
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
+            content_layout.addLayout(button_layout)
             
             # Handle window close (X button)
             def on_close():
                 nonlocal selected_mode_value
                 selected_mode_value = None
-                mode_dialog.destroy()
+            mode_dialog.rejected.connect(on_close)
             
-            mode_dialog.protocol("WM_DELETE_WINDOW", on_close)
+            # Show dialog and wait for result
+            result = mode_dialog.exec()
             
-            # Show dialog
-            mode_dialog.deiconify()
-            mode_dialog.update_idletasks()  # Force geometry update
-            mode_dialog.wait_window()
-            
-            # Check if user selected a mode
-            if selected_mode_value is None:
+            # Check if user canceled or selected a mode
+            if result == QDialog.Rejected or selected_mode_value is None:
                 self.append_log("⚠️ QA scan canceled.")
                 return
 
@@ -503,38 +582,67 @@ class QAScannerMixin:
 
         # Show custom settings dialog if custom mode is selected
         if selected_mode_value == "custom":
-            # Use WindowManager's setup_scrollable for proper scrolling support
-            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-                self.master,
-                "Custom Mode Settings",
-                width=800,
-                height=650,
-                max_width_ratio=0.9,
-                max_height_ratio=0.85
-            )
+            # Create custom settings dialog
+            custom_dialog = QDialog(None)  # None parent for Tkinter compatibility
+            custom_dialog.setWindowTitle("Custom Mode Settings")
+            custom_dialog.setModal(True)
+            # Use screen ratios: 20% width, 50% height for better content fit
+            screen = QApplication.primaryScreen().geometry()
+            custom_width = int(screen.width() * 0.20)
+            custom_height = int(screen.height() * 0.50)
+            custom_dialog.resize(custom_width, custom_height)
+            # Set window icon
+            try:
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    custom_dialog.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
             
-            # Variables for custom settings
+            # Main layout
+            dialog_layout = QVBoxLayout(custom_dialog)
+            
+            # Scroll area
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            
+            # Scrollable content widget
+            scroll_widget = QWidget()
+            scroll_layout = QVBoxLayout(scroll_widget)
+            scroll.setWidget(scroll_widget)
+            dialog_layout.addWidget(scroll)
+            
+            # Variables for custom settings (using native Python values instead of tk vars)
             custom_settings = {
-                'similarity': tk.IntVar(value=85),
-                'semantic': tk.IntVar(value=80),
-                'structural': tk.IntVar(value=90),
-                'word_overlap': tk.IntVar(value=75),
-                'minhash_threshold': tk.IntVar(value=80),
-                'consecutive_chapters': tk.IntVar(value=2),
-                'check_all_pairs': tk.BooleanVar(value=False),
-                'sample_size': tk.IntVar(value=3000),
-                'min_text_length': tk.IntVar(value=500)
+                'similarity': 85,
+                'semantic': 80,
+                'structural': 90,
+                'word_overlap': 75,
+                'minhash_threshold': 80,
+                'consecutive_chapters': 2,
+                'check_all_pairs': False,
+                'sample_size': 3000,
+                'min_text_length': 500
             }
             
-            # Title using consistent styling
-            title_label = tk.Label(scrollable_frame, text="Configure Custom Detection Settings", 
-                                  font=('Arial', 20, 'bold'))
-            title_label.pack(pady=(0, 20))
+            # Store widget references
+            custom_widgets = {}
             
-            # Detection Thresholds Section using ttkbootstrap
-            threshold_frame = tb.LabelFrame(scrollable_frame, text="Detection Thresholds (%)", 
-                                            padding=25, bootstyle="secondary")
-            threshold_frame.pack(fill='x', padx=20, pady=(0, 25))
+            # Title using consistent styling
+            title_label = QLabel("Configure Custom Detection Settings")
+            title_label.setFont(QFont('Arial', 20, QFont.Bold))
+            title_label.setAlignment(Qt.AlignCenter)
+            scroll_layout.addWidget(title_label)
+            scroll_layout.addSpacing(20)
+            
+            # Detection Thresholds Section
+            threshold_group = QGroupBox("Detection Thresholds (%)")
+            threshold_group.setFont(QFont('Arial', 12, QFont.Bold))
+            threshold_layout = QVBoxLayout(threshold_group)
+            threshold_layout.setContentsMargins(25, 25, 25, 25)
+            scroll_layout.addWidget(threshold_group)
             
             threshold_descriptions = {
                 'similarity': ('Text Similarity', 'Character-by-character comparison'),
@@ -549,101 +657,142 @@ class QAScannerMixin:
             
             for setting_key, (label_text, description) in threshold_descriptions.items():
                 # Container for each threshold
-                row_frame = tk.Frame(threshold_frame)
-                row_frame.pack(fill='x', pady=8)
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 8, 0, 8)
                 
                 # Left side - labels
-                label_container = tk.Frame(row_frame)
-                label_container.pack(side='left', fill='x', expand=True)
+                label_widget = QWidget()
+                label_layout = QVBoxLayout(label_widget)
+                label_layout.setContentsMargins(0, 0, 0, 0)
                 
-                main_label = tk.Label(label_container, text=f"{label_text} - {description}:",
-                                     font=('TkDefaultFont', 11))
-                main_label.pack(anchor='w')
+                main_label = QLabel(f"{label_text} - {description}:")
+                main_label.setFont(QFont('Arial', 11))
+                label_layout.addWidget(main_label)
+                label_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                row_layout.addWidget(label_widget)
                 
                 # Right side - slider and percentage
-                slider_container = tk.Frame(row_frame)
-                slider_container.pack(side='right', padx=(20, 0))
-                
-                # Percentage label (shows current value)
-                percentage_label = tk.Label(slider_container, text=f"{custom_settings[setting_key].get()}%",
-                                           font=('TkDefaultFont', 12, 'bold'), width=5, anchor='e')
-                percentage_label.pack(side='right', padx=(10, 0))
-                percentage_labels[setting_key] = percentage_label
+                slider_widget = QWidget()
+                slider_layout = QHBoxLayout(slider_widget)
+                slider_layout.setContentsMargins(20, 0, 0, 0)
                 
                 # Create slider
-                slider = tb.Scale(slider_container, 
-                                 from_=10, to=100,
-                                 variable=custom_settings[setting_key],
-                                 bootstyle="info",
-                                 length=300,
-                                 orient='horizontal')
-                slider.pack(side='right')
+                slider = QSlider(Qt.Horizontal)
+                slider.setMinimum(10)
+                slider.setMaximum(100)
+                slider.setValue(custom_settings[setting_key])
+                slider.setMinimumWidth(300)
+                slider_layout.addWidget(slider)
+                
+                # Percentage label (shows current value)
+                percentage_label = QLabel(f"{custom_settings[setting_key]}%")
+                percentage_label.setFont(QFont('Arial', 12, QFont.Bold))
+                percentage_label.setMinimumWidth(50)
+                percentage_label.setAlignment(Qt.AlignRight)
+                slider_layout.addWidget(percentage_label)
+                percentage_labels[setting_key] = percentage_label
+                
+                row_layout.addWidget(slider_widget)
+                threshold_layout.addWidget(row_widget)
+                
+                # Store slider widget reference
+                custom_widgets[setting_key] = slider
                 
                 # Update percentage label when slider moves
-                def create_update_function(key, label):
-                    def update_percentage(*args):
-                        value = custom_settings[key].get()
-                        label.config(text=f"{value}%")
+                def create_update_function(key, label, settings_dict):
+                    def update_percentage(value):
+                        settings_dict[key] = value
+                        label.setText(f"{value}%")
                     return update_percentage
                 
-                # Bind the update function
-                update_func = create_update_function(setting_key, percentage_label)
-                custom_settings[setting_key].trace('w', update_func)
+                # Connect slider to update function
+                update_func = create_update_function(setting_key, percentage_label, custom_settings)
+                slider.valueChanged.connect(update_func)
+            
+            scroll_layout.addSpacing(15)
             
             # Processing Options Section
-            options_frame = tb.LabelFrame(scrollable_frame, text="Processing Options", 
-                                          padding=20, bootstyle="secondary")
-            options_frame.pack(fill='x', padx=20, pady=15)
+            options_group = QGroupBox("Processing Options")
+            options_group.setFont(QFont('Arial', 12, QFont.Bold))
+            options_layout = QVBoxLayout(options_group)
+            options_layout.setContentsMargins(20, 20, 20, 20)
+            scroll_layout.addWidget(options_group)
             
             # Consecutive chapters option with spinbox
-            consec_frame = tk.Frame(options_frame)
-            consec_frame.pack(fill='x', pady=5)
+            consec_widget = QWidget()
+            consec_layout = QHBoxLayout(consec_widget)
+            consec_layout.setContentsMargins(0, 5, 0, 5)
             
-            tk.Label(consec_frame, text="Consecutive chapters to check:", 
-                     font=('TkDefaultFont', 11)).pack(side='left')
+            consec_label = QLabel("Consecutive chapters to check:")
+            consec_label.setFont(QFont('Arial', 11))
+            consec_layout.addWidget(consec_label)
             
-            tb.Spinbox(consec_frame, from_=1, to=10, 
-                       textvariable=custom_settings['consecutive_chapters'],
-                       width=10, bootstyle="info").pack(side='left', padx=(10, 0))
+            consec_spinbox = QSpinBox()
+            consec_spinbox.setMinimum(1)
+            consec_spinbox.setMaximum(10)
+            consec_spinbox.setValue(custom_settings['consecutive_chapters'])
+            consec_spinbox.setMinimumWidth(100)
+            consec_layout.addWidget(consec_spinbox)
+            consec_layout.addStretch()
+            options_layout.addWidget(consec_widget)
+            custom_widgets['consecutive_chapters'] = consec_spinbox
             
             # Sample size option
-            sample_frame = tk.Frame(options_frame)
-            sample_frame.pack(fill='x', pady=5)
+            sample_widget = QWidget()
+            sample_layout = QHBoxLayout(sample_widget)
+            sample_layout.setContentsMargins(0, 5, 0, 5)
             
-            tk.Label(sample_frame, text="Sample size for comparison (characters):", 
-                     font=('TkDefaultFont', 11)).pack(side='left')
+            sample_label = QLabel("Sample size for comparison (characters):")
+            sample_label.setFont(QFont('Arial', 11))
+            sample_layout.addWidget(sample_label)
             
             # Sample size spinbox with larger range
-            sample_spinbox = tb.Spinbox(sample_frame, from_=1000, to=10000, increment=500,
-                                        textvariable=custom_settings['sample_size'],
-                                        width=10, bootstyle="info")
-            sample_spinbox.pack(side='left', padx=(10, 0))
+            sample_spinbox = QSpinBox()
+            sample_spinbox.setMinimum(1000)
+            sample_spinbox.setMaximum(10000)
+            sample_spinbox.setSingleStep(500)
+            sample_spinbox.setValue(custom_settings['sample_size'])
+            sample_spinbox.setMinimumWidth(100)
+            sample_layout.addWidget(sample_spinbox)
+            sample_layout.addStretch()
+            options_layout.addWidget(sample_widget)
+            custom_widgets['sample_size'] = sample_spinbox
             
             # Minimum text length option
-            min_length_frame = tk.Frame(options_frame)
-            min_length_frame.pack(fill='x', pady=5)
+            min_length_widget = QWidget()
+            min_length_layout = QHBoxLayout(min_length_widget)
+            min_length_layout.setContentsMargins(0, 5, 0, 5)
             
-            tk.Label(min_length_frame, text="Minimum text length to process (characters):", 
-                     font=('TkDefaultFont', 11)).pack(side='left')
+            min_length_label = QLabel("Minimum text length to process (characters):")
+            min_length_label.setFont(QFont('Arial', 11))
+            min_length_layout.addWidget(min_length_label)
             
             # Minimum length spinbox
-            min_length_spinbox = tb.Spinbox(min_length_frame, from_=100, to=5000, increment=100,
-                                            textvariable=custom_settings['min_text_length'],
-                                            width=10, bootstyle="info")
-            min_length_spinbox.pack(side='left', padx=(10, 0))
+            min_length_spinbox = QSpinBox()
+            min_length_spinbox.setMinimum(100)
+            min_length_spinbox.setMaximum(5000)
+            min_length_spinbox.setSingleStep(100)
+            min_length_spinbox.setValue(custom_settings['min_text_length'])
+            min_length_spinbox.setMinimumWidth(100)
+            min_length_layout.addWidget(min_length_spinbox)
+            min_length_layout.addStretch()
+            options_layout.addWidget(min_length_widget)
+            custom_widgets['min_text_length'] = min_length_spinbox
             
             # Check all file pairs option
-            tb.Checkbutton(options_frame, text="Check all file pairs (slower but more thorough)",
-                           variable=custom_settings['check_all_pairs'],
-                           bootstyle="primary").pack(anchor='w', pady=8)
+            check_all_checkbox = QCheckBox("Check all file pairs (slower but more thorough)")
+            check_all_checkbox.setChecked(custom_settings['check_all_pairs'])
+            options_layout.addWidget(check_all_checkbox)
+            custom_widgets['check_all_pairs'] = check_all_checkbox
             
-            # Create button frame at bottom (inside scrollable_frame)
-            button_frame = tk.Frame(scrollable_frame)
-            button_frame.pack(fill='x', pady=(30, 20))
+            scroll_layout.addSpacing(30)
             
-            # Center buttons using inner frame
-            button_inner = tk.Frame(button_frame)
-            button_inner.pack()
+            # Create button layout at bottom
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            button_layout.addStretch()
+            scroll_layout.addWidget(button_widget)
             
             # Flag to track if settings were saved
             settings_saved = False
@@ -653,36 +802,36 @@ class QAScannerMixin:
                 nonlocal settings_saved
                 qa_settings['custom_mode_settings'] = {
                     'thresholds': {
-                        'similarity': custom_settings['similarity'].get() / 100,
-                        'semantic': custom_settings['semantic'].get() / 100,
-                        'structural': custom_settings['structural'].get() / 100,
-                        'word_overlap': custom_settings['word_overlap'].get() / 100,
-                        'minhash_threshold': custom_settings['minhash_threshold'].get() / 100
+                        'similarity': custom_widgets['similarity'].value() / 100,
+                        'semantic': custom_widgets['semantic'].value() / 100,
+                        'structural': custom_widgets['structural'].value() / 100,
+                        'word_overlap': custom_widgets['word_overlap'].value() / 100,
+                        'minhash_threshold': custom_widgets['minhash_threshold'].value() / 100
                     },
-                    'consecutive_chapters': custom_settings['consecutive_chapters'].get(),
-                    'check_all_pairs': custom_settings['check_all_pairs'].get(),
-                    'sample_size': custom_settings['sample_size'].get(),
-                    'min_text_length': custom_settings['min_text_length'].get()
+                    'consecutive_chapters': custom_widgets['consecutive_chapters'].value(),
+                    'check_all_pairs': custom_widgets['check_all_pairs'].isChecked(),
+                    'sample_size': custom_widgets['sample_size'].value(),
+                    'min_text_length': custom_widgets['min_text_length'].value()
                 }
                 settings_saved = True
                 self.append_log("✅ Custom detection settings saved")
-                dialog._cleanup_scrolling()  # Clean up scrolling bindings
-                dialog.destroy()
+                custom_dialog.accept()
             
             def reset_to_defaults():
                 """Reset all values to default settings"""
-                if messagebox.askyesno("Reset to Defaults", 
-                                       "Reset all values to default settings?",
-                                       parent=dialog):
-                    custom_settings['similarity'].set(85)
-                    custom_settings['semantic'].set(80)
-                    custom_settings['structural'].set(90)
-                    custom_settings['word_overlap'].set(75)
-                    custom_settings['minhash_threshold'].set(80)
-                    custom_settings['consecutive_chapters'].set(2)
-                    custom_settings['check_all_pairs'].set(False)
-                    custom_settings['sample_size'].set(3000)
-                    custom_settings['min_text_length'].set(500)
+                reply = QMessageBox.question(custom_dialog, "Reset to Defaults", 
+                                           "Reset all values to default settings?",
+                                           QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    custom_widgets['similarity'].setValue(85)
+                    custom_widgets['semantic'].setValue(80)
+                    custom_widgets['structural'].setValue(90)
+                    custom_widgets['word_overlap'].setValue(75)
+                    custom_widgets['minhash_threshold'].setValue(80)
+                    custom_widgets['consecutive_chapters'].setValue(2)
+                    custom_widgets['check_all_pairs'].setChecked(False)
+                    custom_widgets['sample_size'].setValue(3000)
+                    custom_widgets['min_text_length'].setValue(500)
                     self.append_log("ℹ️ Settings reset to defaults")
             
             def cancel_settings():
@@ -704,44 +853,61 @@ class QAScannerMixin:
                     
                     changed = False
                     for key, default_val in defaults.items():
-                        if custom_settings[key].get() != default_val:
-                            changed = True
-                            break
+                        if key == 'check_all_pairs':
+                            if custom_widgets[key].isChecked() != default_val:
+                                changed = True
+                                break
+                        else:
+                            if custom_widgets[key].value() != default_val:
+                                changed = True
+                                break
                     
                     if changed:
-                        if messagebox.askyesno("Unsaved Changes", 
-                                              "You have unsaved changes. Are you sure you want to cancel?",
-                                              parent=dialog):
-                            dialog._cleanup_scrolling()
-                            dialog.destroy()
+                        reply = QMessageBox.question(custom_dialog, "Unsaved Changes", 
+                                                    "You have unsaved changes. Are you sure you want to cancel?",
+                                                    QMessageBox.Yes | QMessageBox.No)
+                        if reply == QMessageBox.Yes:
+                            custom_dialog.reject()
                     else:
-                        dialog._cleanup_scrolling()
-                        dialog.destroy()
+                        custom_dialog.reject()
                 else:
-                    dialog._cleanup_scrolling()
-                    dialog.destroy()
+                    custom_dialog.reject()
             
-            # Use ttkbootstrap buttons with better styling
-            tb.Button(button_inner, text="Cancel", 
-                     command=cancel_settings,
-                     bootstyle="secondary", width=15).pack(side='left', padx=5)
+            # Create buttons
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setMinimumWidth(120)
+            cancel_btn.clicked.connect(cancel_settings)
+            button_layout.addWidget(cancel_btn)
             
-            tb.Button(button_inner, text="Reset Defaults", 
-                     command=reset_to_defaults,
-                     bootstyle="warning", width=15).pack(side='left', padx=5)
+            reset_btn = QPushButton("Reset Defaults")
+            reset_btn.setMinimumWidth(120)
+            reset_btn.clicked.connect(reset_to_defaults)
+            button_layout.addWidget(reset_btn)
             
-            tb.Button(button_inner, text="Start Scan", 
-                     command=save_custom_settings,
-                     bootstyle="success", width=15).pack(side='left', padx=5)
+            start_btn = QPushButton("Start Scan")
+            start_btn.setMinimumWidth(120)
+            start_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    border: 1px solid #28a745;
+                    padding: 6px 12px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #218838;
+                }
+            """)
+            start_btn.clicked.connect(save_custom_settings)
+            button_layout.addWidget(start_btn)
             
-            # Use WindowManager's auto-resize
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.72)
+            button_layout.addStretch()
             
             # Handle window close properly - treat as cancel
-            dialog.protocol("WM_DELETE_WINDOW", cancel_settings)
+            custom_dialog.rejected.connect(cancel_settings)
             
-            # Wait for dialog to close
-            dialog.wait_window()
+            # Show dialog and wait for result
+            result = custom_dialog.exec()
             
             # If user cancelled at this dialog, cancel the whole scan
             if not settings_saved:
@@ -779,34 +945,38 @@ class QAScannerMixin:
             # Check if we have EPUBs for word count analysis
             if not epub_files_to_scan:
                 # No EPUBs available for word count analysis
-                result = messagebox.askyesnocancel(
-                    "No Source EPUB Selected",
-                    "Word count cross-reference is enabled but no source EPUB file is selected.\n\n" +
-                    "Would you like to:\n" +
-                    "• YES - Continue scan without word count analysis\n" +
-                    "• NO - Select an EPUB file now\n" +
-                    "• CANCEL - Cancel the scan",
-                    icon='warning'
-                )
+                msg = QMessageBox(None)  # None parent for Tkinter compatibility
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("No Source EPUB Selected")
+                msg.setText("Word count cross-reference is enabled but no source EPUB file is selected.")
+                msg.setInformativeText("Would you like to:\n"
+                                      "• YES - Continue scan without word count analysis\n"
+                                      "• NO - Select an EPUB file now\n"
+                                      "• CANCEL - Cancel the scan")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+                result = msg.exec()
                 
-                if result is None:  # Cancel
+                if result == QMessageBox.Cancel:
                     self.append_log("⚠️ QA scan canceled.")
                     return
-                elif result is False:  # No - Select EPUB now
-                    epub_path = filedialog.askopenfilename(
-                        title="Select Source EPUB File",
-                        filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+                elif result == QMessageBox.No:  # No - Select EPUB now
+                    epub_path, _ = QFileDialog.getOpenFileName(
+                        None,  # None parent for Tkinter compatibility
+                        "Select Source EPUB File",
+                        "",
+                        "EPUB files (*.epub);;All files (*.*)"
                     )
                     
                     if not epub_path:
-                        retry = messagebox.askyesno(
+                        retry = QMessageBox.question(
+                            None,  # None parent for Tkinter compatibility
                             "No File Selected",
                             "No EPUB file was selected.\n\n" +
                             "Do you want to continue the scan without word count analysis?",
-                            icon='question'
+                            QMessageBox.Yes | QMessageBox.No
                         )
                         
-                        if not retry:
+                        if retry == QMessageBox.No:
                             self.append_log("⚠️ QA scan canceled.")
                             return
                         else:
@@ -827,7 +997,7 @@ class QAScannerMixin:
                     epub_files_to_scan = []
         # Persist latest auto-search preference
         try:
-            self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_var.get())
+            self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_checkbox.isChecked())
             self.save_config(show_message=False)
         except Exception:
             pass
@@ -836,8 +1006,8 @@ class QAScannerMixin:
         folders_to_scan = []
         auto_search_enabled = self.config.get('qa_auto_search_output', True)
         try:
-            if hasattr(self, 'qa_auto_search_output_var'):
-                auto_search_enabled = bool(self.qa_auto_search_output_var.get())
+            if hasattr(self, 'qa_auto_search_output_checkbox'):
+                auto_search_enabled = bool(self.qa_auto_search_output_checkbox.isChecked())
         except Exception:
             pass
         
@@ -906,7 +1076,10 @@ class QAScannerMixin:
                 self.append_log("⚠️ Auto-search enabled but no matching output folder found")
                 self.append_log("📁 Falling back to manual folder selection...")
                 
-                selected_folder = filedialog.askdirectory(title="Auto-search failed - Select Output Folder to Scan")
+                selected_folder = QFileDialog.getExistingDirectory(
+                    self.parent,
+                    "Auto-search failed - Select Output Folder to Scan"
+                )
                 if not selected_folder:
                     self.append_log("⚠️ QA scan canceled - no folder selected.")
                     return
@@ -955,7 +1128,10 @@ class QAScannerMixin:
             folders_to_scan = []
             
             # Simply select one folder - clean and simple
-            selected_folder = filedialog.askdirectory(title="Select Folder with HTML Files")
+            selected_folder = QFileDialog.getExistingDirectory(
+                self.parent,
+                "Select Folder with HTML Files"
+            )
             if not selected_folder:
                 self.append_log("⚠️ QA scan canceled - no folder selected.")
                 return
@@ -1023,8 +1199,8 @@ class QAScannerMixin:
  
         def run_scan():
             # Update UI on the main thread
-            self.master.after(0, self.update_run_button)
-            self.master.after(0, lambda: self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger"))
+            QTimer.singleShot(0, self.update_run_button)
+            QTimer.singleShot(0, lambda: self.qa_button.setText("Stop Scan") or self.qa_button.clicked.disconnect() or self.qa_button.clicked.connect(self.stop_qa_scan))
             
             try:
                 # Extract cache configuration from qa_settings
@@ -1134,26 +1310,29 @@ class QAScannerMixin:
                         if not check_epub_folder_match(epub_name, folder_name_for_check, current_qa_settings.get('custom_output_suffixes', '')):
                             if len(folders_to_scan) == 1:
                                 # Interactive dialog for single folder scans
-                                result = messagebox.askyesnocancel(
-                                    "EPUB/Folder Name Mismatch",
-                                    f"The source EPUB and output folder names don't match:\n\n" +
-                                    f"📖 EPUB: {epub_name}\n" +
-                                    f"📁 Folder: {folder_name_for_check}\n\n" +
-                                    "This might mean you're comparing the wrong files.\n" +
-                                    "Would you like to:\n" +
-                                    "• YES - Continue anyway (I'm sure these match)\n" +
-                                    "• NO - Select a different EPUB file\n" +
-                                    "• CANCEL - Cancel the scan",
-                                    icon='warning'
-                                )
+                                msg = QMessageBox(None)  # None parent for Tkinter compatibility
+                                msg.setIcon(QMessageBox.Warning)
+                                msg.setWindowTitle("EPUB/Folder Name Mismatch")
+                                msg.setText(f"The source EPUB and output folder names don't match:\n\n"
+                                          f"📖 EPUB: {epub_name}\n"
+                                          f"📁 Folder: {folder_name_for_check}\n\n"
+                                          "This might mean you're comparing the wrong files.")
+                                msg.setInformativeText("Would you like to:\n"
+                                                      "• YES - Continue anyway (I'm sure these match)\n"
+                                                      "• NO - Select a different EPUB file\n"
+                                                      "• CANCEL - Cancel the scan")
+                                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+                                result = msg.exec()
                                 
-                                if result is None:  # Cancel
+                                if result == QMessageBox.Cancel:
                                     self.append_log("⚠️ QA scan canceled due to EPUB/folder mismatch.")
                                     return
-                                elif result is False:  # No - select different EPUB
-                                    new_epub_path = filedialog.askopenfilename(
-                                        title="Select Different Source EPUB File",
-                                        filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+                                elif result == QMessageBox.No:  # No - select different EPUB
+                                    new_epub_path, _ = QFileDialog.getOpenFileName(
+                                        None,  # None parent for Tkinter compatibility
+                                        "Select Different Source EPUB File",
+                                        "",
+                                        "EPUB files (*.epub);;All files (*.*)"
                                     )
                                     
                                     if new_epub_path:
@@ -1163,13 +1342,14 @@ class QAScannerMixin:
                                         self.save_config(show_message=False)
                                         self.append_log(f"✅ Updated EPUB: {os.path.basename(new_epub_path)}")
                                     else:
-                                        proceed = messagebox.askyesno(
+                                        proceed = QMessageBox.question(
+                                            None,  # None parent for Tkinter compatibility
                                             "No File Selected",
                                             "No EPUB file was selected.\n\n" +
                                             "Continue scan without word count analysis?",
-                                            icon='question'
+                                            QMessageBox.Yes | QMessageBox.No
                                         )
-                                        if not proceed:
+                                        if proceed == QMessageBox.No:
                                             self.append_log("⚠️ QA scan canceled.")
                                             return
                                         else:
@@ -1243,16 +1423,19 @@ class QAScannerMixin:
                         self.qa_future = None
                     except Exception:
                         pass
-                self.master.after(0, self.update_run_button)
+                QTimer.singleShot(0, self.update_run_button)
                 # Check if scan_html_folder is available in translator_gui
                 import translator_gui
                 scan_available = hasattr(translator_gui, 'scan_html_folder') and translator_gui.scan_html_folder is not None
-                self.master.after(0, lambda: self.qa_button.config(
-                    text="QA Scan", 
-                    command=self.run_qa_scan, 
-                    bootstyle="warning",
-                    state=tk.NORMAL if scan_available else tk.DISABLED
-                ))
+                def reset_button():
+                    self.qa_button.setText("QA Scan")
+                    try:
+                        self.qa_button.clicked.disconnect()
+                    except:
+                        pass
+                    self.qa_button.clicked.connect(self.run_qa_scan)
+                    self.qa_button.setEnabled(scan_available)
+                QTimer.singleShot(0, reset_button)
         
         # Run via shared executor
         self._ensure_executor()
@@ -1261,7 +1444,7 @@ class QAScannerMixin:
             # Ensure UI is refreshed when QA work completes
             def _qa_done_callback(f):
                 try:
-                    self.master.after(0, lambda: (setattr(self, 'qa_future', None), self.update_run_button()))
+                    QTimer.singleShot(0, lambda: (setattr(self, 'qa_future', None), self.update_run_button()))
                 except Exception:
                     pass
             try:
@@ -1273,264 +1456,324 @@ class QAScannerMixin:
             self.qa_thread.start()
 
     def show_qa_scanner_settings(self, parent_dialog, qa_settings):
-        """Show QA Scanner settings dialog using WindowManager properly"""
-        # Use setup_scrollable from WindowManager - NOT create_scrollable_dialog
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            parent_dialog,
-            "QA Scanner Settings",
-            width=800,
-            height=None,  # Let WindowManager calculate optimal height
-            modal=True,
-            resizable=True,
-            max_width_ratio=0.9,
-            max_height_ratio=0.9
-        )
+        """Show QA Scanner settings dialog"""
+        # Create settings dialog
+        dialog = QDialog(parent_dialog)
+        dialog.setWindowTitle("QA Scanner Settings")
+        dialog.setModal(True)
+        # Use screen ratios: 40% width, 85% height (decreased from 100%)
+        screen = QApplication.primaryScreen().geometry()
+        settings_width = int(screen.width() * 0.40)
+        settings_height = int(screen.height() * 0.85)
+        dialog.resize(settings_width, settings_height)
         
-        # Main settings frame
-        main_frame = tk.Frame(scrollable_frame, padx=30, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Set window icon
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                dialog.setWindowIcon(QIcon(ico_path))
+        except Exception:
+            pass
+        
+        # Apply global dark stylesheet for consistent appearance
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #0f172a; /* slate-900 */
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #374151; /* slate-700 */
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 15px;
+                background-color: #111827; /* slate-800 */
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 8px 0 8px;
+                color: #e5e7eb; /* text-slate-200 */
+            }
+            QLabel {
+                background-color: transparent;
+                color: #e5e7eb; /* text-slate-200 */
+            }
+            QPushButton {
+                border: 1px solid #4b5563; /* slate-600 */
+                border-radius: 4px;
+                padding: 6px 12px;
+                background-color: #1f2937; /* slate-800 */
+                color: #e5e7eb;
+                font-weight: normal;
+            }
+            QPushButton:hover {
+                background-color: #374151; /* slate-700 */
+                border-color: #6b7280; /* slate-500 */
+            }
+            QPushButton:pressed {
+                background-color: #111827; /* slate-900 */
+            }
+            QCheckBox {
+                spacing: 8px;
+                color: #e5e7eb;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #4b5563;
+                border-radius: 3px;
+                background-color: #1f2937;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #6b7280;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #3b82f6; /* blue-500 */
+                border-color: #3b82f6;
+            }
+            QSpinBox, QComboBox, QTextEdit {
+                border: 1px solid #374151;
+                border-radius: 4px;
+                padding: 6px 8px;
+                background-color: #111827;
+                color: #e5e7eb;
+                min-height: 22px;
+            }
+            QSpinBox:hover, QComboBox:hover, QTextEdit:hover {
+                border-color: #6b7280;
+            }
+            QSpinBox:focus, QComboBox:focus, QTextEdit:focus {
+                border-color: #3b82f6;
+            }
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            #scroll_widget {
+                background-color: #0f172a;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background-color: #111827;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #374151;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #4b5563;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #374151;
+                height: 6px;
+                background: #1f2937;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #3b82f6;
+                border: 1px solid #2563eb;
+                width: 18px;
+                margin: -6px 0;
+                border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #2563eb;
+            }
+        """)
+        
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        
+        # Scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Scrollable content widget
+        scroll_widget = QWidget()
+        scroll_widget.setObjectName('scroll_widget')
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(30, 20, 30, 20)
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+        
+        # Helper function to disable mousewheel on spinboxes and comboboxes
+        def disable_wheel_event(widget):
+            widget.wheelEvent = lambda event: event.ignore()
         
         # Title
-        title_label = tk.Label(
-            main_frame,
-            text="QA Scanner Settings",
-            font=('Arial', 24, 'bold')
-        )
-        title_label.pack(pady=(0, 20))
+        title_label = QLabel("QA Scanner Settings")
+        title_label.setFont(QFont('Arial', 24, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        scroll_layout.addWidget(title_label)
+        scroll_layout.addSpacing(20)
         
         # Foreign Character Settings Section
-        foreign_section = tk.LabelFrame(
-            main_frame,
-            text="Foreign Character Detection",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        foreign_section.pack(fill=tk.X, pady=(0, 20))
+        foreign_group = QGroupBox("Foreign Character Detection")
+        foreign_group.setFont(QFont('Arial', 12, QFont.Bold))
+        foreign_layout = QVBoxLayout(foreign_group)
+        foreign_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(foreign_group)
         
         # Target Language setting
-        target_lang_frame = tk.Frame(foreign_section)
-        target_lang_frame.pack(fill=tk.X, pady=(0, 10))
+        target_lang_widget = QWidget()
+        target_lang_layout = QHBoxLayout(target_lang_widget)
+        target_lang_layout.setContentsMargins(0, 0, 0, 10)
         
-        tk.Label(
-            target_lang_frame,
-            text="Target language:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
+        target_lang_label = QLabel("Target language:")
+        target_lang_label.setFont(QFont('Arial', 10))
+        target_lang_layout.addWidget(target_lang_label)
         
         # Capitalize the stored value for display in combobox
         stored_language = qa_settings.get('target_language', 'english')
         display_language = stored_language.capitalize()
-        target_language_var = tk.StringVar(value=display_language)
         target_language_options = [
             'English', 'Spanish', 'French', 'German', 'Portuguese', 
             'Italian', 'Russian', 'Japanese', 'Korean', 'Chinese', 
             'Arabic', 'Hebrew', 'Thai'
         ]
         
-        target_language_combo = tb.Combobox(
-            target_lang_frame,
-            textvariable=target_language_var,
-            values=target_language_options,
-            state='readonly',
-            width=15,
-            bootstyle="primary"
-        )
-        target_language_combo.pack(side=tk.LEFT, padx=(10, 0))
+        target_language_combo = QComboBox()
+        target_language_combo.addItems(target_language_options)
+        target_language_combo.setCurrentText(display_language)
+        target_language_combo.setMinimumWidth(150)
+        disable_wheel_event(target_language_combo)
+        target_lang_layout.addWidget(target_language_combo)
         
-        # Disable mousewheel scrolling to prevent accidental changes
-        self.ui.disable_spinbox_mousewheel(target_language_combo)
-        
-        tk.Label(
-            target_lang_frame,
-            text="(characters from other scripts will be flagged)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        target_lang_hint = QLabel("(characters from other scripts will be flagged)")
+        target_lang_hint.setFont(QFont('Arial', 9))
+        target_lang_hint.setStyleSheet("color: gray;")
+        target_lang_layout.addWidget(target_lang_hint)
+        target_lang_layout.addStretch()
+        foreign_layout.addWidget(target_lang_widget)
         
         # Threshold setting
-        threshold_frame = tk.Frame(foreign_section)
-        threshold_frame.pack(fill=tk.X, pady=(10, 10))
+        threshold_widget = QWidget()
+        threshold_layout = QHBoxLayout(threshold_widget)
+        threshold_layout.setContentsMargins(0, 10, 0, 10)
         
-        tk.Label(
-            threshold_frame,
-            text="Minimum foreign characters to flag:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
+        threshold_label = QLabel("Minimum foreign characters to flag:")
+        threshold_label.setFont(QFont('Arial', 10))
+        threshold_layout.addWidget(threshold_label)
         
-        threshold_var = tk.IntVar(value=qa_settings.get('foreign_char_threshold', 10))
-        threshold_spinbox = tb.Spinbox(
-            threshold_frame,
-            from_=0,
-            to=1000,
-            textvariable=threshold_var,
-            width=10,
-            bootstyle="primary"
-        )
-        threshold_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+        threshold_spinbox = QSpinBox()
+        threshold_spinbox.setMinimum(0)
+        threshold_spinbox.setMaximum(1000)
+        threshold_spinbox.setValue(qa_settings.get('foreign_char_threshold', 10))
+        threshold_spinbox.setMinimumWidth(100)
+        disable_wheel_event(threshold_spinbox)
+        threshold_layout.addWidget(threshold_spinbox)
         
-        # Disable mousewheel scrolling on spinbox
-        self.ui.disable_spinbox_mousewheel(threshold_spinbox)
+        threshold_hint = QLabel("(0 = always flag, higher = more tolerant)")
+        threshold_hint.setFont(QFont('Arial', 9))
+        threshold_hint.setStyleSheet("color: gray;")
+        threshold_layout.addWidget(threshold_hint)
+        threshold_layout.addStretch()
+        foreign_layout.addWidget(threshold_widget)
         
-        tk.Label(
-            threshold_frame,
-            text="(0 = always flag, higher = more tolerant)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        # Excluded characters
+        excluded_label = QLabel("Additional characters to exclude from detection:")
+        excluded_label.setFont(QFont('Arial', 10))
+        foreign_layout.addWidget(excluded_label)
         
-        # Excluded characters - using UIHelper for scrollable text
-        excluded_frame = tk.Frame(foreign_section)
-        excluded_frame.pack(fill=tk.X, pady=(10, 0))
+        # Text edit for excluded characters
+        excluded_text = QTextEdit()
+        excluded_text.setMaximumHeight(150)
+        excluded_text.setFont(QFont('Consolas', 10))
+        excluded_text.setPlainText(qa_settings.get('excluded_characters', ''))
+        foreign_layout.addWidget(excluded_text)
         
-        tk.Label(
-            excluded_frame,
-            text="Additional characters to exclude from detection:",
-            font=('Arial', 10)
-        ).pack(anchor=tk.W)
+        excluded_hint = QLabel("Enter characters separated by spaces (e.g., ™ © ® • …)")
+        excluded_hint.setFont(QFont('Arial', 9))
+        excluded_hint.setStyleSheet("color: gray;")
+        foreign_layout.addWidget(excluded_hint)
         
-        # Use regular Text widget with manual scroll setup instead of ScrolledText
-        excluded_text_frame = tk.Frame(excluded_frame)
-        excluded_text_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        excluded_text = tk.Text(
-            excluded_text_frame,
-            height=7,
-            width=60,
-            font=('Consolas', 10),
-            wrap=tk.WORD,
-            undo=True
-        )
-        excluded_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Add scrollbar manually
-        excluded_scrollbar = ttk.Scrollbar(excluded_text_frame, orient="vertical", command=excluded_text.yview)
-        excluded_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        excluded_text.configure(yscrollcommand=excluded_scrollbar.set)
-        
-        # Setup undo/redo for the text widget
-        self.ui.setup_text_undo_redo(excluded_text)
-        
-        excluded_text.insert(1.0, qa_settings.get('excluded_characters', ''))
-        
-        tk.Label(
-            excluded_frame,
-            text="Enter characters separated by spaces (e.g., ™ © ® • …)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(anchor=tk.W)
+        scroll_layout.addSpacing(20)
         
         # Detection Options Section
-        detection_section = tk.LabelFrame(
-            main_frame,
-            text="Detection Options",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        detection_section.pack(fill=tk.X, pady=(0, 20))
+        detection_group = QGroupBox("Detection Options")
+        detection_group.setFont(QFont('Arial', 12, QFont.Bold))
+        detection_layout = QVBoxLayout(detection_group)
+        detection_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(detection_group)
         
         # Checkboxes for detection options
-        check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', False))
-        check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
-        check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', False))
-        check_glossary_var = tk.BooleanVar(value=qa_settings.get('check_glossary_leakage', True))
+        check_encoding_checkbox = QCheckBox("Check for encoding issues (�, □, ◇)")
+        check_encoding_checkbox.setChecked(qa_settings.get('check_encoding_issues', False))
+        detection_layout.addWidget(check_encoding_checkbox)
         
-        tb.Checkbutton(
-            detection_section,
-            text="Check for encoding issues (�, □, ◇)",
-            variable=check_encoding_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
+        check_repetition_checkbox = QCheckBox("Check for excessive repetition")
+        check_repetition_checkbox.setChecked(qa_settings.get('check_repetition', True))
+        detection_layout.addWidget(check_repetition_checkbox)
         
-        tb.Checkbutton(
-            detection_section,
-            text="Check for excessive repetition",
-            variable=check_repetition_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
+        check_artifacts_checkbox = QCheckBox("Check for translation artifacts (MTL notes, watermarks)")
+        check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', False))
+        detection_layout.addWidget(check_artifacts_checkbox)
         
-        tb.Checkbutton(
-            detection_section,
-            text="Check for translation artifacts (MTL notes, watermarks)",
-            variable=check_artifacts_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
-        tb.Checkbutton(
-            detection_section,
-            text="Check for glossary leakage (raw glossary entries in translation)",
-            variable=check_glossary_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
+        check_glossary_checkbox = QCheckBox("Check for glossary leakage (raw glossary entries in translation)")
+        check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
+        detection_layout.addWidget(check_glossary_checkbox)
+        
+        scroll_layout.addSpacing(20)
         
         # File Processing Section
-        file_section = tk.LabelFrame(
-            main_frame,
-            text="File Processing",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        file_section.pack(fill=tk.X, pady=(0, 20))
+        file_group = QGroupBox("File Processing")
+        file_group.setFont(QFont('Arial', 12, QFont.Bold))
+        file_layout = QVBoxLayout(file_group)
+        file_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(file_group)
         
         # Minimum file length
-        min_length_frame = tk.Frame(file_section)
-        min_length_frame.pack(fill=tk.X, pady=(0, 10))
+        min_length_widget = QWidget()
+        min_length_layout = QHBoxLayout(min_length_widget)
+        min_length_layout.setContentsMargins(0, 0, 0, 10)
         
-        tk.Label(
-            min_length_frame,
-            text="Minimum file length (characters):",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
+        min_length_label = QLabel("Minimum file length (characters):")
+        min_length_label.setFont(QFont('Arial', 10))
+        min_length_layout.addWidget(min_length_label)
         
-        min_length_var = tk.IntVar(value=qa_settings.get('min_file_length', 0))
-        min_length_spinbox = tb.Spinbox(
-            min_length_frame,
-            from_=0,
-            to=10000,
-            textvariable=min_length_var,
-            width=10,
-            bootstyle="primary"
-        )
-        min_length_spinbox.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Disable mousewheel scrolling on spinbox
-        self.ui.disable_spinbox_mousewheel(min_length_spinbox)
+        min_length_spinbox = QSpinBox()
+        min_length_spinbox.setMinimum(0)
+        min_length_spinbox.setMaximum(10000)
+        min_length_spinbox.setValue(qa_settings.get('min_file_length', 0))
+        min_length_spinbox.setMinimumWidth(100)
+        disable_wheel_event(min_length_spinbox)
+        min_length_layout.addWidget(min_length_spinbox)
+        min_length_layout.addStretch()
+        file_layout.addWidget(min_length_widget)
 
-        # Add a separator
-        separator = ttk.Separator(main_frame, orient='horizontal')
-        separator.pack(fill=tk.X, pady=15)
+        scroll_layout.addSpacing(15)
         
         # Word Count Cross-Reference Section
-        wordcount_section = tk.LabelFrame(
-            main_frame,
-            text="Word Count Analysis",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        wordcount_section.pack(fill=tk.X, pady=(0, 20))
+        wordcount_group = QGroupBox("Word Count Analysis")
+        wordcount_group.setFont(QFont('Arial', 12, QFont.Bold))
+        wordcount_layout = QVBoxLayout(wordcount_group)
+        wordcount_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(wordcount_group)
         
-        check_word_count_var = tk.BooleanVar(value=qa_settings.get('check_word_count_ratio', False))
-        tb.Checkbutton(
-            wordcount_section,
-            text="Cross-reference word counts with original EPUB",
-            variable=check_word_count_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(0, 5))
+        check_word_count_checkbox = QCheckBox("Cross-reference word counts with original EPUB")
+        check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', False))
+        wordcount_layout.addWidget(check_word_count_checkbox)
         
-        tk.Label(
-            wordcount_section,
-            text="Compares word counts between original and translated files to detect missing content.\n" +
-                 "Accounts for typical expansion ratios when translating from CJK to English.",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray'
-        ).pack(anchor=tk.W, padx=(20, 0))
+        wordcount_desc = QLabel("Compares word counts between original and translated files to detect missing content.\n" +
+                               "Accounts for typical expansion ratios when translating from CJK to English.")
+        wordcount_desc.setFont(QFont('Arial', 9))
+        wordcount_desc.setStyleSheet("color: gray;")
+        wordcount_desc.setWordWrap(True)
+        wordcount_desc.setMaximumWidth(700)
+        wordcount_layout.addWidget(wordcount_desc)
  
         # Show current EPUB status and allow selection
-        epub_frame = tk.Frame(wordcount_section)
-        epub_frame.pack(anchor=tk.W, pady=(10, 5))
+        epub_widget = QWidget()
+        epub_layout = QHBoxLayout(epub_widget)
+        epub_layout.setContentsMargins(0, 10, 0, 5)
 
         # Get EPUBs from actual current selection (not stored config)
         current_epub_files = []
@@ -1551,19 +1794,17 @@ class QAScannerMixin:
             status_text = "📖 No EPUB in current selection"
             status_color = 'orange'
 
-        status_label = tk.Label(
-            epub_frame,
-            text=status_text,
-            fg=status_color,
-            font=('Arial', 10)
-        )
-        status_label.pack(side=tk.LEFT)
+        status_label = QLabel(status_text)
+        status_label.setFont(QFont('Arial', 10))
+        status_label.setStyleSheet(f"color: {status_color};")
+        epub_layout.addWidget(status_label)
 
         def select_epub_for_qa():
-            epub_path = filedialog.askopenfilename(
-                title="Select Source EPUB File",
-                filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")],
-                parent=dialog
+            epub_path, _ = QFileDialog.getOpenFileName(
+                dialog,
+                "Select Source EPUB File",
+                "",
+                "EPUB files (*.epub);;All files (*.*)"
             )
             if epub_path:
                 self.selected_epub_path = epub_path
@@ -1574,219 +1815,206 @@ class QAScannerMixin:
                 if hasattr(self, 'selected_epub_files'):
                     self.selected_epub_files = [epub_path]
                 
-                status_label.config(
-                    text=f"📖 Current EPUB: {os.path.basename(epub_path)}",
-                    fg='green'
-                )
+                status_label.setText(f"📖 Current EPUB: {os.path.basename(epub_path)}")
+                status_label.setStyleSheet("color: green;")
                 self.append_log(f"✅ Selected EPUB for QA: {os.path.basename(epub_path)}")
 
-        tk.Button(
-            epub_frame,
-            text="Select EPUB",
-            command=select_epub_for_qa,
-            font=('Arial', 9)
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        select_epub_btn = QPushButton("Select EPUB")
+        select_epub_btn.setFont(QFont('Arial', 9))
+        select_epub_btn.clicked.connect(select_epub_for_qa)
+        epub_layout.addWidget(select_epub_btn)
+        epub_layout.addStretch()
+        wordcount_layout.addWidget(epub_widget)
 
         # Add option to disable mismatch warning
-        warn_mismatch_var = tk.BooleanVar(value=qa_settings.get('warn_name_mismatch', True))
-        tb.Checkbutton(
-            wordcount_section,
-            text="Warn when EPUB and folder names don't match",
-            variable=warn_mismatch_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(10, 5))
+        warn_mismatch_checkbox = QCheckBox("Warn when EPUB and folder names don't match")
+        warn_mismatch_checkbox.setChecked(qa_settings.get('warn_name_mismatch', True))
+        wordcount_layout.addWidget(warn_mismatch_checkbox)
 
+        scroll_layout.addSpacing(20)
+        
         # Additional Checks Section
-        additional_section = tk.LabelFrame(
-            main_frame,
-            text="Additional Checks",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        additional_section.pack(fill=tk.X, pady=(20, 0))
+        additional_group = QGroupBox("Additional Checks")
+        additional_group.setFont(QFont('Arial', 12, QFont.Bold))
+        additional_layout = QVBoxLayout(additional_group)
+        additional_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(additional_group)
 
         # Multiple headers check
-        check_multiple_headers_var = tk.BooleanVar(value=qa_settings.get('check_multiple_headers', True))
-        tb.Checkbutton(
-            additional_section,
-            text="Detect files with 2 or more headers (h1-h6 tags)",
-            variable=check_multiple_headers_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(5, 5))
+        check_multiple_headers_checkbox = QCheckBox("Detect files with 2 or more headers (h1-h6 tags)")
+        check_multiple_headers_checkbox.setChecked(qa_settings.get('check_multiple_headers', True))
+        additional_layout.addWidget(check_multiple_headers_checkbox)
 
-        tk.Label(
-            additional_section,
-            text="Identifies files that may have been incorrectly split or merged.\n" +
-                 "Useful for detecting chapters that contain multiple sections.",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray'
-        ).pack(anchor=tk.W, padx=(20, 0))
+        headers_desc = QLabel("Identifies files that may have been incorrectly split or merged.\n" +
+                             "Useful for detecting chapters that contain multiple sections.")
+        headers_desc.setFont(QFont('Arial', 9))
+        headers_desc.setStyleSheet("color: gray;")
+        headers_desc.setWordWrap(True)
+        headers_desc.setMaximumWidth(700)
+        additional_layout.addWidget(headers_desc)
+        additional_layout.addSpacing(10)
 
         # Missing HTML tag check
-        html_tag_frame = tk.Frame(additional_section)
-        html_tag_frame.pack(fill=tk.X, pady=(10, 5))
+        html_tag_widget = QWidget()
+        html_tag_layout = QHBoxLayout(html_tag_widget)
+        html_tag_layout.setContentsMargins(0, 0, 0, 5)
 
-        check_missing_html_tag_var = tk.BooleanVar(value=qa_settings.get('check_missing_html_tag', True))
-        check_missing_html_tag_check = tb.Checkbutton(
-            html_tag_frame,
-            text="Flag HTML files with missing <html> tag",
-            variable=check_missing_html_tag_var,
-            bootstyle="primary"
-        )
-        check_missing_html_tag_check.pack(side=tk.LEFT)
+        check_missing_html_tag_checkbox = QCheckBox("Flag HTML files with missing <html> tag")
+        check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
+        html_tag_layout.addWidget(check_missing_html_tag_checkbox)
 
-        tk.Label(
-            html_tag_frame,
-            text="(Checks if HTML files have proper structure)",
-            font=('Arial', 9),
-            foreground='gray'
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        html_tag_hint = QLabel("(Checks if HTML files have proper structure)")
+        html_tag_hint.setFont(QFont('Arial', 9))
+        html_tag_hint.setStyleSheet("color: gray;")
+        html_tag_layout.addWidget(html_tag_hint)
+        html_tag_layout.addStretch()
+        additional_layout.addWidget(html_tag_widget)
 
         # Invalid nesting check (separate toggle)
-        check_invalid_nesting_var = tk.BooleanVar(value=qa_settings.get('check_invalid_nesting', False))
-        tb.Checkbutton(
-            additional_section,
-            text="Check for invalid tag nesting",
-            variable=check_invalid_nesting_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(5, 5))
+        check_invalid_nesting_checkbox = QCheckBox("Check for invalid tag nesting")
+        check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
+        additional_layout.addWidget(check_invalid_nesting_checkbox)
 
-        # NEW: Paragraph Structure Check
-        paragraph_section_frame = tk.Frame(additional_section)
-        paragraph_section_frame.pack(fill=tk.X, pady=(15, 5))
+        additional_layout.addSpacing(15)
         
+        # NEW: Paragraph Structure Check
         # Separator line
-        ttk.Separator(paragraph_section_frame, orient='horizontal').pack(fill=tk.X, pady=(0, 10))
+        separator_line = QFrame()
+        separator_line.setFrameShape(QFrame.HLine)
+        separator_line.setFrameShadow(QFrame.Sunken)
+        additional_layout.addWidget(separator_line)
+        additional_layout.addSpacing(10)
         
         # Checkbox for paragraph structure check
-        check_paragraph_structure_var = tk.BooleanVar(value=qa_settings.get('check_paragraph_structure', True))
-        paragraph_check = tb.Checkbutton(
-            paragraph_section_frame,
-            text="Check for insufficient paragraph tags",
-            variable=check_paragraph_structure_var,
-            bootstyle="primary"
-        )
-        paragraph_check.pack(anchor=tk.W)
+        check_paragraph_structure_checkbox = QCheckBox("Check for insufficient paragraph tags")
+        check_paragraph_structure_checkbox.setChecked(qa_settings.get('check_paragraph_structure', True))
+        additional_layout.addWidget(check_paragraph_structure_checkbox)
         
         # Threshold setting frame
-        threshold_container = tk.Frame(paragraph_section_frame)
-        threshold_container.pack(fill=tk.X, pady=(10, 5), padx=(20, 0))
+        threshold_widget = QWidget()
+        threshold_layout = QHBoxLayout(threshold_widget)
+        threshold_layout.setContentsMargins(20, 10, 0, 5)
         
-        tk.Label(
-            threshold_container,
-            text="Minimum text in <p> tags:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
+        threshold_label = QLabel("Minimum text in <p> tags:")
+        threshold_label.setFont(QFont('Arial', 10))
+        threshold_layout.addWidget(threshold_label)
         
         # Get current threshold value (default 30%)
         current_threshold = int(qa_settings.get('paragraph_threshold', 0.3) * 100)
-        paragraph_threshold_var = tk.IntVar(value=current_threshold)
         
         # Spinbox for threshold
-        paragraph_threshold_spinbox = tb.Spinbox(
-            threshold_container,
-            from_=0,
-            to=100,
-            textvariable=paragraph_threshold_var,
-            width=8,
-            bootstyle="primary"
-        )
-        paragraph_threshold_spinbox.pack(side=tk.LEFT, padx=(10, 5))
+        paragraph_threshold_spinbox = QSpinBox()
+        paragraph_threshold_spinbox.setMinimum(0)
+        paragraph_threshold_spinbox.setMaximum(100)
+        paragraph_threshold_spinbox.setValue(current_threshold)
+        paragraph_threshold_spinbox.setMinimumWidth(80)
+        disable_wheel_event(paragraph_threshold_spinbox)
+        threshold_layout.addWidget(paragraph_threshold_spinbox)
         
-        # Disable mousewheel scrolling on the spinbox
-        self.ui.disable_spinbox_mousewheel(paragraph_threshold_spinbox)
-        
-        tk.Label(
-            threshold_container,
-            text="%",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
+        percent_label = QLabel("%")
+        percent_label.setFont(QFont('Arial', 10))
+        threshold_layout.addWidget(percent_label)
         
         # Threshold value label
-        threshold_value_label = tk.Label(
-            threshold_container,
-            text=f"(currently {current_threshold}%)",
-            font=('Arial', 9),
-            fg='gray'
-        )
-        threshold_value_label.pack(side=tk.LEFT, padx=(10, 0))
+        threshold_value_label = QLabel(f"(currently {current_threshold}%)")
+        threshold_value_label.setFont(QFont('Arial', 9))
+        threshold_value_label.setStyleSheet("color: gray;")
+        threshold_layout.addWidget(threshold_value_label)
+        threshold_layout.addStretch()
+        additional_layout.addWidget(threshold_widget)
         
         # Update label when spinbox changes
-        def update_threshold_label(*args):
-            try:
-                value = paragraph_threshold_var.get()
-                threshold_value_label.config(text=f"(currently {value}%)")
-            except (tk.TclError, ValueError):
-                # Handle empty or invalid input
-                threshold_value_label.config(text="(currently --%)")
-        paragraph_threshold_var.trace('w', update_threshold_label)
+        def update_threshold_label(value):
+            threshold_value_label.setText(f"(currently {value}%)")
+        paragraph_threshold_spinbox.valueChanged.connect(update_threshold_label)
         
         # Description
-        tk.Label(
-            paragraph_section_frame,
-            text="Detects HTML files where text content is not properly wrapped in paragraph tags.\n" +
-                 "Files with less than the specified percentage of text in <p> tags will be flagged.\n" +
-                 "Also checks for large blocks of unwrapped text directly in the body element.",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray'
-        ).pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
+        para_desc = QLabel("Detects HTML files where text content is not properly wrapped in paragraph tags.\n" +
+                          "Files with less than the specified percentage of text in <p> tags will be flagged.\n" +
+                          "Also checks for large blocks of unwrapped text directly in the body element.")
+        para_desc.setFont(QFont('Arial', 9))
+        para_desc.setStyleSheet("color: gray;")
+        para_desc.setWordWrap(True)
+        para_desc.setMaximumWidth(700)
+        para_desc.setContentsMargins(20, 5, 0, 0)
+        additional_layout.addWidget(para_desc)
         
         # Enable/disable threshold setting based on checkbox
-        def toggle_paragraph_threshold(*args):
-            if check_paragraph_structure_var.get():
-                paragraph_threshold_spinbox.config(state='normal')
-            else:
-                paragraph_threshold_spinbox.config(state='disabled')
+        def toggle_paragraph_threshold(checked):
+            paragraph_threshold_spinbox.setEnabled(checked)
+            threshold_label.setEnabled(checked)
+            percent_label.setEnabled(checked)
+            threshold_value_label.setEnabled(checked)
         
-        check_paragraph_structure_var.trace('w', toggle_paragraph_threshold)
-        toggle_paragraph_threshold()  # Set initial state
+        check_paragraph_structure_checkbox.toggled.connect(toggle_paragraph_threshold)
+        toggle_paragraph_threshold(check_paragraph_structure_checkbox.isChecked())  # Set initial state
 
+        scroll_layout.addSpacing(20)
+        
         # Report Settings Section
-        report_section = tk.LabelFrame(
-            main_frame,
-            text="Report Settings",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        report_section.pack(fill=tk.X, pady=(0, 20))
+        report_group = QGroupBox("Report Settings")
+        report_group.setFont(QFont('Arial', 12, QFont.Bold))
+        report_layout = QVBoxLayout(report_group)
+        report_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(report_group)
+        
+        # Report format
+        format_widget = QWidget()
+        format_layout = QHBoxLayout(format_widget)
+        format_layout.setContentsMargins(0, 0, 0, 10)
+        
+        format_label = QLabel("Report format:")
+        format_label.setFont(QFont('Arial', 10))
+        format_layout.addWidget(format_label)
+        
+        current_format_value = qa_settings.get('report_format', 'detailed')
+        format_options = [
+            ("Summary only", "summary"),
+            ("Detailed (recommended)", "detailed"),
+            ("Verbose (all data)", "verbose")
+        ]
+        
+        # Create radio buttons for format options
+        format_radio_buttons = []
+        for idx, (text, value) in enumerate(format_options):
+            rb = QRadioButton(text)
+            if value == current_format_value:
+                rb.setChecked(True)
+            format_layout.addWidget(rb)
+            format_radio_buttons.append((rb, value))
+        
+        format_layout.addStretch()
+        report_layout.addWidget(format_widget)
+        
+        # Auto-save report
+        auto_save_checkbox = QCheckBox("Automatically save report after scan")
+        auto_save_checkbox.setChecked(qa_settings.get('auto_save_report', True))
+        report_layout.addWidget(auto_save_checkbox)
 
+        scroll_layout.addSpacing(20)
+        
         # Cache Settings Section
-        cache_section = tk.LabelFrame(
-            main_frame,
-            text="Performance Cache Settings",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        cache_section.pack(fill=tk.X, pady=(0, 20))
+        cache_group = QGroupBox("Performance Cache Settings")
+        cache_group.setFont(QFont('Arial', 12, QFont.Bold))
+        cache_layout = QVBoxLayout(cache_group)
+        cache_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(cache_group)
         
         # Enable cache checkbox
-        cache_enabled_var = tk.BooleanVar(value=qa_settings.get('cache_enabled', True))
-        cache_checkbox = tb.Checkbutton(
-            cache_section,
-            text="Enable performance cache (speeds up duplicate detection)",
-            variable=cache_enabled_var,
-            bootstyle="primary"
-        )
-        cache_checkbox.pack(anchor=tk.W, pady=(0, 10))
+        cache_enabled_checkbox = QCheckBox("Enable performance cache (speeds up duplicate detection)")
+        cache_enabled_checkbox.setChecked(qa_settings.get('cache_enabled', True))
+        cache_layout.addWidget(cache_enabled_checkbox)
+        cache_layout.addSpacing(10)
         
-        # Cache size settings frame
-        cache_sizes_frame = tk.Frame(cache_section)
-        cache_sizes_frame.pack(fill=tk.X, padx=(20, 0))
+        # Cache size settings
+        cache_desc_label = QLabel("Cache sizes (0 = disabled, -1 = unlimited):")
+        cache_desc_label.setFont(QFont('Arial', 10))
+        cache_layout.addWidget(cache_desc_label)
+        cache_layout.addSpacing(5)
         
-        # Description
-        tk.Label(
-            cache_sizes_frame,
-            text="Cache sizes (0 = disabled, -1 = unlimited):",
-            font=('Arial', 10)
-        ).pack(anchor=tk.W, pady=(0, 5))
-        
-        # Cache size variables
-        cache_vars = {}
+        # Cache size variables - store spinboxes and buttons
+        cache_spinboxes = {}
+        cache_buttons = {}
         cache_defaults = {
             'normalize_text': 10000,
             'similarity_ratio': 20000,
@@ -1798,243 +2026,207 @@ class QAScannerMixin:
         
         # Create input fields for each cache type
         for cache_name, default_value in cache_defaults.items():
-            row_frame = tk.Frame(cache_sizes_frame)
-            row_frame.pack(fill=tk.X, pady=2)
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 2, 0, 2)
             
             # Label
             label_text = cache_name.replace('_', ' ').title() + ":"
-            tk.Label(
-                row_frame,
-                text=label_text,
-                width=25,
-                anchor='w',
-                font=('Arial', 9)
-            ).pack(side=tk.LEFT)
+            cache_label = QLabel(label_text)
+            cache_label.setFont(QFont('Arial', 9))
+            cache_label.setMinimumWidth(200)
+            row_layout.addWidget(cache_label)
             
             # Get current value
             current_value = qa_settings.get(f'cache_{cache_name}', default_value)
-            cache_var = tk.IntVar(value=current_value)
-            cache_vars[cache_name] = cache_var
             
             # Spinbox
-            spinbox = tb.Spinbox(
-                row_frame,
-                from_=-1,
-                to=50000,
-                textvariable=cache_var,
-                width=10,
-                bootstyle="primary"
-            )
-            spinbox.pack(side=tk.LEFT, padx=(0, 10))
-            
-            # Disable mousewheel scrolling
-            self.ui.disable_spinbox_mousewheel(spinbox)
+            spinbox = QSpinBox()
+            spinbox.setMinimum(-1)
+            spinbox.setMaximum(50000)
+            spinbox.setValue(current_value)
+            spinbox.setMinimumWidth(100)
+            disable_wheel_event(spinbox)
+            row_layout.addWidget(spinbox)
+            cache_spinboxes[cache_name] = spinbox
             
             # Quick preset buttons
-            button_frame = tk.Frame(row_frame)
-            button_frame.pack(side=tk.LEFT)
+            def make_preset_handler(sb, val):
+                return lambda: sb.setValue(val)
             
-            tk.Button(
-                button_frame,
-                text="Off",
-                width=4,
-                font=('Arial', 8),
-                command=lambda v=cache_var: v.set(0)
-            ).pack(side=tk.LEFT, padx=1)
+            off_btn = QPushButton("Off")
+            off_btn.setFont(QFont('Arial', 8))
+            off_btn.setMinimumWidth(40)
+            off_btn.clicked.connect(make_preset_handler(spinbox, 0))
+            row_layout.addWidget(off_btn)
             
-            tk.Button(
-                button_frame,
-                text="Small",
-                width=5,
-                font=('Arial', 8),
-                command=lambda v=cache_var: v.set(1000)
-            ).pack(side=tk.LEFT, padx=1)
+            small_btn = QPushButton("Small")
+            small_btn.setFont(QFont('Arial', 8))
+            small_btn.setMinimumWidth(50)
+            small_btn.clicked.connect(make_preset_handler(spinbox, 1000))
+            row_layout.addWidget(small_btn)
             
-            tk.Button(
-                button_frame,
-                text="Medium",
-                width=7,
-                font=('Arial', 8),
-                command=lambda v=cache_var, d=default_value: v.set(d)
-            ).pack(side=tk.LEFT, padx=1)
+            medium_btn = QPushButton("Medium")
+            medium_btn.setFont(QFont('Arial', 8))
+            medium_btn.setMinimumWidth(60)
+            medium_btn.clicked.connect(make_preset_handler(spinbox, default_value))
+            row_layout.addWidget(medium_btn)
             
-            tk.Button(
-                button_frame,
-                text="Large",
-                width=5,
-                font=('Arial', 8),
-                command=lambda v=cache_var, d=default_value: v.set(d * 2)
-            ).pack(side=tk.LEFT, padx=1)
+            large_btn = QPushButton("Large")
+            large_btn.setFont(QFont('Arial', 8))
+            large_btn.setMinimumWidth(50)
+            large_btn.clicked.connect(make_preset_handler(spinbox, default_value * 2))
+            row_layout.addWidget(large_btn)
             
-            tk.Button(
-                button_frame,
-                text="Max",
-                width=4,
-                font=('Arial', 8),
-                command=lambda v=cache_var: v.set(-1)
-            ).pack(side=tk.LEFT, padx=1)
+            max_btn = QPushButton("Max")
+            max_btn.setFont(QFont('Arial', 8))
+            max_btn.setMinimumWidth(40)
+            max_btn.clicked.connect(make_preset_handler(spinbox, -1))
+            row_layout.addWidget(max_btn)
+            
+            # Store buttons for enabling/disabling
+            cache_buttons[cache_name] = [cache_label, off_btn, small_btn, medium_btn, large_btn, max_btn]
+            
+            row_layout.addStretch()
+            cache_layout.addWidget(row_widget)
         
         # Enable/disable cache size controls based on checkbox
-        def toggle_cache_controls(*args):
-            state = 'normal' if cache_enabled_var.get() else 'disabled'
-            for widget in cache_sizes_frame.winfo_children():
-                if isinstance(widget, tk.Frame):
-                    for child in widget.winfo_children():
-                        if isinstance(child, (tb.Spinbox, tk.Button)):
-                            child.config(state=state)
+        def toggle_cache_controls(checked):
+            for cache_name in cache_defaults.keys():
+                spinbox = cache_spinboxes[cache_name]
+                spinbox.setEnabled(checked)
+                for widget in cache_buttons[cache_name]:
+                    widget.setEnabled(checked)
         
-        cache_enabled_var.trace('w', toggle_cache_controls)
-        toggle_cache_controls()  # Set initial state
+        cache_enabled_checkbox.toggled.connect(toggle_cache_controls)
+        toggle_cache_controls(cache_enabled_checkbox.isChecked())  # Set initial state
+        
+        cache_layout.addSpacing(10)
         
         # Auto-size cache option
-        auto_size_frame = tk.Frame(cache_section)
-        auto_size_frame.pack(fill=tk.X, pady=(10, 5))
+        auto_size_widget = QWidget()
+        auto_size_layout = QHBoxLayout(auto_size_widget)
+        auto_size_layout.setContentsMargins(0, 0, 0, 5)
         
-        auto_size_var = tk.BooleanVar(value=qa_settings.get('cache_auto_size', False))
-        auto_size_check = tb.Checkbutton(
-            auto_size_frame,
-            text="Auto-size caches based on available RAM",
-            variable=auto_size_var,
-            bootstyle="primary"
-        )
-        auto_size_check.pack(side=tk.LEFT)
+        auto_size_checkbox = QCheckBox("Auto-size caches based on available RAM")
+        auto_size_checkbox.setChecked(qa_settings.get('cache_auto_size', False))
+        auto_size_layout.addWidget(auto_size_checkbox)
         
-        tk.Label(
-            auto_size_frame,
-            text="(overrides manual settings)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        auto_size_hint = QLabel("(overrides manual settings)")
+        auto_size_hint.setFont(QFont('Arial', 9))
+        auto_size_hint.setStyleSheet("color: gray;")
+        auto_size_layout.addWidget(auto_size_hint)
+        auto_size_layout.addStretch()
+        cache_layout.addWidget(auto_size_widget)
+        
+        cache_layout.addSpacing(10)
         
         # Cache statistics display
-        stats_frame = tk.Frame(cache_section)
-        stats_frame.pack(fill=tk.X, pady=(10, 0))
+        show_stats_checkbox = QCheckBox("Show cache hit/miss statistics after scan")
+        show_stats_checkbox.setChecked(qa_settings.get('cache_show_stats', False))
+        cache_layout.addWidget(show_stats_checkbox)
         
-        show_stats_var = tk.BooleanVar(value=qa_settings.get('cache_show_stats', False))
-        tb.Checkbutton(
-            stats_frame,
-            text="Show cache hit/miss statistics after scan",
-            variable=show_stats_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W)
+        cache_layout.addSpacing(10)
         
         # Info about cache
-        tk.Label(
-            cache_section,
-            text="Larger cache sizes use more memory but improve performance for:\n" +
-                 "• Large datasets (100+ files)\n" +
-                 "• AI Hunter mode (all file pairs compared)\n" +
-                 "• Repeated scans of the same folder",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray',
-            font=('Arial', 9)
-        ).pack(anchor=tk.W, padx=(20, 0), pady=(10, 0))
+        cache_info = QLabel("Larger cache sizes use more memory but improve performance for:\n" +
+                           "• Large datasets (100+ files)\n" +
+                           "• AI Hunter mode (all file pairs compared)\n" +
+                           "• Repeated scans of the same folder")
+        cache_info.setFont(QFont('Arial', 9))
+        cache_info.setStyleSheet("color: gray;")
+        cache_info.setWordWrap(True)
+        cache_info.setMaximumWidth(700)
+        cache_info.setContentsMargins(20, 0, 0, 0)
+        cache_layout.addWidget(cache_info)
 
+        scroll_layout.addSpacing(20)
+        
         # AI Hunter Performance Section
-        ai_hunter_section = tk.LabelFrame(
-            main_frame,
-            text="AI Hunter Performance Settings",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        ai_hunter_section.pack(fill=tk.X, pady=(0, 20))
+        ai_hunter_group = QGroupBox("AI Hunter Performance Settings")
+        ai_hunter_group.setFont(QFont('Arial', 12, QFont.Bold))
+        ai_hunter_layout = QVBoxLayout(ai_hunter_group)
+        ai_hunter_layout.setContentsMargins(20, 15, 20, 15)
+        scroll_layout.addWidget(ai_hunter_group)
 
         # Description
-        tk.Label(
-            ai_hunter_section,
-            text="AI Hunter mode performs exhaustive duplicate detection by comparing every file pair.\n" +
-                 "Parallel processing can significantly speed up this process on multi-core systems.",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray',
-            font=('Arial', 9)
-        ).pack(anchor=tk.W, pady=(0, 10))
+        ai_hunter_desc = QLabel("AI Hunter mode performs exhaustive duplicate detection by comparing every file pair.\n" +
+                               "Parallel processing can significantly speed up this process on multi-core systems.")
+        ai_hunter_desc.setFont(QFont('Arial', 9))
+        ai_hunter_desc.setStyleSheet("color: gray;")
+        ai_hunter_desc.setWordWrap(True)
+        ai_hunter_desc.setMaximumWidth(700)
+        ai_hunter_layout.addWidget(ai_hunter_desc)
+        ai_hunter_layout.addSpacing(10)
 
         # Parallel workers setting
-        workers_frame = tk.Frame(ai_hunter_section)
-        workers_frame.pack(fill=tk.X, pady=(0, 10))
+        workers_widget = QWidget()
+        workers_layout = QHBoxLayout(workers_widget)
+        workers_layout.setContentsMargins(0, 0, 0, 10)
 
-        tk.Label(
-            workers_frame,
-            text="Maximum parallel workers:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
+        workers_label = QLabel("Maximum parallel workers:")
+        workers_label.setFont(QFont('Arial', 10))
+        workers_layout.addWidget(workers_label)
 
         # Get current value from AI Hunter config
         ai_hunter_config = self.config.get('ai_hunter_config', {})
         current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 1)
 
-        ai_hunter_workers_var = tk.IntVar(value=current_max_workers)
-        workers_spinbox = tb.Spinbox(
-            workers_frame,
-            from_=0,
-            to=64,
-            textvariable=ai_hunter_workers_var,
-            width=10,
-            bootstyle="primary"
-        )
-        workers_spinbox.pack(side=tk.LEFT, padx=(10, 0))
-
-        # Disable mousewheel scrolling on spinbox
-        self.ui.disable_spinbox_mousewheel(workers_spinbox)
+        ai_hunter_workers_spinbox = QSpinBox()
+        ai_hunter_workers_spinbox.setMinimum(0)
+        ai_hunter_workers_spinbox.setMaximum(64)
+        ai_hunter_workers_spinbox.setValue(current_max_workers)
+        ai_hunter_workers_spinbox.setMinimumWidth(100)
+        disable_wheel_event(ai_hunter_workers_spinbox)
+        workers_layout.addWidget(ai_hunter_workers_spinbox)
 
         # CPU count display
         import multiprocessing
         cpu_count = multiprocessing.cpu_count()
-        cpu_label = tk.Label(
-            workers_frame,
-            text=f"(0 = use all {cpu_count} cores)",
-            font=('Arial', 9),
-            fg='gray'
-        )
-        cpu_label.pack(side=tk.LEFT, padx=(10, 0))
+        cpu_hint = QLabel(f"(0 = use all {cpu_count} cores)")
+        cpu_hint.setFont(QFont('Arial', 9))
+        cpu_hint.setStyleSheet("color: gray;")
+        workers_layout.addWidget(cpu_hint)
+        workers_layout.addStretch()
+        ai_hunter_layout.addWidget(workers_widget)
 
         # Quick preset buttons
-        preset_frame = tk.Frame(ai_hunter_section)
-        preset_frame.pack(fill=tk.X)
+        preset_widget = QWidget()
+        preset_layout = QHBoxLayout(preset_widget)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
 
-        tk.Label(
-            preset_frame,
-            text="Quick presets:",
-            font=('Arial', 9)
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        preset_label = QLabel("Quick presets:")
+        preset_label.setFont(QFont('Arial', 9))
+        preset_layout.addWidget(preset_label)
+        preset_layout.addSpacing(10)
 
-        tk.Button(
-            preset_frame,
-            text=f"All cores ({cpu_count})",
-            font=('Arial', 9),
-            command=lambda: ai_hunter_workers_var.set(0)
-        ).pack(side=tk.LEFT, padx=2)
+        all_cores_btn = QPushButton(f"All cores ({cpu_count})")
+        all_cores_btn.setFont(QFont('Arial', 9))
+        all_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(0))
+        preset_layout.addWidget(all_cores_btn)
 
-        tk.Button(
-            preset_frame,
-            text="Half cores",
-            font=('Arial', 9),
-            command=lambda: ai_hunter_workers_var.set(max(1, cpu_count // 2))
-        ).pack(side=tk.LEFT, padx=2)
+        half_cores_btn = QPushButton("Half cores")
+        half_cores_btn.setFont(QFont('Arial', 9))
+        half_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(max(1, cpu_count // 2)))
+        preset_layout.addWidget(half_cores_btn)
 
-        tk.Button(
-            preset_frame,
-            text="4 cores",
-            font=('Arial', 9),
-            command=lambda: ai_hunter_workers_var.set(4)
-        ).pack(side=tk.LEFT, padx=2)
+        four_cores_btn = QPushButton("4 cores")
+        four_cores_btn.setFont(QFont('Arial', 9))
+        four_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(4))
+        preset_layout.addWidget(four_cores_btn)
 
-        tk.Button(
-            preset_frame,
-            text="8 cores",
-            font=('Arial', 9),
-            command=lambda: ai_hunter_workers_var.set(8)
-        ).pack(side=tk.LEFT, padx=2)
+        eight_cores_btn = QPushButton("8 cores")
+        eight_cores_btn.setFont(QFont('Arial', 9))
+        eight_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(8))
+        preset_layout.addWidget(eight_cores_btn)
 
-        tk.Button(
-            preset_frame,
-            text="Single thread",
-            font=('Arial', 9),
-            command=lambda: ai_hunter_workers_var.set(1)
-        ).pack(side=tk.LEFT, padx=2)
+        single_thread_btn = QPushButton("Single thread")
+        single_thread_btn.setFont(QFont('Arial', 9))
+        single_thread_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(1))
+        preset_layout.addWidget(single_thread_btn)
+
+        preset_layout.addStretch()
+        ai_hunter_layout.addWidget(preset_widget)
 
         # Performance tips
         tips_text = "Performance Tips:\n" + \
@@ -2043,80 +2235,46 @@ class QAScannerMixin:
                     "• 4-8 cores usually provides good balance of speed and system responsiveness\n" + \
                     "• Single thread (1) disables parallel processing for debugging"
 
-        tk.Label(
-            ai_hunter_section,
-            text=tips_text,
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray',
-            font=('Arial', 9)
-        ).pack(anchor=tk.W, padx=(20, 0), pady=(10, 0))
+        tips_label = QLabel(tips_text)
+        tips_label.setFont(QFont('Arial', 9))
+        tips_label.setStyleSheet("color: gray;")
+        tips_label.setWordWrap(True)
+        tips_label.setMaximumWidth(700)
+        tips_label.setContentsMargins(20, 10, 0, 0)
+        ai_hunter_layout.addWidget(tips_label)
 
-        # Report format
-        format_frame = tk.Frame(report_section)
-        format_frame.pack(fill=tk.X, pady=(0, 10))
 
-        tk.Label(
-            format_frame,
-            text="Report format:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
-
-        format_var = tk.StringVar(value=qa_settings.get('report_format', 'detailed'))
-        format_options = [
-            ("Summary only", "summary"),
-            ("Detailed (recommended)", "detailed"),
-            ("Verbose (all data)", "verbose")
-        ]
-
-        for idx, (text, value) in enumerate(format_options):
-            rb = tb.Radiobutton(
-                format_frame,
-                text=text,
-                variable=format_var,
-                value=value,
-                bootstyle="primary"
-            )
-            rb.pack(side=tk.LEFT, padx=(10 if idx == 0 else 5, 0))
-
-        # Auto-save report
-        auto_save_var = tk.BooleanVar(value=qa_settings.get('auto_save_report', True))
-        tb.Checkbutton(
-            report_section,
-            text="Automatically save report after scan",
-            variable=auto_save_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W)
-
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
-        button_inner = tk.Frame(button_frame)
-        button_inner.pack()
         
         def save_settings():
             """Save QA scanner settings with comprehensive debugging"""
             try:
                 self.append_log("🔍 [DEBUG] Starting QA Scanner settings save process...")
                 
+                # Helper to get the selected radio button value
+                def get_selected_radio_value(radio_button_list):
+                    for rb, value in radio_button_list:
+                        if rb.isChecked():
+                            return value
+                    return None
+                
                 # Core QA Settings with debugging
                 core_settings_to_save = {
-                    'foreign_char_threshold': (threshold_var, lambda x: x.get()),
-                    'excluded_characters': (excluded_text, lambda x: x.get(1.0, tk.END).strip()),
-                    'target_language': (target_language_var, lambda x: x.get().lower()),
-                    'check_encoding_issues': (check_encoding_var, lambda x: x.get()),
-                    'check_repetition': (check_repetition_var, lambda x: x.get()),
-                    'check_translation_artifacts': (check_artifacts_var, lambda x: x.get()),
-                    'check_glossary_leakage': (check_glossary_var, lambda x: x.get()),
-                    'min_file_length': (min_length_var, lambda x: x.get()),
-                    'report_format': (format_var, lambda x: x.get()),
-                    'auto_save_report': (auto_save_var, lambda x: x.get()),
-                    'check_word_count_ratio': (check_word_count_var, lambda x: x.get()),
-                    'check_multiple_headers': (check_multiple_headers_var, lambda x: x.get()),
-                    'warn_name_mismatch': (warn_mismatch_var, lambda x: x.get()),
-                    'check_missing_html_tag': (check_missing_html_tag_var, lambda x: x.get()),
-                    'check_paragraph_structure': (check_paragraph_structure_var, lambda x: x.get()),
-                    'check_invalid_nesting': (check_invalid_nesting_var, lambda x: x.get()),
+                    'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
+                    'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
+                    'target_language': (target_language_combo, lambda x: x.currentText().lower()),
+                    'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
+                    'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
+                    'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
+                    'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
+                    'min_file_length': (min_length_spinbox, lambda x: x.value()),
+                    'report_format': (format_radio_buttons, get_selected_radio_value),
+                    'auto_save_report': (auto_save_checkbox, lambda x: x.isChecked()),
+                    'check_word_count_ratio': (check_word_count_checkbox, lambda x: x.isChecked()),
+                    'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
+                    'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
+                    'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
+                    'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
+                    'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
                 }
                 
                 failed_core_settings = []
@@ -2141,9 +2299,9 @@ class QAScannerMixin:
                 # Cache settings with debugging
                 self.append_log("🔍 [DEBUG] Saving QA cache settings...")
                 cache_settings_to_save = {
-                    'cache_enabled': (cache_enabled_var, lambda x: x.get()),
-                    'cache_auto_size': (auto_size_var, lambda x: x.get()),
-                    'cache_show_stats': (show_stats_var, lambda x: x.get()),
+                    'cache_enabled': (cache_enabled_checkbox, lambda x: x.isChecked()),
+                    'cache_auto_size': (auto_size_checkbox, lambda x: x.isChecked()),
+                    'cache_show_stats': (show_stats_checkbox, lambda x: x.isChecked()),
                 }
                 
                 failed_cache_settings = []
@@ -2164,11 +2322,11 @@ class QAScannerMixin:
                 # Save individual cache sizes with debugging
                 saved_cache_vars = []
                 failed_cache_vars = []
-                for cache_name, cache_var in cache_vars.items():
+                for cache_name, cache_spinbox in cache_spinboxes.items():
                     try:
                         cache_key = f'cache_{cache_name}'
                         old_value = qa_settings.get(cache_key, '<NOT SET>')
-                        new_value = cache_var.get()
+                        new_value = cache_spinbox.value()
                         qa_settings[cache_key] = new_value
                         saved_cache_vars.append(cache_name)
                         
@@ -2191,7 +2349,7 @@ class QAScannerMixin:
                         self.append_log("🔍 [DEBUG] Created new ai_hunter_config section")
                     
                     old_workers = self.config['ai_hunter_config'].get('ai_hunter_max_workers', '<NOT SET>')
-                    new_workers = ai_hunter_workers_var.get()
+                    new_workers = ai_hunter_workers_spinbox.value()
                     self.config['ai_hunter_config']['ai_hunter_max_workers'] = new_workers
                     
                     if old_workers != new_workers:
@@ -2205,7 +2363,7 @@ class QAScannerMixin:
                 # Validate and save paragraph threshold with debugging
                 self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
                 try:
-                    threshold_value = paragraph_threshold_var.get()
+                    threshold_value = paragraph_threshold_spinbox.value()
                     old_threshold = qa_settings.get('paragraph_threshold', '<NOT SET>')
                     
                     if 0 <= threshold_value <= 100:
@@ -2219,7 +2377,7 @@ class QAScannerMixin:
                     else:
                         raise ValueError("Threshold must be between 0 and 100")
                         
-                except (tk.TclError, ValueError) as e:
+                except (ValueError, Exception) as e:
                     # Default to 30% if invalid
                     qa_settings['paragraph_threshold'] = 0.3
                     self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
@@ -2309,84 +2467,96 @@ class QAScannerMixin:
                 
                 self.append_log("✅ QA Scanner settings saved successfully")
                 dialog._cleanup_scrolling()  # Clean up scrolling bindings
-                dialog.destroy()
+                dialog.accept()
                 
             except Exception as e:
                 self.append_log(f"❌ [DEBUG] QA save_settings full exception: {str(e)}")
                 import traceback
                 self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
                 self.append_log(f"❌ Error saving QA settings: {str(e)}")
-                messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
+                QMessageBox.critical(dialog, "Error", f"Failed to save settings: {str(e)}")
         
         def reset_defaults():
             """Reset to default settings"""
-            result = messagebox.askyesno(
-                "Reset to Defaults", 
+            result = QMessageBox.question(
+                dialog,
+                "Reset to Defaults",
                 "Are you sure you want to reset all settings to defaults?",
-                parent=dialog
+                QMessageBox.Yes | QMessageBox.No
             )
-            if result:
-                threshold_var.set(10)
-                excluded_text.delete(1.0, tk.END)
-                target_language_var.set('English')
-                check_encoding_var.set(False)
-                check_repetition_var.set(True)
-                check_artifacts_var.set(False)
+            if result == QMessageBox.Yes:
+                threshold_spinbox.setValue(10)
+                excluded_text.clear()
+                target_language_combo.setCurrentText('English')
+                check_encoding_checkbox.setChecked(False)
+                check_repetition_checkbox.setChecked(True)
+                check_artifacts_checkbox.setChecked(False)
 
-                check_glossary_var.set(True)
-                min_length_var.set(0)
-                format_var.set('detailed')
-                auto_save_var.set(True)
-                check_word_count_var.set(False)
-                check_multiple_headers_var.set(True)
-                warn_mismatch_var.set(False)
-                check_missing_html_tag_var.set(True)
-                check_paragraph_structure_var.set(True)
-                check_invalid_nesting_var.set(False)
-                paragraph_threshold_var.set(30)  # 30% default
-                paragraph_threshold_var.set(30)  # 30% default
+                check_glossary_checkbox.setChecked(True)
+                min_length_spinbox.setValue(0)
+                # Set 'detailed' radio button as checked
+                for rb, value in format_radio_buttons:
+                    rb.setChecked(value == 'detailed')
+                auto_save_checkbox.setChecked(True)
+                check_word_count_checkbox.setChecked(False)
+                check_multiple_headers_checkbox.setChecked(True)
+                warn_mismatch_checkbox.setChecked(False)
+                check_missing_html_tag_checkbox.setChecked(True)
+                check_paragraph_structure_checkbox.setChecked(True)
+                check_invalid_nesting_checkbox.setChecked(False)
+                paragraph_threshold_spinbox.setValue(30)  # 30% default
                 
                 # Reset cache settings
-                cache_enabled_var.set(True)
-                auto_size_var.set(False)
-                show_stats_var.set(False)
+                cache_enabled_checkbox.setChecked(True)
+                auto_size_checkbox.setChecked(False)
+                show_stats_checkbox.setChecked(False)
                 
                 # Reset cache sizes to defaults
                 for cache_name, default_value in cache_defaults.items():
-                    cache_vars[cache_name].set(default_value)
+                    cache_spinboxes[cache_name].setValue(default_value)
                     
-                ai_hunter_workers_var.set(1)
+                ai_hunter_workers_spinbox.setValue(1)
         
-        # Create buttons using ttkbootstrap styles
-        save_btn = tb.Button(
-            button_inner,
-            text="Save Settings",
-            command=save_settings,
-            bootstyle="success",
-            width=15
-        )
-        save_btn.pack(side=tk.LEFT, padx=5)
+        scroll_layout.addStretch()
         
-        reset_btn = tb.Button(
-            button_inner,
-            text="Reset Defaults",
-            command=reset_defaults,
-            bootstyle="warning",
-            width=15
-        )
-        reset_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        # Create buttons
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(0, 20, 0, 0)
+        scroll_layout.addWidget(button_widget)
         
-        cancel_btn = tb.Button(
-            button_inner,
-            text="Cancel",
-            command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()],
-            bootstyle="secondary",
-            width=15
-        )
-        cancel_btn.pack(side=tk.RIGHT)
+        save_btn = QPushButton("Save Settings")
+        save_btn.setMinimumWidth(120)
+        save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
+        save_btn.clicked.connect(save_settings)
+        button_layout.addWidget(save_btn)
         
-        # Use WindowManager's auto_resize_dialog to properly size the window
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+        button_layout.addStretch()
         
-        # Handle window close - setup_scrollable adds _cleanup_scrolling method
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumWidth(120)
+        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+        cancel_btn.clicked.connect(lambda: [dialog._cleanup_scrolling(), dialog.reject()])
+        button_layout.addWidget(cancel_btn)
+        
+        reset_btn = QPushButton("Reset Defaults")
+        reset_btn.setMinimumWidth(120)
+        reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 8px;")
+        reset_btn.clicked.connect(reset_defaults)
+        button_layout.addWidget(reset_btn)
+        
+        # Show the dialog (PySide6 handles sizing automatically)
+        # Note: The dialog size is already set in the constructor (800x600)
+        # WindowManager's auto_resize_dialog is for Tkinter, not PySide6
+        
+        # Add a dummy _cleanup_scrolling method for compatibility
+        dialog._cleanup_scrolling = lambda: None
+        
+        # Handle window close
+        def handle_close():
+            dialog._cleanup_scrolling()
+            dialog.reject()
+        dialog.rejected.connect(handle_close)
+        
+        # Show the dialog and return result
+        return dialog.exec()

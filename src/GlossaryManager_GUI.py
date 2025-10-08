@@ -6,9 +6,14 @@ Comprehensive glossary management for automatic and manual glossary extraction
 import os
 import sys
 import json
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
+                                QCheckBox, QRadioButton, QTextEdit, QListWidget,
+                                QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget,
+                                QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
+                                QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
+                                QSizePolicy, QAbstractItemView, QButtonGroup, QApplication)
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtGui import QFont, QColor, QIcon
 
 # Import from translator_gui if available
 try:
@@ -20,22 +25,305 @@ except ImportError:
 
 class GlossaryManagerMixin:
     """Mixin class containing glossary management methods for TranslatorGUI"""
+    
+    @staticmethod
+    def _disable_slider_mousewheel(slider):
+        """Disable mousewheel scrolling on a slider to prevent accidental changes"""
+        slider.wheelEvent = lambda event: None
+    
+    @staticmethod
+    def _disable_spinbox_mousewheel(spinbox):
+        """Disable mousewheel scrolling on a spinbox to prevent accidental changes"""
+        spinbox.wheelEvent = lambda event: None
+    
+    @staticmethod
+    def _disable_tabwidget_mousewheel(tabwidget):
+        """Disable mousewheel scrolling on a tab widget to prevent accidental tab switching"""
+        tabwidget.wheelEvent = lambda event: None
 
     def glossary_manager(self):
         """Open comprehensive glossary management dialog"""
-        # Create scrollable dialog (stays hidden)
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.master, 
-            "Glossary Manager",
-            width=0,  # Will be auto-sized
-            height=None,
-            max_width_ratio=0.9,
-            max_height_ratio=0.85
-        )
+        # Create standalone PySide6 dialog (no Tkinter parent)
+        # Note: self.master is a Tkinter window, so we use None as parent for PySide6
+        dialog = QDialog(None)
+        dialog.setWindowTitle("Glossary Manager")
+        
+        # Use screen ratios instead of fixed pixels
+        self._screen = QApplication.primaryScreen().geometry()
+        min_width = int(self._screen.width() * 0.4)   # 40% of screen width
+        min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
+        dialog.setMinimumSize(min_width, min_height)
+        
+        # Set window icon
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"Could not load window icon: {e}")
+        
+        # Store dialog reference for use in nested functions
+        self.dialog = dialog
+        
+        # Apply global dark mode stylesheet similar to manga_integration
+        global_stylesheet = """
+            /* Global dark mode styling */
+            QDialog, QWidget {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            
+            /* Checkbox styling */
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            
+            /* Radio button styling */
+            QRadioButton {
+                color: white;
+                spacing: 5px;
+            }
+            QRadioButton::indicator {
+                width: 13px;
+                height: 13px;
+                border: 2px solid #5a9fd4;
+                border-radius: 7px;
+                background-color: #2d2d2d;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #5a9fd4;
+                border: 2px solid #5a9fd4;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QRadioButton:disabled {
+                color: #666666;
+            }
+            QRadioButton::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            
+            /* Input fields styling */
+            QLineEdit, QTextEdit {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QLineEdit:focus, QTextEdit:focus {
+                border-color: #5a9fd4;
+            }
+            QLineEdit:disabled, QTextEdit:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            
+            /* ComboBox styling */
+            QComboBox {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QComboBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #5a9fd4;
+            }
+            
+            /* SpinBox styling */
+            QSpinBox, QDoubleSpinBox {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QSpinBox:disabled, QDoubleSpinBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            
+            /* Slider styling */
+            QSlider::groove:horizontal {
+                background: #2d2d2d;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #5a9fd4;
+                width: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #7bb3e0;
+            }
+            
+            /* GroupBox styling */
+            QGroupBox {
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background-color: #252525;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 2px 5px;
+                color: #5a9fd4;
+            }
+            
+            /* Label styling */
+            QLabel {
+                color: white;
+            }
+            QLabel:disabled {
+                color: #666666;
+            }
+            
+            /* ListWidget styling */
+            QListWidget {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #5a9fd4;
+            }
+            QListWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            
+            /* TreeWidget styling */
+            QTreeWidget {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                alternate-background-color: #252525;
+            }
+            QTreeWidget::item:selected {
+                background-color: #5a9fd4;
+            }
+            QTreeWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            QHeaderView::section {
+                background-color: #252525;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 4px;
+            }
+            
+            /* TabWidget styling */
+            QTabWidget::pane {
+                border: 1px solid #4a5568;
+                background-color: #1e1e1e;
+            }
+            QTabBar::tab {
+                background-color: #252525;
+                color: white;
+                border: 1px solid #4a5568;
+                padding: 8px 16px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #5a9fd4;
+                border-bottom: 2px solid #5a9fd4;
+            }
+            QTabBar::tab:hover {
+                background-color: #3a3a3a;
+            }
+            
+            /* ScrollBar styling */
+            QScrollBar:vertical {
+                background: #2d2d2d;
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4a5568;
+                min-height: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #5a9fd4;
+            }
+            QScrollBar:horizontal {
+                background: #2d2d2d;
+                height: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #4a5568;
+                min-width: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #5a9fd4;
+            }
+        """
+        dialog.setStyleSheet(global_stylesheet)
+        
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        
+        # Create scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Scrollable widget and layout
+        scrollable_widget = QWidget()
+        scrollable_layout = QVBoxLayout(scrollable_widget)
+        scroll_area.setWidget(scrollable_widget)
+        main_layout.addWidget(scroll_area)
         
         # Create notebook for tabs
-        notebook = ttk.Notebook(scrollable_frame)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        notebook = QTabWidget()
+        self._disable_tabwidget_mousewheel(notebook)  # Disable mouse wheel tab switching
+        scrollable_layout.addWidget(notebook)
         
         # Create and add tabs
         tabs = [
@@ -45,13 +333,14 @@ class GlossaryManagerMixin:
         ]
         
         for tab_name, setup_method in tabs:
-            frame = ttk.Frame(notebook)
-            notebook.add(frame, text=tab_name)
-            setup_method(frame)
+            tab_widget = QWidget()
+            notebook.addTab(tab_widget, tab_name)
+            setup_method(tab_widget)
         
         # Dialog Controls
-        control_frame = tk.Frame(dialog)
-        control_frame.pack(fill=tk.X, padx=10, pady=10)
+        control_frame = QWidget()
+        control_layout = QHBoxLayout(control_frame)
+        main_layout.addWidget(control_frame)
         
         def save_glossary_settings():
             try:
@@ -71,24 +360,24 @@ class GlossaryManagerMixin:
                 self.config['custom_glossary_fields'] = self.custom_glossary_fields
                 
                 # Update enabled status from checkboxes
-                if hasattr(self, 'type_enabled_vars'):
-                    for type_name, var in self.type_enabled_vars.items():
+                if hasattr(self, 'type_enabled_checks'):
+                    for type_name, checkbox in self.type_enabled_checks.items():
                         if type_name in self.custom_entry_types:
-                            self.custom_entry_types[type_name]['enabled'] = var.get()
+                            self.custom_entry_types[type_name]['enabled'] = checkbox.isChecked()
                 
                 # Save custom entry types
                 self.config['custom_entry_types'] = self.custom_entry_types
                 
                 # Save all glossary-related settings with validation
                 settings_to_save = {
-                    'enable_auto_glossary': ('enable_auto_glossary_var', lambda x: x.get()),
-                    'append_glossary': ('append_glossary_var', lambda x: x.get()),
-                    'glossary_min_frequency': ('glossary_min_frequency_var', lambda x: int(x.get())),
-                    'glossary_max_names': ('glossary_max_names_var', lambda x: int(x.get())),
-                    'glossary_max_titles': ('glossary_max_titles_var', lambda x: int(x.get())),
-                    'glossary_batch_size': ('glossary_batch_size_var', lambda x: int(x.get())),
-                    'glossary_max_text_size': ('glossary_max_text_size_var', lambda x: x.get()),
-                    'glossary_max_sentences': ('glossary_max_sentences_var', lambda x: int(x.get())),
+                    'enable_auto_glossary': ('enable_auto_glossary_checkbox', lambda x: x.isChecked()),
+                    'append_glossary': ('append_glossary_checkbox', lambda x: x.isChecked()),
+                    'glossary_min_frequency': ('glossary_min_frequency_entry', lambda x: int(x.text())),
+                    'glossary_max_names': ('glossary_max_names_entry', lambda x: int(x.text())),
+                    'glossary_max_titles': ('glossary_max_titles_entry', lambda x: int(x.text())),
+                    'glossary_batch_size': ('glossary_batch_size_entry', lambda x: int(x.text())),
+                    'glossary_max_text_size': ('glossary_max_text_size_entry', lambda x: int(x.text())),
+                    'glossary_max_sentences': ('glossary_max_sentences_entry', lambda x: int(x.text())),
                 }
                 
                 failed_settings = []
@@ -110,33 +399,33 @@ class GlossaryManagerMixin:
                 self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
                 
                 # Honorifics and other settings
-                if hasattr(self, 'strip_honorifics_var'):
-                    self.config['strip_honorifics'] = self.strip_honorifics_var.get()
+                if hasattr(self, 'strip_honorifics_checkbox'):
+                    self.config['strip_honorifics'] = self.strip_honorifics_checkbox.isChecked()
                     self.append_log(f"🔍 [DEBUG] Saved strip_honorifics: {self.config['strip_honorifics']}")
                 else:
-                    self.append_log("⚠️ [DEBUG] strip_honorifics_var not found")
+                    self.append_log("⚠️ [DEBUG] strip_honorifics_checkbox not found")
                     
-                if hasattr(self, 'disable_honorifics_var'):
-                    self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
+                if hasattr(self, 'disable_honorifics_checkbox'):
+                    self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_checkbox.isChecked()
                     self.append_log(f"🔍 [DEBUG] Saved glossary_disable_honorifics_filter: {self.config['glossary_disable_honorifics_filter']}")
                 else:
-                    self.append_log("⚠️ [DEBUG] disable_honorifics_var not found")
+                    self.append_log("⚠️ [DEBUG] disable_honorifics_checkbox not found")
                 
                 # Save format preference
-                if hasattr(self, 'use_legacy_csv_var'):
-                    self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var.get()
+                if hasattr(self, 'use_legacy_csv_checkbox'):
+                    self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_checkbox.isChecked()
                     self.append_log(f"🔍 [DEBUG] Saved glossary_use_legacy_csv: {self.config['glossary_use_legacy_csv']}")
                 else:
-                    self.append_log("⚠️ [DEBUG] use_legacy_csv_var not found")
+                    self.append_log("⚠️ [DEBUG] use_legacy_csv_checkbox not found")
                     
                 # Temperature and context limit
                 try:
-                    self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
-                    self.config['manual_context_limit'] = int(self.manual_context_var.get())
+                    self.config['manual_glossary_temperature'] = float(self.manual_temp_entry.text())
+                    self.config['manual_context_limit'] = int(self.manual_context_entry.text())
                     self.append_log(f"🔍 [DEBUG] Saved temperature: {self.config['manual_glossary_temperature']}, context: {self.config['manual_context_limit']}")
                 except ValueError as e:
                     self.append_log(f"❌ [DEBUG] Temperature/context validation failed: {e}")
-                    messagebox.showwarning("Invalid Input", 
+                    QMessageBox.warning(dialog, "Invalid Input", 
                         "Please enter valid numbers for temperature and context limit")
                     return
                 except Exception as e:
@@ -144,7 +433,7 @@ class GlossaryManagerMixin:
                 
                 # Fuzzy matching threshold
                 try:
-                    self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_var.get()
+                    self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_slider.value() / 100.0
                     self.append_log(f"🔍 [DEBUG] Saved fuzzy_threshold: {self.config['glossary_fuzzy_threshold']}")
                 except Exception as e:
                     self.append_log(f"❌ [DEBUG] Fuzzy threshold error: {e}")
@@ -174,13 +463,13 @@ class GlossaryManagerMixin:
                     env_mappings = [
                         ('GLOSSARY_SYSTEM_PROMPT', self.manual_glossary_prompt),
                         ('AUTO_GLOSSARY_PROMPT', self.auto_glossary_prompt),
-                        ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if hasattr(self, 'disable_honorifics_var') and self.disable_honorifics_var.get() else '0'),
-                        ('GLOSSARY_STRIP_HONORIFICS', '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '0'),
-                        ('GLOSSARY_FUZZY_THRESHOLD', str(self.fuzzy_threshold_var.get()) if hasattr(self, 'fuzzy_threshold_var') else '0.90'),
+                        ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if hasattr(self, 'disable_honorifics_checkbox') and self.disable_honorifics_checkbox.isChecked() else '0'),
+                        ('GLOSSARY_STRIP_HONORIFICS', '1' if hasattr(self, 'strip_honorifics_checkbox') and self.strip_honorifics_checkbox.isChecked() else '0'),
+                        ('GLOSSARY_FUZZY_THRESHOLD', str(self.fuzzy_threshold_slider.value() / 100.0) if hasattr(self, 'fuzzy_threshold_slider') else '0.90'),
                         ('GLOSSARY_TRANSLATION_PROMPT', getattr(self, 'glossary_translation_prompt', '')),
                         ('GLOSSARY_FORMAT_INSTRUCTIONS', getattr(self, 'glossary_format_instructions', '')),
-                        ('GLOSSARY_USE_LEGACY_CSV', '1' if hasattr(self, 'use_legacy_csv_var') and self.use_legacy_csv_var.get() else '0'),
-                        ('GLOSSARY_MAX_SENTENCES', str(self.glossary_max_sentences_var.get()) if hasattr(self, 'glossary_max_sentences_var') else '10'),
+                        ('GLOSSARY_USE_LEGACY_CSV', '1' if hasattr(self, 'use_legacy_csv_checkbox') and self.use_legacy_csv_checkbox.isChecked() else '0'),
+                        ('GLOSSARY_MAX_SENTENCES', str(int(self.glossary_max_sentences_entry.text())) if hasattr(self, 'glossary_max_sentences_entry') else '10'),
                     ]
                     
                     for env_key, env_value in env_mappings:
@@ -242,7 +531,7 @@ class GlossaryManagerMixin:
                 # Check if any types are enabled
                 enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
                 if not enabled_types:
-                    messagebox.showwarning("Warning", "No entry types selected! The glossary extraction will not find any entries.")
+                    QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
                     self.append_log("⚠️ [DEBUG] No enabled types found!")
                 else:
                     self.append_log(f"📑 Enabled types: {', '.join(enabled_types)}")
@@ -257,51 +546,40 @@ class GlossaryManagerMixin:
                     else:
                         self.append_log(f"✅ [DEBUG] {var}: {len(str(value))} chars")
                 
-                messagebox.showinfo("Success", "Glossary settings saved!")
-                dialog.destroy()
+                QMessageBox.information(dialog, "Success", "Glossary settings saved!")
+                dialog.accept()
                 
             except Exception as e:
                 self.append_log(f"❌ [DEBUG] Full exception details: {str(e)}")
                 import traceback
                 self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
-                messagebox.showerror("Error", f"Failed to save settings: {e}")
+                QMessageBox.critical(dialog, "Error", f"Failed to save settings: {e}")
                 self.append_log(f"❌ Failed to save glossary settings: {e}")
                 
-        # Create button container
-        button_container = tk.Frame(control_frame)
-        button_container.pack(expand=True)
-        
         # Add buttons
-        tb.Button(
-            button_container, 
-            text="Save All Settings", 
-            command=save_glossary_settings, 
-            bootstyle="success", 
-            width=20
-        ).pack(side=tk.LEFT, padx=5)
+        save_button = QPushButton("Save All Settings")
+        save_button.clicked.connect(save_glossary_settings)
+        save_button.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px;")
+        control_layout.addWidget(save_button)
         
-        tb.Button(
-            button_container, 
-            text="Cancel", 
-            command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
-            bootstyle="secondary", 
-            width=20
-        ).pack(side=tk.LEFT, padx=5)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(dialog.reject)
+        cancel_button.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+        control_layout.addWidget(cancel_button)
         
-        # Auto-resize and show
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.5)
-        
-        dialog.protocol("WM_DELETE_WINDOW", 
-                       lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        # Show dialog
+        dialog.exec()
 
     def _setup_manual_glossary_tab(self, parent):
         """Setup manual glossary tab - simplified for new format"""
-        manual_container = tk.Frame(parent)
-        manual_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Create main layout for parent
+        manual_layout = QVBoxLayout(parent)
+        manual_layout.setContentsMargins(10, 10, 10, 10)
         
         # Type filtering section with custom types
-        type_filter_frame = tk.LabelFrame(manual_container, text="Entry Type Configuration", padx=10, pady=10)
-        type_filter_frame.pack(fill=tk.X, pady=(0, 10))
+        type_filter_frame = QGroupBox("Entry Type Configuration")
+        type_filter_layout = QVBoxLayout(type_filter_frame)
+        manual_layout.addWidget(type_filter_frame)
         
         # Initialize custom entry types if not exists
         if not hasattr(self, 'custom_entry_types'):
@@ -312,40 +590,45 @@ class GlossaryManagerMixin:
             })
         
         # Main container with grid for better control
-        type_main_container = tk.Frame(type_filter_frame)
-        type_main_container.pack(fill=tk.X)
-        type_main_container.grid_columnconfigure(0, weight=3)  # Left side gets 3/5 of space
-        type_main_container.grid_columnconfigure(1, weight=2)  # Right side gets 2/5 of space
+        type_main_grid = QGridLayout()
+        type_filter_layout.addLayout(type_main_grid)
         
         # Left side - type list with checkboxes
-        type_list_frame = tk.Frame(type_main_container)
-        type_list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
+        type_list_widget = QWidget()
+        type_list_layout = QVBoxLayout(type_list_widget)
+        type_list_layout.setContentsMargins(0, 0, 15, 0)
+        type_main_grid.addWidget(type_list_widget, 0, 0)
+        type_main_grid.setColumnStretch(0, 3)
+        type_main_grid.setColumnStretch(1, 2)
         
-        tk.Label(type_list_frame, text="Active Entry Types:",
-                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+        label = QLabel("Active Entry Types:")
+        label.setStyleSheet("font-weight: bold;")
+        type_list_layout.addWidget(label)
         
         # Scrollable frame for type checkboxes
-        type_scroll_frame = tk.Frame(type_list_frame)
-        type_scroll_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        type_scroll_area = QScrollArea()
+        type_scroll_area.setWidgetResizable(True)
+        # Use screen ratio: ~16% of screen height
+        scroll_height = int(self._screen.height() * 0.16)
+        type_scroll_area.setMinimumHeight(scroll_height)
+        type_scroll_area.setMaximumHeight(scroll_height)
+        type_list_layout.addWidget(type_scroll_area)
         
-        type_canvas = tk.Canvas(type_scroll_frame, height=150)
-        type_scrollbar = ttk.Scrollbar(type_scroll_frame, orient="vertical", command=type_canvas.yview)
-        self.type_checkbox_frame = tk.Frame(type_canvas)
-        
-        type_canvas.configure(yscrollcommand=type_scrollbar.set)
-        type_canvas_window = type_canvas.create_window((0, 0), window=self.type_checkbox_frame, anchor="nw")
-        
-        type_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        type_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.type_checkbox_widget = QWidget()
+        self.type_checkbox_layout = QVBoxLayout(self.type_checkbox_widget)
+        self.type_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        type_scroll_area.setWidget(self.type_checkbox_widget)
         
         # Store checkbox variables
-        self.type_enabled_vars = {}
+        self.type_enabled_checkboxes = {}
         
         def update_type_checkboxes():
             """Rebuild the checkbox list"""
             # Clear existing checkboxes
-            for widget in self.type_checkbox_frame.winfo_children():
-                widget.destroy()
+            while self.type_checkbox_layout.count():
+                item = self.type_checkbox_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
             
             # Sort types: built-in first, then custom alphabetically
             sorted_types = sorted(self.custom_entry_types.items(), 
@@ -353,70 +636,77 @@ class GlossaryManagerMixin:
             
             # Create checkboxes for each type
             for type_name, type_config in sorted_types:
-                var = tk.BooleanVar(value=type_config.get('enabled', True))
-                self.type_enabled_vars[type_name] = var
-                
-                frame = tk.Frame(self.type_checkbox_frame)
-                frame.pack(fill=tk.X, pady=2)
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 2, 0, 2)
                 
                 # Checkbox
-                cb = tb.Checkbutton(frame, text=type_name, variable=var,
-                                  bootstyle="round-toggle")
-                cb.pack(side=tk.LEFT)
+                cb = QCheckBox(type_name)
+                cb.setChecked(type_config.get('enabled', True))
+                self.type_enabled_checkboxes[type_name] = cb
+                row_layout.addWidget(cb)
                 
                 # Add gender indicator for types that support it
                 if type_config.get('has_gender', False):
-                    tk.Label(frame, text="(has gender field)", 
-                            font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                    label = QLabel("(has gender field)")
+                    label.setStyleSheet("color: gray; font-size: 9pt;")
+                    row_layout.addWidget(label)
+                
+                row_layout.addStretch()
                 
                 # Delete button for custom types
                 if type_name not in ['character', 'term']:
-                    tb.Button(frame, text="×", command=lambda t=type_name: remove_type(t),
-                             bootstyle="danger", width=3).pack(side=tk.RIGHT, padx=(5, 0))
+                    delete_btn = QPushButton("×")
+                    # Use screen ratio: ~3% of screen width
+                    btn_width = int(self._screen.width() * 0.03)
+                    delete_btn.setMaximumWidth(btn_width)
+                    delete_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+                    delete_btn.clicked.connect(lambda checked, t=type_name: remove_type(t))
+                    row_layout.addWidget(delete_btn)
+                
+                self.type_checkbox_layout.addWidget(row_widget)
             
-            # Update canvas scroll region
-            self.type_checkbox_frame.update_idletasks()
-            type_canvas.configure(scrollregion=type_canvas.bbox("all"))
+            self.type_checkbox_layout.addStretch()
         
         # Right side - controls for adding custom types
-        type_control_frame = tk.Frame(type_main_container)
-        type_control_frame.grid(row=0, column=1, sticky="nsew")
+        type_control_widget = QWidget()
+        type_control_layout = QVBoxLayout(type_control_widget)
+        type_control_layout.setContentsMargins(0, 0, 0, 0)
+        type_main_grid.addWidget(type_control_widget, 0, 1)
         
-        tk.Label(type_control_frame, text="Add Custom Type:",
-                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+        label = QLabel("Add Custom Type:")
+        label.setStyleSheet("font-weight: bold;")
+        type_control_layout.addWidget(label)
         
         # Entry for new type field
-        new_type_frame = tk.Frame(type_control_frame)
-        new_type_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        tk.Label(new_type_frame, text="Type Field:").pack(anchor=tk.W)
-        new_type_entry = tb.Entry(new_type_frame)
-        new_type_entry.pack(fill=tk.X, pady=(2, 0))
+        QLabel("Type Field:").setParent(type_control_widget)
+        type_control_layout.addWidget(QLabel("Type Field:"))
+        new_type_entry = QLineEdit()
+        type_control_layout.addWidget(new_type_entry)
         
         # Checkbox for gender field
-        has_gender_var = tk.BooleanVar(value=False)
-        tb.Checkbutton(new_type_frame, text="Include gender field", 
-                      variable=has_gender_var).pack(anchor=tk.W, pady=(5, 0))
+        has_gender_checkbox = QCheckBox("Include gender field")
+        type_control_layout.addWidget(has_gender_checkbox)
         
         def add_custom_type():
-            type_name = new_type_entry.get().strip().lower()
+            type_name = new_type_entry.text().strip().lower()
             if not type_name:
-                messagebox.showwarning("Invalid Input", "Please enter a type name")
+                QMessageBox.warning(parent, "Invalid Input", "Please enter a type name")
                 return
             
             if type_name in self.custom_entry_types:
-                messagebox.showwarning("Duplicate Type", f"Type '{type_name}' already exists")
+                QMessageBox.warning(parent, "Duplicate Type", f"Type '{type_name}' already exists")
                 return
             
             # Add the new type
             self.custom_entry_types[type_name] = {
                 'enabled': True,
-                'has_gender': has_gender_var.get()
+                'has_gender': has_gender_checkbox.isChecked()
             }
             
             # Clear inputs
-            new_type_entry.delete(0, tk.END)
-            has_gender_var.set(False)
+            new_type_entry.clear()
+            has_gender_checkbox.setChecked(False)
             
             # Update display
             update_type_checkboxes()
@@ -424,205 +714,205 @@ class GlossaryManagerMixin:
         
         def remove_type(type_name):
             if type_name in ['character', 'term']:
-                messagebox.showwarning("Cannot Remove", "Built-in types cannot be removed")
+                QMessageBox.warning(parent, "Cannot Remove", "Built-in types cannot be removed")
                 return
             
-            if messagebox.askyesno("Confirm Removal", f"Remove type '{type_name}'?"):
+            reply = QMessageBox.question(parent, "Confirm Removal", f"Remove type '{type_name}'?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
                 del self.custom_entry_types[type_name]
-                if type_name in self.type_enabled_vars:
-                    del self.type_enabled_vars[type_name]
+                if type_name in self.type_enabled_checkboxes:
+                    del self.type_enabled_checkboxes[type_name]
                 update_type_checkboxes()
                 self.append_log(f"🗑️ Removed custom type: {type_name}")
         
-        tb.Button(new_type_frame, text="Add Type", command=add_custom_type,
-                 bootstyle="success").pack(fill=tk.X, pady=(10, 0))
+        add_type_button = QPushButton("Add Type")
+        add_type_button.clicked.connect(add_custom_type)
+        add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
+        type_control_layout.addWidget(add_type_button)
+        type_control_layout.addStretch()
         
         # Initialize checkboxes
         update_type_checkboxes()
         
         # Custom fields section
-        custom_frame = tk.LabelFrame(manual_container, text="Custom Fields (Additional Columns)", padx=10, pady=10)
-        custom_frame.pack(fill=tk.X, pady=(0, 10))
+        custom_frame = QGroupBox("Custom Fields (Additional Columns)")
+        custom_frame_layout = QVBoxLayout(custom_frame)
+        manual_layout.addWidget(custom_frame)
         
-        custom_list_frame = tk.Frame(custom_frame)
-        custom_list_frame.pack(fill=tk.X)
+        QLabel("Additional fields to extract (will be added as extra columns):").setParent(custom_frame)
+        custom_frame_layout.addWidget(QLabel("Additional fields to extract (will be added as extra columns):"))
         
-        tk.Label(custom_list_frame, text="Additional fields to extract (will be added as extra columns):").pack(anchor=tk.W)
-        
-        custom_scroll = ttk.Scrollbar(custom_list_frame)
-        custom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=4, 
-                                              yscrollcommand=custom_scroll.set)
-        self.custom_fields_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        custom_scroll.config(command=self.custom_fields_listbox.yview)
+        self.custom_fields_listbox = QListWidget()
+        # Use screen ratio: ~10% of screen height
+        listbox_height = int(self._screen.height() * 0.10)
+        self.custom_fields_listbox.setMaximumHeight(listbox_height)
+        custom_frame_layout.addWidget(self.custom_fields_listbox)
         
         # Initialize custom_glossary_fields if not exists
         if not hasattr(self, 'custom_glossary_fields'):
             self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         
         for field in self.custom_glossary_fields:
-            self.custom_fields_listbox.insert(tk.END, field)
+            self.custom_fields_listbox.addItem(field)
         
-        custom_controls = tk.Frame(custom_frame)
-        custom_controls.pack(fill=tk.X, pady=(5, 0))
+        custom_controls_widget = QWidget()
+        custom_controls_layout = QHBoxLayout(custom_controls_widget)
+        custom_controls_layout.setContentsMargins(0, 5, 0, 0)
+        custom_frame_layout.addWidget(custom_controls_widget)
         
-        self.custom_field_entry = tb.Entry(custom_controls, width=30)
-        self.custom_field_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.custom_field_entry = QLineEdit()
+        self.custom_field_entry.setPlaceholderText("Enter field name...")
+        custom_controls_layout.addWidget(self.custom_field_entry)
         
         def add_custom_field():
-            field = self.custom_field_entry.get().strip()
+            field = self.custom_field_entry.text().strip()
             if field and field not in self.custom_glossary_fields:
                 self.custom_glossary_fields.append(field)
-                self.custom_fields_listbox.insert(tk.END, field)
-                self.custom_field_entry.delete(0, tk.END)
+                self.custom_fields_listbox.addItem(field)
+                self.custom_field_entry.clear()
         
         def remove_custom_field():
-            selection = self.custom_fields_listbox.curselection()
-            if selection:
-                idx = selection[0]
-                field = self.custom_fields_listbox.get(idx)
+            current_row = self.custom_fields_listbox.currentRow()
+            if current_row >= 0:
+                item = self.custom_fields_listbox.item(current_row)
+                field = item.text()
                 self.custom_glossary_fields.remove(field)
-                self.custom_fields_listbox.delete(idx)
+                self.custom_fields_listbox.takeItem(current_row)
         
-        tb.Button(custom_controls, text="Add", command=add_custom_field, width=10).pack(side=tk.LEFT, padx=2)
-        tb.Button(custom_controls, text="Remove", command=remove_custom_field, width=10).pack(side=tk.LEFT, padx=2)
+        # Use screen ratio for button widths: ~8% of screen width
+        button_width = int(self._screen.width() * 0.08)
+        
+        add_field_btn = QPushButton("Add")
+        add_field_btn.setFixedWidth(button_width)
+        add_field_btn.clicked.connect(add_custom_field)
+        custom_controls_layout.addWidget(add_field_btn)
+        
+        remove_field_btn = QPushButton("Remove")
+        remove_field_btn.setFixedWidth(button_width)
+        remove_field_btn.clicked.connect(remove_custom_field)
+        custom_controls_layout.addWidget(remove_field_btn)
         
         # Duplicate Detection Settings
-        duplicate_frame = tk.LabelFrame(manual_container, text="Duplicate Detection", padx=10, pady=10)
-        duplicate_frame.pack(fill=tk.X, pady=(0, 10))
+        duplicate_frame = QGroupBox("Duplicate Detection")
+        duplicate_frame_layout = QVBoxLayout(duplicate_frame)
+        manual_layout.addWidget(duplicate_frame)
         
         # Honorifics filter toggle
-        if not hasattr(self, 'disable_honorifics_var'):
-            self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
+        if not hasattr(self, 'disable_honorifics_checkbox'):
+            self.disable_honorifics_checkbox = QCheckBox("Disable honorifics filtering")
+            self.disable_honorifics_checkbox.setChecked(self.config.get('glossary_disable_honorifics_filter', False))
         
-        tb.Checkbutton(duplicate_frame, text="Disable honorifics filtering", 
-                      variable=self.disable_honorifics_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W)
+        duplicate_frame_layout.addWidget(self.disable_honorifics_checkbox)
         
-        tk.Label(duplicate_frame, text="When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+        honorifics_label = QLabel("When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names")
+        honorifics_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        duplicate_frame_layout.addWidget(honorifics_label)
         
         # Fuzzy matching slider
-        fuzzy_frame = tk.Frame(duplicate_frame)
-        fuzzy_frame.pack(fill=tk.X, pady=(10, 0))
+        fuzzy_label = QLabel("Fuzzy Matching Threshold:")
+        fuzzy_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        duplicate_frame_layout.addWidget(fuzzy_label)
 
-        tk.Label(fuzzy_frame, text="Fuzzy Matching Threshold:",
-                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+        desc_label = QLabel("Controls how similar names must be to be considered duplicates")
+        desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        duplicate_frame_layout.addWidget(desc_label)
 
-        tk.Label(fuzzy_frame, text="Controls how similar names must be to be considered duplicates",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
-
-        # Slider frame
-        slider_frame = tk.Frame(fuzzy_frame)
-        slider_frame.pack(fill=tk.X, pady=(5, 0))
+        # Slider widget
+        slider_widget = QWidget()
+        slider_layout = QHBoxLayout(slider_widget)
+        slider_layout.setContentsMargins(0, 5, 0, 0)
+        duplicate_frame_layout.addWidget(slider_widget)
 
         # Initialize fuzzy threshold variable
-        if not hasattr(self, 'fuzzy_threshold_var'):
-            self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))
+        if not hasattr(self, 'fuzzy_threshold_value'):
+            self.fuzzy_threshold_value = self.config.get('glossary_fuzzy_threshold', 0.90)
 
         # Slider
-        fuzzy_slider = tb.Scale(
-            slider_frame,
-            from_=0.5,
-            to=1.0,
-            orient=tk.HORIZONTAL,
-            variable=self.fuzzy_threshold_var,
-            style="info.Horizontal.TScale",
-            length=300
-        )
-        fuzzy_slider.pack(side=tk.LEFT, padx=(0, 10))
+        fuzzy_slider = QSlider(Qt.Horizontal)
+        fuzzy_slider.setMinimum(50)  # 0.5 * 100
+        fuzzy_slider.setMaximum(100)  # 1.0 * 100
+        fuzzy_slider.setValue(int(self.fuzzy_threshold_value * 100))
+        # Use screen ratio: ~30% of screen width
+        slider_width = int(self._screen.width() * 0.30)
+        fuzzy_slider.setMinimumWidth(slider_width)
+        self._disable_slider_mousewheel(fuzzy_slider)  # Disable mouse wheel
+        slider_layout.addWidget(fuzzy_slider)
 
         # Value label
-        self.fuzzy_value_label = tk.Label(slider_frame, text=f"{self.fuzzy_threshold_var.get():.2f}")
-        self.fuzzy_value_label.pack(side=tk.LEFT)
+        self.fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
+        slider_layout.addWidget(self.fuzzy_value_label)
 
-        # Description label - CREATE THIS FIRST
-        fuzzy_desc_label = tk.Label(fuzzy_frame, text="", font=('TkDefaultFont', 9), fg='blue')
-        fuzzy_desc_label.pack(anchor=tk.W, pady=(5, 0))
+        # Description label
+        fuzzy_desc_label = QLabel("")
+        fuzzy_desc_label.setStyleSheet("color: blue; font-size: 9pt; margin-top: 5px;")
+        duplicate_frame_layout.addWidget(fuzzy_desc_label)
 
         # Token-efficient format toggle
-        format_frame = tk.LabelFrame(manual_container, text="Output Format", padx=10, pady=10)
-        format_frame.pack(fill=tk.X, pady=(0, 10))
+        format_frame = QGroupBox("Output Format")
+        format_frame_layout = QVBoxLayout(format_frame)
+        manual_layout.addWidget(format_frame)
 
         # Initialize variable if not exists
-        if not hasattr(self, 'use_legacy_csv_var'):
-            self.use_legacy_csv_var = tk.BooleanVar(value=self.config.get('glossary_use_legacy_csv', False))
+        if not hasattr(self, 'use_legacy_csv_checkbox'):
+            self.use_legacy_csv_checkbox = QCheckBox("Use legacy CSV format")
+            self.use_legacy_csv_checkbox.setChecked(self.config.get('glossary_use_legacy_csv', False))
 
-        tb.Checkbutton(format_frame, text="Use legacy CSV format", 
-                      variable=self.use_legacy_csv_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W)
+        format_frame_layout.addWidget(self.use_legacy_csv_checkbox)
 
-        tk.Label(format_frame, text="When disabled (default): Uses token-efficient format with sections (=== CHARACTERS ===)",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+        label1 = QLabel("When disabled (default): Uses token-efficient format with sections (=== CHARACTERS ===)")
+        label1.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        format_frame_layout.addWidget(label1)
 
-        tk.Label(format_frame, text="When enabled: Uses traditional CSV format with repeated type columns",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
+        label2 = QLabel("When enabled: Uses traditional CSV format with repeated type columns")
+        label2.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        format_frame_layout.addWidget(label2)
         
-        # Update label when slider moves - DEFINE AFTER CREATING THE LABEL
-        def update_fuzzy_label(*args):
-            try:
-                # Check if widgets still exist before updating
-                if not fuzzy_desc_label.winfo_exists():
-                    return
-                if not self.fuzzy_value_label.winfo_exists():
-                    return
-                    
-                value = self.fuzzy_threshold_var.get()
-                self.fuzzy_value_label.config(text=f"{value:.2f}")
-                
-                # Show description
-                if value >= 0.95:
-                    desc = "Exact match only (strict)"
-                elif value >= 0.85:
-                    desc = "Very similar names (recommended)"
-                elif value >= 0.75:
-                    desc = "Moderately similar names"
-                elif value >= 0.65:
-                    desc = "Loosely similar names"
-                else:
-                    desc = "Very loose matching (may over-merge)"
-                
-                fuzzy_desc_label.config(text=desc)
-            except tk.TclError:
-                # Widget was destroyed, ignore
-                pass
-            except Exception as e:
-                # Catch any other unexpected errors
-                print(f"Error updating fuzzy label: {e}")
-                pass
-
-        # Remove any existing trace before adding a new one
-        if hasattr(self, 'manual_fuzzy_trace_id'):
-            try:
-                self.fuzzy_threshold_var.trace_remove('write', self.manual_fuzzy_trace_id)
-            except:
-                pass
+        # Update label when slider moves
+        def update_fuzzy_label(value):
+            float_value = value / 100.0
+            self.fuzzy_threshold_value = float_value
+            self.fuzzy_value_label.setText(f"{float_value:.2f}")
+            
+            # Show description
+            if float_value >= 0.95:
+                desc = "Exact match only (strict)"
+            elif float_value >= 0.85:
+                desc = "Very similar names (recommended)"
+            elif float_value >= 0.75:
+                desc = "Moderately similar names"
+            elif float_value >= 0.65:
+                desc = "Loosely similar names"
+            else:
+                desc = "Very loose matching (may over-merge)"
+            
+            fuzzy_desc_label.setText(desc)
         
-        # Set up the trace AFTER creating the label and store the trace ID
-        self.manual_fuzzy_trace_id = self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
+        # Connect slider to update function
+        fuzzy_slider.valueChanged.connect(update_fuzzy_label)
         
-        # Initialize description by calling the function
-        try:
-            update_fuzzy_label()
-        except:
-            # If initialization fails, just continue
-            pass
+        # Initialize description
+        update_fuzzy_label(fuzzy_slider.value())
         
-        # Prompt section (continues as before)
-        prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt", padx=10, pady=10)
-        prompt_frame.pack(fill=tk.BOTH, expand=True)
+        # Prompt section
+        prompt_frame = QGroupBox("Extraction Prompt")
+        prompt_frame_layout = QVBoxLayout(prompt_frame)
+        manual_layout.addWidget(prompt_frame)
         
-        tk.Label(prompt_frame, text="Use {fields} for field list and {chapter_text} for content placeholder",
-                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        label1 = QLabel("Use {fields} for field list and {chapter_text} for content placeholder")
+        label1.setStyleSheet("color: blue; font-size: 9pt;")
+        prompt_frame_layout.addWidget(label1)
         
-        tk.Label(prompt_frame, text="The {fields} placeholder will be replaced with the format specification",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+        label2 = QLabel("The {fields} placeholder will be replaced with the format specification")
+        label2.setStyleSheet("color: gray; font-size: 9pt;")
+        prompt_frame_layout.addWidget(label2)
         
-        self.manual_prompt_text = self.ui.setup_scrollable_text(
-            prompt_frame, height=13, wrap=tk.WORD
-        )
-        self.manual_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.manual_prompt_text = QTextEdit()
+        # Use screen ratio: ~25% of screen height
+        prompt_height = int(self._screen.height() * 0.25)
+        self.manual_prompt_text.setMinimumHeight(prompt_height)
+        self.manual_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        prompt_frame_layout.addWidget(self.manual_prompt_text)
         
         # Set default prompt if not already set
         if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
@@ -638,15 +928,17 @@ Rules:
 - Leave gender empty for terms (just end with comma)
     """
         
-        self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
-        self.manual_prompt_text.edit_reset()
+        self.manual_prompt_text.setPlainText(self.manual_glossary_prompt)
         
-        prompt_controls = tk.Frame(manual_container)
-        prompt_controls.pack(fill=tk.X, pady=(10, 0))
+        prompt_controls_widget = QWidget()
+        prompt_controls_layout = QHBoxLayout(prompt_controls_widget)
+        prompt_controls_layout.setContentsMargins(0, 10, 0, 0)
+        manual_layout.addWidget(prompt_controls_widget)
         
         def reset_manual_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset manual glossary prompt to default?"):
-                self.manual_prompt_text.delete('1.0', tk.END)
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset manual glossary prompt to default?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
                 default_prompt = """Extract character names and important terms from the following text.
 
     Output format:
@@ -658,255 +950,299 @@ Rules:
     - One entry per line
     - Leave gender empty for terms (just end with comma)
     """
-                self.manual_prompt_text.insert('1.0', default_prompt)
+                self.manual_prompt_text.setPlainText(default_prompt)
         
-        tb.Button(prompt_controls, text="Reset to Default", command=reset_manual_prompt, 
-                bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(reset_manual_prompt)
+        reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        prompt_controls_layout.addWidget(reset_btn)
+        prompt_controls_layout.addStretch()
         
         # Settings
-        settings_frame = tk.LabelFrame(manual_container, text="Extraction Settings", padx=10, pady=10)
-        settings_frame.pack(fill=tk.X, pady=(10, 0))
+        settings_frame = QGroupBox("Extraction Settings")
+        settings_frame_layout = QVBoxLayout(settings_frame)
+        manual_layout.addWidget(settings_frame)
         
-        settings_grid = tk.Frame(settings_frame)
-        settings_grid.pack()
+        settings_grid = QGridLayout()
+        settings_frame_layout.addLayout(settings_grid)
         
-        tk.Label(settings_grid, text="Temperature:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.1)))
-        tb.Entry(settings_grid, textvariable=self.manual_temp_var, width=10).grid(row=0, column=1, padx=5)
+        settings_grid.addWidget(QLabel("Temperature:"), 0, 0)
+        self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
+        self.manual_temp_entry.setFixedWidth(80)
+        settings_grid.addWidget(self.manual_temp_entry, 0, 1)
         
-        tk.Label(settings_grid, text="Context Limit:").grid(row=0, column=2, sticky=tk.W, padx=5)
-        self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 2)))
-        tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
+        settings_grid.addWidget(QLabel("Context Limit:"), 0, 2)
+        self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
+        self.manual_context_entry.setFixedWidth(80)
+        settings_grid.addWidget(self.manual_context_entry, 0, 3)
         
-        tk.Label(settings_grid, text="Rolling Window:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(10, 0))
-        tb.Checkbutton(settings_grid, text="Keep recent context instead of reset", 
-                      variable=self.glossary_history_rolling_var,
-                      bootstyle="round-toggle").grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(10, 0))
+        settings_grid.addWidget(QLabel("Rolling Window:"), 1, 0)
+        if not hasattr(self, 'glossary_history_rolling_checkbox'):
+            self.glossary_history_rolling_checkbox = QCheckBox("Keep recent context instead of reset")
+            self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
+        settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 1, 1, 3)
         
-        tk.Label(settings_grid, text="When context limit is reached, keep recent chapters instead of clearing all history",
-                font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
+        rolling_label = QLabel("When context limit is reached, keep recent chapters instead of clearing all history")
+        rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
+        settings_grid.addWidget(rolling_label, 2, 0, 1, 4)
 
     def update_glossary_prompts(self):
         """Update glossary prompts from text widgets if they exist"""
         try:
             if hasattr(self, 'manual_prompt_text'):
-                self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
+                self.manual_glossary_prompt = self.manual_prompt_text.toPlainText().strip()
             
             if hasattr(self, 'auto_prompt_text'):
-                self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
+                self.auto_glossary_prompt = self.auto_prompt_text.toPlainText().strip()
             
             if hasattr(self, 'append_prompt_text'):
-                self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
+                self.append_glossary_prompt = self.append_prompt_text.toPlainText().strip()
             
             if hasattr(self, 'translation_prompt_text'):
-                self.glossary_translation_prompt = self.translation_prompt_text.get('1.0', tk.END).strip()
+                self.glossary_translation_prompt = self.translation_prompt_text.toPlainText().strip()
 
             if hasattr(self, 'format_instructions_text'):
-                self.glossary_format_instructions = self.format_instructions_text.get('1.0', tk.END).strip()
+                self.glossary_format_instructions = self.format_instructions_text.toPlainText().strip()
                 
         except Exception as e:
             print(f"Error updating glossary prompts: {e}")
             
     def _setup_auto_glossary_tab(self, parent):
         """Setup automatic glossary tab with fully configurable prompts"""
-        auto_container = tk.Frame(parent)
-        auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Create main layout for parent
+        auto_layout = QVBoxLayout(parent)
+        auto_layout.setContentsMargins(10, 10, 10, 10)
         
         # Master toggle
-        master_toggle_frame = tk.Frame(auto_container)
-        master_toggle_frame.pack(fill=tk.X, pady=(0, 15))
+        master_toggle_widget = QWidget()
+        master_toggle_layout = QHBoxLayout(master_toggle_widget)
+        master_toggle_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(master_toggle_widget)
         
-        tb.Checkbutton(master_toggle_frame, text="Enable Automatic Glossary Generation", 
-                      variable=self.enable_auto_glossary_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        if not hasattr(self, 'enable_auto_glossary_checkbox'):
+            self.enable_auto_glossary_checkbox = QCheckBox("Enable Automatic Glossary Generation")
+            self.enable_auto_glossary_checkbox.setChecked(self.config.get('enable_auto_glossary', False))
+        master_toggle_layout.addWidget(self.enable_auto_glossary_checkbox)
         
-        tk.Label(master_toggle_frame, text="(Automatic extraction and translation of character names/Terms)",
-                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        label = QLabel("(Automatic extraction and translation of character names/Terms)")
+        label.setStyleSheet("color: gray; font-size: 9pt;")
+        master_toggle_layout.addWidget(label)
+        master_toggle_layout.addStretch()
         
         # Append glossary toggle
-        append_frame = tk.Frame(auto_container)
-        append_frame.pack(fill=tk.X, pady=(0, 15))
+        append_widget = QWidget()
+        append_layout = QHBoxLayout(append_widget)
+        append_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(append_widget)
         
-        tb.Checkbutton(append_frame, text="Append Glossary to System Prompt", 
-                      variable=self.append_glossary_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        if not hasattr(self, 'append_glossary_checkbox'):
+            self.append_glossary_checkbox = QCheckBox("Append Glossary to System Prompt")
+            self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
+        append_layout.addWidget(self.append_glossary_checkbox)
         
-        tk.Label(append_frame, text="(Applies to ALL glossaries - manual and automatic)",
-                font=('TkDefaultFont', 10, 'italic'), fg='blue').pack(side=tk.LEFT, padx=(10, 0))
+        label2 = QLabel("(Applies to ALL glossaries - manual and automatic)")
+        label2.setStyleSheet("color: blue; font-size: 10pt; font-style: italic;")
+        append_layout.addWidget(label2)
+        append_layout.addStretch()
         
         # Custom append prompt section
-        append_prompt_frame = tk.LabelFrame(auto_container, text="Glossary Append Format", padx=10, pady=10)
-        append_prompt_frame.pack(fill=tk.X, pady=(0, 15))
+        append_prompt_frame = QGroupBox("Glossary Append Format")
+        append_prompt_layout = QVBoxLayout(append_prompt_frame)
+        append_prompt_layout.setContentsMargins(10, 10, 10, 10)  # Tighter margins
+        append_prompt_layout.setSpacing(5)  # Reduced spacing
+        auto_layout.addWidget(append_prompt_frame)
         
-        tk.Label(append_prompt_frame, text="This text will be added before the glossary entries:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
-        
-        self.append_prompt_text = self.ui.setup_scrollable_text(
-            append_prompt_frame, height=2, wrap=tk.WORD
-        )
-        self.append_prompt_text.pack(fill=tk.X)
+        self.append_prompt_text = QTextEdit()
+        self.append_prompt_text.setMinimumHeight(40)  # Reduced from 60
+        self.append_prompt_text.setMaximumHeight(40)  # Reduced from 60
+        self.append_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        append_prompt_layout.addWidget(self.append_prompt_text)
         
         # Set default append prompt if not already set
         if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
             self.append_glossary_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
         
-        self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
-        self.append_prompt_text.edit_reset()
+        self.append_prompt_text.setPlainText(self.append_glossary_prompt)
         
-        append_prompt_controls = tk.Frame(append_prompt_frame)
-        append_prompt_controls.pack(fill=tk.X, pady=(5, 0))
+        append_prompt_controls_widget = QWidget()
+        append_prompt_controls_layout = QHBoxLayout(append_prompt_controls_widget)
+        append_prompt_controls_layout.setContentsMargins(0, 5, 0, 0)
+        append_prompt_layout.addWidget(append_prompt_controls_widget)
         
         def reset_append_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset to default glossary append format?"):
-                self.append_prompt_text.delete('1.0', tk.END)
-                self.append_prompt_text.insert('1.0', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default glossary append format?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.append_prompt_text.setPlainText("- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         
-        tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        reset_append_btn = QPushButton("Reset to Default")
+        reset_append_btn.clicked.connect(reset_append_prompt)
+        reset_append_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        append_prompt_controls_layout.addWidget(reset_append_btn)
+        append_prompt_controls_layout.addStretch()
         
         # Create notebook for tabs
-        notebook = ttk.Notebook(auto_container)
-        notebook.pack(fill=tk.BOTH, expand=True)
+        notebook = QTabWidget()
+        self._disable_tabwidget_mousewheel(notebook)  # Disable mouse wheel tab switching
+        auto_layout.addWidget(notebook)
         
         # Tab 1: Extraction Settings
-        extraction_tab = tk.Frame(notebook)
-        notebook.add(extraction_tab, text="Extraction Settings")
+        extraction_tab = QWidget()
+        extraction_tab_layout = QVBoxLayout(extraction_tab)
+        extraction_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(extraction_tab, "Extraction Settings")
         
         # Extraction settings
-        settings_label_frame = tk.LabelFrame(extraction_tab, text="Targeted Extraction Settings", padx=10, pady=10)
-        settings_label_frame.pack(fill=tk.X, padx=10, pady=10)
+        settings_label_frame = QGroupBox("Targeted Extraction Settings")
+        settings_label_layout = QVBoxLayout(settings_label_frame)
+        extraction_tab_layout.addWidget(settings_label_frame)
         
-        extraction_grid = tk.Frame(settings_label_frame)
-        extraction_grid.pack(fill=tk.X)
+        extraction_grid = QGridLayout()
+        settings_label_layout.addLayout(extraction_grid)
+        
+        # Initialize entry widgets with config values
+        if not hasattr(self, 'glossary_min_frequency_entry'):
+            self.glossary_min_frequency_entry = QLineEdit(str(self.config.get('glossary_min_frequency', 2)))
+            self.glossary_min_frequency_entry.setFixedWidth(80)
+        if not hasattr(self, 'glossary_max_names_entry'):
+            self.glossary_max_names_entry = QLineEdit(str(self.config.get('glossary_max_names', 100)))
+            self.glossary_max_names_entry.setFixedWidth(80)
+        if not hasattr(self, 'glossary_max_titles_entry'):
+            self.glossary_max_titles_entry = QLineEdit(str(self.config.get('glossary_max_titles', 50)))
+            self.glossary_max_titles_entry.setFixedWidth(80)
+        if not hasattr(self, 'glossary_batch_size_entry'):
+            self.glossary_batch_size_entry = QLineEdit(str(self.config.get('glossary_batch_size', 10)))
+            self.glossary_batch_size_entry.setFixedWidth(80)
+        if not hasattr(self, 'glossary_max_text_size_entry'):
+            self.glossary_max_text_size_entry = QLineEdit(str(self.config.get('glossary_max_text_size', 0)))
+            self.glossary_max_text_size_entry.setFixedWidth(80)
+        if not hasattr(self, 'glossary_chapter_split_threshold_entry'):
+            self.glossary_chapter_split_threshold_entry = QLineEdit(str(self.config.get('glossary_chapter_split_threshold', 0)))
+            self.glossary_chapter_split_threshold_entry.setFixedWidth(80)
+        if not hasattr(self, 'glossary_max_sentences_entry'):
+            self.glossary_max_sentences_entry = QLineEdit(str(self.config.get('glossary_max_sentences', 200)))
+            self.glossary_max_sentences_entry.setFixedWidth(80)
         
         # Row 1
-        tk.Label(extraction_grid, text="Min frequency:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        tb.Entry(extraction_grid, textvariable=self.glossary_min_frequency_var, width=10).grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        extraction_grid.addWidget(QLabel("Min frequency:"), 0, 0)
+        extraction_grid.addWidget(self.glossary_min_frequency_entry, 0, 1)
         
-        tk.Label(extraction_grid, text="Max names:").grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
-        tb.Entry(extraction_grid, textvariable=self.glossary_max_names_var, width=10).grid(row=0, column=3, sticky=tk.W)
+        extraction_grid.addWidget(QLabel("Max names:"), 0, 2)
+        extraction_grid.addWidget(self.glossary_max_names_entry, 0, 3)
         
         # Row 2
-        tk.Label(extraction_grid, text="Max titles:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tb.Entry(extraction_grid, textvariable=self.glossary_max_titles_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Max titles:"), 1, 0)
+        extraction_grid.addWidget(self.glossary_max_titles_entry, 1, 1)
         
-        tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Translation batch:"), 1, 2)
+        extraction_grid.addWidget(self.glossary_batch_size_entry, 1, 3)
         
         # Row 3 - Max text size and chapter split
-        tk.Label(extraction_grid, text="Max text size:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tb.Entry(extraction_grid, textvariable=self.glossary_max_text_size_var, width=10).grid(row=3, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Max text size:"), 3, 0)
+        extraction_grid.addWidget(self.glossary_max_text_size_entry, 3, 1)
 
-        tk.Label(extraction_grid, text="Chapter split threshold:").grid(row=3, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tb.Entry(extraction_grid, textvariable=self.glossary_chapter_split_threshold_var, width=10).grid(row=3, column=3, sticky=tk.W, pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Chapter split threshold:"), 3, 2)
+        extraction_grid.addWidget(self.glossary_chapter_split_threshold_entry, 3, 3)
         
         # Row 4 - Max sentences for glossary
-        tk.Label(extraction_grid, text="Max sentences:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tb.Entry(extraction_grid, textvariable=self.glossary_max_sentences_var, width=10).grid(row=4, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Max sentences:"), 4, 0)
+        extraction_grid.addWidget(self.glossary_max_sentences_entry, 4, 1)
         
-        tk.Label(extraction_grid, text="(Limit for AI processing)", font=('TkDefaultFont', 9), fg='gray').grid(row=4, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        ai_limit_label = QLabel("(Limit for AI processing)")
+        ai_limit_label.setStyleSheet("color: gray; font-size: 9pt;")
+        extraction_grid.addWidget(ai_limit_label, 4, 2, 1, 2)
         
         # Row 5 - Filter mode
-        tk.Label(extraction_grid, text="Filter mode:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        filter_frame = tk.Frame(extraction_grid)
-        filter_frame.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Filter mode:"), 5, 0)
+        filter_widget = QWidget()
+        filter_layout = QHBoxLayout(filter_widget)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        extraction_grid.addWidget(filter_widget, 5, 1, 1, 3)
         
-        tb.Radiobutton(filter_frame, text="All names & terms", variable=self.glossary_filter_mode_var, 
-                      value="all", bootstyle="info").pack(side=tk.LEFT, padx=(0, 10))
-        tb.Radiobutton(filter_frame, text="Names with honorifics only", variable=self.glossary_filter_mode_var, 
-                      value="only_with_honorifics", bootstyle="info").pack(side=tk.LEFT, padx=(0, 10))
-        tb.Radiobutton(filter_frame, text="Names without honorifics & terms", variable=self.glossary_filter_mode_var, 
-                      value="only_without_honorifics", bootstyle="info").pack(side=tk.LEFT)
+        if not hasattr(self, 'glossary_filter_mode_buttons'):
+            self.glossary_filter_mode_buttons = {}
+            filter_mode_value = self.config.get('glossary_filter_mode', 'all')
+            
+        radio1 = QRadioButton("All names & terms")
+        radio1.setChecked(self.config.get('glossary_filter_mode', 'all') == 'all')
+        self.glossary_filter_mode_buttons['all'] = radio1
+        filter_layout.addWidget(radio1)
+        
+        radio2 = QRadioButton("Names with honorifics only")
+        radio2.setChecked(self.config.get('glossary_filter_mode', 'all') == 'only_with_honorifics')
+        self.glossary_filter_mode_buttons['only_with_honorifics'] = radio2
+        filter_layout.addWidget(radio2)
+        
+        radio3 = QRadioButton("Names without honorifics & terms")
+        radio3.setChecked(self.config.get('glossary_filter_mode', 'all') == 'only_without_honorifics')
+        self.glossary_filter_mode_buttons['only_without_honorifics'] = radio3
+        filter_layout.addWidget(radio3)
+        filter_layout.addStretch()
 
         # Row 6 - Strip honorifics
-        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tb.Checkbutton(extraction_grid, text="Remove honorifics from extracted names", 
-                      variable=self.strip_honorifics_var,
-                      bootstyle="round-toggle").grid(row=6, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        extraction_grid.addWidget(QLabel("Strip honorifics:"), 6, 0)
+        if not hasattr(self, 'strip_honorifics_checkbox'):
+            self.strip_honorifics_checkbox = QCheckBox("Remove honorifics from extracted names")
+            self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
+        extraction_grid.addWidget(self.strip_honorifics_checkbox, 6, 1, 1, 3)
         
-        # Row 7 - Fuzzy matching threshold (reuse existing variable)
-        tk.Label(extraction_grid, text="Fuzzy threshold:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # Row 7 - Fuzzy matching threshold (reuse existing value)
+        extraction_grid.addWidget(QLabel("Fuzzy threshold:"), 7, 0)
         
-        fuzzy_frame = tk.Frame(extraction_grid)
-        fuzzy_frame.grid(row=7, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        auto_fuzzy_widget = QWidget()
+        auto_fuzzy_layout = QHBoxLayout(auto_fuzzy_widget)
+        auto_fuzzy_layout.setContentsMargins(0, 0, 0, 0)
+        extraction_grid.addWidget(auto_fuzzy_widget, 7, 1, 1, 3)
         
-        # Reuse the existing fuzzy_threshold_var that's already initialized elsewhere
-        fuzzy_slider = tb.Scale(
-            fuzzy_frame,
-            from_=0.5,
-            to=1.0,
-            orient=tk.HORIZONTAL,
-            variable=self.fuzzy_threshold_var,
-            length=200,
-            bootstyle="info"
-        )
-        fuzzy_slider.pack(side=tk.LEFT, padx=(0, 10))
+        # Reuse the existing fuzzy threshold value
+        auto_fuzzy_slider = QSlider(Qt.Horizontal)
+        auto_fuzzy_slider.setMinimum(50)
+        auto_fuzzy_slider.setMaximum(100)
+        auto_fuzzy_slider.setValue(int(self.fuzzy_threshold_value * 100))
+        auto_fuzzy_slider.setMinimumWidth(200)
+        self._disable_slider_mousewheel(auto_fuzzy_slider)  # Disable mouse wheel
+        auto_fuzzy_layout.addWidget(auto_fuzzy_slider)
         
-        fuzzy_value_label = tk.Label(fuzzy_frame, text=f"{self.fuzzy_threshold_var.get():.2f}")
-        fuzzy_value_label.pack(side=tk.LEFT, padx=(0, 10))
+        auto_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
+        auto_fuzzy_layout.addWidget(auto_fuzzy_value_label)
         
-        fuzzy_desc_label = tk.Label(fuzzy_frame, text="", font=('TkDefaultFont', 9), fg='gray')
-        fuzzy_desc_label.pack(side=tk.LEFT)
+        auto_fuzzy_desc_label = QLabel("")
+        auto_fuzzy_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        auto_fuzzy_layout.addWidget(auto_fuzzy_desc_label)
+        auto_fuzzy_layout.addStretch()
         
-        # Reuse the exact same update function logic
-        def update_fuzzy_label(*args):
-            try:
-                # Check if widgets still exist before updating
-                if not fuzzy_desc_label.winfo_exists():
-                    return
-                if not fuzzy_value_label.winfo_exists():
-                    return
-                    
-                value = self.fuzzy_threshold_var.get()
-                fuzzy_value_label.config(text=f"{value:.2f}")
-                
-                # Show description
-                if value >= 0.95:
-                    desc = "Exact match only (strict)"
-                elif value >= 0.85:
-                    desc = "Very similar names (recommended)"
-                elif value >= 0.75:
-                    desc = "Moderately similar names"
-                elif value >= 0.65:
-                    desc = "Loosely similar names"
-                else:
-                    desc = "Very loose matching (may over-merge)"
-                
-                fuzzy_desc_label.config(text=desc)
-            except tk.TclError:
-                # Widget was destroyed, ignore
-                pass
-            except Exception as e:
-                # Catch any other unexpected errors
-                print(f"Error updating auto fuzzy label: {e}")
-                pass
+        # Update function for auto fuzzy slider
+        def update_auto_fuzzy_label(value):
+            float_value = value / 100.0
+            self.fuzzy_threshold_value = float_value
+            auto_fuzzy_value_label.setText(f"{float_value:.2f}")
+            
+            if float_value >= 0.95:
+                desc = "Exact match only (strict)"
+            elif float_value >= 0.85:
+                desc = "Very similar names (recommended)"
+            elif float_value >= 0.75:
+                desc = "Moderately similar names"
+            elif float_value >= 0.65:
+                desc = "Loosely similar names"
+            else:
+                desc = "Very loose matching (may over-merge)"
+            
+            auto_fuzzy_desc_label.setText(desc)
         
-        # Remove any existing auto trace before adding a new one
-        if hasattr(self, 'auto_fuzzy_trace_id'):
-            try:
-                self.fuzzy_threshold_var.trace_remove('write', self.auto_fuzzy_trace_id)
-            except:
-                pass
-        
-        # Set up the trace AFTER creating the label and store the trace ID
-        self.auto_fuzzy_trace_id = self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
-        
-        # Initialize description by calling the function
-        try:
-            update_fuzzy_label()
-        except:
-            # If initialization fails, just continue
-            pass
-                
-        # Initialize the variable if not exists
-        if not hasattr(self, 'strip_honorifics_var'):
-            self.strip_honorifics_var = tk.BooleanVar(value=True)
+        auto_fuzzy_slider.valueChanged.connect(update_auto_fuzzy_label)
+        update_auto_fuzzy_label(auto_fuzzy_slider.value())
         
         # Help text
-        help_frame = tk.Frame(extraction_tab)
-        help_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
+        help_widget = QWidget()
+        help_layout = QVBoxLayout(help_widget)
+        help_layout.setContentsMargins(10, 10, 0, 0)
+        extraction_tab_layout.addWidget(help_widget)
         
-        tk.Label(help_frame, text="💡 Settings Guide:", font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W)
+        help_title = QLabel("💡 Settings Guide:")
+        help_title.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        help_layout.addWidget(help_title)
+        
         help_texts = [
             "• Min frequency: How many times a name must appear (lower = more terms)",
             "• Max names/titles: Limits to prevent huge glossaries",
@@ -922,55 +1258,70 @@ Rules:
             "• Fuzzy threshold: How similar terms must be to match (0.9 = 90% match, 1.0 = exact match)"
         ]
         for txt in help_texts:
-            tk.Label(help_frame, text=txt, font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
+            label = QLabel(txt)
+            label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
+            help_layout.addWidget(label)
         
         # Tab 2: Extraction Prompt
-        extraction_prompt_tab = tk.Frame(notebook)
-        notebook.add(extraction_prompt_tab, text="Extraction Prompt")
+        extraction_prompt_tab = QWidget()
+        extraction_prompt_tab_layout = QVBoxLayout(extraction_prompt_tab)
+        extraction_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(extraction_prompt_tab, "Extraction Prompt")
         
         # Auto prompt section
-        auto_prompt_frame = tk.LabelFrame(extraction_prompt_tab, text="Extraction Template (System Prompt)", padx=10, pady=10)
-        auto_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        auto_prompt_frame = QGroupBox("Extraction Template (System Prompt)")
+        auto_prompt_frame_layout = QVBoxLayout(auto_prompt_frame)
+        extraction_prompt_tab_layout.addWidget(auto_prompt_frame)
         
-        tk.Label(auto_prompt_frame, text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
-                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        placeholder_label = QLabel("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}")
+        placeholder_label.setStyleSheet("color: blue; font-size: 9pt;")
+        auto_prompt_frame_layout.addWidget(placeholder_label)
         
-        self.auto_prompt_text = self.ui.setup_scrollable_text(
-            auto_prompt_frame, height=12, wrap=tk.WORD
-        )
-        self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.auto_prompt_text = QTextEdit()
+        self.auto_prompt_text.setMinimumHeight(250)
+        self.auto_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        auto_prompt_frame_layout.addWidget(self.auto_prompt_text)
         
         # Set default extraction prompt if not set
         if not hasattr(self, 'auto_glossary_prompt') or not self.auto_glossary_prompt:
-            self.auto_glossary_prompt = self.default_auto_glossary_prompt
+            self.auto_glossary_prompt = getattr(self, 'default_auto_glossary_prompt', '')
         
-        self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
-        self.auto_prompt_text.edit_reset()
+        self.auto_prompt_text.setPlainText(self.auto_glossary_prompt)
         
-        auto_prompt_controls = tk.Frame(extraction_prompt_tab)
-        auto_prompt_controls.pack(fill=tk.X, padx=10, pady=(0, 10))
+        auto_prompt_controls_widget = QWidget()
+        auto_prompt_controls_layout = QHBoxLayout(auto_prompt_controls_widget)
+        auto_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
+        extraction_prompt_tab_layout.addWidget(auto_prompt_controls_widget)
         
         def reset_auto_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset automatic glossary prompt to default?"):
-                self.auto_prompt_text.delete('1.0', tk.END)
-                self.auto_prompt_text.insert('1.0', self.default_auto_glossary_prompt)
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset automatic glossary prompt to default?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.auto_prompt_text.setPlainText(getattr(self, 'default_auto_glossary_prompt', ''))
         
-        tb.Button(auto_prompt_controls, text="Reset to Default", command=reset_auto_prompt, 
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        reset_auto_btn = QPushButton("Reset to Default")
+        reset_auto_btn.clicked.connect(reset_auto_prompt)
+        reset_auto_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        auto_prompt_controls_layout.addWidget(reset_auto_btn)
+        auto_prompt_controls_layout.addStretch()
         
-        # Tab 3: Format Instructions - NEW TAB
-        format_tab = tk.Frame(notebook)
-        notebook.add(format_tab, text="Format Instructions")
+        # Tab 3: Format Instructions
+        format_tab = QWidget()
+        format_tab_layout = QVBoxLayout(format_tab)
+        format_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(format_tab, "Format Instructions")
         
         # Format instructions section
-        format_prompt_frame = tk.LabelFrame(format_tab, text="Output Format Instructions (User Prompt)", padx=10, pady=10)
-        format_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        format_prompt_frame = QGroupBox("Output Format Instructions (User Prompt)")
+        format_prompt_frame_layout = QVBoxLayout(format_prompt_frame)
+        format_tab_layout.addWidget(format_prompt_frame)
         
-        tk.Label(format_prompt_frame, text="These instructions are added to your extraction prompt to specify the output format:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
+        format_desc_label = QLabel("These instructions are added to your extraction prompt to specify the output format:")
+        format_prompt_frame_layout.addWidget(format_desc_label)
         
-        tk.Label(format_prompt_frame, text="Available placeholders: {text_sample}",
-                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        format_placeholder_label = QLabel("Available placeholders: {text_sample}")
+        format_placeholder_label.setStyleSheet("color: blue; font-size: 9pt;")
+        format_prompt_frame_layout.addWidget(format_placeholder_label)
         
         # Initialize format instructions variable and text widget
         if not hasattr(self, 'glossary_format_instructions'):
@@ -989,18 +1340,21 @@ Do not use quotes around values unless they contain commas.
 Text to analyze:
 {text_sample}"""
         
-        self.format_instructions_text = self.ui.setup_scrollable_text(
-            format_prompt_frame, height=12, wrap=tk.WORD
-        )
-        self.format_instructions_text.pack(fill=tk.BOTH, expand=True)
-        self.format_instructions_text.insert('1.0', self.glossary_format_instructions)
-        self.format_instructions_text.edit_reset()
+        self.format_instructions_text = QTextEdit()
+        self.format_instructions_text.setMinimumHeight(250)
+        self.format_instructions_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        format_prompt_frame_layout.addWidget(self.format_instructions_text)
+        self.format_instructions_text.setPlainText(self.glossary_format_instructions)
         
-        format_prompt_controls = tk.Frame(format_tab)
-        format_prompt_controls.pack(fill=tk.X, padx=10, pady=(0, 10))
+        format_prompt_controls_widget = QWidget()
+        format_prompt_controls_layout = QHBoxLayout(format_prompt_controls_widget)
+        format_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
+        format_tab_layout.addWidget(format_prompt_controls_widget)
         
         def reset_format_instructions():
-            if messagebox.askyesno("Reset Prompt", "Reset format instructions to default?"):
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset format instructions to default?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
                 default_format_instructions = """
 Return the results in EXACT CSV format with this header:
 type,raw_name,translated_name
@@ -1015,25 +1369,31 @@ Do not use quotes around values unless they contain commas.
 
 Text to analyze:
 {text_sample}"""
-                self.format_instructions_text.delete('1.0', tk.END)
-                self.format_instructions_text.insert('1.0', default_format_instructions)
+                self.format_instructions_text.setPlainText(default_format_instructions)
         
-        tb.Button(format_prompt_controls, text="Reset to Default", command=reset_format_instructions, 
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        reset_format_btn = QPushButton("Reset to Default")
+        reset_format_btn.clicked.connect(reset_format_instructions)
+        reset_format_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        format_prompt_controls_layout.addWidget(reset_format_btn)
+        format_prompt_controls_layout.addStretch()
         
-        # Tab 4: Translation Prompt (moved from Tab 3)
-        translation_prompt_tab = tk.Frame(notebook)
-        notebook.add(translation_prompt_tab, text="Translation Prompt")
+        # Tab 4: Translation Prompt
+        translation_prompt_tab = QWidget()
+        translation_prompt_tab_layout = QVBoxLayout(translation_prompt_tab)
+        translation_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(translation_prompt_tab, "Translation Prompt")
         
         # Translation prompt section
-        trans_prompt_frame = tk.LabelFrame(translation_prompt_tab, text="Glossary Translation Template (User Prompt)", padx=10, pady=10)
-        trans_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        trans_prompt_frame = QGroupBox("Glossary Translation Template (User Prompt)")
+        trans_prompt_frame_layout = QVBoxLayout(trans_prompt_frame)
+        translation_prompt_tab_layout.addWidget(trans_prompt_frame)
         
-        tk.Label(trans_prompt_frame, text="This prompt is used to translate extracted terms to English:",
-                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
+        trans_desc_label = QLabel("This prompt is used to translate extracted terms to English:")
+        trans_prompt_frame_layout.addWidget(trans_desc_label)
         
-        tk.Label(trans_prompt_frame, text="Available placeholders: {language}, {terms_list}, {batch_size}",
-                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        trans_placeholder_label = QLabel("Available placeholders: {language}, {terms_list}, {batch_size}")
+        trans_placeholder_label.setStyleSheet("color: blue; font-size: 9pt;")
+        trans_prompt_frame_layout.addWidget(trans_placeholder_label)
         
         # Initialize translation prompt variable and text widget
         if not hasattr(self, 'glossary_translation_prompt'):
@@ -1048,18 +1408,21 @@ Terms to translate:
 
 Provide translations in the same numbered format."""
         
-        self.translation_prompt_text = self.ui.setup_scrollable_text(
-            trans_prompt_frame, height=12, wrap=tk.WORD
-        )
-        self.translation_prompt_text.pack(fill=tk.BOTH, expand=True)
-        self.translation_prompt_text.insert('1.0', self.glossary_translation_prompt)
-        self.translation_prompt_text.edit_reset()
+        self.translation_prompt_text = QTextEdit()
+        self.translation_prompt_text.setMinimumHeight(250)
+        self.translation_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        trans_prompt_frame_layout.addWidget(self.translation_prompt_text)
+        self.translation_prompt_text.setPlainText(self.glossary_translation_prompt)
         
-        trans_prompt_controls = tk.Frame(translation_prompt_tab)
-        trans_prompt_controls.pack(fill=tk.X, padx=10, pady=(0, 10))
+        trans_prompt_controls_widget = QWidget()
+        trans_prompt_controls_layout = QHBoxLayout(trans_prompt_controls_widget)
+        trans_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
+        translation_prompt_tab_layout.addWidget(trans_prompt_controls_widget)
         
         def reset_trans_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset translation prompt to default?"):
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset translation prompt to default?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
                 default_trans_prompt = """
 You are translating {language} character names and important terms to English.
 For character names, provide English transliterations or keep as romanized.
@@ -1070,115 +1433,90 @@ Terms to translate:
 {terms_list}
 
 Provide translations in the same numbered format."""
-                self.translation_prompt_text.delete('1.0', tk.END)
-                self.translation_prompt_text.insert('1.0', default_trans_prompt)
+                self.translation_prompt_text.setPlainText(default_trans_prompt)
         
-        tb.Button(trans_prompt_controls, text="Reset to Default", command=reset_trans_prompt, 
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        reset_trans_btn = QPushButton("Reset to Default")
+        reset_trans_btn.clicked.connect(reset_trans_prompt)
+        reset_trans_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        trans_prompt_controls_layout.addWidget(reset_trans_btn)
+        trans_prompt_controls_layout.addStretch()
         
-        # Update states function with proper error handling
-        def update_auto_glossary_state():
-            try:
-                if not extraction_grid.winfo_exists():
-                    return
-                state = tk.NORMAL if self.enable_auto_glossary_var.get() else tk.DISABLED
-                for widget in extraction_grid.winfo_children():
-                    if isinstance(widget, (tb.Entry, ttk.Entry, tb.Checkbutton, ttk.Checkbutton)):
-                        widget.config(state=state)
-                    # Handle frames that contain radio buttons or scales
-                    elif isinstance(widget, tk.Frame):
-                        for child in widget.winfo_children():
-                            if isinstance(child, (tb.Radiobutton, ttk.Radiobutton, tb.Scale, ttk.Scale)):
-                                child.config(state=state)
-                if self.auto_prompt_text.winfo_exists():
-                    self.auto_prompt_text.config(state=state)
-                if hasattr(self, 'format_instructions_text') and self.format_instructions_text.winfo_exists():
-                    self.format_instructions_text.config(state=state)
-                if hasattr(self, 'translation_prompt_text') and self.translation_prompt_text.winfo_exists():
-                    self.translation_prompt_text.config(state=state)
-                for widget in auto_prompt_controls.winfo_children():
-                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
-                        widget.config(state=state)
-                for widget in format_prompt_controls.winfo_children():
-                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
-                        widget.config(state=state)
-                for widget in trans_prompt_controls.winfo_children():
-                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
-                        widget.config(state=state)
-            except tk.TclError:
-                # Widget was destroyed, ignore
-                pass
+        # Update states function with proper error handling - converted to use signals
+        def update_auto_glossary_state(checked=None):
+            enabled = self.enable_auto_glossary_checkbox.isChecked()
+            
+            # Enable/disable extraction settings widgets
+            for i in range(extraction_grid.count()):
+                widget = extraction_grid.itemAt(i).widget()
+                if widget and isinstance(widget, (QLineEdit, QCheckBox)):
+                    widget.setEnabled(enabled)
+            
+            # Enable/disable text widgets
+            self.auto_prompt_text.setEnabled(enabled)
+            if hasattr(self, 'format_instructions_text'):
+                self.format_instructions_text.setEnabled(enabled)
+            if hasattr(self, 'translation_prompt_text'):
+                self.translation_prompt_text.setEnabled(enabled)
         
-        def update_append_prompt_state():
-            try:
-                if not self.append_prompt_text.winfo_exists():
-                    return
-                state = tk.NORMAL if self.append_glossary_var.get() else tk.DISABLED
-                self.append_prompt_text.config(state=state)
-                for widget in append_prompt_controls.winfo_children():
-                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
-                        widget.config(state=state)
-            except tk.TclError:
-                # Widget was destroyed, ignore
-                pass
+        def update_append_prompt_state(checked=None):
+            enabled = self.append_glossary_checkbox.isChecked()
+            self.append_prompt_text.setEnabled(enabled)
         
         # Initialize states
         update_auto_glossary_state()
         update_append_prompt_state()
         
-        # Add traces
-        self.enable_auto_glossary_var.trace('w', lambda *args: update_auto_glossary_state())
-        self.append_glossary_var.trace('w', lambda *args: update_append_prompt_state())
+        # Connect signals
+        self.enable_auto_glossary_checkbox.stateChanged.connect(update_auto_glossary_state)
+        self.append_glossary_checkbox.stateChanged.connect(update_append_prompt_state)
 
     def _setup_glossary_editor_tab(self, parent):
         """Set up the glossary editor/trimmer tab"""
-        container = tk.Frame(parent)
-        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Create main layout
+        editor_layout = QVBoxLayout(parent)
+        editor_layout.setContentsMargins(10, 10, 10, 10)
 
-        file_frame = tk.Frame(container)
-        file_frame.pack(fill=tk.X, pady=(0, 10))
+        file_widget = QWidget()
+        file_layout = QHBoxLayout(file_widget)
+        file_layout.setContentsMargins(0, 0, 0, 10)
+        editor_layout.addWidget(file_widget)
 
-        tk.Label(file_frame, text="Glossary File:").pack(side=tk.LEFT, padx=(0, 5))
-        self.editor_file_var = tk.StringVar()
-        tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        file_layout.addWidget(QLabel("Glossary File:"))
+        self.editor_file_entry = QLineEdit()
+        self.editor_file_entry.setReadOnly(True)
+        file_layout.addWidget(self.editor_file_entry)
 
-        stats_frame = tk.Frame(container)
-        stats_frame.pack(fill=tk.X, pady=(0, 5))
-        self.stats_label = tk.Label(stats_frame, text="No glossary loaded", font=('TkDefaultFont', 10, 'italic'))
-        self.stats_label.pack(side=tk.LEFT)
+        stats_widget = QWidget()
+        stats_layout = QHBoxLayout(stats_widget)
+        stats_layout.setContentsMargins(0, 0, 0, 5)
+        editor_layout.addWidget(stats_widget)
+        
+        self.stats_label = QLabel("No glossary loaded")
+        self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic;")
+        stats_layout.addWidget(self.stats_label)
+        stats_layout.addStretch()
 
-        content_frame = tk.LabelFrame(container, text="Glossary Entries", padx=10, pady=10)
-        content_frame.pack(fill=tk.BOTH, expand=True)
+        content_frame = QGroupBox("Glossary Entries")
+        content_frame_layout = QVBoxLayout(content_frame)
+        editor_layout.addWidget(content_frame)
 
-        tree_frame = tk.Frame(content_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # Create tree widget
+        self.glossary_tree = QTreeWidget()
+        self.glossary_tree.setColumnCount(1)
+        self.glossary_tree.setHeaderLabels(["#"])
+        self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        content_frame_layout.addWidget(self.glossary_tree)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
-
-        self.glossary_tree = ttk.Treeview(tree_frame, show='tree headings',
-                                        yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        vsb.config(command=self.glossary_tree.yview)
-        hsb.config(command=self.glossary_tree.xview)
-
-        self.glossary_tree.grid(row=0, column=0, sticky='nsew')
-        vsb.grid(row=0, column=1, sticky='ns')
-        hsb.grid(row=1, column=0, sticky='ew')
-
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-
-        self.glossary_tree.bind('<Double-Button-1>', self._on_tree_double_click)
+        self.glossary_tree.itemDoubleClicked.connect(lambda item, col: self._on_tree_double_click(item, col))
 
         self.current_glossary_data = None
         self.current_glossary_format = None
 
         # Editor functions
         def load_glossary_for_editing():
-           path = self.editor_file_var.get()
+           path = self.editor_file_entry.text()
            if not path or not os.path.exists(path):
-               messagebox.showerror("Error", "Please select a valid glossary file")
+               QMessageBox.critical(parent, "Error", "Please select a valid glossary file")
                return
            
            try:
@@ -1255,16 +1593,15 @@ Provide translations in the same numbered format."""
                    custom_fields = sorted(all_fields - set(standard_fields))
                    column_fields.extend(custom_fields)
                
-               self.glossary_tree.delete(*self.glossary_tree.get_children())
-               self.glossary_tree['columns'] = column_fields
+               self.glossary_tree.clear()
+               self.glossary_tree.setColumnCount(len(column_fields) + 1)  # +1 for index column
                
-               self.glossary_tree.heading('#0', text='#')
-               self.glossary_tree.column('#0', width=40, stretch=False)
+               headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
+               self.glossary_tree.setHeaderLabels(headers)
                
-               for field in column_fields:
-                   display_name = field.replace('_', ' ').title()
-                   self.glossary_tree.heading(field, text=display_name)
-                   
+               self.glossary_tree.setColumnWidth(0, 40)
+               
+               for idx, field in enumerate(column_fields, start=1):
                    if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
                        width = 150
                    elif field in ['traits', 'locations', 'how_they_refer_to_others']:
@@ -1272,10 +1609,10 @@ Provide translations in the same numbered format."""
                    else:
                        width = 100
                    
-                   self.glossary_tree.column(field, width=width)
+                   self.glossary_tree.setColumnWidth(idx, width)
                
                for idx, entry in enumerate(entries):
-                   values = []
+                   values = [str(idx + 1)]
                    for field in column_fields:
                        value = entry.get(field, '')
                        if isinstance(value, list):
@@ -1284,9 +1621,10 @@ Provide translations in the same numbered format."""
                            value = ', '.join(f"{k}: {v}" for k, v in value.items())
                        elif value is None:
                            value = ''
-                       values.append(value)
+                       values.append(str(value))
                    
-                   self.glossary_tree.insert('', 'end', text=str(idx + 1), values=values)
+                   item = QTreeWidgetItem(values)
+                   self.glossary_tree.addTopLevelItem(item)
                
                # Update stats
                stats = []
@@ -1303,25 +1641,27 @@ Provide translations in the same numbered format."""
                    locs = sum(1 for e in entries if 'locations' in e and e['locations'])
                    stats.append(f"Characters: {chars}, Locations: {locs}")
                
-               self.stats_label.config(text=" | ".join(stats))
+               self.stats_label.setText(" | ".join(stats))
                self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
                
            except Exception as e:
-               messagebox.showerror("Error", f"Failed to load glossary: {e}")
+               QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
                self.append_log(f"❌ Failed to load glossary: {e}")
        
         def browse_glossary():
-           path = filedialog.askopenfilename(
-               title="Select glossary file",
-               filetypes=[("Glossary files", "*.json *.csv"), ("JSON files", "*.json"), ("CSV files", "*.csv")]
+           path, _ = QFileDialog.getOpenFileName(
+               parent,
+               "Select glossary file",
+               "",
+               "Glossary files (*.json *.csv);;JSON files (*.json);;CSV files (*.csv)"
            )
            if path:
-               self.editor_file_var.set(path)
+               self.editor_file_entry.setText(path)
                load_glossary_for_editing()
        
         # Common save helper
         def save_current_glossary():
-           path = self.editor_file_var.get()
+           path = self.editor_file_entry.text()
            if not path or not self.current_glossary_data:
                return False
            try:
@@ -1343,12 +1683,12 @@ Provide translations in the same numbered format."""
                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                return True
            except Exception as e:
-               messagebox.showerror("Error", f"Failed to save: {e}")
+               QMessageBox.critical(parent, "Error", f"Failed to save: {e}")
                return False
        
         def clean_empty_fields():
             if not self.current_glossary_data:
-                messagebox.showerror("Error", "No glossary loaded")
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
                 return
             
             if self.current_glossary_format == 'list':
@@ -1366,7 +1706,7 @@ Provide translations in the same numbered format."""
                 
                 # If no empty fields found, show message and return
                 if not empty_fields_found:
-                    messagebox.showinfo("Info", "No empty fields found in glossary")
+                    QMessageBox.information(parent, "Info", "No empty fields found in glossary")
                     return
                 
                 # Only create backup if there are fields to clean
@@ -1391,23 +1731,25 @@ Provide translations in the same numbered format."""
                     for field, count in sorted(fields_cleaned.items(), key=lambda x: x[1], reverse=True):
                         msg += f"• {field}: {count} entries\n"
                     
-                    messagebox.showinfo("Success", msg)
+                    QMessageBox.information(parent, "Success", msg)
         
         def delete_selected_entries():
-            selected = self.glossary_tree.selection()
+            selected = self.glossary_tree.selectedItems()
             if not selected:
-                messagebox.showwarning("No Selection", "Please select entries to delete")
+                QMessageBox.warning(parent, "No Selection", "Please select entries to delete")
                 return
             
             count = len(selected)
-            if messagebox.askyesno("Confirm Delete", f"Delete {count} selected entries?"):
+            reply = QMessageBox.question(parent, "Confirm Delete", f"Delete {count} selected entries?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
                 # automatic backup
                 if not self.create_glossary_backup(f"before_delete_{count}"):
                     return
                     
                 indices_to_delete = []
                 for item in selected:
-                   idx = int(self.glossary_tree.item(item)['text']) - 1
+                   idx = int(item.text(0)) - 1  # First column is index
                    indices_to_delete.append(idx)
 
                 indices_to_delete.sort(reverse=True)
@@ -1426,11 +1768,11 @@ Provide translations in the same numbered format."""
 
                 if save_current_glossary():
                    load_glossary_for_editing()
-                   messagebox.showinfo("Success", f"Deleted {len(indices_to_delete)} entries")
+                   QMessageBox.information(parent, "Success", f"Deleted {len(indices_to_delete)} entries")
                 
         def remove_duplicates():
             if not self.current_glossary_data:
-                messagebox.showerror("Error", "No glossary loaded")
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
                 return
             
             if self.current_glossary_format == 'list':
@@ -1451,10 +1793,10 @@ Provide translations in the same numbered format."""
                         
                         if save_current_glossary():
                             load_glossary_for_editing()
-                            messagebox.showinfo("Success", f"Removed {duplicates_removed} duplicate entries")
+                            QMessageBox.information(parent, "Success", f"Removed {duplicates_removed} duplicate entries")
                             self.append_log(f"🗑️ Removed {duplicates_removed} duplicates based on raw_name")
                     else:
-                        messagebox.showinfo("Info", "No duplicates found")
+                        QMessageBox.information(parent, "Info", "No duplicates found")
                         
                 except ImportError:
                     # Fallback implementation
@@ -1474,14 +1816,15 @@ Provide translations in the same numbered format."""
                         self.current_glossary_data = unique_entries
                         if save_current_glossary():
                             load_glossary_for_editing()
-                            messagebox.showinfo("Success", f"Removed {duplicates} duplicate entries")
+                            QMessageBox.information(parent, "Success", f"Removed {duplicates} duplicate entries")
                     else:
-                        messagebox.showinfo("Info", "No duplicates found")
+                        QMessageBox.information(parent, "Info", "No duplicates found")
 
         # dialog function for configuring duplicate detection mode
         def duplicate_detection_settings():
             """Show info about duplicate detection (simplified for new format)"""
-            messagebox.showinfo(
+            QMessageBox.information(
+                parent,
                 "Duplicate Detection", 
                 "Duplicate detection is based on the raw_name field.\n\n"
                 "• Entries with identical raw_name values are considered duplicates\n"
@@ -1492,238 +1835,274 @@ Provide translations in the same numbered format."""
 
         def backup_settings_dialog():
             """Show dialog for configuring automatic backup settings"""
-            # Use setup_scrollable with custom ratios
-            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-                self.master,
-                "Automatic Backup Settings",
-                width=500,
-                height=None,
-                max_width_ratio=0.45,
-                max_height_ratio=0.51
-            )
+            # Create dialog
+            backup_dialog = QDialog(parent)
+            backup_dialog.setWindowTitle("Automatic Backup Settings")
+            backup_dialog.setMinimumSize(500, 400)
             
-            # Main frame
-            main_frame = ttk.Frame(scrollable_frame, padding="20")
-            main_frame.pack(fill=tk.BOTH, expand=True)
+            # Main layout
+            main_layout = QVBoxLayout(backup_dialog)
+            main_layout.setContentsMargins(20, 20, 20, 20)
             
             # Title
-            ttk.Label(main_frame, text="Automatic Backup Settings", 
-                      font=('TkDefaultFont', 22, 'bold')).pack(pady=(0, 20))
+            title_label = QLabel("Automatic Backup Settings")
+            title_label.setStyleSheet("font-size: 22pt; font-weight: bold;")
+            main_layout.addWidget(title_label)
+            main_layout.addSpacing(20)
             
             # Backup toggle
-            backup_var = tk.BooleanVar(value=self.config.get('glossary_auto_backup', True))
-            backup_frame = ttk.Frame(main_frame)
-            backup_frame.pack(fill=tk.X, pady=5)
-            
-            backup_check = ttk.Checkbutton(backup_frame, 
-                                           text="Enable automatic backups before modifications",
-                                           variable=backup_var)
-            backup_check.pack(anchor=tk.W)
+            backup_checkbox = QCheckBox("Enable automatic backups before modifications")
+            backup_checkbox.setChecked(self.config.get('glossary_auto_backup', True))
+            main_layout.addWidget(backup_checkbox)
+            main_layout.addSpacing(5)
             
             # Settings frame (indented)
-            settings_frame = ttk.Frame(main_frame)
-            settings_frame.pack(fill=tk.X, pady=(10, 0), padx=(20, 0))
+            settings_widget = QWidget()
+            settings_layout = QVBoxLayout(settings_widget)
+            settings_layout.setContentsMargins(20, 10, 0, 0)
+            main_layout.addWidget(settings_widget)
             
             # Max backups setting
-            max_backups_frame = ttk.Frame(settings_frame)
-            max_backups_frame.pack(fill=tk.X, pady=5)
+            max_backups_widget = QWidget()
+            max_backups_layout = QHBoxLayout(max_backups_widget)
+            max_backups_layout.setContentsMargins(0, 5, 0, 5)
+            settings_layout.addWidget(max_backups_widget)
             
-            ttk.Label(max_backups_frame, text="Maximum backups to keep:").pack(side=tk.LEFT, padx=(0, 10))
-            max_backups_var = tk.IntVar(value=self.config.get('glossary_max_backups', 50))
-            max_backups_spin = ttk.Spinbox(max_backups_frame, from_=0, to=999, 
-                                           textvariable=max_backups_var, width=10)
-            max_backups_spin.pack(side=tk.LEFT)
-            ttk.Label(max_backups_frame, text="(0 = unlimited)", 
-                      font=('TkDefaultFont', 9), 
-                      foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+            max_backups_layout.addWidget(QLabel("Maximum backups to keep:"))
+            max_backups_spinbox = QSpinBox()
+            max_backups_spinbox.setRange(0, 999)
+            max_backups_spinbox.setValue(self.config.get('glossary_max_backups', 50))
+            max_backups_spinbox.setFixedWidth(80)
+            self._disable_spinbox_mousewheel(max_backups_spinbox)  # Disable mouse wheel
+            max_backups_layout.addWidget(max_backups_spinbox)
+            
+            unlimited_label = QLabel("(0 = unlimited)")
+            unlimited_label.setStyleSheet("color: gray; font-size: 9pt;")
+            max_backups_layout.addWidget(unlimited_label)
+            max_backups_layout.addStretch()
             
             # Backup naming pattern info
-            pattern_frame = ttk.Frame(settings_frame)
-            pattern_frame.pack(fill=tk.X, pady=(15, 5))
+            settings_layout.addSpacing(15)
             
-            ttk.Label(pattern_frame, text="Backup naming pattern:", 
-                      font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
-            ttk.Label(pattern_frame, 
-                      text="[original_name]_[operation]_[YYYYMMDD_HHMMSS].json",
-                      font=('TkDefaultFont', 9, 'italic'),
-                      foreground='#666').pack(anchor=tk.W, padx=(10, 0))
+            pattern_label = QLabel("Backup naming pattern:")
+            pattern_label.setStyleSheet("font-weight: bold;")
+            settings_layout.addWidget(pattern_label)
+            
+            pattern_text = QLabel("[original_name]_[operation]_[YYYYMMDD_HHMMSS].json")
+            pattern_text.setStyleSheet("color: #666; font-style: italic; font-size: 9pt; margin-left: 10px;")
+            settings_layout.addWidget(pattern_text)
             
             # Example
             example_text = "Example: my_glossary_before_delete_5_20240115_143052.json"
-            ttk.Label(pattern_frame, text=example_text,
-                      font=('TkDefaultFont', 8),
-                      foreground='gray').pack(anchor=tk.W, padx=(10, 0), pady=(2, 0))
+            example_label = QLabel(example_text)
+            example_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px; margin-top: 2px;")
+            settings_layout.addWidget(example_label)
             
             # Separator
-            ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=(20, 15))
+            main_layout.addSpacing(20)
+            separator = QFrame()
+            separator.setFrameShape(QFrame.HLine)
+            separator.setFrameShadow(QFrame.Sunken)
+            main_layout.addWidget(separator)
+            main_layout.addSpacing(15)
             
             # Backup location info
-            location_frame = ttk.Frame(main_frame)
-            location_frame.pack(fill=tk.X)
+            location_label = QLabel("📁 Backup Location:")
+            location_label.setStyleSheet("font-weight: bold;")
+            main_layout.addWidget(location_label)
             
-            ttk.Label(location_frame, text="📁 Backup Location:", 
-                      font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
-            
-            if self.editor_file_var.get():
-                glossary_dir = os.path.dirname(self.editor_file_var.get())
+            if self.editor_file_entry.text():
+                glossary_dir = os.path.dirname(self.editor_file_entry.text())
                 backup_path = "Backups"
                 full_path = os.path.join(glossary_dir, "Backups")
                 
-                path_label = ttk.Label(location_frame, 
-                                      text=f"{backup_path}/",
-                                      font=('TkDefaultFont', 9),
-                                      foreground='#0066cc')
-                path_label.pack(anchor=tk.W, padx=(10, 0))
+                path_label = QLabel(f"{backup_path}/")
+                path_label.setStyleSheet("color: #0066cc; font-size: 9pt; margin-left: 10px;")
+                main_layout.addWidget(path_label)
                 
                 # Check if backup folder exists and show count
                 if os.path.exists(full_path):
                     backup_count = len([f for f in os.listdir(full_path) if f.endswith('.json')])
-                    ttk.Label(location_frame, 
-                             text=f"Currently contains {backup_count} backup(s)",
-                             font=('TkDefaultFont', 8),
-                             foreground='gray').pack(anchor=tk.W, padx=(10, 0))
+                    count_label = QLabel(f"Currently contains {backup_count} backup(s)")
+                    count_label.setStyleSheet("color: gray; font-size: 8pt; margin-left: 10px;")
+                    main_layout.addWidget(count_label)
             else:
-                ttk.Label(location_frame, 
-                         text="Backups",
-                         font=('TkDefaultFont', 9),
-                         foreground='gray').pack(anchor=tk.W, padx=(10, 0))
+                backup_label = QLabel("Backups")
+                backup_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 10px;")
+                main_layout.addWidget(backup_label)
             
-            def toggle_settings_state(*args):
-                state = tk.NORMAL if backup_var.get() else tk.DISABLED
-                max_backups_spin.config(state=state)
+            def toggle_settings_state(checked):
+                max_backups_spinbox.setEnabled(backup_checkbox.isChecked())
             
-            backup_var.trace('w', toggle_settings_state)
-            toggle_settings_state()  # Set initial state
+            backup_checkbox.stateChanged.connect(toggle_settings_state)
+            toggle_settings_state(backup_checkbox.isChecked())  # Set initial state
             
             # Buttons
-            button_frame = ttk.Frame(main_frame)
-            button_frame.pack(fill=tk.X, pady=(25, 0))
+            main_layout.addSpacing(25)
             
-            # Inner frame for centering buttons
-            button_inner_frame = ttk.Frame(button_frame)
-            button_inner_frame.pack(anchor=tk.CENTER)
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            button_layout.setContentsMargins(0, 0, 0, 0)
+            main_layout.addWidget(button_widget)
+            
+            button_layout.addStretch()
             
             def save_settings():
                 # Save backup settings
-                self.config['glossary_auto_backup'] = backup_var.get()
-                self.config['glossary_max_backups'] = max_backups_var.get()
+                self.config['glossary_auto_backup'] = backup_checkbox.isChecked()
+                self.config['glossary_max_backups'] = max_backups_spinbox.value()
                 
                 # Save to config file
+                CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
                 with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
                 
-                status = "enabled" if backup_var.get() else "disabled"
-                if backup_var.get():
-                    limit = max_backups_var.get()
+                status = "enabled" if backup_checkbox.isChecked() else "disabled"
+                if backup_checkbox.isChecked():
+                    limit = max_backups_spinbox.value()
                     limit_text = "unlimited" if limit == 0 else f"max {limit}"
                     msg = f"Automatic backups {status} ({limit_text})"
                 else:
                     msg = f"Automatic backups {status}"
                     
-                messagebox.showinfo("Success", msg)
-                dialog.destroy()
+                QMessageBox.information(backup_dialog, "Success", msg)
+                backup_dialog.accept()
             
             def create_manual_backup():
                 """Create a manual backup right now"""
                 if not self.current_glossary_data:
-                    messagebox.showerror("Error", "No glossary loaded")
+                    QMessageBox.critical(backup_dialog, "Error", "No glossary loaded")
                     return
                     
                 if self.create_glossary_backup("manual"):
-                    messagebox.showinfo("Success", "Manual backup created successfully!")
+                    QMessageBox.information(backup_dialog, "Success", "Manual backup created successfully!")
             
-            tb.Button(button_inner_frame, text="Save Settings", command=save_settings, 
-                      bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Backup Now", command=create_manual_backup,
-                      bootstyle="info", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
-                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            save_btn = QPushButton("Save Settings")
+            save_btn.setFixedWidth(120)
+            save_btn.clicked.connect(save_settings)
+            save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
+            button_layout.addWidget(save_btn)
             
-            # Auto-resize and show
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.45, max_height_ratio=0.41)
+            backup_now_btn = QPushButton("Backup Now")
+            backup_now_btn.setFixedWidth(120)
+            backup_now_btn.clicked.connect(create_manual_backup)
+            backup_now_btn.setStyleSheet("background-color: #17a2b8; color: white; padding: 8px;")
+            button_layout.addWidget(backup_now_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedWidth(120)
+            cancel_btn.clicked.connect(backup_dialog.reject)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
+            
+            # Show dialog
+            backup_dialog.exec()
     
         def smart_trim_dialog():
             if not self.current_glossary_data:
-                messagebox.showerror("Error", "No glossary loaded")
+                QMessageBox.critical(parent, "Error", "No glossary loaded")
                 return
             
-            # Use WindowManager's setup_scrollable for unified scrolling
-            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-                self.master,
-                "Smart Trim Glossary",
-                width=600,
-                height=None,
-                max_width_ratio=0.9,
-                max_height_ratio=0.85
-            )
+            # Create dialog
+            trim_dialog = QDialog(parent)
+            trim_dialog.setWindowTitle("Smart Trim Glossary")
+            trim_dialog.setMinimumSize(600, 500)
             
-            main_frame = scrollable_frame
+            main_layout = QVBoxLayout(trim_dialog)
+            main_layout.setContentsMargins(20, 20, 20, 20)
             
             # Title and description
-            tk.Label(main_frame, text="Smart Glossary Trimming", 
-                    font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 5))
+            title = QLabel("Smart Glossary Trimming")
+            title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+            main_layout.addWidget(title)
             
-            tk.Label(main_frame, text="Limit the number of entries in your glossary",
-                    font=('TkDefaultFont', 10), fg='gray', wraplength=550).pack(pady=(0, 15))
+            desc = QLabel("Limit the number of entries in your glossary")
+            desc.setStyleSheet("color: gray; font-size: 10pt;")
+            desc.setWordWrap(True)
+            main_layout.addWidget(desc)
+            main_layout.addSpacing(15)
             
             # Display current glossary stats
-            stats_frame = tk.LabelFrame(main_frame, text="Current Glossary Statistics", padx=15, pady=10)
-            stats_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            stats_group = QGroupBox("Current Glossary Statistics")
+            stats_layout = QVBoxLayout(stats_group)
+            main_layout.addWidget(stats_group)
             
             entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
-            tk.Label(stats_frame, text=f"Total entries: {entry_count}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+            stats_layout.addWidget(QLabel(f"Total entries: {entry_count}"))
             
             # For new format, show type breakdown
             if self.current_glossary_format == 'list' and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
                 characters = sum(1 for e in self.current_glossary_data if e.get('type') == 'character')
                 terms = sum(1 for e in self.current_glossary_data if e.get('type') == 'term')
-                tk.Label(stats_frame, text=f"Characters: {characters}, Terms: {terms}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+                stats_layout.addWidget(QLabel(f"Characters: {characters}, Terms: {terms}"))
+            
+            main_layout.addSpacing(15)
             
             # Entry limit section
-            limit_frame = tk.LabelFrame(main_frame, text="Entry Limit", padx=15, pady=10)
-            limit_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            limit_group = QGroupBox("Entry Limit")
+            limit_layout = QVBoxLayout(limit_group)
+            main_layout.addWidget(limit_group)
             
-            tk.Label(limit_frame, text="Keep only the first N entries to reduce glossary size",
-                    font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
+            limit_desc = QLabel("Keep only the first N entries to reduce glossary size")
+            limit_desc.setStyleSheet("color: gray; font-size: 9pt;")
+            limit_desc.setWordWrap(True)
+            limit_layout.addWidget(limit_desc)
             
-            top_frame = tk.Frame(limit_frame)
-            top_frame.pack(fill=tk.X, pady=5)
-            tk.Label(top_frame, text="Keep first").pack(side=tk.LEFT)
-            top_var = tk.StringVar(value=str(min(100, entry_count)))
-            tb.Entry(top_frame, textvariable=top_var, width=10).pack(side=tk.LEFT, padx=5)
-            tk.Label(top_frame, text=f"entries (out of {entry_count})").pack(side=tk.LEFT)
+            top_widget = QWidget()
+            top_layout = QHBoxLayout(top_widget)
+            top_layout.setContentsMargins(0, 5, 0, 0)
+            limit_layout.addWidget(top_widget)
+            
+            top_layout.addWidget(QLabel("Keep first"))
+            top_entry = QLineEdit(str(min(100, entry_count)))
+            top_entry.setFixedWidth(80)
+            top_layout.addWidget(top_entry)
+            top_layout.addWidget(QLabel(f"entries (out of {entry_count})"))
+            top_layout.addStretch()
+            
+            main_layout.addSpacing(15)
             
             # Preview section
-            preview_frame = tk.LabelFrame(main_frame, text="Preview", padx=15, pady=10)
-            preview_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            preview_group = QGroupBox("Preview")
+            preview_layout = QVBoxLayout(preview_group)
+            main_layout.addWidget(preview_group)
             
-            preview_label = tk.Label(preview_frame, text="Click 'Preview Changes' to see the effect",
-                                   font=('TkDefaultFont', 10), fg='gray')
-            preview_label.pack(pady=5)
+            preview_label = QLabel("Click 'Preview Changes' to see the effect")
+            preview_label.setStyleSheet("color: gray; font-size: 10pt;")
+            preview_layout.addWidget(preview_label)
             
             def preview_changes():
                 try:
-                    top_n = int(top_var.get())
+                    top_n = int(top_entry.text())
                     entries_to_remove = max(0, entry_count - top_n)
                     
                     preview_text = f"Preview of changes:\n"
                     preview_text += f"• Entries: {entry_count} → {top_n} ({entries_to_remove} removed)\n"
                     
-                    preview_label.config(text=preview_text, fg='blue')
+                    preview_label.setText(preview_text)
+                    preview_label.setStyleSheet("color: blue; font-size: 10pt;")
                     
                 except ValueError:
-                    preview_label.config(text="Please enter a valid number", fg='red')
+                    preview_label.setText("Please enter a valid number")
+                    preview_label.setStyleSheet("color: red; font-size: 10pt;")
             
-            tb.Button(preview_frame, text="Preview Changes", command=preview_changes,
-                     bootstyle="info").pack()
+            preview_btn = QPushButton("Preview Changes")
+            preview_btn.clicked.connect(preview_changes)
+            preview_btn.setStyleSheet("background-color: #17a2b8; color: white; padding: 5px;")
+            preview_layout.addWidget(preview_btn)
+            
+            main_layout.addSpacing(10)
             
             # Action buttons
-            button_frame = tk.Frame(main_frame)
-            button_frame.pack(fill=tk.X, pady=(10, 20), padx=20)
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            main_layout.addWidget(button_widget)
             
             def apply_smart_trim():
                 try:
-                    top_n = int(top_var.get())
+                    top_n = int(top_entry.text())
                     
                     # Calculate how many entries will be removed
                     entries_to_remove = len(self.current_glossary_data) - top_n
@@ -1745,61 +2124,80 @@ Provide translations in the same numbered format."""
                     if save_current_glossary():
                         load_glossary_for_editing()
                         
-                        messagebox.showinfo("Success", f"Trimmed glossary to {top_n} entries")
-                        dialog.destroy()
+                        QMessageBox.information(trim_dialog, "Success", f"Trimmed glossary to {top_n} entries")
+                        trim_dialog.accept()
                         
                 except ValueError:
-                    messagebox.showerror("Error", "Please enter valid numbers")
+                    QMessageBox.critical(trim_dialog, "Error", "Please enter valid numbers")
 
-            # Create inner frame for buttons
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()
-
-            tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
-                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            button_layout.addStretch()
+            
+            apply_btn = QPushButton("Apply Trim")
+            apply_btn.setFixedWidth(120)
+            apply_btn.clicked.connect(apply_smart_trim)
+            apply_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
+            button_layout.addWidget(apply_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedWidth(120)
+            cancel_btn.clicked.connect(trim_dialog.reject)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
 
             # Info section at bottom
-            info_frame = tk.Frame(main_frame)
-            info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
+            main_layout.addSpacing(20)
+            tip_label = QLabel("💡 Tip: Entries are kept in their original order")
+            tip_label.setStyleSheet("color: #666; font-size: 9pt; font-style: italic;")
+            main_layout.addWidget(tip_label)
 
-            tk.Label(info_frame, text="💡 Tip: Entries are kept in their original order",
-                font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
-
-            # Auto-resize the dialog to fit content
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
+            # Show dialog
+            trim_dialog.exec()
        
         def filter_entries_dialog():
             if not self.current_glossary_data:
-                messagebox.showerror("Error", "No glossary loaded")
+                QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
                 return
             
-            # Use WindowManager's setup_scrollable for unified scrolling
-            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-                self.master,
-                "Filter Entries",
-                width=600,
-                height=None,
-                max_width_ratio=0.9,
-                max_height_ratio=0.85
-            )
+            # Create dialog with scroll area
+            filter_dialog = QDialog(self.dialog)
+            filter_dialog.setWindowTitle("Filter Entries")
+            filter_dialog.setMinimumWidth(600)
             
-            main_frame = scrollable_frame
+            main_layout = QVBoxLayout(filter_dialog)
+            
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            main_layout.addWidget(scroll_area)
+            
+            main_frame = QWidget()
+            content_layout = QVBoxLayout(main_frame)
+            scroll_area.setWidget(main_frame)
             
             # Title and description
-            tk.Label(main_frame, text="Filter Glossary Entries", 
-                    font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 5))
+            title_label = QLabel("Filter Glossary Entries")
+            title_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
+            content_layout.addWidget(title_label)
+            content_layout.addSpacing(5)
             
-            tk.Label(main_frame, text="Filter entries by type or content",
-                    font=('TkDefaultFont', 10), fg='gray', wraplength=550).pack(pady=(0, 15))
+            desc_label = QLabel("Filter entries by type or content")
+            desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+            desc_label.setWordWrap(True)
+            content_layout.addWidget(desc_label)
+            content_layout.addSpacing(15)
             
             # Current stats
             entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
             
-            stats_frame = tk.LabelFrame(main_frame, text="Current Status", padx=15, pady=10)
-            stats_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
-            tk.Label(stats_frame, text=f"Total entries: {entry_count}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+            stats_group = QGroupBox("Current Status")
+            stats_layout = QVBoxLayout(stats_group)
+            stats_label = QLabel(f"Total entries: {entry_count}")
+            stats_label.setStyleSheet("font-size: 10pt;")
+            stats_layout.addWidget(stats_label)
+            content_layout.addWidget(stats_group)
+            content_layout.addSpacing(15)
             
             # Check if new format
             is_new_format = (self.current_glossary_format == 'list' and 
@@ -1807,59 +2205,104 @@ Provide translations in the same numbered format."""
                            'type' in self.current_glossary_data[0])
             
             # Filter conditions
-            conditions_frame = tk.LabelFrame(main_frame, text="Filter Conditions", padx=15, pady=10)
-            conditions_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15), padx=20)
+            conditions_group = QGroupBox("Filter Conditions")
+            conditions_layout = QVBoxLayout(conditions_group)
+            content_layout.addWidget(conditions_group)
+            content_layout.addSpacing(15)
             
             # Type filter for new format
-            type_vars = {}
+            type_checks = {}
             if is_new_format:
-                type_frame = tk.LabelFrame(conditions_frame, text="Entry Type", padx=10, pady=10)
-                type_frame.pack(fill=tk.X, pady=(0, 10))
+                type_group = QGroupBox("Entry Type")
+                type_layout = QVBoxLayout(type_group)
+                conditions_layout.addWidget(type_group)
+                conditions_layout.addSpacing(10)
                 
-                type_vars['character'] = tk.BooleanVar(value=True)
-                type_vars['term'] = tk.BooleanVar(value=True)
+                char_check = QCheckBox("Keep characters")
+                char_check.setChecked(True)
+                type_checks['character'] = char_check
+                type_layout.addWidget(char_check)
                 
-                tb.Checkbutton(type_frame, text="Keep characters", variable=type_vars['character']).pack(anchor=tk.W)
-                tb.Checkbutton(type_frame, text="Keep terms/locations", variable=type_vars['term']).pack(anchor=tk.W)
+                term_check = QCheckBox("Keep terms/locations")
+                term_check.setChecked(True)
+                type_checks['term'] = term_check
+                type_layout.addWidget(term_check)
             
             # Text content filter
-            text_filter_frame = tk.LabelFrame(conditions_frame, text="Text Content Filter", padx=10, pady=10)
-            text_filter_frame.pack(fill=tk.X, pady=(0, 10))
+            text_filter_group = QGroupBox("Text Content Filter")
+            text_filter_layout = QVBoxLayout(text_filter_group)
+            conditions_layout.addWidget(text_filter_group)
+            conditions_layout.addSpacing(10)
             
-            tk.Label(text_filter_frame, text="Keep entries containing text (case-insensitive):",
-                    font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+            text_hint_label = QLabel("Keep entries containing text (case-insensitive):")
+            text_hint_label.setStyleSheet("color: gray; font-size: 9pt;")
+            text_filter_layout.addWidget(text_hint_label)
+            text_filter_layout.addSpacing(5)
             
-            search_var = tk.StringVar()
-            tb.Entry(text_filter_frame, textvariable=search_var, width=40).pack(fill=tk.X, pady=5)
+            search_entry = QLineEdit()
+            text_filter_layout.addWidget(search_entry)
             
             # Gender filter for new format
-            gender_var = tk.StringVar(value="all")
+            gender_value = "all"
+            gender_buttons = {}
             if is_new_format:
-                gender_frame = tk.LabelFrame(conditions_frame, text="Gender Filter (Characters Only)", padx=10, pady=10)
-                gender_frame.pack(fill=tk.X, pady=(0, 10))
+                gender_group = QGroupBox("Gender Filter (Characters Only)")
+                gender_layout = QVBoxLayout(gender_group)
+                conditions_layout.addWidget(gender_group)
+                conditions_layout.addSpacing(10)
                 
-                tk.Radiobutton(gender_frame, text="All genders", variable=gender_var, value="all").pack(anchor=tk.W)
-                tk.Radiobutton(gender_frame, text="Male only", variable=gender_var, value="Male").pack(anchor=tk.W)
-                tk.Radiobutton(gender_frame, text="Female only", variable=gender_var, value="Female").pack(anchor=tk.W)
-                tk.Radiobutton(gender_frame, text="Unknown only", variable=gender_var, value="Unknown").pack(anchor=tk.W)
+                gender_button_group = QButtonGroup(filter_dialog)
+                
+                all_radio = QRadioButton("All genders")
+                all_radio.setChecked(True)
+                gender_buttons['all'] = all_radio
+                gender_button_group.addButton(all_radio, 0)
+                gender_layout.addWidget(all_radio)
+                
+                male_radio = QRadioButton("Male only")
+                gender_buttons['Male'] = male_radio
+                gender_button_group.addButton(male_radio, 1)
+                gender_layout.addWidget(male_radio)
+                
+                female_radio = QRadioButton("Female only")
+                gender_buttons['Female'] = female_radio
+                gender_button_group.addButton(female_radio, 2)
+                gender_layout.addWidget(female_radio)
+                
+                unknown_radio = QRadioButton("Unknown only")
+                gender_buttons['Unknown'] = unknown_radio
+                gender_button_group.addButton(unknown_radio, 3)
+                gender_layout.addWidget(unknown_radio)
+                
+                def update_gender_value():
+                    nonlocal gender_value
+                    for val, btn in gender_buttons.items():
+                        if btn.isChecked():
+                            gender_value = val
+                            break
+                
+                gender_button_group.buttonClicked.connect(update_gender_value)
             
             # Preview section
-            preview_frame = tk.LabelFrame(main_frame, text="Preview", padx=15, pady=10)
-            preview_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            preview_group = QGroupBox("Preview")
+            preview_layout = QVBoxLayout(preview_group)
+            content_layout.addWidget(preview_group)
+            content_layout.addSpacing(15)
             
-            preview_label = tk.Label(preview_frame, text="Click 'Preview Filter' to see how many entries match",
-                                   font=('TkDefaultFont', 10), fg='gray')
-            preview_label.pack(pady=5)
+            preview_label = QLabel("Click 'Preview Filter' to see how many entries match")
+            preview_label.setStyleSheet("color: gray; font-size: 10pt;")
+            preview_layout.addWidget(preview_label)
             
             def check_entry_matches(entry):
                 """Check if an entry matches the filter conditions"""
                 # Type filter
                 if is_new_format and entry.get('type'):
-                    if not type_vars.get(entry['type'], tk.BooleanVar(value=True)).get():
+                    type_check = type_checks.get(entry['type'])
+                    if type_check and not type_check.isChecked():
                         return False
                 
                 # Text filter
-                search_text = search_var.get().strip().lower()
+                search_text = search_entry.text().strip().lower()
                 if search_text:
                     # Search in all text fields
                     entry_text = ' '.join(str(v) for v in entry.values() if isinstance(v, str)).lower()
@@ -1867,14 +2310,21 @@ Provide translations in the same numbered format."""
                         return False
                 
                 # Gender filter
-                if is_new_format and gender_var.get() != "all":
-                    if entry.get('type') == 'character' and entry.get('gender') != gender_var.get():
+                if is_new_format and gender_value != "all":
+                    if entry.get('type') == 'character' and entry.get('gender') != gender_value:
                         return False
                 
                 return True
             
             def preview_filter():
                 """Preview the filter results"""
+                nonlocal gender_value
+                # Update gender value first
+                for val, btn in gender_buttons.items():
+                    if btn.isChecked():
+                        gender_value = val
+                        break
+                
                 matching = 0
                 
                 if self.current_glossary_format == 'list':
@@ -1887,19 +2337,30 @@ Provide translations in the same numbered format."""
                             matching += 1
                 
                 removed = entry_count - matching
-                preview_label.config(
-                    text=f"Filter matches: {matching} entries ({removed} will be removed)",
-                    fg='blue' if matching > 0 else 'red'
+                preview_label.setText(f"Filter matches: {matching} entries ({removed} will be removed)")
+                preview_label.setStyleSheet(
+                    f"color: {'blue' if matching > 0 else 'red'}; font-size: 10pt;"
                 )
             
-            tb.Button(preview_frame, text="Preview Filter", command=preview_filter,
-                     bootstyle="info").pack()
+            preview_btn = QPushButton("Preview Filter")
+            preview_btn.clicked.connect(preview_filter)
+            preview_btn.setStyleSheet("background-color: #0dcaf0; color: white; padding: 8px;")
+            preview_layout.addWidget(preview_btn)
             
             # Action buttons
-            button_frame = tk.Frame(main_frame)
-            button_frame.pack(fill=tk.X, pady=(10, 20), padx=20)
+            content_layout.addSpacing(10)
+            button_layout = QHBoxLayout()
+            content_layout.addLayout(button_layout)
+            content_layout.addSpacing(20)
             
             def apply_filter():
+                nonlocal gender_value
+                # Update gender value first
+                for val, btn in gender_buttons.items():
+                    if btn.isChecked():
+                        gender_value = val
+                        break
+                
                 if self.current_glossary_format == 'list':
                     filtered = []
                     for entry in self.current_glossary_data:
@@ -1916,32 +2377,40 @@ Provide translations in the same numbered format."""
                     
                     if save_current_glossary():
                         load_glossary_for_editing()
-                        messagebox.showinfo("Success", 
+                        QMessageBox.information(filter_dialog, "Success", 
                             f"Filter applied!\n\nKept: {len(filtered)} entries\nRemoved: {removed} entries")
-                        dialog.destroy()
+                        filter_dialog.accept()
             
-            # Create inner frame for buttons
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()
-
-            tb.Button(button_inner_frame, text="Apply Filter", command=apply_filter,
-                     bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
-                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            button_layout.addStretch()
             
-            # Auto-resize the dialog to fit content
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.49)
+            apply_btn = QPushButton("Apply Filter")
+            apply_btn.setFixedWidth(120)
+            apply_btn.clicked.connect(apply_filter)
+            apply_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
+            button_layout.addWidget(apply_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedWidth(120)
+            cancel_btn.clicked.connect(filter_dialog.reject)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            button_layout.addWidget(cancel_btn)
+            
+            button_layout.addStretch()
+            
+            # Show dialog
+            filter_dialog.exec()
     
         def export_selection():
-           selected = self.glossary_tree.selection()
+           selected = self.glossary_tree.selectedItems()
            if not selected:
-               messagebox.showwarning("Warning", "No entries selected")
+               QMessageBox.warning(self.dialog, "Warning", "No entries selected")
                return
            
-           path = filedialog.asksaveasfilename(
-               title="Export Selected Entries",
-               defaultextension=".json",
-               filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv")]
+           path, _ = QFileDialog.getSaveFileName(
+               self.dialog,
+               "Export Selected Entries",
+               "",
+               "JSON files (*.json);;CSV files (*.csv)"
            )
            
            if not path:
@@ -1951,7 +2420,7 @@ Provide translations in the same numbered format."""
                if self.current_glossary_format == 'list':
                    exported = []
                    for item in selected:
-                       idx = int(self.glossary_tree.item(item)['text']) - 1
+                       idx = int(item.text(0)) - 1
                        if 0 <= idx < len(self.current_glossary_data):
                            exported.append(self.current_glossary_data[idx])
                    
@@ -1976,7 +2445,7 @@ Provide translations in the same numbered format."""
                    exported = {}
                    entries_list = list(self.current_glossary_data.get('entries', {}).items())
                    for item in selected:
-                       idx = int(self.glossary_tree.item(item)['text']) - 1
+                       idx = int(item.text(0)) - 1
                        if 0 <= idx < len(entries_list):
                            key, value = entries_list[idx]
                            exported[key] = value
@@ -1984,25 +2453,26 @@ Provide translations in the same numbered format."""
                    with open(path, 'w', encoding='utf-8') as f:
                        json.dump(exported, f, ensure_ascii=False, indent=2)
                
-               messagebox.showinfo("Success", f"Exported {len(selected)} entries to {os.path.basename(path)}")
+               QMessageBox.information(self.dialog, "Success", f"Exported {len(selected)} entries to {os.path.basename(path)}")
                
            except Exception as e:
-               messagebox.showerror("Error", f"Failed to export: {e}")
+               QMessageBox.critical(self.dialog, "Error", f"Failed to export: {e}")
        
         def save_edited_glossary():
            if save_current_glossary():
-               messagebox.showinfo("Success", "Glossary saved successfully")
+               QMessageBox.information(self.dialog, "Success", "Glossary saved successfully")
                self.append_log(f"✅ Saved glossary to: {self.editor_file_var.get()}")
        
         def save_as_glossary():
            if not self.current_glossary_data:
-               messagebox.showerror("Error", "No glossary loaded")
+               QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
                return
            
-           path = filedialog.asksaveasfilename(
-               title="Save Glossary As",
-               defaultextension=".json",
-               filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv")]
+           path, _ = QFileDialog.getSaveFileName(
+               self.dialog,
+               "Save Glossary As",
+               "",
+               "JSON files (*.json);;CSV files (*.csv)"
            )
            
            if not path:
@@ -2028,135 +2498,156 @@ Provide translations in the same numbered format."""
                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                
                self.editor_file_var.set(path)
-               messagebox.showinfo("Success", f"Glossary saved to {os.path.basename(path)}")
+               QMessageBox.information(self.dialog, "Success", f"Glossary saved to {os.path.basename(path)}")
                self.append_log(f"✅ Saved glossary as: {path}")
                
            except Exception as e:
-               messagebox.showerror("Error", f"Failed to save: {e}")
+               QMessageBox.critical(self.dialog, "Error", f"Failed to save: {e}")
        
         # Buttons
-        tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+        browse_btn = QPushButton("Browse")
+        browse_btn.setFixedWidth(120)
+        browse_btn.clicked.connect(browse_glossary)
+        browse_btn.setStyleSheet("padding: 8px;")
+        file_layout.addWidget(browse_btn)
         
-       
-        editor_controls = tk.Frame(container)
-        editor_controls.pack(fill=tk.X, pady=(10, 0))
-       
+        # Editor control buttons
+        editor_layout.addSpacing(10)
+        
         # Row 1
-        row1 = tk.Frame(editor_controls)
-        row1.pack(fill=tk.X, pady=2)
+        row1_layout = QHBoxLayout()
+        editor_layout.addLayout(row1_layout)
+        editor_layout.addSpacing(2)
        
         buttons_row1 = [
-           ("Reload", load_glossary_for_editing, "info"),
-           ("Delete Selected", delete_selected_entries, "danger"),
-           ("Clean Empty Fields", clean_empty_fields, "warning"),
-           ("Remove Duplicates", remove_duplicates, "warning"),
-           ("Backup Settings", backup_settings_dialog, "success")
+           ("Reload", load_glossary_for_editing, "#0dcaf0"),
+           ("Delete Selected", delete_selected_entries, "#dc3545"),
+           ("Clean Empty Fields", clean_empty_fields, "#ffc107"),
+           ("Remove Duplicates", remove_duplicates, "#ffc107"),
+           ("Backup Settings", backup_settings_dialog, "#198754")
         ]
        
-        for text, cmd, style in buttons_row1:
-           tb.Button(row1, text=text, command=cmd, bootstyle=style, width=15).pack(side=tk.LEFT, padx=2)
+        for text, cmd, color in buttons_row1:
+            btn = QPushButton(text)
+            btn.setFixedWidth(120)
+            btn.clicked.connect(cmd)
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px;")
+            row1_layout.addWidget(btn)
        
         # Row 2
-        row2 = tk.Frame(editor_controls)
-        row2.pack(fill=tk.X, pady=2)
+        row2_layout = QHBoxLayout()
+        editor_layout.addLayout(row2_layout)
+        editor_layout.addSpacing(2)
 
         buttons_row2 = [
-           ("Trim Entries", smart_trim_dialog, "primary"),
-           ("Filter Entries", filter_entries_dialog, "primary"),
-           ("Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "info"),
-           ("Export Selection", export_selection, "secondary"),
-           ("About Format", duplicate_detection_settings, "info")
+           ("Trim Entries", smart_trim_dialog, "#0d6efd"),
+           ("Filter Entries", filter_entries_dialog, "#0d6efd"),
+           ("Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "#0dcaf0"),
+           ("Export Selection", export_selection, "#6c757d"),
+           ("About Format", duplicate_detection_settings, "#0dcaf0")
         ]
 
-        for text, cmd, style in buttons_row2:
-           tb.Button(row2, text=text, command=cmd, bootstyle=style, width=15).pack(side=tk.LEFT, padx=2)
+        for text, cmd, color in buttons_row2:
+            btn = QPushButton(text)
+            btn.setFixedWidth(120)
+            btn.clicked.connect(cmd)
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px;")
+            row2_layout.addWidget(btn)
 
         # Row 3
-        row3 = tk.Frame(editor_controls)
-        row3.pack(fill=tk.X, pady=2)
+        row3_layout = QHBoxLayout()
+        editor_layout.addLayout(row3_layout)
+        editor_layout.addSpacing(2)
 
-        tb.Button(row3, text="Save Changes", command=save_edited_glossary,
-                bootstyle="success", width=20).pack(side=tk.LEFT, padx=2)
-        tb.Button(row3, text="Save As...", command=save_as_glossary,
-                bootstyle="success-outline", width=20).pack(side=tk.LEFT, padx=2)
+        save_btn = QPushButton("Save Changes")
+        save_btn.setFixedWidth(150)
+        save_btn.clicked.connect(save_edited_glossary)
+        save_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
+        row3_layout.addWidget(save_btn)
+        
+        save_as_btn = QPushButton("Save As...")
+        save_as_btn.setFixedWidth(150)
+        save_as_btn.clicked.connect(save_as_glossary)
+        save_as_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px; border: 1px solid #198754;")
+        row3_layout.addWidget(save_as_btn)
 
-    def _on_tree_double_click(self, event):
+    def _on_tree_double_click(self, item, column_idx):
        """Handle double-click on treeview item for inline editing"""
-       region = self.glossary_tree.identify_region(event.x, event.y)
-       if region != 'cell':
+       if not item or column_idx < 0:
            return
        
-       item = self.glossary_tree.identify_row(event.y)
-       column = self.glossary_tree.identify_column(event.x)
-       
-       if not item or column == '#0':
+       # Get column count
+       column_count = self.glossary_tree.columnCount()
+       if column_idx >= column_count:
            return
        
-       col_idx = int(column.replace('#', '')) - 1
-       columns = self.glossary_tree['columns']
-       if col_idx >= len(columns):
-           return
+       # Get column name from header
+       col_name = self.glossary_tree.headerItem().text(column_idx)
+       current_value = item.text(column_idx)
        
-       col_name = columns[col_idx]
-       values = self.glossary_tree.item(item)['values']
-       current_value = values[col_idx] if col_idx < len(values) else ''
+       edit_dialog = QDialog(self.dialog)
+       edit_dialog.setWindowTitle(f"Edit {col_name.replace('_', ' ').title()}")
+       edit_dialog.setMinimumWidth(400)
+       edit_dialog.setMinimumHeight(150)
        
-       dialog = self.wm.create_simple_dialog(
-           self.master,
-           f"Edit {col_name.replace('_', ' ').title()}",
-           width=400,
-           height=150
-       )
+       dialog_layout = QVBoxLayout(edit_dialog)
+       dialog_layout.setContentsMargins(20, 20, 20, 20)
        
-       frame = tk.Frame(dialog, padx=20, pady=20)
-       frame.pack(fill=tk.BOTH, expand=True)
-       
-       tk.Label(frame, text=f"Edit {col_name.replace('_', ' ').title()}:").pack(anchor=tk.W)
+       label = QLabel(f"Edit {col_name.replace('_', ' ').title()}:")
+       dialog_layout.addWidget(label)
        
        # Simple entry for new format fields
-       var = tk.StringVar(value=current_value)
-       entry = tb.Entry(frame, textvariable=var, width=50)
-       entry.pack(fill=tk.X, pady=5)
-       entry.focus()
-       entry.select_range(0, tk.END)
+       entry = QLineEdit(current_value)
+       dialog_layout.addWidget(entry)
+       dialog_layout.addSpacing(5)
+       entry.setFocus()
+       entry.selectAll()
        
        def save_edit():
-           new_value = var.get()
+           new_value = entry.text()
            
-           new_values = list(values)
-           new_values[col_idx] = new_value
-           self.glossary_tree.item(item, values=new_values)
+           # Update tree item
+           item.setText(column_idx, new_value)
            
-           row_idx = int(self.glossary_tree.item(item)['text']) - 1
+           # Update data
+           row_idx = int(item.text(0)) - 1
            
            if self.current_glossary_format == 'list':
                if 0 <= row_idx < len(self.current_glossary_data):
-                   entry = self.current_glossary_data[row_idx]
+                   data_entry = self.current_glossary_data[row_idx]
                    
                    if new_value:
-                       entry[col_name] = new_value
+                       data_entry[col_name] = new_value
                    else:
-                       entry.pop(col_name, None)
+                       data_entry.pop(col_name, None)
            
-           dialog.destroy()
+           edit_dialog.accept()
        
-       button_frame = tk.Frame(frame)
-       button_frame.pack(fill=tk.X, pady=(10, 0))
+       dialog_layout.addSpacing(10)
+       button_layout = QHBoxLayout()
+       dialog_layout.addLayout(button_layout)
        
-       tb.Button(button_frame, text="Save", command=save_edit,
-                bootstyle="success", width=10).pack(side=tk.LEFT, padx=5)
-       tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                bootstyle="secondary", width=10).pack(side=tk.LEFT, padx=5)
+       save_btn = QPushButton("Save")
+       save_btn.setFixedWidth(80)
+       save_btn.clicked.connect(save_edit)
+       save_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
+       button_layout.addWidget(save_btn)
        
-       dialog.bind('<Return>', lambda e: save_edit())
-       dialog.bind('<Escape>', lambda e: dialog.destroy())
+       cancel_btn = QPushButton("Cancel")
+       cancel_btn.setFixedWidth(80)
+       cancel_btn.clicked.connect(edit_dialog.reject)
+       cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+       button_layout.addWidget(cancel_btn)
        
-       dialog.deiconify()
+       # Connect Enter/Escape shortcuts
+       entry.returnPressed.connect(save_edit)
+       
+       edit_dialog.exec()
 
     def convert_glossary_format(self, reload_callback):
         """Export glossary to CSV format"""
         if not self.current_glossary_data:
-            messagebox.showerror("Error", "No glossary loaded")
+            QMessageBox.critical(self.dialog, "Error", "No glossary loaded")
             return
         
         # Create backup before conversion
@@ -2168,12 +2659,11 @@ Provide translations in the same numbered format."""
         default_csv_path = current_path.replace('.json', '.csv')
         
         # Ask user for CSV save location
-        from tkinter import filedialog
-        csv_path = filedialog.asksaveasfilename(
-            title="Export Glossary to CSV",
-            defaultextension=".csv",
-            initialfile=os.path.basename(default_csv_path),
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        csv_path, _ = QFileDialog.getSaveFileName(
+            self.dialog,
+            "Export Glossary to CSV",
+            default_csv_path,
+            "CSV files (*.csv);;All files (*.*)"
         )
         
         if not csv_path:
@@ -2259,9 +2749,9 @@ Provide translations in the same numbered format."""
                             
                             writer.writerow(row)
             
-            messagebox.showinfo("Success", f"Glossary exported to CSV:\n{csv_path}")
+            QMessageBox.information(self.dialog, "Success", f"Glossary exported to CSV:\n{csv_path}")
             self.append_log(f"✅ Exported glossary to: {csv_path}")
             
         except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
+            QMessageBox.critical(self.dialog, "Export Error", f"Failed to export CSV: {e}")
             self.append_log(f"❌ CSV export failed: {e}")

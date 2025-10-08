@@ -7,9 +7,12 @@ import os
 import sys
 import json
 import re
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
+                                QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
+                                QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
+                                QScrollArea, QSizePolicy)
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QColor
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -25,6 +28,59 @@ except ImportError:
 
 class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
+    
+    def _get_dialog_size(self, width_ratio=0.5, height_ratio=0.5):
+        """Calculate dialog size as a ratio of screen size (default 50% width, 50% height)"""
+        try:
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtGui import QScreen
+            
+            # Get primary screen
+            screen = QApplication.primaryScreen()
+            if screen:
+                geometry = screen.availableGeometry()
+                width = int(geometry.width() * width_ratio)
+                height = int(geometry.height() * height_ratio)
+                return width, height
+        except:
+            pass
+        
+        # Fallback to reasonable defaults if screen info unavailable
+        return int(1920 * width_ratio), int(1080 * height_ratio)
+    
+    def _show_message(self, msg_type, title, message, parent=None):
+        """Show message using appropriate GUI framework (tkinter or PySide6)"""
+        # Try PySide6 first if parent is provided
+        if parent and not hasattr(self, 'master'):
+            try:
+                if msg_type == 'info':
+                    QMessageBox.information(parent, title, message)
+                elif msg_type == 'warning':
+                    QMessageBox.warning(parent, title, message)
+                elif msg_type == 'error':
+                    QMessageBox.critical(parent, title, message)
+                elif msg_type == 'question':
+                    return QMessageBox.question(parent, title, message, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+                return True
+            except:
+                pass
+        
+        # Fall back to tkinter
+        try:
+            import tkinter.messagebox as tk_messagebox
+            if msg_type == 'info':
+                tk_messagebox.showinfo(title, message)
+            elif msg_type == 'warning':
+                tk_messagebox.showwarning(title, message)
+            elif msg_type == 'error':
+                tk_messagebox.showerror(title, message)
+            elif msg_type == 'question':
+                return tk_messagebox.askyesno(title, message)
+            return True
+        except:
+            # Last resort: print to console
+            print(f"{title}: {message}")
+            return False
  
     def force_retranslation(self):
         """Force retranslation of specific chapters or images with improved display"""
@@ -43,9 +99,18 @@ class RetranslationMixin:
                 return
         
         # Original logic for single files
-        input_path = self.entry_epub.get()
+        # Check if it's a tkinter Entry or QLineEdit and use appropriate method
+        if hasattr(self.entry_epub, 'get'):
+            # tkinter Entry widget
+            input_path = self.entry_epub.get()
+        elif hasattr(self.entry_epub, 'text'):
+            # PySide6 QLineEdit widget
+            input_path = self.entry_epub.text()
+        else:
+            input_path = ""
+        
         if not input_path or not os.path.isfile(input_path):
-            messagebox.showerror("Error", "Please select a valid EPUB, text file, or image folder first.")
+            self._show_message('error', "Error", "Please select a valid EPUB, text file, or image folder first.")
             return
         
         # Check if it's an image file
@@ -77,13 +142,13 @@ class RetranslationMixin:
         
         if not os.path.exists(output_dir):
             if not parent_dialog:
-                messagebox.showinfo("Info", "No translation output found for this file.")
+                self._show_message('info', "Info", "No translation output found for this file.")
             return None
         
         progress_file = os.path.join(output_dir, "translation_progress.json")
         if not os.path.exists(progress_file):
             if not parent_dialog:
-                messagebox.showinfo("Info", "No progress tracking found.")
+                self._show_message('info', "Info", "No progress tracking found.")
             return None
         
         with open(progress_file, 'r', encoding='utf-8') as f:
@@ -400,26 +465,59 @@ class RetranslationMixin:
         
         # If no parent dialog or tab frame, create standalone dialog
         if not parent_dialog and not tab_frame:
-            dialog = self.wm.create_simple_dialog(
-                self.master,
-                "Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation",
-                width=1000,
-                height=700
-            )
-            container = dialog
+            # Ensure QApplication exists for standalone PySide6 dialog
+            from PySide6.QtWidgets import QApplication
+            if not QApplication.instance():
+                # Create QApplication if it doesn't exist
+                import sys
+                QApplication(sys.argv)
+            
+            # Create standalone PySide6 dialog
+            dialog = QDialog()
+            dialog.setWindowTitle("Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation")
+            # Use 26% width, 36% height for 1920x1080
+            width, height = self._get_dialog_size(0.26, 0.36)
+            dialog.resize(width, height)
+            
+            # Set icon
+            try:
+                from PySide6.QtGui import QIcon
+                # Try to get base_dir from self (TranslatorGUI), fallback to calculating it
+                if hasattr(self, 'base_dir'):
+                    base_dir = self.base_dir
+                else:
+                    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    dialog.setWindowIcon(QIcon(ico_path))
+            except Exception as e:
+                print(f"Failed to load icon: {e}")
+            dialog_layout = QVBoxLayout(dialog)
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            dialog_layout.addWidget(container)
         else:
             container = tab_frame or parent_dialog
+            if not hasattr(container, 'layout') or container.layout() is None:
+                container_layout = QVBoxLayout(container)
+            else:
+                container_layout = container.layout()
             dialog = parent_dialog
         
         # Title
         title_text = "Chapters from content.opf (in reading order):" if spine_chapters else "Select chapters to retranslate:"
-        tk.Label(container, text=title_text, 
-                font=('Arial', 12 if not tab_frame else 11, 'bold')).pack(pady=5)
+        title_label = QLabel(title_text)
+        title_font = QFont('Arial', 12 if not tab_frame else 11)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        container_layout.addWidget(title_label)
         
         # Statistics if OPF is available
         if spine_chapters:
-            stats_frame = tk.Frame(container)
-            stats_frame.pack(pady=5)
+            stats_frame = QWidget()
+            stats_layout = QHBoxLayout(stats_frame)
+            stats_layout.setContentsMargins(0, 5, 0, 5)
+            container_layout.addWidget(stats_frame)
             
             total_chapters = len(spine_chapters)
             completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
@@ -427,35 +525,49 @@ class RetranslationMixin:
             failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
             file_missing = sum(1 for ch in spine_chapters if ch['status'] == 'file_missing')
             
-            tk.Label(stats_frame, text=f"Total: {total_chapters} | ", font=('Arial', 10)).pack(side=tk.LEFT)
-            tk.Label(stats_frame, text=f"✅ Completed: {completed} | ", font=('Arial', 10), fg='green').pack(side=tk.LEFT)
-            tk.Label(stats_frame, text=f"❌ Missing: {missing} | ", font=('Arial', 10), fg='red').pack(side=tk.LEFT)
-            tk.Label(stats_frame, text=f"⚠️ Failed: {failed} | ", font=('Arial', 10), fg='orange').pack(side=tk.LEFT)
-            tk.Label(stats_frame, text=f"📁 File Missing: {file_missing}", font=('Arial', 10), fg='purple').pack(side=tk.LEFT)
+            stats_font = QFont('Arial', 10)
+            
+            lbl_total = QLabel(f"Total: {total_chapters} | ")
+            lbl_total.setFont(stats_font)
+            stats_layout.addWidget(lbl_total)
+            
+            lbl_completed = QLabel(f"✅ Completed: {completed} | ")
+            lbl_completed.setFont(stats_font)
+            lbl_completed.setStyleSheet("color: green;")
+            stats_layout.addWidget(lbl_completed)
+            
+            lbl_missing = QLabel(f"❌ Missing: {missing} | ")
+            lbl_missing.setFont(stats_font)
+            lbl_missing.setStyleSheet("color: red;")
+            stats_layout.addWidget(lbl_missing)
+            
+            lbl_failed = QLabel(f"⚠️ Failed: {failed} | ")
+            lbl_failed.setFont(stats_font)
+            lbl_failed.setStyleSheet("color: orange;")
+            stats_layout.addWidget(lbl_failed)
+            
+            lbl_file_missing = QLabel(f"📁 File Missing: {file_missing}")
+            lbl_file_missing.setFont(stats_font)
+            lbl_file_missing.setStyleSheet("color: purple;")
+            stats_layout.addWidget(lbl_file_missing)
+            
+            stats_layout.addStretch()
         
         # Main frame for listbox
-        main_frame = tk.Frame(container)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10 if not tab_frame else 5, pady=5)
+        main_frame = QWidget()
+        main_layout = QVBoxLayout(main_frame)
+        main_layout.setContentsMargins(10 if not tab_frame else 5, 5, 10 if not tab_frame else 5, 5)
+        container_layout.addWidget(main_frame)
         
-        # Create scrollbars and listbox
-        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        listbox = tk.Listbox(
-            main_frame, 
-            selectmode=tk.EXTENDED, 
-            yscrollcommand=v_scrollbar.set,
-            xscrollcommand=h_scrollbar.set,
-            width=120,
-            font=('Courier', 10)  # Fixed-width font for better alignment
-        )
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        v_scrollbar.config(command=listbox.yview)
-        h_scrollbar.config(command=listbox.xview)
+        # Create listbox (QListWidget has built-in scrollbars)
+        listbox = QListWidget()
+        listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        listbox_font = QFont('Courier', 10)  # Fixed-width font for better alignment
+        listbox.setFont(listbox_font)
+        # Use 21% of screen width (half of original ~42% for 1920px screen)
+        min_width, _ = self._get_dialog_size(0.21, 0)
+        listbox.setMinimumWidth(min_width)
+        main_layout.addWidget(listbox)
         
         # Populate listbox
         status_icons = {
@@ -508,28 +620,31 @@ class RetranslationMixin:
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
             
-            listbox.insert(tk.END, display)
+            item = QListWidgetItem(display)
             
             # Color code based on status
             if status == 'completed':
-                listbox.itemconfig(tk.END, fg='green')
+                item.setForeground(QColor('green'))
             elif status in ['failed', 'qa_failed', 'not_translated']:
-                listbox.itemconfig(tk.END, fg='red')
+                item.setForeground(QColor('red'))
             elif status == 'file_missing':
-                listbox.itemconfig(tk.END, fg='purple')
+                item.setForeground(QColor('purple'))
             elif status == 'in_progress':
-                listbox.itemconfig(tk.END, fg='orange')
+                item.setForeground(QColor('orange'))
+            
+            listbox.addItem(item)
         
         # Selection count label
-        selection_count_label = tk.Label(container, text="Selected: 0", 
-                                       font=('Arial', 10 if not tab_frame else 9))
-        selection_count_label.pack(pady=(5, 10) if not tab_frame else 2)
+        selection_count_label = QLabel("Selected: 0")
+        selection_font = QFont('Arial', 10 if not tab_frame else 9)
+        selection_count_label.setFont(selection_font)
+        container_layout.addWidget(selection_count_label)
         
-        def update_selection_count(*args):
-            count = len(listbox.curselection())
-            selection_count_label.config(text=f"Selected: {count}")
+        def update_selection_count():
+            count = len(listbox.selectedItems())
+            selection_count_label.setText(f"Selected: {count}")
         
-        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        listbox.itemSelectionChanged.connect(update_selection_count)
         
         # Return data structure for external access
         result = {
@@ -546,8 +661,13 @@ class RetranslationMixin:
             'container': container
         }
         
-        # If standalone (no parent), add buttons
-        if not parent_dialog or tab_frame:
+        # If standalone (no parent), add buttons and show dialog
+        if not parent_dialog and not tab_frame:
+            self._add_retranslation_buttons_opf(result)
+            # Show the dialog
+            dialog.exec()
+        elif not parent_dialog or tab_frame:
+            # Embedded in tab - just add buttons
             self._add_retranslation_buttons_opf(result)
         
         return result
@@ -557,54 +677,59 @@ class RetranslationMixin:
         """Add the standard button set for retranslation dialogs with OPF support"""
         
         if not button_frame:
-            button_frame = tk.Frame(data['container'])
-            button_frame.pack(pady=10)
-        
-        # Configure column weights
-        for i in range(5):
-            button_frame.columnconfigure(i, weight=1)
+            button_frame = QWidget()
+            button_layout = QGridLayout(button_frame)
+            # Get container layout and add button frame
+            container = data['container']
+            if hasattr(container, 'layout') and container.layout():
+                container.layout().addWidget(button_frame)
+        else:
+            button_layout = button_frame.layout() if button_frame.layout() else QGridLayout(button_frame)
         
         # Helper functions that work with the data dict
         def select_all():
-            data['listbox'].select_set(0, tk.END)
-            data['selection_count_label'].config(text=f"Selected: {data['listbox'].size()}")
+            data['listbox'].selectAll()
+            data['selection_count_label'].setText(f"Selected: {data['listbox'].count()}")
         
         def clear_selection():
-            data['listbox'].select_clear(0, tk.END)
-            data['selection_count_label'].config(text="Selected: 0")
+            data['listbox'].clearSelection()
+            data['selection_count_label'].setText("Selected: 0")
         
         def select_status(status_to_select):
-            data['listbox'].select_clear(0, tk.END)
+            data['listbox'].clearSelection()
             for idx, info in enumerate(data['chapter_display_info']):
                 if status_to_select == 'failed':
                     if info['status'] in ['failed', 'qa_failed']:
-                        data['listbox'].select_set(idx)
+                        data['listbox'].item(idx).setSelected(True)
                 elif status_to_select == 'missing':
                     if info['status'] in ['not_translated', 'file_missing']:
-                        data['listbox'].select_set(idx)
+                        data['listbox'].item(idx).setSelected(True)
                 else:
                     if info['status'] == status_to_select:
-                        data['listbox'].select_set(idx)
-            count = len(data['listbox'].curselection())
-            data['selection_count_label'].config(text=f"Selected: {count}")
+                        data['listbox'].item(idx).setSelected(True)
+            count = len(data['listbox'].selectedItems())
+            data['selection_count_label'].setText(f"Selected: {count}")
         
         def remove_qa_failed_mark():
-            selected = data['listbox'].curselection()
-            if not selected:
-                messagebox.showwarning("No Selection", "Please select at least one chapter.")
+            selected_items = data['listbox'].selectedItems()
+            if not selected_items:
+                QMessageBox.warning(self, "No Selection", "Please select at least one chapter.")
                 return
             
-            selected_chapters = [data['chapter_display_info'][i] for i in selected]
+            selected_indices = [data['listbox'].row(item) for item in selected_items]
+            selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
             qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
             
             if not qa_failed_chapters:
-                messagebox.showwarning("No QA Failed Chapters", 
+                QMessageBox.warning(self, "No QA Failed Chapters", 
                                      "None of the selected chapters have 'qa_failed' status.")
                 return
             
             count = len(qa_failed_chapters)
-            if not messagebox.askyesno("Confirm Remove QA Failed Mark", 
-                                      f"Remove QA failed mark from {count} chapters?"):
+            reply = QMessageBox.question(self, "Confirm Remove QA Failed Mark", 
+                                      f"Remove QA failed mark from {count} chapters?",
+                                      QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
                 return
             
             # Remove marks
@@ -639,17 +764,18 @@ class RetranslationMixin:
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
                 json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
-            messagebox.showinfo("Success", f"Removed QA failed mark from {cleared_count} chapters.")
+            QMessageBox.information(self, "Success", f"Removed QA failed mark from {cleared_count} chapters.")
             if data.get('dialog'):
-                data['dialog'].destroy()
+                data['dialog'].close()
         
         def retranslate_selected():
-            selected = data['listbox'].curselection()
-            if not selected:
-                messagebox.showwarning("No Selection", "Please select at least one chapter.")
+            selected_items = data['listbox'].selectedItems()
+            if not selected_items:
+                QMessageBox.warning(self, "No Selection", "Please select at least one chapter.")
                 return
             
-            selected_chapters = [data['chapter_display_info'][i] for i in selected]
+            selected_indices = [data['listbox'].row(item) for item in selected_items]
+            selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
             
             # Count different types
             missing_count = sum(1 for ch in selected_chapters if ch['status'] == 'not_translated')
@@ -672,7 +798,9 @@ class RetranslationMixin:
                     confirm_msg += f"• {existing_count} existing chapters will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
-            if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
+            reply = QMessageBox.question(self, "Confirm Retranslation", confirm_msg,
+                                       QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
                 return
             
             # Process chapters - DELETE FILES AND UPDATE PROGRESS
@@ -757,33 +885,55 @@ class RetranslationMixin:
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
                 if deleted_count > 0 or marked_count > 0:
-                    success_msg += f"\n\nTotal {len(selected)} chapters ready for translation."
-                messagebox.showinfo("Success", success_msg)
+                    success_msg += f"\n\nTotal {len(selected_indices)} chapters ready for translation."
+                QMessageBox.information(self, "Success", success_msg)
             else:
-                messagebox.showinfo("Info", "No changes made.")
+                QMessageBox.information(self, "Info", "No changes made.")
             
             if data.get('dialog'):
-                data['dialog'].destroy()
+                data['dialog'].close()
         
         # Add buttons - First row
-        tb.Button(button_frame, text="Select All", command=select_all, 
-                  bootstyle="info").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Clear", command=clear_selection, 
-                  bootstyle="secondary").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Completed", command=lambda: select_status('completed'), 
-                  bootstyle="success").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Missing", command=lambda: select_status('missing'), 
-                  bootstyle="danger").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), 
-                  bootstyle="warning").grid(row=0, column=4, padx=5, pady=5, sticky="ew")
+        btn_select_all = QPushButton("Select All")
+        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        btn_select_all.clicked.connect(select_all)
+        button_layout.addWidget(btn_select_all, 0, 0)
+        
+        btn_clear = QPushButton("Clear")
+        btn_clear.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_clear.clicked.connect(clear_selection)
+        button_layout.addWidget(btn_clear, 0, 1)
+        
+        btn_select_completed = QPushButton("Select Completed")
+        btn_select_completed.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        btn_select_completed.clicked.connect(lambda: select_status('completed'))
+        button_layout.addWidget(btn_select_completed, 0, 2)
+        
+        btn_select_missing = QPushButton("Select Missing")
+        btn_select_missing.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+        btn_select_missing.clicked.connect(lambda: select_status('missing'))
+        button_layout.addWidget(btn_select_missing, 0, 3)
+        
+        btn_select_failed = QPushButton("Select Failed")
+        btn_select_failed.setStyleSheet("QPushButton { background-color: #ffc107; color: white; padding: 5px 15px; }")
+        btn_select_failed.clicked.connect(lambda: select_status('failed'))
+        button_layout.addWidget(btn_select_failed, 0, 4)
         
         # Second row
-        tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
-                  bootstyle="warning").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
-        tb.Button(button_frame, text="Remove QA Failed Mark", command=remove_qa_failed_mark, 
-                  bootstyle="success").grid(row=1, column=2, columnspan=1, padx=5, pady=10, sticky="ew")
-        tb.Button(button_frame, text="Cancel", command=lambda: data['dialog'].destroy() if data.get('dialog') else None, 
-                  bootstyle="secondary").grid(row=1, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
+        btn_retranslate = QPushButton("Retranslate Selected")
+        btn_retranslate.setStyleSheet("QPushButton { background-color: #ffc107; color: white; padding: 5px 15px; }")
+        btn_retranslate.clicked.connect(retranslate_selected)
+        button_layout.addWidget(btn_retranslate, 1, 0, 1, 2)
+        
+        btn_remove_qa = QPushButton("Remove QA Failed Mark")
+        btn_remove_qa.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        btn_remove_qa.clicked.connect(remove_qa_failed_mark)
+        button_layout.addWidget(btn_remove_qa, 1, 2, 1, 1)
+        
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
+        button_layout.addWidget(btn_cancel, 1, 3, 1, 2)
 
 
     def _force_retranslation_multiple_files(self):
@@ -842,24 +992,27 @@ class RetranslationMixin:
             summary_parts.append(f"{len(folders)} folder(s)")
         
         if not summary_parts:
-            messagebox.showinfo("Info", "No valid files selected.")
+            QMessageBox.information(self, "Info", "No valid files selected.")
             return
         
         # Create main dialog
-        dialog = self.wm.create_simple_dialog(
-            self.master,
-            "Force Retranslation - Multiple Files",
-            width=950,
-            height=700
-        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Force Retranslation - Multiple Files")
+        # Use 25% width, 18% height (half of original ~49% width, 36% height for 1920x1080)
+        width, height = self._get_dialog_size(0.25, 0.18)
+        dialog.resize(width, height)
+        dialog_layout = QVBoxLayout(dialog)
         
         # Summary label
-        tk.Label(dialog, text=f"Selected: {', '.join(summary_parts)}", 
-                font=('Arial', 12, 'bold')).pack(pady=10)
+        summary_label = QLabel(f"Selected: {', '.join(summary_parts)}")
+        summary_font = QFont('Arial', 12)
+        summary_font.setBold(True)
+        summary_label.setFont(summary_font)
+        dialog_layout.addWidget(summary_label)
         
-        # Create notebook
-        notebook = ttk.Notebook(dialog)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # Create tab widget
+        notebook = QTabWidget()
+        dialog_layout.addWidget(notebook)
         
         # Track all tab data
         tab_data = []
@@ -874,9 +1027,10 @@ class RetranslationMixin:
                 continue
             
             # Create tab
-            tab_frame = tk.Frame(notebook)
+            tab_frame = QWidget()
+            tab_layout = QVBoxLayout(tab_frame)
             tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
-            notebook.add(tab_frame, text=tab_name)
+            notebook.addTab(tab_frame, tab_name)
             tabs_created = True
             
             # Use shared logic to populate the tab
@@ -914,10 +1068,10 @@ class RetranslationMixin:
         
         # If no tabs were created, show error
         if not tabs_created:
-            messagebox.showinfo("Info", 
+            QMessageBox.information(self, "Info", 
                 "No translation output found for any of the selected files.\n\n"
                 "Make sure the output folders exist in your script directory.")
-            dialog.destroy()
+            dialog.close()
             return
         
         # Add unified button bar that works across all tabs
@@ -925,44 +1079,37 @@ class RetranslationMixin:
 
     def _add_multi_file_buttons(self, dialog, notebook, tab_data):
         """Add a simple cancel button at the bottom of the dialog"""
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        button_frame = QWidget()
+        button_layout = QHBoxLayout(button_frame)
+        button_layout.addStretch()
         
-        tb.Button(button_frame, text="Close All", command=dialog.destroy, 
-                  bootstyle="secondary").pack(side=tk.RIGHT, padx=5)
+        btn_close = QPushButton("Close All")
+        btn_close.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_close.clicked.connect(dialog.close)
+        button_layout.addWidget(btn_close)
+        
+        dialog.layout().addWidget(button_frame)
               
     def _create_individual_images_tab(self, image_files, notebook, parent_dialog):
         """Create a tab for individual image files"""
         # Create tab
-        tab_frame = tk.Frame(notebook)
-        notebook.add(tab_frame, text="Individual Images")
+        tab_frame = QWidget()
+        tab_layout = QVBoxLayout(tab_frame)
+        notebook.addTab(tab_frame, "Individual Images")
         
         # Instructions
-        tk.Label(tab_frame, text=f"Selected {len(image_files)} individual image(s):", 
-                 font=('Arial', 11)).pack(pady=5)
+        instruction_label = QLabel(f"Selected {len(image_files)} individual image(s):")
+        instruction_font = QFont('Arial', 11)
+        instruction_label.setFont(instruction_font)
+        tab_layout.addWidget(instruction_label)
         
-        # Main frame
-        main_frame = tk.Frame(tab_frame)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Scrollbars and listbox
-        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        listbox = tk.Listbox(
-            main_frame,
-            selectmode=tk.EXTENDED,
-            yscrollcommand=v_scrollbar.set,
-            xscrollcommand=h_scrollbar.set,
-            width=100
-        )
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        v_scrollbar.config(command=listbox.yview)
-        h_scrollbar.config(command=listbox.xview)
+        # Listbox (QListWidget has built-in scrolling)
+        listbox = QListWidget()
+        listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        # Use 16% of screen width (half of original ~31% for 1920px screen)
+        min_width, _ = self._get_dialog_size(0.16, 0)
+        listbox.setMinimumWidth(min_width)
+        tab_layout.addWidget(listbox)
         
         # File info
         file_info = []
@@ -994,7 +1141,7 @@ class RetranslationMixin:
             if found_translations:
                 for output_dir, html_file in found_translations:
                     display = f"📄 {img_name} → {html_file} | ✅ Translated"
-                    listbox.insert(tk.END, display)
+                    listbox.addItem(display)
                     
                     file_info.append({
                         'type': 'translated',
@@ -1005,17 +1152,19 @@ class RetranslationMixin:
                     })
             else:
                 display = f"🖼️ {img_name} | ❌ No translation found"
-                listbox.insert(tk.END, display)
+                listbox.addItem(display)
         
         # Selection count
-        selection_count_label = tk.Label(tab_frame, text="Selected: 0", font=('Arial', 9))
-        selection_count_label.pack(pady=2)
+        selection_count_label = QLabel("Selected: 0")
+        selection_font = QFont('Arial', 9)
+        selection_count_label.setFont(selection_font)
+        tab_layout.addWidget(selection_count_label)
         
-        def update_selection_count(*args):
-            count = len(listbox.curselection())
-            selection_count_label.config(text=f"Selected: {count}")
+        def update_selection_count():
+            count = len(listbox.selectedItems())
+            selection_count_label.setText(f"Selected: {count}")
         
-        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        listbox.itemSelectionChanged.connect(update_selection_count)
         
         return {
             'type': 'individual_images',
@@ -1034,38 +1183,26 @@ class RetranslationMixin:
             return None
         
         # Create tab
-        tab_frame = tk.Frame(notebook)
+        tab_frame = QWidget()
+        tab_layout = QVBoxLayout(tab_frame)
         tab_name = "📁 " + (folder_name[:17] + "..." if len(folder_name) > 17 else folder_name)
-        notebook.add(tab_frame, text=tab_name)
+        notebook.addTab(tab_frame, tab_name)
         
         # Instructions
-        tk.Label(tab_frame, text="Select images to retranslate:", font=('Arial', 11)).pack(pady=5)
+        instruction_label = QLabel("Select images to retranslate:")
+        instruction_font = QFont('Arial', 11)
+        instruction_label.setFont(instruction_font)
+        tab_layout.addWidget(instruction_label)
         
-        # Main frame
-        main_frame = tk.Frame(tab_frame)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Scrollbars and listbox
-        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        listbox = tk.Listbox(
-            main_frame,
-            selectmode=tk.EXTENDED,
-            yscrollcommand=v_scrollbar.set,
-            xscrollcommand=h_scrollbar.set,
-            width=100
-        )
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        v_scrollbar.config(command=listbox.yview)
-        h_scrollbar.config(command=listbox.xview)
+        # Listbox (QListWidget has built-in scrolling)
+        listbox = QListWidget()
+        listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        # Use 16% of screen width (half of original ~31% for 1920px screen)
+        min_width, _ = self._get_dialog_size(0.16, 0)
+        listbox.setMinimumWidth(min_width)
+        tab_layout.addWidget(listbox)
         
         # Find files
-        file_info = []
         
         # Add HTML files
         for file in os.listdir(output_dir):
@@ -1079,7 +1216,7 @@ class RetranslationMixin:
                 else:
                     display = f"📄 {file} | ✅ Translated"
                 
-                listbox.insert(tk.END, display)
+                listbox.addItem(display)
                 file_info.append({
                     'type': 'translated',
                     'file': file,
@@ -1092,7 +1229,7 @@ class RetranslationMixin:
             for file in sorted(os.listdir(images_dir)):
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
                     display = f"🖼️ Cover | {file} | ⏭️ Skipped"
-                    listbox.insert(tk.END, display)
+                    listbox.addItem(display)
                     file_info.append({
                         'type': 'cover',
                         'file': file,
@@ -1100,14 +1237,16 @@ class RetranslationMixin:
                     })
         
         # Selection count
-        selection_count_label = tk.Label(tab_frame, text="Selected: 0", font=('Arial', 9))
-        selection_count_label.pack(pady=2)
+        selection_count_label = QLabel("Selected: 0")
+        selection_font = QFont('Arial', 9)
+        selection_count_label.setFont(selection_font)
+        tab_layout.addWidget(selection_count_label)
         
-        def update_selection_count(*args):
-            count = len(listbox.curselection())
-            selection_count_label.config(text=f"Selected: {count}")
+        def update_selection_count():
+            count = len(listbox.selectedItems())
+            selection_count_label.setText(f"Selected: {count}")
         
-        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        listbox.itemSelectionChanged.connect(update_selection_count)
         
         return {
             'type': 'image_folder',
@@ -1155,7 +1294,7 @@ class RetranslationMixin:
                         pass
         
         if not output_dir:
-            messagebox.showinfo("Info", 
+            QMessageBox.information(self, "Info", 
                 f"No translation output found for '{folder_name}'.\n\n"
                 f"Selected folder: {folder_path}\n"
                 f"Script directory: {script_dir}\n\n"
@@ -1222,50 +1361,37 @@ class RetranslationMixin:
         print(f"Total files found: {len(html_files)} HTML, {len(image_files)} images")
         
         if not html_files and not image_files:
-            messagebox.showinfo("Info", 
+            QMessageBox.information(self, "Info", 
                 f"No translated files found in: {output_dir}\n\n"
                 f"Progress tracking: {'Yes' if has_progress_tracking else 'No'}")
             return
         
         # Create dialog
-        dialog = self.wm.create_simple_dialog(
-            self.master,
-            "Force Retranslation - Images",
-            width=800,
-            height=600
-        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Force Retranslation - Images")
+        # Use 21% width, 15% height (half of original ~42% width, 30% height for 1920x1080)
+        width, height = self._get_dialog_size(0.21, 0.15)
+        dialog.resize(width, height)
+        dialog_layout = QVBoxLayout(dialog)
         
         # Add instructions with more detail
         instruction_text = f"Output folder: {output_dir}\n"
         instruction_text += f"Found {len(html_files)} translated images and {len(image_files)} cover images"
         if has_progress_tracking:
             instruction_text += " (with progress tracking)"
-        tk.Label(dialog, text=instruction_text, font=('Arial', 11), justify=tk.LEFT).pack(pady=10)
+        instruction_label = QLabel(instruction_text)
+        instruction_font = QFont('Arial', 11)
+        instruction_label.setFont(instruction_font)
+        instruction_label.setAlignment(Qt.AlignLeft)
+        dialog_layout.addWidget(instruction_label)
         
-        # Create main frame for listbox and scrollbars
-        main_frame = tk.Frame(dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Create scrollbars
-        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Create listbox
-        listbox = tk.Listbox(
-            main_frame, 
-            selectmode=tk.EXTENDED, 
-            yscrollcommand=v_scrollbar.set,
-            xscrollcommand=h_scrollbar.set,
-            width=100
-        )
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Configure scrollbars
-        v_scrollbar.config(command=listbox.yview)
-        h_scrollbar.config(command=listbox.xview)
+        # Create listbox (QListWidget has built-in scrolling)
+        listbox = QListWidget()
+        listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        # Use 16% of screen width (half of original ~31% for 1920px screen)
+        min_width, _ = self._get_dialog_size(0.16, 0)
+        listbox.setMinimumWidth(min_width)
+        dialog_layout.addWidget(listbox)
         
         # Keep track of file info
         file_info = []
@@ -1282,7 +1408,7 @@ class RetranslationMixin:
             else:
                 display = f"📄 {html_file} | ✅ Translated"
             
-            listbox.insert(tk.END, display)
+            listbox.addItem(display)
             
             # Find the hash key for this file if progress tracking exists
             hash_key = None
@@ -1304,7 +1430,7 @@ class RetranslationMixin:
         # Add cover images
         for img_file in sorted(image_files):
             display = f"🖼️ Cover | {img_file} | ⏭️ Skipped (cover)"
-            listbox.insert(tk.END, display)
+            listbox.addItem(display)
             file_info.append({
                 'type': 'cover',
                 'file': img_file,
@@ -1314,62 +1440,64 @@ class RetranslationMixin:
             })
         
         # Selection count label
-        selection_count_label = tk.Label(dialog, text="Selected: 0", font=('Arial', 10))
-        selection_count_label.pack(pady=(5, 10))
+        selection_count_label = QLabel("Selected: 0")
+        selection_font = QFont('Arial', 10)
+        selection_count_label.setFont(selection_font)
+        dialog_layout.addWidget(selection_count_label)
         
-        def update_selection_count(*args):
-            count = len(listbox.curselection())
-            selection_count_label.config(text=f"Selected: {count}")
+        def update_selection_count():
+            count = len(listbox.selectedItems())
+            selection_count_label.setText(f"Selected: {count}")
         
-        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        listbox.itemSelectionChanged.connect(update_selection_count)
         
         # Button frame
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=10)
-        
-        # Configure grid columns
-        for i in range(4):
-            button_frame.columnconfigure(i, weight=1)
+        button_frame = QWidget()
+        button_layout = QGridLayout(button_frame)
+        dialog_layout.addWidget(button_frame)
         
         def select_all():
-            listbox.select_set(0, tk.END)
+            listbox.selectAll()
             update_selection_count()
         
         def clear_selection():
-            listbox.select_clear(0, tk.END)
+            listbox.clearSelection()
             update_selection_count()
         
         def select_translated():
-            listbox.select_clear(0, tk.END)
+            listbox.clearSelection()
             for idx, info in enumerate(file_info):
                 if info['type'] == 'translated':
-                    listbox.select_set(idx)
+                    listbox.item(idx).setSelected(True)
             update_selection_count()
         
         def mark_as_skipped():
             """Move selected images to the images folder to be skipped"""
-            selected = listbox.curselection()
-            if not selected:
-                messagebox.showwarning("No Selection", "Please select at least one image to mark as skipped.")
+            selected_items = listbox.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(self, "No Selection", "Please select at least one image to mark as skipped.")
                 return
             
             # Get all selected items
-            selected_items = [(i, file_info[i]) for i in selected]
+            selected_indices = [listbox.row(item) for item in selected_items]
+            items_with_info = [(i, file_info[i]) for i in selected_indices]
             
             # Filter out items already in images folder (covers)
-            items_to_move = [(i, item) for i, item in selected_items if item['type'] != 'cover']
+            items_to_move = [(i, item) for i, item in items_with_info if item['type'] != 'cover']
             
             if not items_to_move:
-                messagebox.showinfo("Info", "Selected items are already in the images folder (skipped).")
+                QMessageBox.information(self, "Info", "Selected items are already in the images folder (skipped).")
                 return
             
             count = len(items_to_move)
-            if not messagebox.askyesno("Confirm Mark as Skipped", 
+            reply = QMessageBox.question(self, "Confirm Mark as Skipped", 
                                       f"Move {count} translated image(s) to the images folder?\n\n"
                                       "This will:\n"
                                       "• Delete the translated HTML files\n"
                                       "• Copy source images to the images folder\n"
-                                      "• Skip these images in future translations"):
+                                      "• Skip these images in future translations",
+                                      QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
                 return
             
             # Create images directory if it doesn't exist
@@ -1418,8 +1546,7 @@ class RetranslationMixin:
                     
                     # Update the listbox display
                     display = f"🖼️ Skipped | {base_name if match else item['file']} | ⏭️ Moved to images folder"
-                    listbox.delete(idx)
-                    listbox.insert(idx, display)
+                    listbox.item(idx).setText(display)
                     
                     # Update file_info
                     file_info[idx] = {
@@ -1450,23 +1577,25 @@ class RetranslationMixin:
             
             # Show result
             if failed_count > 0:
-                messagebox.showwarning("Partial Success", 
+                QMessageBox.warning(self, "Partial Success", 
                     f"Moved {moved_count} image(s) to be skipped.\n"
                     f"Failed to process {failed_count} item(s).")
             else:
-                messagebox.showinfo("Success", 
+                QMessageBox.information(self, "Success", 
                     f"Moved {moved_count} image(s) to the images folder.\n"
                     "They will be skipped in future translations.")
         
         def retranslate_selected():
-            selected = listbox.curselection()
-            if not selected:
-                messagebox.showwarning("No Selection", "Please select at least one file.")
+            selected_items = listbox.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(self, "No Selection", "Please select at least one file.")
                 return
             
+            selected_indices = [listbox.row(item) for item in selected_items]
+            
             # Count types
-            translated_count = sum(1 for i in selected if file_info[i]['type'] == 'translated')
-            cover_count = sum(1 for i in selected if file_info[i]['type'] == 'cover')
+            translated_count = sum(1 for i in selected_indices if file_info[i]['type'] == 'translated')
+            cover_count = sum(1 for i in selected_indices if file_info[i]['type'] == 'cover')
             
             # Build confirmation message
             msg_parts = []
@@ -1477,14 +1606,16 @@ class RetranslationMixin:
             
             confirm_msg = f"This will delete {' and '.join(msg_parts)}.\n\nContinue?"
             
-            if not messagebox.askyesno("Confirm Deletion", confirm_msg):
+            reply = QMessageBox.question(self, "Confirm Deletion", confirm_msg,
+                                       QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
                 return
             
             # Delete selected files
             deleted_count = 0
             progress_updated = False
             
-            for idx in selected:
+            for idx in selected_indices:
                 info = file_info[idx]
                 try:
                     if os.path.exists(info['path']):
@@ -1509,25 +1640,41 @@ class RetranslationMixin:
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
             
-            messagebox.showinfo("Success", 
+            QMessageBox.information(self, "Success", 
                 f"Deleted {deleted_count} file(s).\n\n"
                 "They will be retranslated on the next run.")
             
-            dialog.destroy()
+            dialog.close()
         
         # Add buttons in grid layout (similar to EPUB/text retranslation)
         # Row 0: Selection buttons
-        tb.Button(button_frame, text="Select All", command=select_all, 
-                  bootstyle="info").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Clear Selection", command=clear_selection, 
-                  bootstyle="secondary").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Translated", command=select_translated, 
-                  bootstyle="success").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Mark as Skipped", command=mark_as_skipped, 
-                  bootstyle="warning").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        btn_select_all = QPushButton("Select All")
+        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        btn_select_all.clicked.connect(select_all)
+        button_layout.addWidget(btn_select_all, 0, 0)
+        
+        btn_clear_selection = QPushButton("Clear Selection")
+        btn_clear_selection.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_clear_selection.clicked.connect(clear_selection)
+        button_layout.addWidget(btn_clear_selection, 0, 1)
+        
+        btn_select_translated = QPushButton("Select Translated")
+        btn_select_translated.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        btn_select_translated.clicked.connect(select_translated)
+        button_layout.addWidget(btn_select_translated, 0, 2)
+        
+        btn_mark_skipped = QPushButton("Mark as Skipped")
+        btn_mark_skipped.setStyleSheet("QPushButton { background-color: #ffc107; color: white; padding: 5px 15px; }")
+        btn_mark_skipped.clicked.connect(mark_as_skipped)
+        button_layout.addWidget(btn_mark_skipped, 0, 3)
         
         # Row 1: Action buttons
-        tb.Button(button_frame, text="Delete Selected", command=retranslate_selected, 
-                  bootstyle="danger").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                  bootstyle="secondary").grid(row=1, column=2, columnspan=2, padx=5, pady=10, sticky="ew")
+        btn_delete = QPushButton("Delete Selected")
+        btn_delete.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+        btn_delete.clicked.connect(retranslate_selected)
+        button_layout.addWidget(btn_delete, 1, 0, 1, 2)
+        
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_cancel.clicked.connect(dialog.close)
+        button_layout.addWidget(btn_cancel, 1, 2, 1, 2)

@@ -31,9 +31,11 @@ import hashlib
 import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-import tkinter as tk
-from tkinter import ttk, messagebox
-import ttkbootstrap as tb
+from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+                                QLabel, QPushButton, QCheckBox, QSpinBox, QTreeWidget, QTreeWidgetItem,
+                                QScrollArea, QProgressBar, QGroupBox, QFrame, QMessageBox, QMenu, QApplication)
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QIcon, QBrush, QColor
 from dataclasses import dataclass, asdict
 from enum import Enum
 import requests
@@ -1109,12 +1111,21 @@ class AsyncAPIProcessor:
     def _get_api_key(self) -> str:
         """Get API key from GUI settings"""
         if hasattr(self.gui, 'api_key_entry'):
-            return self.gui.api_key_entry.get().strip()
+            # PySide6 QLineEdit uses text() method
+            if hasattr(self.gui.api_key_entry, 'text'):
+                return self.gui.api_key_entry.text().strip()
+            else:
+                # Fallback for tkinter compatibility during transition
+                return self.gui.api_key_entry.get().strip()
         elif hasattr(self.gui, 'api_key_var'):
             return self.gui.api_key_var.get().strip()
         else:
             # Fallback to environment variable
             return os.getenv('API_KEY', '') or os.getenv('GEMINI_API_KEY', '') or os.getenv('GOOGLE_API_KEY', '')
+    
+    def _get_api_key_from_gui(self) -> str:
+        """Wrapper for _get_api_key for consistency"""
+        return self._get_api_key()
         
     def retrieve_results(self, job_id: str) -> List[Dict[str, Any]]:
         """Retrieve results from a completed batch job"""
@@ -1338,334 +1349,522 @@ class AsyncProcessingDialog:
         self.selected_job_id = None
         self.polling_jobs = set()  # Track which jobs are being polled
         
-        # Use the correct attribute name 'wm' instead of 'window_manager'
-        self.window_manager = translator_gui.wm  # WindowManager is stored as 'wm'
-        
         self._create_dialog()
         self._refresh_jobs_list()
         
     def _create_dialog(self):
         """Create the async processing dialog"""
-        # Create scrollable dialog (stays hidden)
-        self.dialog, scrollable_frame, canvas = self.window_manager.setup_scrollable(
-            self.parent,
-            "Async Batch Processing (50% Discount)",
-            width=0,  # Will be auto-sized
-            height=None,
-            max_width_ratio=0.9,
-            max_height_ratio=1.00
-        )
+        # Create main dialog
+        self.dialog = QDialog()
+        self.dialog.setWindowTitle("Async Batch Processing (50% Discount)")
+        self.dialog.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
+        self.dialog.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+            }
+        """)
         
-        # Store references
-        self.scrollable_frame = scrollable_frame
-        self.canvas = canvas
+        # Set icon if available
+        try:
+            icon_path = os.path.join(self.gui.base_dir, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                self.dialog.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
         
-        # Main container in scrollable_frame
-        main_frame = ttk.Frame(scrollable_frame)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Main layout
+        main_layout = QVBoxLayout(self.dialog)
+        
+        # Create scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Create scrollable content widget
+        scrollable_widget = QWidget()
+        content_layout = QVBoxLayout(scrollable_widget)
+        content_layout.setContentsMargins(5, 5, 5, 5)
         
         # Top section - Information and controls
-        self._create_info_section(main_frame)
+        self._create_info_section(scrollable_widget)
         
         # Middle section - Configuration
-        self._create_config_section(main_frame)
+        self._create_config_section(scrollable_widget)
         
         # Bottom section - Active jobs
-        self._create_jobs_section(main_frame)
+        self._create_jobs_section(scrollable_widget)
         
-        # Button frame goes in the DIALOG, not scrollable_frame
-        button_frame = ttk.Frame(self.dialog)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        self._create_button_frame(button_frame)
+        # Set scroll area widget
+        scroll_area.setWidget(scrollable_widget)
+        main_layout.addWidget(scroll_area)
+        
+        # Button frame at bottom of dialog
+        self._create_button_frame(self.dialog)
         
         # Load active jobs
         self._refresh_jobs_list()
         
-        # Auto-resize and show - THIS is what applies the height ratio!
-        self.window_manager.auto_resize_dialog(
-            self.dialog, 
-            canvas, 
-            max_width_ratio=0.9, 
-            max_height_ratio=0.92  # Can override to any value like 1.43
-        )
-        
-        # Handle window close
-        self.dialog.protocol("WM_DELETE_WINDOW", 
-                           lambda: [self.dialog._cleanup_scrolling(), self.dialog.destroy()])
+        # Size and position dialog
+        app = QApplication.instance()
+        if app:
+            screen = app.primaryScreen().availableGeometry()
+            dialog_width = min(1200, int(screen.width() * 0.9))
+            dialog_height = int(screen.height() * 0.92)
+            self.dialog.resize(dialog_width, dialog_height)
+            
+            # Center the dialog
+            dialog_x = screen.x() + (screen.width() - dialog_width) // 2
+            dialog_y = screen.y() + (screen.height() - dialog_height) // 2
+            self.dialog.move(dialog_x, dialog_y)
        
+        # Start auto refresh
         self._start_auto_refresh(30)
+        
+        # Show dialog
+        self.dialog.show()
         
     def _create_info_section(self, parent):
         """Create information section"""
-        info_frame = ttk.LabelFrame(parent, text="Async Processing Information", padding=10)
-        info_frame.pack(fill=tk.X, pady=(0, 10))
+        info_group = QGroupBox("Async Processing Information")
+        info_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11pt;
+                font-weight: bold;
+                border: 0.1em solid #555555;
+                border-radius: 0.25em;
+                margin-top: 0.5em;
+                padding: 0.75em;
+                color: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 0.5em;
+                padding: 0 0.25em;
+                color: #ffffff;
+            }
+        """)
+        info_layout = QVBoxLayout()
+        info_group.setLayout(info_layout)
         
         # Model and provider info
-        model_frame = ttk.Frame(info_frame)
-        model_frame.pack(fill=tk.X)
+        model_layout = QHBoxLayout()
         
-        ttk.Label(model_frame, text="Current Model:").pack(side=tk.LEFT, padx=(0, 5))
-        model_name = self.gui.model_var.get() if hasattr(self.gui, 'model_var') else "Not selected"
-        self.model_label = ttk.Label(model_frame, text=model_name, style="info.TLabel")
-        self.model_label.pack(side=tk.LEFT, padx=(0, 20))
+        model_label_text = QLabel("Current Model:")
+        model_label_text.setStyleSheet("font-size: 10pt; color: #ffffff;")
+        model_layout.addWidget(model_label_text)
+        
+        # Get model name from GUI - handle both tkinter and PySide6
+        if hasattr(self.gui, 'model_var'):
+            if hasattr(self.gui.model_var, 'get'):
+                model_name = self.gui.model_var.get()
+            else:
+                model_name = str(self.gui.model_var) if self.gui.model_var else "Not selected"
+        else:
+            model_name = "Not selected"
+        self.model_label = QLabel(model_name)
+        self.model_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #ffffff;")
+        model_layout.addWidget(self.model_label)
+        model_layout.addSpacing(20)
         
         # Check if model supports async
         provider = self.processor.get_provider_from_model(model_name)
         if provider and provider in self.processor.PROVIDER_CONFIGS:
             status_text = f"✓ Supported ({provider.upper()})"
-            status_style = "success.TLabel"
+            status_label = QLabel(status_text)
+            status_label.setStyleSheet("color: #28a745; font-size: 10pt; font-weight: bold;")
         else:
             status_text = "✗ Not supported for async"
-            status_style = "danger.TLabel"
+            status_label = QLabel(status_text)
+            status_label.setStyleSheet("color: #dc3545; font-size: 10pt; font-weight: bold;")
             
-        ttk.Label(model_frame, text=status_text, style=status_style).pack(side=tk.LEFT)
+        model_layout.addWidget(status_label)
+        model_layout.addStretch()
+        info_layout.addLayout(model_layout)
         
         # Cost estimation
-        cost_frame = ttk.Frame(info_frame)
-        cost_frame.pack(fill=tk.X, pady=(10, 0))
+        cost_label = QLabel("Cost Estimation:")
+        cost_label.setStyleSheet("font-size: 11pt; font-weight: bold; margin-top: 10px; color: #ffffff;")
+        info_layout.addWidget(cost_label)
         
-        ttk.Label(cost_frame, text="Cost Estimation:", font=("", 10, "bold")).pack(anchor=tk.W)
+        self.cost_info_label = QLabel("Select chapters to see cost estimate")
+        self.cost_info_label.setStyleSheet("font-size: 10pt; color: #aaaaaa; padding: 0.25em;")
+        self.cost_info_label.setWordWrap(True)
+        info_layout.addWidget(self.cost_info_label)
         
-        self.cost_info_label = ttk.Label(cost_frame, text="Select chapters to see cost estimate")
-        self.cost_info_label.pack(anchor=tk.W, pady=(5, 0))
+        # Add to parent layout
+        parent.layout().addWidget(info_group)
         
     def _create_config_section(self, parent):
         """Create configuration section"""
-        config_frame = ttk.LabelFrame(parent, text="Async Processing Configuration", padding=10)
-        config_frame.pack(fill=tk.X, pady=(0, 10))
+        config_group = QGroupBox("Async Processing Configuration")
+        config_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11pt;
+                font-weight: bold;
+                border: 0.1em solid #555555;
+                border-radius: 0.25em;
+                margin-top: 0.5em;
+                padding: 0.75em;
+                color: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 0.5em;
+                padding: 0 0.25em;
+                color: #ffffff;
+            }
+        """)
+        config_layout = QVBoxLayout()
+        config_group.setLayout(config_layout)
         
-        # Processing options
-        options_frame = ttk.Frame(config_frame)
-        options_frame.pack(fill=tk.X)
-        
-        # Wait for completion
-        self.wait_for_completion_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            options_frame,
-            text="Wait for completion (blocks GUI)",
-            variable=self.wait_for_completion_var
-        ).pack(anchor=tk.W)
+        # Wait for completion checkbox
+        self.wait_for_completion_checkbox = QCheckBox("Wait for completion (blocks GUI)")
+        self.wait_for_completion_checkbox.setChecked(False)
+        self.wait_for_completion_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-size: 10pt;
+                color: #ffffff;
+                spacing: 0.4em;
+            }
+            QCheckBox::indicator {
+                width: 0.9em;
+                height: 0.9em;
+                border-radius: 0.15em;
+                border: 0.1em solid #555555;
+                background-color: #2b2b2b;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #007bff;
+                background-color: #333333;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #007bff;
+                border-color: #007bff;
+            }
+        """)
+        config_layout.addWidget(self.wait_for_completion_checkbox)
         
         # Poll interval
-        poll_frame = ttk.Frame(options_frame)
-        poll_frame.pack(fill=tk.X, pady=(5, 0))
+        poll_layout = QHBoxLayout()
+        poll_label = QLabel("Poll interval (seconds):")
+        poll_label.setStyleSheet("font-size: 10pt; color: #ffffff;")
+        poll_layout.addWidget(poll_label)
         
-        ttk.Label(poll_frame, text="Poll interval (seconds):").pack(side=tk.LEFT, padx=(0, 5))
-        self.poll_interval_var = tk.IntVar(value=60)
-        ttk.Spinbox(
-            poll_frame,
-            from_=10,
-            to=600,
-            textvariable=self.poll_interval_var,
-            width=10
-        ).pack(side=tk.LEFT)
+        self.poll_interval_spinbox = QSpinBox()
+        self.poll_interval_spinbox.setMinimum(10)
+        self.poll_interval_spinbox.setMaximum(600)
+        self.poll_interval_spinbox.setValue(60)
+        self.poll_interval_spinbox.setFixedWidth(100)
+        self.poll_interval_spinbox.setStyleSheet("""
+            QSpinBox {
+                font-size: 10pt;
+                background-color: #2b2b2b;
+                color: #ffffff;
+                border: 0.05em solid #555555;
+                border-radius: 0.15em;
+                padding: 0.15em;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #3d3d3d;
+                border: 0.05em solid #555555;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #4d4d4d;
+            }
+        """)
+        poll_layout.addWidget(self.poll_interval_spinbox)
+        poll_layout.addStretch()
+        
+        config_layout.addLayout(poll_layout)
         
         # Chapter selection info
-        chapter_frame = ttk.Frame(config_frame)
-        chapter_frame.pack(fill=tk.X, pady=(10, 0))
+        self.chapter_info_label = QLabel("Note: Async processing will skip chapters that require chunking")
+        self.chapter_info_label.setStyleSheet("color: #ffa500; font-size: 9pt; padding: 0.25em;")
+        self.chapter_info_label.setWordWrap(True)
+        config_layout.addWidget(self.chapter_info_label)
         
-        self.chapter_info_label = ttk.Label(
-            chapter_frame,
-            text="Note: Async processing will skip chapters that require chunking",
-            style="warning.TLabel"
-        )
-        self.chapter_info_label.pack(anchor=tk.W)
+        # Add to parent layout
+        parent.layout().addWidget(config_group)
         
     def _create_jobs_section(self, parent):
         """Create active jobs section"""
-        jobs_frame = ttk.LabelFrame(parent, text="Active Async Jobs", padding=10)
-        jobs_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        jobs_group = QGroupBox("Active Async Jobs")
+        jobs_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11pt;
+                font-weight: bold;
+                border: 0.1em solid #555555;
+                border-radius: 0.25em;
+                margin-top: 0.5em;
+                padding: 0.75em;
+                color: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 0.5em;
+                padding: 0 0.25em;
+                color: #ffffff;
+            }
+        """)
+        jobs_layout = QVBoxLayout()
+        jobs_group.setLayout(jobs_layout)
         
-        # Jobs treeview
-        tree_frame = ttk.Frame(jobs_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # Jobs tree widget
+        self.jobs_tree = QTreeWidget()
+        self.jobs_tree.setColumnCount(7)
+        self.jobs_tree.setHeaderLabels(["Job ID", "Provider", "Model", "Status", "Progress", "Created", "Cost"])
+        self.jobs_tree.setStyleSheet("""
+            QTreeWidget {
+                font-size: 10pt;
+                background-color: #2b2b2b;
+                alternate-background-color: #333333;
+                border: 0.05em solid #555555;
+                border-radius: 0.15em;
+                color: #ffffff;
+            }
+            QTreeWidget::item {
+                padding: 0.25em;
+                color: #ffffff;
+            }
+            QTreeWidget::item:hover {
+                background-color: #3d3d3d;
+            }
+            QTreeWidget::item:selected {
+                background-color: #0078d7;
+                color: white;
+            }
+            QHeaderView::section {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                padding: 0.25em;
+                border: 0.05em solid #555555;
+                font-weight: bold;
+            }
+        """)
+        self.jobs_tree.setAlternatingRowColors(True)
         
-        # Scrollbars
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
+        # Set column widths
+        self.jobs_tree.setColumnWidth(0, 200)  # Job ID
+        self.jobs_tree.setColumnWidth(1, 100)  # Provider
+        self.jobs_tree.setColumnWidth(2, 150)  # Model
+        self.jobs_tree.setColumnWidth(3, 100)  # Status
+        self.jobs_tree.setColumnWidth(4, 150)  # Progress
+        self.jobs_tree.setColumnWidth(5, 150)  # Created
+        self.jobs_tree.setColumnWidth(6, 100)  # Cost
         
-        # Treeview
-        self.jobs_tree = ttk.Treeview(
-            tree_frame,
-            columns=("Provider", "Model", "Status", "Progress", "Created", "Cost"),
-            show="tree headings",
-            yscrollcommand=vsb.set,
-            xscrollcommand=hsb.set
-        )
-        
-        vsb.config(command=self.jobs_tree.yview)
-        hsb.config(command=self.jobs_tree.xview)
+        jobs_layout.addWidget(self.jobs_tree)
         
         # Add a progress bar for the selected job
-        progress_frame = ttk.Frame(jobs_frame)
-        progress_frame.pack(fill=tk.X, pady=(5, 0))
+        progress_layout = QHBoxLayout()
+        progress_text = QLabel("Selected Job Progress:")
+        progress_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #ffffff;")
+        progress_layout.addWidget(progress_text)
         
-        ttk.Label(progress_frame, text="Selected Job Progress:").pack(side=tk.LEFT, padx=(0, 5))
+        self.job_progress_bar = QProgressBar()
+        self.job_progress_bar.setMinimum(0)
+        self.job_progress_bar.setMaximum(100)
+        self.job_progress_bar.setValue(0)
+        self.job_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 0.1em solid #555555;
+                border-radius: 0.25em;
+                text-align: center;
+                font-size: 9pt;
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QProgressBar::chunk {
+                background-color: #0078d7;
+                border-radius: 0.15em;
+            }
+        """)
+        progress_layout.addWidget(self.job_progress_bar)
         
-        self.job_progress_bar = ttk.Progressbar(
-            progress_frame,
-            mode='determinate',
-            style='success.Horizontal.TProgressbar'
-        )
-        self.job_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.progress_label = QLabel("0%")
+        self.progress_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #aaaaaa;")
+        progress_layout.addWidget(self.progress_label)
         
-        self.progress_label = ttk.Label(progress_frame, text="0%")
-        self.progress_label.pack(side=tk.LEFT, padx=(5, 0))   
+        jobs_layout.addLayout(progress_layout)
         
-        # Configure columns
-        self.jobs_tree.heading("#0", text="Job ID")
-        self.jobs_tree.heading("Provider", text="Provider")
-        self.jobs_tree.heading("Model", text="Model")
-        self.jobs_tree.heading("Status", text="Status")
-        self.jobs_tree.heading("Progress", text="Progress")
-        self.jobs_tree.heading("Created", text="Created")
-        self.jobs_tree.heading("Cost", text="Est. Cost")
+        # Create context menu
+        self.jobs_context_menu = QMenu(self.jobs_tree)
+        self.jobs_context_menu.addAction("Check Status", self._check_selected_status)
+        self.jobs_context_menu.addAction("Retrieve Results", self._retrieve_selected_results)
+        self.jobs_context_menu.addSeparator()
+        self.jobs_context_menu.addAction("Delete", self._delete_selected_job)
         
-        self.jobs_tree.column("#0", width=200)
-        self.jobs_tree.column("Provider", width=100)
-        self.jobs_tree.column("Model", width=150)
-        self.jobs_tree.column("Status", width=100)
-        self.jobs_tree.column("Progress", width=150)
-        self.jobs_tree.column("Created", width=150)
-        self.jobs_tree.column("Cost", width=100)
+        # Set context menu policy
+        self.jobs_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.jobs_tree.customContextMenuRequested.connect(self._show_context_menu)
         
-        # Add right-click menu
-        self.jobs_context_menu = tk.Menu(self.jobs_tree, tearoff=0)
-        self.jobs_context_menu.add_command(label="Check Status", command=self._check_selected_status)
-        self.jobs_context_menu.add_command(label="Retrieve Results", command=self._retrieve_selected_results)
-        self.jobs_context_menu.add_separator()
-        self.jobs_context_menu.add_command(label="Delete", command=self._delete_selected_job)
-        
-        # Context menu binding function - use unique name to avoid conflicts
-        def show_jobs_context_menu(event):
-            # Select the item under cursor
-            item = self.jobs_tree.identify_row(event.y)
-            if item:
-                self.jobs_tree.selection_set(item)
-                self._on_job_select(None)  # Update selection
-            self.jobs_context_menu.post(event.x_root, event.y_root)
-        
-        # Bind right-click
-        self.jobs_tree.bind("<Button-3>", show_jobs_context_menu)  # Right-click on Windows/Linux
-        if sys.platform == "darwin":
-            self.jobs_tree.bind("<Button-2>", show_jobs_context_menu)  # Right-click on macOS
-        
-        # Pack treeview and scrollbars
-        self.jobs_tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        
-        # Bind selection
-        self.jobs_tree.bind('<<TreeviewSelect>>', self._on_job_select)
+        # Connect selection change
+        self.jobs_tree.itemSelectionChanged.connect(self._on_job_select)
         
         # Job action buttons
-        action_frame = ttk.Frame(jobs_frame)
-        action_frame.pack(fill=tk.X, pady=(10, 0))
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(10)
         
-        button_width = 15
-
-        ttk.Button(
-            action_frame,
-            text="Check Status",
-            command=self._check_selected_status,
-            style="info.TButton",
-            width=button_width
-        ).pack(side=tk.LEFT, padx=(0, 5))
-
-        ttk.Button(
-            action_frame,
-            text="Retrieve Results",
-            command=self._retrieve_selected_results,
-            style="success.TButton",
-            width=button_width
-        ).pack(side=tk.LEFT, padx=(0, 5))
-
-        ttk.Button(
-            action_frame,
-            text="Cancel Job",
-            command=self._cancel_selected_job,
-            style="warning.TButton",
-            width=button_width
-        ).pack(side=tk.LEFT, padx=(0, 5))
-
-        # delete buttons
-        ttk.Button(
-            action_frame,
-            text="Delete Selected",
-            command=self._delete_selected_job,
-            style="danger.TButton",
-            width=button_width
-        ).pack(side=tk.LEFT, padx=(30, 5))  # Extra padding to separate
-
-        ttk.Button(
-            action_frame,
-            text="Clear Completed",
-            command=self._clear_completed_jobs,
-            style="secondary.TButton",
-            width=button_width
-        ).pack(side=tk.LEFT)
+        button_style = """
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-size: 9pt;
+                padding: 0.4em 0.75em;
+                border-radius: 0.2em;
+                border: none;
+                min-width: 5em;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+            QPushButton:pressed {
+                background-color: #545b62;
+            }
+        """
+        
+        check_status_btn = QPushButton("Check Status")
+        check_status_btn.clicked.connect(self._check_selected_status)
+        check_status_btn.setStyleSheet(button_style)
+        action_layout.addWidget(check_status_btn)
+        
+        retrieve_btn = QPushButton("Retrieve Results")
+        retrieve_btn.clicked.connect(self._retrieve_selected_results)
+        retrieve_btn.setStyleSheet(button_style.replace("#6c757d", "#28a745").replace("#5a6268", "#218838").replace("#545b62", "#1e7e34"))
+        action_layout.addWidget(retrieve_btn)
+        
+        cancel_btn = QPushButton("Cancel Job")
+        cancel_btn.clicked.connect(self._cancel_selected_job)
+        cancel_btn.setStyleSheet(button_style.replace("#6c757d", "#ffc107").replace("#5a6268", "#e0a800").replace("#545b62", "#d39e00"))
+        action_layout.addWidget(cancel_btn)
+        
+        action_layout.addSpacing(30)
+        
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.clicked.connect(self._delete_selected_job)
+        delete_btn.setStyleSheet(button_style.replace("#6c757d", "#dc3545").replace("#5a6268", "#c82333").replace("#545b62", "#bd2130"))
+        action_layout.addWidget(delete_btn)
+        
+        clear_btn = QPushButton("Clear Completed")
+        clear_btn.clicked.connect(self._clear_completed_jobs)
+        clear_btn.setStyleSheet(button_style)
+        action_layout.addWidget(clear_btn)
+        
+        action_layout.addStretch()
+        jobs_layout.addLayout(action_layout)
+        
+        # Add to parent layout
+        parent.layout().addWidget(jobs_group)
     
     def _create_button_frame(self, parent):
         """Create bottom button frame"""
-        button_frame = ttk.Frame(parent)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(10, 5, 10, 10)
         
         # Start processing button
-        self.start_button = ttk.Button(
-            button_frame,
-            text="Start Async Processing",
-            command=self._start_processing,
-            style="success.TButton"
-        )
-        self.start_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.start_button = QPushButton("Start Async Processing")
+        self.start_button.clicked.connect(self._start_processing)
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 0.6em 1.25em;
+                border-radius: 0.25em;
+                border: none;
+                min-width: 9em;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:pressed {
+                background-color: #1e7e34;
+            }
+            QPushButton:disabled {
+                background-color: #94d3a2;
+                color: #ffffff;
+            }
+        """)
+        button_layout.addWidget(self.start_button)
         
         # Estimate only button
-        ttk.Button(
-            button_frame,
-            text="Estimate Cost Only",
-            command=self._estimate_cost,
-            style="info.TButton"
-        ).pack(side=tk.LEFT, padx=(0, 5))
+        estimate_button = QPushButton("Estimate Cost Only")
+        estimate_button.clicked.connect(self._estimate_cost)
+        estimate_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 0.6em 1.25em;
+                border-radius: 0.25em;
+                border: none;
+                min-width: 8em;
+            }
+            QPushButton:hover {
+                background-color: #0069d9;
+            }
+            QPushButton:pressed {
+                background-color: #0056b3;
+            }
+        """)
+        button_layout.addWidget(estimate_button)
         
-        # Close button - need to handle cleanup if using WindowManager
-        if hasattr(self.dialog, '_cleanup_scrolling'):
-            ttk.Button(
-                button_frame,
-                text="Close",
-                command=lambda: [self.dialog._cleanup_scrolling(), self.dialog.destroy()]
-            ).pack(side=tk.RIGHT)
-        else:
-            ttk.Button(
-                button_frame,
-                text="Close",
-                command=self.dialog.destroy
-            ).pack(side=tk.RIGHT)
+        button_layout.addStretch()
         
+        # Close button
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.dialog.close)
+        close_button.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-size: 10pt;
+                padding: 0.6em 1.5em;
+                border-radius: 0.25em;
+                border: none;
+                min-width: 5em;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+            QPushButton:pressed {
+                background-color: #545b62;
+            }
+        """)
+        button_layout.addWidget(close_button)
+        
+        # Add to parent layout
+        parent.layout().addLayout(button_layout)
+        
+    def _show_context_menu(self, position):
+        """Show context menu for jobs tree"""
+        item = self.jobs_tree.itemAt(position)
+        if item:
+            self.jobs_context_menu.exec_(self.jobs_tree.viewport().mapToGlobal(position))
+    
     def _update_selected_job_progress(self, job):
         """Update progress display for selected job"""
         if hasattr(self, 'job_progress_bar'):
             if job.total_requests > 0:
                 progress = int((job.completed_requests / job.total_requests) * 100)
-                self.job_progress_bar['value'] = progress
+                self.job_progress_bar.setValue(progress)
                 
                 # Update progress label if exists
                 if hasattr(self, 'progress_label'):
-                    self.progress_label.config(
-                        text=f"{progress}% ({job.completed_requests}/{job.total_requests} chapters)"
+                    self.progress_label.setText(
+                        f"{progress}% ({job.completed_requests}/{job.total_requests} chapters)"
                     )
             else:
-                self.job_progress_bar['value'] = 0
+                self.job_progress_bar.setValue(0)
                 if hasattr(self, 'progress_label'):
-                    self.progress_label.config(text="0% (Waiting)")        
+                    self.progress_label.setText("0% (Waiting)")
         
     def _refresh_jobs_list(self):
         """Refresh the jobs list"""
         # Clear existing items
-        for item in self.jobs_tree.get_children():
-            self.jobs_tree.delete(item)
+        self.jobs_tree.clear()
             
         # Add jobs
         for job_id, job in self.processor.jobs.items():
@@ -1696,27 +1895,39 @@ class AsyncProcessingDialog:
             # Shorten job ID for display
             display_id = job_id[:20] + "..." if len(job_id) > 20 else job_id
             
-            self.jobs_tree.insert(
-                "",
-                "end",
-                text=display_id,
-                values=(
-                    job.provider.upper(),
-                    job.model[:15] + "..." if len(job.model) > 15 else job.model,  # Shorten model name
-                    status_text,
-                    progress_text,  # Now shows percentage and counts
-                    created,
-                    cost
-                ),
-                tags=(job.status.value,)
-            )
+            # Create tree widget item
+            item = QTreeWidgetItem([
+                display_id,
+                job.provider.upper(),
+                job.model[:15] + "..." if len(job.model) > 15 else job.model,  # Shorten model name
+                status_text,
+                progress_text,  # Now shows percentage and counts
+                created,
+                cost
+            ])
             
-        # Configure tags for status colors
-        self.jobs_tree.tag_configure("pending", foreground="#FFA500")  # Orange
-        self.jobs_tree.tag_configure("processing", foreground="#007BFF")  # Blue
-        self.jobs_tree.tag_configure("completed", foreground="#28A745")  # Green
-        self.jobs_tree.tag_configure("failed", foreground="#DC3545")  # Red
-        self.jobs_tree.tag_configure("cancelled", foreground="#6C757D")  # Gray
+            # Set color based on status
+            if job.status == AsyncAPIStatus.PENDING:
+                item.setForeground(0, QBrush(QColor("#FFA500")))  # Orange
+                for col in range(7):
+                    item.setForeground(col, QBrush(QColor("#FFA500")))
+            elif job.status == AsyncAPIStatus.PROCESSING:
+                for col in range(7):
+                    item.setForeground(col, QBrush(QColor("#007BFF")))  # Blue
+            elif job.status == AsyncAPIStatus.COMPLETED:
+                for col in range(7):
+                    item.setForeground(col, QBrush(QColor("#28A745")))  # Green
+            elif job.status == AsyncAPIStatus.FAILED:
+                for col in range(7):
+                    item.setForeground(col, QBrush(QColor("#DC3545")))  # Red
+            elif job.status == AsyncAPIStatus.CANCELLED:
+                for col in range(7):
+                    item.setForeground(col, QBrush(QColor("#6C757D")))  # Gray
+            
+            # Store job_id in item data for retrieval
+            item.setData(0, Qt.UserRole, job_id)
+            
+            self.jobs_tree.addTopLevelItem(item)
         
         # Update progress bar if a job is selected
         if hasattr(self, 'selected_job_id') and self.selected_job_id:
@@ -1724,49 +1935,45 @@ class AsyncProcessingDialog:
             if job:
                 self._update_selected_job_progress(job)
         
-    def _on_job_select(self, event):
+    def _on_job_select(self):
         """Handle job selection"""
-        selection = self.jobs_tree.selection()
-        if selection:
-            item = self.jobs_tree.item(selection[0])
-            # Get full job ID from the item
-            job_id_prefix = item['text'].rstrip('...')
+        selected_items = self.jobs_tree.selectedItems()
+        if selected_items:
+            item = selected_items[0]
+            # Get full job ID from the item data
+            job_id = item.data(0, Qt.UserRole)
             
-            # Find matching job
-            for job_id in self.processor.jobs:
-                if job_id.startswith(job_id_prefix):
-                    self.selected_job_id = job_id
+            if job_id:
+                self.selected_job_id = job_id
+                
+                # Update progress display for selected job
+                job = self.processor.jobs.get(job_id)
+                if job:
+                    # Update progress bar if it exists
+                    if hasattr(self, 'job_progress_bar'):
+                        if job.total_requests > 0:
+                            progress = int((job.completed_requests / job.total_requests) * 100)
+                            self.job_progress_bar.setValue(progress)
+                        else:
+                            self.job_progress_bar.setValue(0)
                     
-                    # Update progress display for selected job
-                    job = self.processor.jobs.get(job_id)
-                    if job:
-                        # Update progress bar if it exists
-                        if hasattr(self, 'job_progress_bar'):
-                            if job.total_requests > 0:
-                                progress = int((job.completed_requests / job.total_requests) * 100)
-                                self.job_progress_bar['value'] = progress
-                            else:
-                                self.job_progress_bar['value'] = 0
-                        
-                        # Update progress label if it exists
-                        if hasattr(self, 'progress_label'):
-                            if job.total_requests > 0:
-                                progress = int((job.completed_requests / job.total_requests) * 100)
-                                self.progress_label.config(
-                                    text=f"{progress}% ({job.completed_requests}/{job.total_requests} chapters)"
-                                )
-                            else:
-                                self.progress_label.config(text="0% (Waiting)")
-                        
-                        # Log selection
-                        logger.info(f"Selected job: {job_id[:30]}... - Status: {job.status.value}")
+                    # Update progress label if it exists
+                    if hasattr(self, 'progress_label'):
+                        if job.total_requests > 0:
+                            progress = int((job.completed_requests / job.total_requests) * 100)
+                            self.progress_label.setText(
+                                f"{progress}% ({job.completed_requests}/{job.total_requests} chapters)"
+                            )
+                        else:
+                            self.progress_label.setText("0% (Waiting)")
                     
-                    break
+                    # Log selection
+                    logger.info(f"Selected job: {job_id[:30]}... - Status: {job.status.value}")
                     
     def _check_selected_status(self):
         """Check status of selected job"""
         if not self.selected_job_id:
-            messagebox.showwarning("No Selection", "Please select a job to check status")
+            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to check status")
             return
             
         try:
@@ -1798,15 +2005,15 @@ class AsyncProcessingDialog:
             if job.output_file:
                 status_text += f"\nOutput Ready: {job.output_file}\n"
             
-            messagebox.showinfo("Job Status", status_text)
+            QMessageBox.information(self.dialog, "Job Status", status_text)
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to check status: {str(e)}")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to check status: {str(e)}")
  
     def _start_auto_refresh(self, interval_seconds=30):
         """Start automatic status refresh"""
         def refresh():
-            if hasattr(self, 'dialog') and self.dialog.winfo_exists():
+            if hasattr(self, 'dialog') and self.dialog.isVisible():
                 # Refresh all jobs
                 for job_id in list(self.processor.jobs.keys()):
                     try:
@@ -1817,27 +2024,30 @@ class AsyncProcessingDialog:
                         pass
                 
                 self._refresh_jobs_list()
-                
-                # Schedule next refresh
-                self.dialog.after(interval_seconds * 1000, refresh)
         
-        # Start the refresh cycle
+        # Create and start timer
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(refresh)
+        self.refresh_timer.start(interval_seconds * 1000)  # Convert to milliseconds
+        
+        # Do first refresh immediately
         refresh()
     
     def _retrieve_selected_results(self):
         """Retrieve results from selected job"""
         if not self.selected_job_id:
-            messagebox.showwarning("No Selection", "Please select a job to retrieve results")
+            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to retrieve results")
             return
         
         # Check job status first
         job = self.processor.jobs.get(self.selected_job_id)
         if not job:
-            messagebox.showerror("Error", "Selected job not found")
+            QMessageBox.critical(self.dialog, "Error", "Selected job not found")
             return
             
         if job.status != AsyncAPIStatus.COMPLETED:
-            messagebox.showwarning(
+            QMessageBox.warning(
+                self.dialog,
                 "Job Not Complete", 
                 f"This job is currently {job.status.value}.\n"
                 "Only completed jobs can have results retrieved."
@@ -1845,55 +2055,55 @@ class AsyncProcessingDialog:
             return
         
         try:
-            # Set cursor to busy (with safety check)
-            if hasattr(self, 'dialog') and self.dialog.winfo_exists():
-                self.dialog.config(cursor="wait")
-                self.dialog.update()
+            # Set cursor to busy
+            if hasattr(self, 'dialog') and self.dialog.isVisible():
+                self.dialog.setCursor(Qt.WaitCursor)
             
             # Retrieve results
             self._handle_completed_job(self.selected_job_id)
             
         except Exception as e:
             self._log(f"❌ Error retrieving results: {e}")
-            messagebox.showerror("Error", f"Failed to retrieve results: {str(e)}")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to retrieve results: {str(e)}")
         finally:
-            # Reset cursor (with safety check)
-            if hasattr(self, 'dialog') and self.dialog.winfo_exists():
-                try:
-                    self.dialog.config(cursor="")
-                except tk.TclError:
-                    # Dialog was closed, ignore
-                    pass
+            # Reset cursor
+            if hasattr(self, 'dialog') and self.dialog.isVisible():
+                self.dialog.setCursor(Qt.ArrowCursor)
             
     def _cancel_selected_job(self):
         """Cancel selected job"""
         if not self.selected_job_id:
-            messagebox.showwarning("No Selection", "Please select a job to cancel")
+            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to cancel")
             return
             
         job = self.processor.jobs.get(self.selected_job_id)
         if not job:
-            messagebox.showerror("Error", "Selected job not found")
+            QMessageBox.critical(self.dialog, "Error", "Selected job not found")
             return
             
         if job.status in [AsyncAPIStatus.COMPLETED, AsyncAPIStatus.FAILED, AsyncAPIStatus.CANCELLED]:
-            messagebox.showwarning(
+            QMessageBox.warning(
+                self.dialog,
                 "Cannot Cancel", 
                 f"This job is already {job.status.value}"
             )
             return
             
         # Confirm cancellation
-        if not messagebox.askyesno(
+        reply = QMessageBox.question(
+            self.dialog,
             "Cancel Job", 
             f"Are you sure you want to cancel this job?\n\n"
             f"Job ID: {job.job_id}\n"
-            f"Status: {job.status.value}"
-        ):
+            f"Status: {job.status.value}",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
             return
             
         try:
-            api_key = self.gui.api_key_entry.get().strip()
+            # Get API key using the helper method
+            api_key = self._get_api_key_from_gui()
             
             if job.provider == 'openai':
                 headers = {'Authorization': f'Bearer {api_key}'}
@@ -1908,9 +2118,9 @@ class AsyncProcessingDialog:
                     job.updated_at = datetime.now()
                     self.processor._save_jobs()
                     self._refresh_jobs_list()
-                    messagebox.showinfo("Job Cancelled", "Job has been cancelled successfully")
+                    QMessageBox.information(self.dialog, "Job Cancelled", "Job has been cancelled successfully")
                 else:
-                    messagebox.showerror("Error", f"Failed to cancel job: {response.text}")
+                    QMessageBox.critical(self.dialog, "Error", f"Failed to cancel job: {response.text}")
                     
             elif job.provider == 'gemini':
                 # Gemini batch cancellation using REST API
@@ -1929,13 +2139,14 @@ class AsyncProcessingDialog:
                     job.updated_at = datetime.now()
                     self.processor._save_jobs()
                     self._refresh_jobs_list()
-                    messagebox.showinfo("Job Cancelled", "Gemini batch job has been cancelled successfully")
+                    QMessageBox.information(self.dialog, "Job Cancelled", "Gemini batch job has been cancelled successfully")
                 else:
-                    messagebox.showerror("Error", f"Failed to cancel Gemini job: {response.text}")
+                    QMessageBox.critical(self.dialog, "Error", f"Failed to cancel Gemini job: {response.text}")
                     
             elif job.provider == 'anthropic':
                 # Anthropic doesn't support cancellation via API yet
-                messagebox.showinfo(
+                QMessageBox.information(
+                    self.dialog,
                     "Not Supported", 
                     "Anthropic doesn't support job cancellation via API.\n"
                     "The job will be marked as cancelled locally only."
@@ -1947,7 +2158,8 @@ class AsyncProcessingDialog:
                 
             else:
                 # For other providers, just mark as cancelled locally
-                messagebox.showinfo(
+                QMessageBox.information(
+                    self.dialog,
                     "Local Cancellation", 
                     f"{job.provider.title()} cancellation not implemented.\n"
                     "The job will be marked as cancelled locally only."
@@ -1958,7 +2170,7 @@ class AsyncProcessingDialog:
                 self._refresh_jobs_list()
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to cancel job: {str(e)}")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to cancel job: {str(e)}")
 
     def _cancel_openai_job(self, job, api_key):
         """Cancel OpenAI batch job"""
@@ -2071,22 +2283,30 @@ class AsyncProcessingDialog:
         """Estimate cost for current file"""
         # Get current file info
         if not hasattr(self.gui, 'file_path') or not self.gui.file_path:
-            messagebox.showwarning("No File", "Please select a file first")
+            QMessageBox.warning(self.dialog, "No File", "Please select a file first")
             return
         
         try:
             # Show analyzing message
-            self.cost_info_label.config(text="Analyzing file...")
-            self.dialog.update()
+            self.cost_info_label.setText("Analyzing file...")
+            QApplication.processEvents()
             
             file_path = self.gui.file_path
-            model = self.gui.model_var.get()
+            # Get model name - handle both tkinter and PySide6
+            if hasattr(self.gui.model_var, 'get'):
+                model = self.gui.model_var.get()
+            else:
+                model = str(self.gui.model_var) if self.gui.model_var else ""
             
             # Calculate overhead tokens (system prompt + glossary)
             overhead_tokens = 0
             
             # Count system prompt tokens
-            system_prompt = self.gui.prompt_text.get("1.0", "end").strip()
+            # Get text from QTextEdit (PySide6) or Text widget (tkinter)
+            if hasattr(self.gui.prompt_text, 'toPlainText'):
+                system_prompt = self.gui.prompt_text.toPlainText().strip()
+            else:
+                system_prompt = self.gui.prompt_text.get("1.0", "end").strip()
             if system_prompt:
                 overhead_tokens += self.count_tokens(system_prompt, model)
                 logger.info(f"System prompt tokens: {overhead_tokens}")
@@ -2095,10 +2315,16 @@ class AsyncProcessingDialog:
             glossary_tokens = 0
             
             # Check if glossary should be appended - match the logic from _prepare_environment_variables
+            append_glossary = False
+            if hasattr(self.gui, 'append_glossary_var'):
+                if hasattr(self.gui.append_glossary_var, 'get'):
+                    append_glossary = self.gui.append_glossary_var.get()
+                else:
+                    append_glossary = bool(self.gui.append_glossary_var)
+            
             if (hasattr(self.gui, 'manual_glossary_path') and 
                 self.gui.manual_glossary_path and 
-                hasattr(self.gui, 'append_glossary_var') and 
-                self.gui.append_glossary_var.get()):  # This is the key check!
+                append_glossary):  # This is the key check!
                 
                 try:
                     glossary_path = self.gui.manual_glossary_path
@@ -2169,14 +2395,18 @@ class AsyncProcessingDialog:
                         
                         # Check if needs chunking (including overhead)
                         total_chapter_tokens = content_tokens + overhead_tokens
-                        token_limit = int(self.gui.token_limit_entry.get() or 200000)
+                        # Get token limit - handle both tkinter and PySide6
+                        if hasattr(self.gui.token_limit_entry, 'text'):
+                            token_limit = int(self.gui.token_limit_entry.text() or 200000)
+                        else:
+                            token_limit = int(self.gui.token_limit_entry.get() or 200000)
                         if total_chapter_tokens > token_limit * 0.8:
                             chapters_needing_chunking += 1
                         
                         # Update progress
                         if i % 5 == 0:
-                            self.cost_info_label.config(text=f"Analyzing chapters... {i+1}/{sample_size}")
-                            self.dialog.update()
+                            self.cost_info_label.setText(f"Analyzing chapters... {i+1}/{sample_size}")
+                            QApplication.processEvents()
                             
                     # Calculate average based on actual sample
                     if sample_size > 0:
@@ -2213,14 +2443,18 @@ class AsyncProcessingDialog:
                         
                         # Check if needs chunking (including overhead)
                         total_chapter_tokens = content_tokens + overhead_tokens
-                        token_limit = int(self.gui.token_limit_entry.get() or 200000)
+                        # Get token limit - handle both tkinter and PySide6
+                        if hasattr(self.gui.token_limit_entry, 'text'):
+                            token_limit = int(self.gui.token_limit_entry.text() or 200000)
+                        else:
+                            token_limit = int(self.gui.token_limit_entry.get() or 200000)
                         if total_chapter_tokens > token_limit * 0.8:
                             chapters_needing_chunking += 1
                         
                         # Update progress
                         if i % 5 == 0:
-                            self.cost_info_label.config(text=f"Analyzing chapters... {i+1}/{sample_size}")
-                            self.dialog.update()
+                            self.cost_info_label.setText(f"Analyzing chapters... {i+1}/{sample_size}")
+                            QApplication.processEvents()
                             
                     # Calculate average based on actual sample
                     if sample_size > 0:
@@ -2238,8 +2472,8 @@ class AsyncProcessingDialog:
                     avg_content_tokens_per_chapter = 15000
             else:
                 # Unsupported format
-                self.cost_info_label.config(
-                    text="Unsupported file format. Only EPUB and TXT are supported."
+                self.cost_info_label.setText(
+                    "Unsupported file format. Only EPUB and TXT are supported."
                 )
                 return
             
@@ -2247,8 +2481,8 @@ class AsyncProcessingDialog:
             processable_chapters = num_chapters - chapters_needing_chunking
             
             if processable_chapters <= 0:
-                self.cost_info_label.config(
-                    text=f"Warning: All {num_chapters} chapters require chunking.\n"
+                self.cost_info_label.setText(
+                    f"Warning: All {num_chapters} chapters require chunking.\n"
                     f"Async APIs do not support chunked chapters.\n"
                     f"Consider using regular batch translation instead."
                 )
@@ -2258,7 +2492,10 @@ class AsyncProcessingDialog:
             avg_total_tokens_per_chapter = avg_content_tokens_per_chapter + overhead_tokens
             
             # Get the translation compression factor from GUI
-            compression_factor = float(self.gui.compression_factor_var.get() or 1.0)
+            if hasattr(self.gui.compression_factor_var, 'get'):
+                compression_factor = float(self.gui.compression_factor_var.get() or 1.0)
+            else:
+                compression_factor = float(self.gui.compression_factor_var or 1.0)
             
             # Get accurate cost estimate
             async_cost, regular_cost = self.processor.estimate_cost(
@@ -2308,11 +2545,11 @@ class AsyncProcessingDialog:
             cost_text += f"output (~{int(avg_content_tokens_per_chapter * compression_factor):,}) tokens per chapter."
 
             
-            self.cost_info_label.config(text=cost_text)
+            self.cost_info_label.setText(cost_text)
             
         except Exception as e:
-            self.cost_info_label.config(
-                text=f"Error estimating cost: {str(e)}"
+            self.cost_info_label.setText(
+                f"Error estimating cost: {str(e)}"
             )
             print(f"Cost estimation error: {traceback.format_exc()}")
 
@@ -2344,10 +2581,15 @@ class AsyncProcessingDialog:
         
     def _start_processing(self):
         """Start async processing"""
-        model = self.gui.model_var.get()
+        # Get model name - handle both tkinter and PySide6
+        if hasattr(self.gui.model_var, 'get'):
+            model = self.gui.model_var.get()
+        else:
+            model = str(self.gui.model_var) if self.gui.model_var else ""
         
         if not self.processor.supports_async(model):
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.dialog,
                 "Not Supported",
                 f"Model '{model}' does not support async processing.\n"
                 "Supported providers: Gemini, Anthropic, OpenAI, Mistral, Groq"
@@ -2356,17 +2598,20 @@ class AsyncProcessingDialog:
         
         # Add special check for Gemini
         if model.lower().startswith('gemini'):
-            response = messagebox.askyesno(
+            reply = QMessageBox.question(
+                self.dialog,
                 "Gemini Batch API",
                 "Note: Gemini's batch API may not be publicly available yet.\n"
                 "This feature is experimental for Gemini models.\n\n"
-                "Would you like to try anyway?"
+                "Would you like to try anyway?",
+                QMessageBox.Yes | QMessageBox.No
             )
-            if not response:
+            if reply != QMessageBox.Yes:
                 return
         
         if not self.processor.supports_async(model):
-            messagebox.showerror(
+            QMessageBox.critical(
+                self.dialog,
                 "Not Supported",
                 f"Model '{model}' does not support async processing.\n"
                 "Supported providers: Gemini, Anthropic, OpenAI, Mistral, Groq"
@@ -2374,20 +2619,23 @@ class AsyncProcessingDialog:
             return
             
         if not hasattr(self.gui, 'file_path') or not self.gui.file_path:
-            messagebox.showwarning("No File", "Please select a file to translate first")
+            QMessageBox.warning(self.dialog, "No File", "Please select a file to translate first")
             return
             
         # Confirm start
-        if not messagebox.askyesno(
+        reply = QMessageBox.question(
+            self.dialog,
             "Start Async Processing",
             "Start async batch processing?\n\n"
             "This will submit all chapters for processing at 50% discount.\n"
-            "Processing may take up to 24 hours."
-        ):
+            "Processing may take up to 24 hours.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
             return
         
         # Disable buttons during processing
-        self.start_button.config(state='disabled')
+        self.start_button.setEnabled(False)
         
         # Start processing in background thread
         self.processing_thread = threading.Thread(
@@ -2403,8 +2651,14 @@ class AsyncProcessingDialog:
             
             # Get all settings from GUI
             file_path = self.gui.file_path
-            model = self.gui.model_var.get()
-            api_key = self.gui.api_key_entry.get().strip()
+            # Get model name - handle both tkinter and PySide6
+            if hasattr(self.gui.model_var, 'get'):
+                model = self.gui.model_var.get()
+            else:
+                model = str(self.gui.model_var) if self.gui.model_var else ""
+            
+            # Get API key
+            api_key = self._get_api_key_from_gui()
             
             if not api_key:
                 self._show_error("API key is required")
@@ -2457,8 +2711,8 @@ class AsyncProcessingDialog:
             self.processor.jobs[job.job_id] = job
             self.processor._save_jobs()
             
-            # Update UI
-            self.dialog.after(0, self._refresh_jobs_list)
+            # Update UI using Qt timer
+            QTimer.singleShot(0, self._refresh_jobs_list)
             
             self._log(f"✅ Batch submitted successfully! Job ID: {job.job_id}")
             
@@ -2472,7 +2726,7 @@ class AsyncProcessingDialog:
             )
             
             # Start polling if requested
-            if self.wait_for_completion_var.get():
+            if self.wait_for_completion_checkbox.isChecked():
                 self._start_polling(job.job_id)
                 
         except Exception as e:
@@ -2481,7 +2735,7 @@ class AsyncProcessingDialog:
             self._show_error(f"Failed to start async processing: {str(e)}")
         finally:
             # Re-enable button
-            self.dialog.after(0, lambda: self.start_button.config(state='normal'))
+            QTimer.singleShot(0, lambda: self.start_button.setEnabled(True))
 
     def _prepare_environment_variables(self):
         """Prepare environment variables from GUI settings"""
@@ -2725,27 +2979,29 @@ class AsyncProcessingDialog:
     def _delete_selected_job(self):
         """Delete selected job from the list"""
         if not self.selected_job_id:
-            messagebox.showwarning("No Selection", "Please select a job to delete")
+            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to delete")
             return
         
         # Get job details for confirmation
         job = self.processor.jobs.get(self.selected_job_id)
         if not job:
-            messagebox.showerror("Error", "Selected job not found")
+            QMessageBox.critical(self.dialog, "Error", "Selected job not found")
             return
         
         # Confirm deletion
-        response = messagebox.askyesno(
+        reply = QMessageBox.question(
+            self.dialog,
             "Confirm Delete",
             f"Are you sure you want to delete this job?\n\n"
             f"Job ID: {job.job_id}\n"
             f"Status: {job.status.value}\n"
             f"Created: {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "Note: This only removes the job from your local list.\n"
-            "The job may still be running on the server."
+            "The job may still be running on the server.",
+            QMessageBox.Yes | QMessageBox.No
         )
         
-        if response:
+        if reply == QMessageBox.Yes:
             # Remove from jobs dictionary
             del self.processor.jobs[self.selected_job_id]
             
@@ -2758,7 +3014,7 @@ class AsyncProcessingDialog:
             # Refresh the display
             self._refresh_jobs_list()
             
-            messagebox.showinfo("Job Deleted", "Job removed from local list.")
+            QMessageBox.information(self.dialog, "Job Deleted", "Job removed from local list.")
 
     def _clear_completed_jobs(self):
         """Clear all completed/failed/cancelled jobs"""
@@ -2770,17 +3026,19 @@ class AsyncProcessingDialog:
                 jobs_to_remove.append(job_id)
         
         if not jobs_to_remove:
-            messagebox.showinfo("No Jobs to Clear", "No completed/failed/cancelled jobs to clear.")
+            QMessageBox.information(self.dialog, "No Jobs to Clear", "No completed/failed/cancelled jobs to clear.")
             return
         
         # Confirm
-        response = messagebox.askyesno(
+        reply = QMessageBox.question(
+            self.dialog,
             "Clear Completed Jobs",
             f"Remove {len(jobs_to_remove)} completed/failed/cancelled jobs from the list?\n\n"
-            "This will not affect any running jobs."
+            "This will not affect any running jobs.",
+            QMessageBox.Yes | QMessageBox.No
         )
         
-        if response:
+        if reply == QMessageBox.Yes:
             # Remove jobs
             for job_id in jobs_to_remove:
                 del self.processor.jobs[job_id]
@@ -2791,7 +3049,7 @@ class AsyncProcessingDialog:
             # Refresh
             self._refresh_jobs_list()
             
-            messagebox.showinfo("Jobs Cleared", f"Removed {len(jobs_to_remove)} jobs from the list.")
+            QMessageBox.information(self.dialog, "Jobs Cleared", f"Removed {len(jobs_to_remove)} jobs from the list.")
 
     def _prepare_chapter_messages(self, content, env_vars):
         """Prepare messages array for a chapter"""
@@ -3065,8 +3323,8 @@ class AsyncProcessingDialog:
                     self._log(f"❌ Job {job_id} {job.status.value}")
                 else:
                     # Continue polling with progress update
-                    poll_interval = self.poll_interval_var.get() * 1000
-                    self.dialog.after(poll_interval, poll)
+                    poll_interval = self.poll_interval_spinbox.value() * 1000
+                    QTimer.singleShot(poll_interval, poll)
                     
             except Exception as e:
                 self._log(f"❌ Polling error: {e}")
@@ -3097,17 +3355,19 @@ class AsyncProcessingDialog:
             
             # Handle existing directory
             if os.path.exists(output_dir):
-                response = messagebox.askyesnocancel(
+                reply = QMessageBox.question(
+                    self.dialog,
                     "Directory Exists",
                     f"The output directory already exists:\n{output_dir}\n\n"
-                    "Yes = Overwrite\n"
-                    "No = Create new with number\n"
-                    "Cancel = Cancel operation"
+                    "Overwrite = Yes\n"
+                    "Create new = No\n"
+                    "Cancel = Cancel",
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
                 )
                 
-                if response is None:
+                if reply == QMessageBox.Cancel:
                     return
-                elif response is False:
+                elif reply == QMessageBox.No:
                     counter = 1
                     while os.path.exists(f"{output_dir}_{counter}"):
                         counter += 1
@@ -3301,7 +3561,8 @@ class AsyncProcessingDialog:
             
             self._log(f"✅ Saved {len(sorted_results)} chapters to: {output_dir}")
             
-            messagebox.showinfo(
+            QMessageBox.information(
+                self.dialog,
                 "Async Translation Complete",
                 f"Successfully saved {len(sorted_results)} translated chapters to:\n{output_dir}\n\n"
                 "Ready for EPUB conversion or further processing."
@@ -3311,7 +3572,7 @@ class AsyncProcessingDialog:
             self._log(f"❌ Error handling completed job: {e}")
             import traceback
             self._log(traceback.format_exc())
-            messagebox.showerror("Error", f"Failed to process results: {str(e)}")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to process results: {str(e)}")
  
     def _show_error_details(self, job):
         """Show details from error file"""
@@ -3319,7 +3580,8 @@ class AsyncProcessingDialog:
             return
             
         try:
-            api_key = self.gui.api_key_entry.get().strip()
+            # Get API key using the helper method
+            api_key = self._get_api_key_from_gui()
             headers = {'Authorization': f'Bearer {api_key}'}
             
             # Download error file
@@ -3345,7 +3607,8 @@ class AsyncProcessingDialog:
                     newline = '\n'
                     error_text += f"\n\n... and {len(response.text.strip().split(newline)) - 5} more errors"
                     
-                messagebox.showerror(
+                QMessageBox.critical(
+                    self.dialog,
                     "Batch Processing Errors",
                     f"All requests failed with errors:\n\n{error_text}\n\n"
                     "Common causes:\n"
@@ -3376,17 +3639,17 @@ class AsyncProcessingDialog:
             logger.info(message)  # This only goes to log file
             # Also display info messages in GUI
             if hasattr(self.gui, 'append_log'):
-                self.dialog.after(0, lambda: self.gui.append_log(message))
+                QTimer.singleShot(0, lambda: self.gui.append_log(message))
 
     def _show_error(self, message):
         """Thread-safe error dialog"""
         self._log(f"Error: {message}", level="error")
-        self.dialog.after(0, lambda: messagebox.showerror("Error", message))
+        QTimer.singleShot(0, lambda: QMessageBox.critical(self.dialog, "Error", message))
 
     def _show_info(self, title, message):
         """Thread-safe info dialog"""
         self._log(f"{title}: {message}", level="info")
-        self.dialog.after(0, lambda: messagebox.showinfo(title, message))
+        QTimer.singleShot(0, lambda: QMessageBox.information(self.dialog, title, message))
 
     def _show_warning(self, message):
         """Thread-safe warning display"""
@@ -3397,10 +3660,11 @@ def show_async_processing_dialog(parent, translator_gui):
     """Show the async processing dialog
     
     Args:
-        parent: Parent window
+        parent: Parent window (tkinter window - will be ignored for PySide6)
         translator_gui: Reference to main TranslatorGUI instance
     """
     dialog = AsyncProcessingDialog(parent, translator_gui)
+    dialog.dialog.exec_()  # Show as modal dialog
     return dialog.dialog
 
 
@@ -3412,18 +3676,32 @@ def add_async_processing_button(translator_gui, parent_frame):
     
     Args:
         translator_gui: TranslatorGUI instance
-        parent_frame: Frame to add button to
+        parent_frame: Frame to add button to (PySide6 QWidget or layout)
     """
     # Create button with appropriate styling
-    async_button = ttk.Button(
-        parent_frame,
-        text="Async Processing (50% Off)",
-        command=lambda: show_async_processing_dialog(translator_gui.master, translator_gui),
-        style="primary.TButton"
-    )
+    async_button = QPushButton("⚡ Async Processing (50% Off)")
+    async_button.clicked.connect(lambda: show_async_processing_dialog(None, translator_gui))
+    async_button.setStyleSheet("""
+        QPushButton {
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+            font-size: 11pt;
+            padding: 0.5em 1em;
+            border-radius: 0.25em;
+            border: none;
+        }
+        QPushButton:hover {
+            background-color: #0069d9;
+        }
+        QPushButton:pressed {
+            background-color: #0056b3;
+        }
+    """)
     
-    # Place button appropriately
-    async_button.pack(side=tk.LEFT, padx=5)
+    # Add to parent (assuming it's a layout)
+    if hasattr(parent_frame, 'addWidget'):
+        parent_frame.addWidget(async_button)
     
     # Store reference
     translator_gui.async_button = async_button
