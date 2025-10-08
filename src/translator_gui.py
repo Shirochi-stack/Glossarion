@@ -7432,7 +7432,17 @@ Important rules:
                 
             glossary_env_vars_set = []
             try:
-                # Glossary environment variables from config
+                # Normalize glossary prompts in config with safe fallbacks
+                manual_prompt = self.config.get('manual_glossary_prompt') or getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
+                self.config['manual_glossary_prompt'] = manual_prompt
+                auto_prompt = self.config.get('auto_glossary_prompt') or getattr(self, 'auto_glossary_prompt', getattr(self, 'default_auto_glossary_prompt', ''))
+                self.config['auto_glossary_prompt'] = auto_prompt
+                trans_prompt = self.config.get('glossary_translation_prompt') or getattr(self, 'glossary_translation_prompt', '')
+                self.config['glossary_translation_prompt'] = trans_prompt
+                format_instr = self.config.get('glossary_format_instructions') or getattr(self, 'glossary_format_instructions', '')
+                self.config['glossary_format_instructions'] = format_instr
+
+                # Glossary environment variables from normalized config
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
@@ -7463,14 +7473,16 @@ Important rules:
                 
                 # JSON environment variables for glossary
                 try:
-                    custom_entry_types = self.config.get('custom_entry_types', {})
-                    if custom_entry_types:
-                        custom_types_json = json.dumps(custom_entry_types)
-                        old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
-                        os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
-                        glossary_env_vars_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
-                        if show_message and debug_enabled and old_types != custom_types_json:
-                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                    custom_entry_types = self.config.get('custom_entry_types') or getattr(self, 'custom_entry_types', None) or {
+                        'character': {'enabled': True, 'has_gender': True},
+                        'term': {'enabled': True, 'has_gender': False}
+                    }
+                    custom_types_json = json.dumps(custom_entry_types)
+                    old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
+                    os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
+                    glossary_env_vars_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
+                    if show_message and debug_enabled and old_types != custom_types_json:
+                        self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
                 except Exception as e:
                     if show_message and debug_enabled:
                         self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
@@ -8072,8 +8084,8 @@ Important rules:
         try:
             # Initialize glossary-related environment variables
             env_mappings = [
-                ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
-                ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
+                ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', getattr(self, 'manual_glossary_prompt', ''))),
+                ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', getattr(self, 'auto_glossary_prompt', ''))),
                 ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
                 ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
                 ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
@@ -8191,13 +8203,20 @@ Important rules:
             
             # JSON environment variables
             try:
-                custom_entry_types = self.config.get('custom_entry_types', {})
-                if custom_entry_types:
-                    custom_types_json = json.dumps(custom_entry_types)
-                    os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
-                    if debug_mode:
-                        self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
-                    initialized_count += 1
+                # Prefer in-memory types, then config, then sensible defaults
+                custom_entry_types = getattr(self, 'custom_entry_types', None)
+                if not custom_entry_types:
+                    custom_entry_types = self.config.get('custom_entry_types')
+                if not custom_entry_types:
+                    custom_entry_types = {
+                        'character': {'enabled': True, 'has_gender': True},
+                        'term': {'enabled': True, 'has_gender': False}
+                    }
+                custom_types_json = json.dumps(custom_entry_types)
+                os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
+                if debug_mode:
+                    self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                initialized_count += 1
             except Exception as e:
                 if debug_mode:
                     self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")

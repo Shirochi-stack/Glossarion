@@ -1335,14 +1335,21 @@ Rules:
         auto_fuzzy_layout.setSpacing(8)
         extraction_grid.addWidget(auto_fuzzy_widget, 7, 1, 1, 3)
         
-        # Reuse the existing fuzzy threshold value
-        auto_fuzzy_slider = QSlider(Qt.Horizontal)
-        auto_fuzzy_slider.setMinimum(50)
-        auto_fuzzy_slider.setMaximum(100)
-        auto_fuzzy_slider.setValue(int(self.fuzzy_threshold_value * 100))
-        auto_fuzzy_slider.setMinimumWidth(200)
-        self._disable_slider_mousewheel(auto_fuzzy_slider)  # Disable mouse wheel
-        auto_fuzzy_layout.addWidget(auto_fuzzy_slider)
+        # Ensure we have a baseline fuzzy threshold value from config
+        if not hasattr(self, 'fuzzy_threshold_value'):
+            try:
+                self.fuzzy_threshold_value = float(self.config.get('glossary_fuzzy_threshold', 0.90))
+            except Exception:
+                self.fuzzy_threshold_value = 0.90
+        
+        # Create slider and expose on self for save handler
+        self.fuzzy_threshold_slider = QSlider(Qt.Horizontal)
+        self.fuzzy_threshold_slider.setMinimum(50)
+        self.fuzzy_threshold_slider.setMaximum(100)
+        self.fuzzy_threshold_slider.setValue(int(self.fuzzy_threshold_value * 100))
+        self.fuzzy_threshold_slider.setMinimumWidth(200)
+        self._disable_slider_mousewheel(self.fuzzy_threshold_slider)  # Disable mouse wheel
+        auto_fuzzy_layout.addWidget(self.fuzzy_threshold_slider)
         
         auto_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
         auto_fuzzy_layout.addWidget(auto_fuzzy_value_label)
@@ -1371,8 +1378,8 @@ Rules:
             
             auto_fuzzy_desc_label.setText(desc)
         
-        auto_fuzzy_slider.valueChanged.connect(update_auto_fuzzy_label)
-        update_auto_fuzzy_label(auto_fuzzy_slider.value())
+        self.fuzzy_threshold_slider.valueChanged.connect(update_auto_fuzzy_label)
+        update_auto_fuzzy_label(self.fuzzy_threshold_slider.value())
         
         # Help text
         help_widget = QWidget()
