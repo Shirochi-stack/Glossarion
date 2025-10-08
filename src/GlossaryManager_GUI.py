@@ -8,7 +8,7 @@ import sys
 import json
 from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
                                 QCheckBox, QRadioButton, QTextEdit, QListWidget,
-                                QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget,
+                                QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication)
@@ -38,72 +38,9 @@ class GlossaryManagerMixin:
         tabwidget.wheelEvent = lambda event: None
     
     def _create_styled_checkbox(self, text):
-        """Create a checkbox with proper checkmark using text overlay"""
-        from PySide6.QtWidgets import QCheckBox, QLabel
-        from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QFont
-        
-        checkbox = QCheckBox(text)
-        checkbox.setStyleSheet("""
-            QCheckBox {
-                color: white;
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #5a9fd4;
-                border-radius: 2px;
-                background-color: #2d2d2d;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #5a9fd4;
-                border-color: #5a9fd4;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #7bb3e0;
-            }
-            QCheckBox:disabled {
-                color: #666666;
-            }
-            QCheckBox::indicator:disabled {
-                background-color: #1a1a1a;
-                border-color: #3a3a3a;
-            }
-        """)
-        
-        # Create checkmark overlay
-        checkmark = QLabel("✓", checkbox)
-        checkmark.setStyleSheet("""
-            QLabel {
-                color: white;
-                background: transparent;
-                font-weight: bold;
-                font-size: 11px;
-            }
-        """)
-        checkmark.setAlignment(Qt.AlignCenter)
-        checkmark.hide()
-        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
-        
-        # Position checkmark properly after widget is shown
-        def position_checkmark():
-            # Position over the checkbox indicator
-            checkmark.setGeometry(2, 1, 14, 14)
-        
-        # Show/hide checkmark based on checked state
-        def update_checkmark():
-            if checkbox.isChecked():
-                position_checkmark()
-                checkmark.show()
-            else:
-                checkmark.hide()
-        
-        checkbox.stateChanged.connect(update_checkmark)
-        # Delay initial positioning to ensure widget is properly rendered
-        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
-        
-        return checkbox
+        """Create a checkbox; styling is handled by the dialog's global stylesheet."""
+        from PySide6.QtWidgets import QCheckBox
+        return QCheckBox(text)
 
     def glossary_manager(self):
         """Open comprehensive glossary management dialog"""
@@ -152,6 +89,32 @@ class GlossaryManagerMixin:
                 background: none;
                 border: none;
             }
+            /* Checkbox styling */
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: transparent;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: transparent;
+                border-color: #3a3a3a;
+            }
             /* Radio button styling */
             QRadioButton {
                 color: white;
@@ -162,7 +125,7 @@ class GlossaryManagerMixin:
                 height: 13px;
                 border: 2px solid #5a9fd4;
                 border-radius: 7px;
-                background-color: #2d2d2d;
+                background-color: transparent;
             }
             QRadioButton::indicator:checked {
                 background-color: #5a9fd4;
@@ -175,7 +138,7 @@ class GlossaryManagerMixin:
                 color: #666666;
             }
             QRadioButton::indicator:disabled {
-                background-color: #1a1a1a;
+                background-color: transparent;
                 border-color: #3a3a3a;
             }
             
@@ -194,6 +157,25 @@ class GlossaryManagerMixin:
                 background-color: #1a1a1a;
                 color: #666666;
                 border: 1px solid #3a3a3a;
+            }
+            
+            /* Slider styling */
+            QSlider {
+                background-color: transparent;
+            }
+            QSlider::groove:horizontal, QSlider::groove:vertical {
+                background: transparent;
+            }
+            QSlider::add-page:horizontal, QSlider::sub-page:horizontal,
+            QSlider::add-page:vertical, QSlider::sub-page:vertical {
+                background: transparent;
+            }
+            QSlider::handle:horizontal, QSlider::handle:vertical {
+                background: #5a9fd4;
+                border: 1px solid #4a5568;
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
             }
             
             /* ComboBox styling */
@@ -374,7 +356,11 @@ class GlossaryManagerMixin:
         
         # Create notebook for tabs
         notebook = QTabWidget()
-        self._disable_tabwidget_mousewheel(notebook)  # Disable mouse wheel tab switching
+        # Prevent wheel from switching tabs, but keep wheel events working inside tab contents
+        class NoWheelTabBar(QTabBar):
+            def wheelEvent(self, event):
+                event.ignore()
+        notebook.setTabBar(NoWheelTabBar())
         scrollable_layout.addWidget(notebook)
         
         # Create and add tabs
@@ -1134,6 +1120,11 @@ Rules:
         
         # Create notebook for tabs
         notebook = QTabWidget()
+        # Prevent wheel from switching tabs, but allow wheel scrolling inside sections
+        class NoWheelTabBar(QTabBar):
+            def wheelEvent(self, event):
+                event.ignore()
+        notebook.setTabBar(NoWheelTabBar())
         auto_layout.addWidget(notebook)
         
         # Add stretch to eliminate the massive empty space
@@ -1235,7 +1226,7 @@ Rules:
         # Row 6 - Strip honorifics
         extraction_grid.addWidget(QLabel("Strip honorifics:"), 6, 0)
         if not hasattr(self, 'strip_honorifics_checkbox'):
-            self.strip_honorifics_checkbox = QCheckBox("Remove honorifics from extracted names")
+            self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
             self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
         extraction_grid.addWidget(self.strip_honorifics_checkbox, 6, 1, 1, 3)
         
