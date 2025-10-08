@@ -1166,48 +1166,9 @@ Text to analyze:
                 pass
 
     def append_log_with_api_error_detection(self, message):
-        """Enhanced log appending that detects and highlights API errors"""
-        # First append the regular log message
+        """Enhanced log appending - now just appends the actual log without adding extra messages"""
+        # Just append the regular log message - no extra "helpful" messages
         self.append_log(message)
-        
-        # Check for API error patterns
-        message_lower = message.lower()
-        
-        if "429" in message or "rate limit" in message_lower:
-            # Rate limit error detected
-            self.append_log("⚠️ RATE LIMIT ERROR DETECTED (HTTP 429)")
-            self.append_log("   The API is throttling your requests.")
-            self.append_log("   Please wait before continuing or increase the delay between requests.")
-            self.append_log("   You can increase 'Delay between API calls' in settings.")
-            
-        elif "401" in message or "unauthorized" in message_lower:
-            # Authentication error
-            self.append_log("❌ AUTHENTICATION ERROR (HTTP 401)")
-            self.append_log("   Your API key is invalid or missing.")
-            self.append_log("   Please check your API key in the settings.")
-            
-        elif "403" in message or "forbidden" in message_lower:
-            # Forbidden error
-            self.append_log("❌ ACCESS FORBIDDEN ERROR (HTTP 403)")
-            self.append_log("   You don't have permission to access this API.")
-            self.append_log("   Please check your API subscription and permissions.")
-            
-        elif "400" in message or "bad request" in message_lower:
-            # Bad request error
-            self.append_log("❌ BAD REQUEST ERROR (HTTP 400)")
-            self.append_log("   The API request was malformed or invalid.")
-            self.append_log("   This might be due to unsupported model settings.")
-            
-        elif "timeout" in message_lower:
-            # Timeout error — suppress helper hints if a stop was requested
-            try:
-                if getattr(self, 'stop_requested', False):
-                    return
-            except Exception:
-                pass
-            self.append_log("⏱️ TIMEOUT ERROR")
-            self.append_log("   The API request took too long to respond.")
-            self.append_log("   Consider increasing timeout settings or retrying.")
 
     
     def create_glossary_backup(self, operation_name="manual"):

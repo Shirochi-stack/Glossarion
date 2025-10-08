@@ -5909,14 +5909,16 @@ class UnifiedClient:
                 except httpx.HTTPStatusError as e:
                     # Handle HTTP status errors from the Anthropic SDK
                     status_code = e.response.status_code if hasattr(e.response, 'status_code') else 0
-                    error_body = e.response.text if hasattr(e.response, 'text') else str(e)
+                    error_body_raw = e.response.text if hasattr(e.response, 'text') else str(e)
+                    # Sanitize HTML from error body for cleaner logs (no limit to see full error)
+                    error_body = _sanitize_for_log(error_body_raw, limit=None)
                     
-                    # Check if it's an HTML error page
-                    if '<!DOCTYPE html>' in error_body or '<html' in error_body:
-                        if '404' in error_body:
+                    # Check if it's an HTML error page (use raw body for detection)
+                    if '<!DOCTYPE html>' in error_body_raw or '<html' in error_body_raw:
+                        if '404' in error_body_raw:
                             # Extract the region from the error
                             import re
-                            region_match = re.search(r'/locations/([^/]+)/', error_body)
+                            region_match = re.search(r'/locations/([^/]+)/', error_body_raw)
                             bad_region = region_match.group(1) if region_match else region
                             
                             raise UnifiedClientError(
@@ -5968,13 +5970,14 @@ class UnifiedClient:
                         
                 except anthropic.APIError as e:
                     # Handle Anthropic-specific API errors
-                    error_str = str(e)
+                    error_str_raw = str(e)
+                    error_str = _sanitize_for_log(error_str_raw, limit=None)
                     
-                    # Check for HTML in error message
-                    if '<!DOCTYPE html>' in error_str or '<html' in error_str:
-                        if '404' in error_str:
+                    # Check for HTML in error message (use raw for detection)
+                    if '<!DOCTYPE html>' in error_str_raw or '<html' in error_str_raw:
+                        if '404' in error_str_raw:
                             import re
-                            region_match = re.search(r'/locations/([^/]+)/', error_str)
+                            region_match = re.search(r'/locations/([^/]+)/', error_str_raw)
                             bad_region = region_match.group(1) if region_match else region
                             
                             raise UnifiedClientError(
@@ -5998,14 +6001,15 @@ class UnifiedClient:
                     
                 except Exception as e:
                     # Catch any other errors
-                    error_str = str(e)
+                    error_str_raw = str(e)
+                    error_str = _sanitize_for_log(error_str_raw, limit=None)
                     
-                    # Check if it's an HTML error page
-                    if '<!DOCTYPE html>' in error_str or '<html' in error_str:
-                        if '404' in error_str:
+                    # Check if it's an HTML error page (use raw for detection)
+                    if '<!DOCTYPE html>' in error_str_raw or '<html' in error_str_raw:
+                        if '404' in error_str_raw:
                             # Extract the region from the error
                             import re
-                            region_match = re.search(r'/locations/([^/]+)/', error_str)
+                            region_match = re.search(r'/locations/([^/]+)/', error_str_raw)
                             bad_region = region_match.group(1) if region_match else region
                             
                             raise UnifiedClientError(
