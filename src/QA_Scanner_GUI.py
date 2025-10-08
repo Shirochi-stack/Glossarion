@@ -854,44 +854,71 @@ class QAScannerMixin:
                     custom_widgets['min_text_length'].setValue(500)
                     self.append_log("ℹ️ Settings reset to defaults")
             
+            # Flag to prevent recursive cancel calls
+            cancel_in_progress = False
+            
             def cancel_settings():
                 """Cancel without saving"""
-                nonlocal settings_saved
-                if not settings_saved:
-                    # Check if any settings were changed
-                    defaults = {
-                        'similarity': 85,
-                        'semantic': 80,
-                        'structural': 90,
-                        'word_overlap': 75,
-                        'minhash_threshold': 80,
-                        'consecutive_chapters': 2,
-                        'check_all_pairs': False,
-                        'sample_size': 3000,
-                        'min_text_length': 500
-                    }
+                nonlocal settings_saved, cancel_in_progress
+                
+                # Prevent recursive calls
+                if cancel_in_progress:
+                    return
                     
-                    changed = False
-                    for key, default_val in defaults.items():
-                        if key == 'check_all_pairs':
-                            if custom_widgets[key].isChecked() != default_val:
-                                changed = True
-                                break
+                cancel_in_progress = True
+                try:
+                    if not settings_saved:
+                        # Check if any settings were changed
+                        defaults = {
+                            'similarity': 85,
+                            'semantic': 80,
+                            'structural': 90,
+                            'word_overlap': 75,
+                            'minhash_threshold': 80,
+                            'consecutive_chapters': 2,
+                            'check_all_pairs': False,
+                            'sample_size': 3000,
+                            'min_text_length': 500
+                        }
+                        
+                        changed = False
+                        for key, default_val in defaults.items():
+                            if key == 'check_all_pairs':
+                                if custom_widgets[key].isChecked() != default_val:
+                                    changed = True
+                                    break
+                            else:
+                                if custom_widgets[key].value() != default_val:
+                                    changed = True
+                                    break
+                        
+                        if changed:
+                            reply = QMessageBox.question(custom_dialog, "Unsaved Changes", 
+                                                        "You have unsaved changes. Are you sure you want to cancel?",
+                                                        QMessageBox.Yes | QMessageBox.No)
+                            if reply == QMessageBox.Yes:
+                                # Disconnect signal before rejecting to prevent loop
+                                try:
+                                    custom_dialog.rejected.disconnect(cancel_settings)
+                                except:
+                                    pass
+                                custom_dialog.reject()
                         else:
-                            if custom_widgets[key].value() != default_val:
-                                changed = True
-                                break
-                    
-                    if changed:
-                        reply = QMessageBox.question(custom_dialog, "Unsaved Changes", 
-                                                    "You have unsaved changes. Are you sure you want to cancel?",
-                                                    QMessageBox.Yes | QMessageBox.No)
-                        if reply == QMessageBox.Yes:
+                            # Disconnect signal before rejecting to prevent loop
+                            try:
+                                custom_dialog.rejected.disconnect(cancel_settings)
+                            except:
+                                pass
                             custom_dialog.reject()
                     else:
+                        # Disconnect signal before rejecting to prevent loop
+                        try:
+                            custom_dialog.rejected.disconnect(cancel_settings)
+                        except:
+                            pass
                         custom_dialog.reject()
-                else:
-                    custom_dialog.reject()
+                finally:
+                    cancel_in_progress = False
             
             # Create buttons
             cancel_btn = QPushButton("Cancel")
@@ -924,7 +951,8 @@ class QAScannerMixin:
             button_layout.addStretch()
             
             # Handle window close properly - treat as cancel
-            custom_dialog.rejected.connect(cancel_settings)
+            # Store the connection so we can disconnect it later if needed
+            rejected_connection = custom_dialog.rejected.connect(cancel_settings)
             
             # Show dialog and wait for result
             result = custom_dialog.exec()
@@ -2442,19 +2470,16 @@ class QAScannerMixin:
         
         scroll_layout.addStretch()
         
-        # Create buttons
+        # Create fixed bottom button section (outside scroll area)
         button_widget = QWidget()
         button_layout = QHBoxLayout(button_widget)
-        button_layout.setContentsMargins(0, 20, 0, 0)
-        scroll_layout.addWidget(button_widget)
+        button_layout.setContentsMargins(20, 15, 20, 15)
         
         save_btn = QPushButton("Save Settings")
         save_btn.setMinimumWidth(120)
-        save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px;")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px; font-weight: bold;")
         save_btn.clicked.connect(save_settings)
         button_layout.addWidget(save_btn)
-        
-        button_layout.addStretch()
         
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setMinimumWidth(120)
@@ -2462,11 +2487,14 @@ class QAScannerMixin:
         cancel_btn.clicked.connect(lambda: [dialog._cleanup_scrolling(), dialog.reject()])
         button_layout.addWidget(cancel_btn)
         
-        reset_btn = QPushButton("Reset Defaults")
+        reset_btn = QPushButton("Reset to Default")
         reset_btn.setMinimumWidth(120)
         reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 8px;")
         reset_btn.clicked.connect(reset_defaults)
         button_layout.addWidget(reset_btn)
+        
+        # Add button widget to main layout (not scroll layout)
+        main_layout.addWidget(button_widget)
         
         # Show the dialog (PySide6 handles sizing automatically)
         # Note: The dialog size is already set in the constructor (800x600)
