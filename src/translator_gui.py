@@ -382,6 +382,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     log_signal = Signal(str)
     # Qt Signal for notifying when threads complete
     thread_complete_signal = Signal()
+    # Qt Signal for triggering QA scan from background thread
+    trigger_qa_scan_signal = Signal()
     
     def __init__(self, parent=None):
         # Initialize QMainWindow
@@ -391,6 +393,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.log_signal.connect(self.append_log_direct)
         # Connect thread complete signal to update buttons
         self.thread_complete_signal.connect(self.update_run_button)
+        # Connect QA scan trigger signal
+        self.trigger_qa_scan_signal.connect(self._trigger_qa_scan_on_main_thread)
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -3340,16 +3344,105 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         return
                     self.append_log("✅ Modules loaded")
                 
+                # Check for large EPUBs and set optimization parameters
+                epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+                
+                for epub_path in epub_files:
+                    try:
+                        import zipfile
+                        with zipfile.ZipFile(epub_path, 'r') as zf:
+                            # Quick count without reading content
+                            html_files = [f for f in zf.namelist() if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                            file_count = len(html_files)
+                            
+                            if file_count > 50:
+                                self.append_log(f"📚 Large EPUB detected: {file_count} chapters")
+                                
+                                # Get user-configured worker count
+                                if hasattr(self, 'config') and 'extraction_workers' in self.config:
+                                    max_workers = self.config.get('extraction_workers', 2)
+                                else:
+                                    # Fallback to environment variable or default
+                                    max_workers = int(os.environ.get('EXTRACTION_WORKERS', '2'))
+                                
+                                # Set extraction parameters
+                                os.environ['EXTRACTION_WORKERS'] = str(max_workers)
+                                os.environ['EXTRACTION_PROGRESS_CALLBACK'] = 'enabled'
+                                
+                                # Set progress interval based on file count
+                                if file_count > 500:
+                                    progress_interval = 50
+                                    os.environ['EXTRACTION_BATCH_SIZE'] = '100'
+                                    self.append_log(f"⚡ Using {max_workers} workers with batch size 100")
+                                elif file_count > 200:
+                                    progress_interval = 25
+                                    os.environ['EXTRACTION_BATCH_SIZE'] = '50'
+                                    self.append_log(f"⚡ Using {max_workers} workers with batch size 50")
+                                elif file_count > 100:
+                                    progress_interval = 20
+                                    os.environ['EXTRACTION_BATCH_SIZE'] = '25'
+                                    self.append_log(f"⚡ Using {max_workers} workers with batch size 25")
+                                else:
+                                    progress_interval = 10
+                                    os.environ['EXTRACTION_BATCH_SIZE'] = '20'
+                                    self.append_log(f"⚡ Using {max_workers} workers with batch size 20")
+                                
+                                os.environ['EXTRACTION_PROGRESS_INTERVAL'] = str(progress_interval)
+                                
+                                # Enable performance flags for large files
+                                os.environ['FAST_EXTRACTION'] = '1'
+                                os.environ['PARALLEL_PARSE'] = '1'
+                                
+                    except Exception as e:
+                        # If we can't check, just continue
+                        pass
+                
+                # Set essential environment variables from current config before translation
+                os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
+                os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
+                os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
+                
                 # Call the direct function
                 self.append_log("🚀 Starting translation...")
-                self.run_translation_direct()
+                translation_completed = self.run_translation_direct()
                 self.append_log("✅ Translation complete")
+                
+                # Post-translation scanning phase
+                # If scanning phase toggle is enabled, launch scanner after translation
+                # BUT only if translation completed successfully (not stopped by user)
+                try:
+                    self.append_log(f"📝 DEBUG: scan_phase_enabled_var={getattr(self, 'scan_phase_enabled_var', 'NOT SET')}")
+                    self.append_log(f"📝 DEBUG: translation_completed={translation_completed}")
+                    self.append_log(f"📝 DEBUG: stop_requested={self.stop_requested}")
+                    
+                    if (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
+                        translation_completed and not self.stop_requested):
+                        mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
+                        self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode (post-translation)...")
+                        # Emit signal to trigger QA scan on main thread
+                        self.trigger_qa_scan_signal.emit()
+                    else:
+                        self.append_log("⚠️ Post-translation scan conditions not met")
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not launch post-translation scan: {e}")
+                    import traceback
+                    self.append_log(traceback.format_exc())
                 
             except Exception as e:
                 self.append_log(f"❌ Error in thread: {e}")
                 import traceback
                 self.append_log(traceback.format_exc())
             finally:
+                # Clean up environment variables
+                env_vars = [
+                    'EXTRACTION_WORKERS', 'EXTRACTION_BATCH_SIZE',
+                    'EXTRACTION_PROGRESS_CALLBACK', 'EXTRACTION_PROGRESS_INTERVAL',
+                    'FAST_EXTRACTION', 'PARALLEL_PARSE'
+                ]
+                for var in env_vars:
+                    if var in os.environ:
+                        del os.environ[var]
+                
                 self.translation_thread = None
                 # Emit signal to update button (thread-safe)
                 self.thread_complete_signal.emit()
@@ -6049,6 +6142,19 @@ Important rules:
            current = self.entry_epub.text()
            if not current or current != file_path:
                self.entry_epub.setText(file_path)
+    
+    def _trigger_qa_scan_on_main_thread(self):
+        """Handler called on main thread to trigger QA scan"""
+        try:
+            self.append_log("🔵 Starting post-translation QA scan...")
+            mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
+            # Call run_qa_scan directly on the main thread with correct parameters
+            self.run_qa_scan(mode_override=mode, non_interactive=True)
+            self.append_log("✅ QA scan launched successfully")
+        except Exception as e:
+            self.append_log(f"❌ Failed to start QA scan: {e}")
+            import traceback
+            self.append_log(traceback.format_exc())
 
     def stop_glossary_extraction(self):
        """Stop glossary extraction specifically"""
@@ -7972,6 +8078,10 @@ Important rules:
             'GLOSSARY_TRANSLATION_PROMPT': 'Glossary translation prompt',
             'GLOSSARY_FORMAT_INSTRUCTIONS': 'Glossary formatting instructions',
             
+            # Post-translation scanning phase
+            'SCAN_PHASE_ENABLED': 'Enable post-translation scanning phase',
+            'SCAN_PHASE_MODE': 'Scanning mode (quick-scan/aggressive/ai-hunter/custom)',
+            
             # Manga Integration and Manga Settings Dialog variables
             'MANGA_FULL_PAGE_CONTEXT': 'Enable full page context translation',
             'MANGA_VISUAL_CONTEXT_ENABLED': 'Include page image in requests',
@@ -8037,20 +8147,25 @@ Important rules:
                     value_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
                     self.append_log(f"✅ [ENV_DEBUG] {var_name}: {value_preview}")
         
-        # Check optional variables if requested or if any are set
-        if show_all and debug_mode:
-            for var_name, description in optional_env_vars.items():
-                value = os.environ.get(var_name)
-                if value is None:
-                    self.append_log(f"🔍 [ENV_DEBUG] Optional not set: {var_name} - {description}")
-                elif not value.strip():
-                    self.append_log(f"⚠️ [ENV_DEBUG] Optional empty: {var_name} - {description}")
-                else:
+        # Treat previous 'optional' as critical as well
+        for var_name, description in optional_env_vars.items():
+            value = os.environ.get(var_name)
+            if value is None:
+                missing_critical.append(var_name)
+                if debug_mode:
+                    self.append_log(f"❌ [ENV_DEBUG] CRITICAL MISSING: {var_name} - {description}")
+            elif not str(value).strip():
+                empty_critical.append(var_name)
+                if debug_mode:
+                    self.append_log(f"⚠️ [ENV_DEBUG] CRITICAL EMPTY: {var_name} - {description}")
+            else:
+                set_critical.append(var_name)
+                if debug_mode:
                     value_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
-                    self.append_log(f"🔍 [ENV_DEBUG] Optional {var_name}: {value_preview}")
+                    self.append_log(f"✅ [ENV_DEBUG] {var_name}: {value_preview}")
         
-        # Summary
-        total_critical = len(critical_env_vars)
+        # Summary (now includes all former optional variables)
+        total_critical = len(critical_env_vars) + len(optional_env_vars)
         if debug_mode:
             self.append_log(f"🔍 [ENV_DEBUG] Summary: {len(set_critical)}/{total_critical} critical vars set")
         
@@ -8185,6 +8300,155 @@ Important rules:
             # Combine all environment variable mappings
             env_mappings.extend(qa_env_mappings)
             env_mappings.extend(manga_env_mappings)
+
+            # Add additional environment variables converted from legacy Tkinter to PySide6 attributes
+            try:
+                import json as _json
+            except Exception:
+                _json = json
+            extra_env_mappings = [
+                # Rolling summary
+                ('USE_ROLLING_SUMMARY', '1' if getattr(self, 'rolling_summary_var', False) else '0'),
+                ('SUMMARY_ROLE', getattr(self, 'summary_role_var', 'user')),
+                ('ROLLING_SUMMARY_EXCHANGES', str(getattr(self, 'rolling_summary_exchanges_var', '5'))),
+                ('ROLLING_SUMMARY_MODE', getattr(self, 'rolling_summary_mode_var', 'append')),
+                ('ROLLING_SUMMARY_SYSTEM_PROMPT', getattr(self, 'rolling_summary_system_prompt', getattr(self, 'default_rolling_summary_system_prompt', ''))),
+                ('ROLLING_SUMMARY_USER_PROMPT', getattr(self, 'rolling_summary_user_prompt', getattr(self, 'default_rolling_summary_user_prompt', ''))),
+                ('ROLLING_SUMMARY_MAX_ENTRIES', str(getattr(self, 'rolling_summary_max_entries_var', '10'))),
+
+                # Retry/network controls
+                ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
+                ('MAX_RETRY_TOKENS', str(getattr(self, 'max_retry_tokens_var', '16384'))),
+                ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),
+                ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
+                ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', True) else '0'),
+                ('CHUNK_TIMEOUT', str(getattr(self, 'chunk_timeout_var', '900'))),
+                ('ENABLE_HTTP_TUNING', '1' if self.config.get('enable_http_tuning', False) else '0'),
+                ('CONNECT_TIMEOUT', str(getattr(self, 'connect_timeout_var', '10'))),
+                ('READ_TIMEOUT', str(getattr(self, 'read_timeout_var', '180'))),
+                ('HTTP_POOL_CONNECTIONS', str(getattr(self, 'http_pool_connections_var', '20'))),
+                ('HTTP_POOL_MAXSIZE', str(getattr(self, 'http_pool_maxsize_var', '50'))),
+                ('IGNORE_RETRY_AFTER', '1' if self.config.get('ignore_retry_after', False) else '0'),
+                ('MAX_RETRIES', str(getattr(self, 'max_retries_var', '7'))),
+
+                # QA/meta preferences
+                ('QA_AUTO_SEARCH_OUTPUT', '1' if getattr(self, 'qa_auto_search_output_var', True) else '0'),
+                ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', True) else '0'),
+                ('REINFORCEMENT_FREQUENCY', str(getattr(self, 'reinforcement_freq_var', '10'))),
+                # Post-translation scanning phase
+                ('SCAN_PHASE_ENABLED', '1' if getattr(self, 'scan_phase_enabled_var', False) else '0'),
+                ('SCAN_PHASE_MODE', getattr(self, 'scan_phase_mode_var', 'quick-scan')),
+
+                # Book title handling
+                ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
+                ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
+
+                # Safety/merge toggles
+                ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),
+                ('DISABLE_CHAPTER_MERGING', '1' if getattr(self, 'disable_chapter_merging_var', False) else '0'),
+
+                # Image translation controls
+                ('ENABLE_IMAGE_TRANSLATION', '1' if getattr(self, 'enable_image_translation_var', False) else '0'),
+                ('PROCESS_WEBNOVEL_IMAGES', '1' if getattr(self, 'process_webnovel_images_var', True) else '0'),
+                ('WEBNOVEL_MIN_HEIGHT', str(getattr(self, 'webnovel_min_height_var', '1000'))),
+                ('MAX_IMAGES_PER_CHAPTER', str(getattr(self, 'max_images_per_chapter_var', '1'))),
+                ('IMAGE_CHUNK_HEIGHT', str(getattr(self, 'image_chunk_height_var', '1500'))),
+                ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
+                ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', False) else '0'),
+                ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
+                ('TRANSLATE_COVER_HTML', '1' if getattr(self, 'translate_cover_html_var', False) else '0'),
+                ('DISABLE_ZERO_DETECTION', '1' if getattr(self, 'disable_zero_detection_var', True) else '0'),
+                ('DUPLICATE_DETECTION_MODE', getattr(self, 'duplicate_detection_mode_var', 'basic')),
+                ('ENABLE_DECIMAL_CHAPTERS', '1' if getattr(self, 'enable_decimal_chapters_var', False) else '0'),
+
+                # Watermark/image toggles
+                ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
+                ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
+
+                # Prompts
+                ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
+                ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),
+
+                # Safety flags
+                ('DISABLE_GEMINI_SAFETY', str(self.config.get('disable_gemini_safety', False)).lower()),
+
+                # OpenRouter (duplicates are okay; ensures presence)
+                ('OPENROUTER_USE_HTTP_ONLY', '1' if getattr(self, 'openrouter_http_only_var', False) else '0'),
+                ('OPENROUTER_ACCEPT_IDENTITY', '1' if getattr(self, 'openrouter_accept_identity_var', False) else '0'),
+
+                # Misc toggles
+                ('auto_update_check', str(getattr(self, 'auto_update_check_var', True))),
+                ('FORCE_NCX_ONLY', '1' if getattr(self, 'force_ncx_only_var', True) else '0'),
+                ('SINGLE_API_IMAGE_CHUNKS', '1' if getattr(self, 'single_api_image_chunks_var', False) else '0'),
+
+                # Thinking features
+                ('ENABLE_GEMINI_THINKING', '1' if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
+                ('THINKING_BUDGET', str(getattr(self, 'thinking_budget_var', '-1')) if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
+                ('ENABLE_GPT_THINKING', '1' if getattr(self, 'enable_gpt_thinking_var', True) else '0'),
+                ('GPT_REASONING_TOKENS', str(getattr(self, 'gpt_reasoning_tokens_var', '2000')) if getattr(self, 'enable_gpt_thinking_var', True) else ''),
+                ('GPT_EFFORT', getattr(self, 'gpt_effort_var', 'medium')),
+
+                # Custom API endpoints
+                ('OPENAI_CUSTOM_BASE_URL', getattr(self, 'openai_base_url_var', '')),
+                ('GROQ_API_URL', getattr(self, 'groq_base_url_var', '')),
+                ('FIREWORKS_API_URL', getattr(self, 'fireworks_base_url_var', '')),
+                ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
+                ('USE_GEMINI_OPENAI_ENDPOINT', '1' if getattr(self, 'use_gemini_openai_endpoint_var', False) else '0'),
+                ('GEMINI_OPENAI_ENDPOINT', getattr(self, 'gemini_openai_endpoint_var', '')),
+
+                # Image compression settings
+                ('ENABLE_IMAGE_COMPRESSION', '1' if getattr(self, 'enable_image_compression_var', False) else '0'),
+                ('AUTO_COMPRESS_ENABLED', '1' if getattr(self, 'auto_compress_enabled_var', True) else '0'),
+                ('TARGET_IMAGE_TOKENS', str(getattr(self, 'target_image_tokens_var', '1000'))),
+                ('IMAGE_COMPRESSION_FORMAT', getattr(self, 'image_format_var', 'auto')),
+                ('WEBP_QUALITY', str(getattr(self, 'webp_quality_var', 85))),
+                ('JPEG_QUALITY', str(getattr(self, 'jpeg_quality_var', 85))),
+                ('PNG_COMPRESSION', str(getattr(self, 'png_compression_var', 6))),
+                ('MAX_IMAGE_DIMENSION', str(getattr(self, 'max_image_dimension_var', '2048'))),
+                ('MAX_IMAGE_SIZE_MB', str(getattr(self, 'max_image_size_mb_var', '10'))),
+                ('PRESERVE_TRANSPARENCY', '1' if getattr(self, 'preserve_transparency_var', False) else '0'),
+                ('OPTIMIZE_FOR_OCR', '1' if getattr(self, 'optimize_for_ocr_var', True) else '0'),
+                ('PROGRESSIVE_ENCODING', '1' if getattr(self, 'progressive_encoding_var', True) else '0'),
+                ('SAVE_COMPRESSED_IMAGES', '1' if getattr(self, 'save_compressed_images_var', False) else '0'),
+                ('USE_FALLBACK_KEYS', '1' if getattr(self, 'use_fallback_keys_var', False) else '0'),
+                ('FALLBACK_KEYS', _json.dumps(self.config.get('fallback_keys', []))),
+                ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '1'))),
+
+                # Metadata and batch header settings
+                ('TRANSLATE_METADATA_FIELDS', _json.dumps(getattr(self, 'translate_metadata_fields', {}))),
+                ('METADATA_TRANSLATION_MODE', self.config.get('metadata_translation_mode', 'together')),
+                ('BATCH_TRANSLATE_HEADERS', '1' if getattr(self, 'batch_translate_headers_var', False) else '0'),
+                ('HEADERS_PER_BATCH', str(getattr(self, 'headers_per_batch_var', '400'))),
+                ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
+                ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
+                ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),
+                ('IGNORE_TITLE', '1' if getattr(self, 'ignore_title_var', False) else '0'),
+
+                # Extraction mode
+                ('TEXT_EXTRACTION_METHOD', getattr(self, 'text_extraction_method_var', 'standard') if hasattr(self, 'text_extraction_method_var') else 'standard'),
+                ('FILE_FILTERING_LEVEL', getattr(self, 'file_filtering_level_var', 'smart') if hasattr(self, 'file_filtering_level_var') else 'smart'),
+                ('EXTRACTION_MODE', getattr(self, 'extraction_mode_var', 'smart')),
+                ('ENHANCED_FILTERING', getattr(self, 'enhanced_filtering_var', 'smart')),
+
+                # Anti-duplicate
+                ('ENABLE_ANTI_DUPLICATE', '1' if getattr(self, 'enable_anti_duplicate_var', False) else '0'),
+                ('TOP_P', str(getattr(self, 'top_p_var', '1.0'))),
+                ('TOP_K', str(getattr(self, 'top_k_var', '0'))),
+                ('FREQUENCY_PENALTY', str(getattr(self, 'frequency_penalty_var', '0.0'))),
+                ('PRESENCE_PENALTY', str(getattr(self, 'presence_penalty_var', '0.0'))),
+                ('REPETITION_PENALTY', str(getattr(self, 'repetition_penalty_var', '1.0'))),
+                ('CANDIDATE_COUNT', str(getattr(self, 'candidate_count_var', '1'))),
+                ('CUSTOM_STOP_SEQUENCES', getattr(self, 'custom_stop_sequences_var', '')),
+                ('LOGIT_BIAS_ENABLED', '1' if getattr(self, 'logit_bias_enabled_var', False) else '0'),
+                ('LOGIT_BIAS_STRENGTH', str(getattr(self, 'logit_bias_strength_var', '-0.5'))),
+                ('BIAS_COMMON_WORDS', '1' if getattr(self, 'bias_common_words_var', False) else '0'),
+                ('BIAS_REPETITIVE_PHRASES', '1' if getattr(self, 'bias_repetitive_phrases_var', False) else '0'),
+
+                # Azure API version
+                ('AZURE_API_VERSION', self.config.get('azure_api_version', '2025-01-01-preview')),
+            ]
+
+            env_mappings.extend(extra_env_mappings)
             
             initialized_count = 0
             for env_key, env_value in env_mappings:
