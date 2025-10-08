@@ -14,9 +14,30 @@ from PySide6.QtWidgets import (
     QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QProgressBar, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QTimer, QObject
+from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from datetime import datetime
+
+class UpdateCheckWorker(QThread):
+    """Worker thread for checking updates in background"""
+    update_checked = Signal(bool, object)  # (update_available, release_data)
+    error_occurred = Signal(str)  # error message
+    
+    def __init__(self, update_manager, silent=True, force_show=False):
+        super().__init__()
+        self.update_manager = update_manager
+        self.silent = silent
+        self.force_show = force_show
+    
+    def run(self):
+        """Run update check in background thread"""
+        try:
+            print("[DEBUG] Worker thread starting update check...")
+            result = self.update_manager._check_for_updates_internal(self.silent, self.force_show)
+            self.update_checked.emit(*result)
+        except Exception as e:
+            print(f"[DEBUG] Worker thread error: {e}")
+            self.error_occurred.emit(str(e))
 
 class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
@@ -27,8 +48,10 @@ class UpdateManager(QObject):
     def __init__(self, main_gui, base_dir):
         super().__init__()
         self.main_gui = main_gui
+        self.dialog = main_gui  # Set dialog as the main GUI window for message box parent
         self.base_dir = base_dir
         self.update_available = False
+        self._check_in_progress = False  # Prevent concurrent checks
         # Use shared executor from main GUI if available
         try:
             if hasattr(self.main_gui, '_ensure_executor'):
@@ -107,31 +130,56 @@ class UpdateManager(QObject):
             return []
     
     def check_for_updates_async(self, silent=True, force_show=False):
-        """Run check_for_updates in the background using the shared executor.
-        Returns a Future if an executor is available, else runs in a thread.
+        """Run check_for_updates in background using QThread (PySide6 compatible).
         """
-        try:
-            # Ensure shared executor
-            if hasattr(self.main_gui, '_ensure_executor'):
-                self.main_gui._ensure_executor()
-            execu = getattr(self, 'executor', None) or getattr(self.main_gui, 'executor', None)
-            if execu:
-                future = execu.submit(self.check_for_updates, silent, force_show)
-                return future
-        except Exception:
-            pass
+        print("[DEBUG] Starting background update check with QThread")
         
-        # Fallback to thread if executor not available
-        def _worker():
-            try:
-                self.check_for_updates(silent=silent, force_show=force_show)
-            except Exception:
-                pass
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        return None
+        # Prevent concurrent update checks
+        if self._check_in_progress:
+            print("[DEBUG] Update check already in progress, skipping...")
+            return None
+            
+        self._check_in_progress = True
+        
+        # Show loading dialog for manual checks (when not silent)
+        if not silent:
+            self._show_loading_dialog()
+        
+        # Create and start worker thread
+        self.worker = UpdateCheckWorker(self, silent, force_show)
+        self.worker.update_checked.connect(self._on_update_checked)
+        self.worker.error_occurred.connect(self._on_update_error)
+        self.worker.finished.connect(self._on_update_finished)  # Clean up flag
+        self.worker.start()
+        
+        return None  # Async, results will come via signals
+    
+    def _on_update_checked(self, update_available, release_data):
+        """Handle update check results from worker thread"""
+        print(f"[DEBUG] Update check completed: available={update_available}")
+        if update_available or self.worker.force_show:
+            self.show_update_dialog()
+    
+    def _on_update_error(self, error_msg):
+        """Handle update check error from worker thread"""
+        print(f"[DEBUG] Update check error: {error_msg}")
+        # Close loading dialog first
+        self._close_loading_dialog()
+        if not self.worker.silent:
+            msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Update Check Failed")
+            msg.setText(f"Failed to check for updates: {error_msg}")
+            msg.exec()
+    
+    def _on_update_finished(self):
+        """Clean up after update check is finished"""
+        print("[DEBUG] Update check finished, resetting progress flag")
+        self._check_in_progress = False
+        # Close loading dialog if it exists
+        self._close_loading_dialog()
 
-    def check_for_updates(self, silent=True, force_show=False) -> Tuple[bool, Optional[Dict]]:
+    def _check_for_updates_internal(self, silent=True, force_show=False) -> Tuple[bool, Optional[Dict]]:
         """Check GitHub for newer releases
         
         Args:
@@ -141,6 +189,7 @@ class UpdateManager(QObject):
         Returns:
             Tuple of (update_available, release_info)
         """
+        print("[DEBUG] _check_for_updates_internal called")
         try:
             # Check if we need to skip the check due to cache
             current_time = time.time()
@@ -156,9 +205,9 @@ class UpdateManager(QObject):
                 'User-Agent': 'Glossarion-Updater'
             }
             
-            # Try with very short timeout and minimal retries to prevent hanging
-            max_retries = 1  # Reduced from 2 to prevent long waits
-            timeout = 5  # Very short timeout to prevent hanging
+            # Try with reasonable timeout and minimal retries to prevent hanging
+            max_retries = 0  # No retries to prevent hanging
+            timeout = 10  # Reasonable timeout
             
             for attempt in range(max_retries + 1):
                 try:
@@ -196,26 +245,20 @@ class UpdateManager(QObject):
             if version.parse(latest_version) > version.parse(self.CURRENT_VERSION):
                 self.update_available = True
                 
-                # Show update dialog when update is available
-                print(f"[DEBUG] Showing update dialog for version {latest_version}")
-                # Use QTimer.singleShot for thread-safe UI updates
-                QTimer.singleShot(0, self.show_update_dialog)
+                # Update available - will be handled by signal
+                print(f"[DEBUG] Update available for version {latest_version}")
                     
                 return True, release_data
             else:
                 # We're up to date
                 self.update_available = False
                 
-                # Show dialog if explicitly requested (from menu)
-                if force_show or not silent:
-                    # Use QTimer.singleShot for thread-safe UI updates
-                    QTimer.singleShot(0, self.show_update_dialog)
-                
+                # Dialog will be shown via signal if force_show is True
                 return False, None
                 
         except requests.Timeout:
             if not silent:
-                msg = QMessageBox()
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
                 msg.setIcon(QMessageBox.Critical)
                 msg.setWindowTitle("Update Check Failed")
                 msg.setText("Connection timed out while checking for updates.\n\n"
@@ -226,7 +269,7 @@ class UpdateManager(QObject):
             
         except requests.ConnectionError as e:
             if not silent:
-                msg = QMessageBox()
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
                 msg.setIcon(QMessageBox.Critical)
                 msg.setWindowTitle("Update Check Failed")
                 if 'api.github.com' in str(e):
@@ -244,7 +287,7 @@ class UpdateManager(QObject):
             
         except requests.HTTPError as e:
             if not silent:
-                msg = QMessageBox()
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
                 msg.setIcon(QMessageBox.Critical)
                 msg.setWindowTitle("Update Check Failed")
                 if e.response.status_code == 403:
@@ -256,7 +299,7 @@ class UpdateManager(QObject):
             
         except ValueError as e:
             if not silent:
-                msg = QMessageBox()
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
                 msg.setIcon(QMessageBox.Critical)
                 msg.setWindowTitle("Update Check Failed")
                 msg.setText("Invalid response from GitHub. The update service may be temporarily unavailable.")
@@ -265,7 +308,7 @@ class UpdateManager(QObject):
             
         except Exception as e:
             if not silent:
-                msg = QMessageBox()
+                msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
                 msg.setIcon(QMessageBox.Critical)
                 msg.setWindowTitle("Update Check Failed")
                 msg.setText(f"An unexpected error occurred:\n{str(e)}")
@@ -275,6 +318,10 @@ class UpdateManager(QObject):
     def check_for_updates_manual(self):
         """Manual update check from menu - always shows dialog (async)"""
         return self.check_for_updates_async(silent=False, force_show=True)
+    
+    def check_for_updates(self, silent=True, force_show=False):
+        """Public method for checking updates - delegates to async method"""
+        return self.check_for_updates_async(silent=silent, force_show=force_show)
     
     def _save_last_check_time(self):
         """Save the last update check time to config"""
@@ -393,19 +440,124 @@ class UpdateManager(QObject):
         
         return text.strip()
     
+    def _show_loading_dialog(self):
+        """Show loading dialog during update check"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QIcon, QPixmap
+        import os
+        
+        # Get the main GUI window for parenting - ensure it's a proper QWidget
+        from PySide6.QtWidgets import QWidget
+        parent = None
+        if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
+            parent = self.dialog
+        
+        # Create loading dialog
+        self.loading_dialog = QDialog(parent)
+        self.loading_dialog.setWindowTitle("Checking for Updates")
+        self.loading_dialog.setFixedSize(300, 150)
+        self.loading_dialog.setModal(True)
+        
+        # Set the proper application icon for the dialog
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                self.loading_dialog.setWindowIcon(QIcon(ico_path))
+        except Exception as e:
+            print(f"Could not load icon for loading dialog: {e}")
+        
+        # Position dialog at center of parent
+        if parent:
+            self.loading_dialog.move(parent.geometry().center() - self.loading_dialog.rect().center())
+        
+        # Create main layout
+        main_layout = QVBoxLayout(self.loading_dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)
+        
+        # Try to load and resize the icon
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                # Load and resize image
+                icon_pixmap = QPixmap(ico_path).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon_label = QLabel()
+                icon_label.setPixmap(icon_pixmap)
+                icon_label.setAlignment(Qt.AlignCenter)
+                main_layout.addWidget(icon_label)
+        except Exception as e:
+            print(f"Could not load loading icon: {e}")
+        
+        # Add loading text
+        self.loading_text = QLabel("Checking for updates...")
+        self.loading_text.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(self.loading_text)
+        
+        # Add progress bar
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 0)  # Indeterminate mode
+        main_layout.addWidget(progress_bar)
+        
+        # Animation state
+        self.loading_animation_active = True
+        self.loading_rotation = 0
+        
+        def animate_text():
+            """Animate the loading text"""
+            if not self.loading_animation_active or not hasattr(self, 'loading_text'):
+                return
+                
+            try:
+                # Simple text-based animation
+                dots = "." * ((self.loading_rotation // 10) % 4)
+                self.loading_text.setText(f"Checking for updates{dots}")
+                self.loading_rotation += 1
+                
+                # Schedule next animation frame
+                QTimer.singleShot(100, animate_text)
+            except:
+                pass  # Dialog might have been destroyed
+        
+        # Start text animation
+        animate_text()
+        
+        # Show the dialog
+        self.loading_dialog.show()
+    
+    def _close_loading_dialog(self):
+        """Close the loading dialog if it exists"""
+        try:
+            if hasattr(self, 'loading_animation_active'):
+                self.loading_animation_active = False
+            if hasattr(self, 'loading_dialog') and self.loading_dialog:
+                self.loading_dialog.close()
+                delattr(self, 'loading_dialog')
+        except:
+            pass  # Dialog might already be destroyed
+    
     def show_update_dialog(self):
         """Show update dialog (for updates or version history)"""
+        print("[DEBUG] show_update_dialog called")
+        
         if not self.latest_release and not self.all_releases:
+            print("[DEBUG] No release data, trying to fetch...")
             # Try to fetch releases if we don't have them
-            self.all_releases = self.fetch_multiple_releases(count=10)
-            if self.all_releases:
-                self.latest_release = self.all_releases[0]
-            else:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Error")
-                msg.setText("Unable to fetch version information from GitHub.")
-                msg.exec()
+            try:
+                self.all_releases = self.fetch_multiple_releases(count=10)
+                if self.all_releases:
+                    self.latest_release = self.all_releases[0]
+                    print(f"[DEBUG] Fetched {len(self.all_releases)} releases")
+                else:
+                    print("[DEBUG] No releases fetched")
+                    msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
+                    msg.setIcon(QMessageBox.Critical)
+                    msg.setWindowTitle("Error")
+                    msg.setText("Unable to fetch version information from GitHub.")
+                    msg.exec()
+                    return
+            except Exception as e:
+                print(f"[DEBUG] Error fetching releases in show_update_dialog: {e}")
                 return
         
         # Set appropriate title
@@ -414,20 +566,53 @@ class UpdateManager(QObject):
         else:
             title = "Version History"
         
+        print(f"[DEBUG] Creating update dialog with title: {title}")
+        
         # Use existing QApplication instance - never create a new one
         app = QApplication.instance()
         if not app:
             print("[ERROR] No QApplication instance found - update dialog cannot be shown")
             return
         
-        # Create PySide6 dialog with proper parent to prevent blocking other dialogs
-        parent_window = self.main_gui if hasattr(self.main_gui, 'show') else None
-        dialog = QDialog(parent_window)
-        dialog.setWindowTitle(title)
+        # Determine parent window - use active modal widget or main GUI
+        from PySide6.QtWidgets import QWidget
+        parent_widget = None
+        try:
+            # Check if there's an active modal widget (e.g., Other Settings dialog)
+            parent_widget = app.activeModalWidget()
+            if not parent_widget:
+                # Fall back to active window
+                parent_widget = app.activeWindow()
+            if not parent_widget:
+                # Fall back to main GUI if it's a proper QWidget
+                if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
+                    parent_widget = self.dialog
+        except Exception:
+            if hasattr(self.dialog, 'show') and isinstance(self.dialog, QWidget):
+                parent_widget = self.dialog
         
-        # Ensure dialog stays on top and gets focus
-        dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
-        dialog.setAttribute(Qt.WA_ShowWithoutActivating, False)  # Ensure it gets focus
+        # Create simple non-blocking dialog with appropriate parent
+        dialog = QDialog(parent_widget)
+        dialog.setWindowTitle(title)
+        dialog.setModal(False)  # Ensure non-modal
+        
+        # Apply dark theme styling to fix white background
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QWidget {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+        """)
+        
+        print(f"[DEBUG] Dialog created successfully with dark theme")
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
@@ -893,16 +1078,10 @@ class UpdateManager(QObject):
         # Set dialog layout and show
         dialog.setLayout(main_layout)
         
-        # Show dialog as modal to parent window only (not application-wide)
-        if parent_window:
-            dialog.setModal(True)  # Modal to parent window only
-            dialog.show()
-        else:
-            # No parent - use non-modal but bring to front
-            dialog.setModal(False)
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
+        # Show dialog as non-modal window that won't block other dialogs
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         
         # Keep reference to prevent garbage collection
         self._update_dialog = dialog
@@ -929,7 +1108,7 @@ class UpdateManager(QObject):
         dialog.close()
         
         # Show confirmation
-        msg = QMessageBox(self.main_gui if hasattr(self.main_gui, 'show') else None)
+        msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle("Version Skipped")
         msg.setText(f"Version {version_tag} will be skipped in future update checks.\n"
@@ -1021,7 +1200,7 @@ class UpdateManager(QObject):
         """Handle completed download"""
         dialog.close()
         
-        msg = QMessageBox(self.main_gui if hasattr(self.main_gui, 'show') else None)
+        msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
         msg.setIcon(QMessageBox.Question)
         msg.setWindowTitle("Download Complete")
         msg.setText("Update downloaded successfully.\n\n"
@@ -1090,7 +1269,7 @@ del "%~f0"
             sys.exit(0)
             
         except Exception as e:
-            msg = QMessageBox(self.main_gui if hasattr(self.main_gui, 'show') else None)
+            msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
             msg.setIcon(QMessageBox.Critical)
             msg.setWindowTitle("Installation Error")
             msg.setText(f"Could not start update process:\n{str(e)}")

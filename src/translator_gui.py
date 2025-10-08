@@ -1062,133 +1062,18 @@ Text to analyze:
             print("[DEBUG] Update manager is None")
         
     def check_for_updates_manual(self):
-        """Manually check for updates from the Other Settings dialog with loading animation"""
+        """Manually check for updates from the Other Settings dialog"""
         if hasattr(self, 'update_manager') and self.update_manager:
-            self._show_update_loading_and_check()
+            # Use the consolidated update checking system instead of separate loading dialog
+            self.update_manager.check_for_updates_manual()
         else:
             QMessageBox.critical(self, "Update Check", 
                                "Update manager is not available.\n"
                                "Please check the GitHub releases page manually:\n"
                                "https://github.com/Shirochi-stack/Glossarion/releases")
 
-    def _show_update_loading_and_check(self):
-        """Show animated loading dialog while checking for updates"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
-        from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QIcon, QPixmap
-        from PIL import Image
-        import threading
-        import os
-        
-        # Create loading dialog
-        loading_dialog = QDialog(self)
-        loading_dialog.setWindowTitle("Checking for Updates")
-        loading_dialog.setFixedSize(300, 150)
-        loading_dialog.setModal(True)
-        
-        # Set the proper application icon for the dialog
-        try:
-            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                loading_dialog.setWindowIcon(QIcon(ico_path))
-        except Exception as e:
-            print(f"Could not load icon for loading dialog: {e}")
-        
-        # Position dialog at center of parent
-        loading_dialog.move(self.geometry().center() - loading_dialog.rect().center())
-        
-        # Create main layout
-        main_layout = QVBoxLayout(loading_dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(10)
-        
-        # Try to load and resize the icon (same approach as main GUI)
-        icon_label = None
-        try:
-            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                # Load and resize image
-                icon_pixmap = QPixmap(ico_path).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                icon_label = QLabel()
-                icon_label.setPixmap(icon_pixmap)
-                icon_label.setAlignment(Qt.AlignCenter)
-                main_layout.addWidget(icon_label)
-        except Exception as e:
-            print(f"Could not load loading icon: {e}")
-        
-        # Add loading text
-        loading_text = QLabel("Checking for updates...")
-        loading_text.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(loading_text)
-        
-        # Add progress bar
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, 0)  # Indeterminate mode
-        main_layout.addWidget(progress_bar)
-        
-        # Animation state
-        self.loading_animation_active = True
-        self.loading_rotation = 0
-        
-        def animate_icon():
-            """Animate the loading text"""
-            if not self.loading_animation_active:
-                return
-                
-            try:
-                # Simple text-based animation
-                dots = "." * ((self.loading_rotation // 10) % 4)
-                loading_text.setText(f"Checking for updates{dots}")
-                self.loading_rotation += 1
-                
-                # Schedule next animation frame
-                QTimer.singleShot(100, animate_icon)
-            except:
-                pass  # Dialog might have been destroyed
-        
-        # Start text animation
-        animate_icon()
-        
-        def check_updates_thread():
-            """Run update check in background thread"""
-            try:
-                # Perform the actual update check
-                self.update_manager.check_for_updates(silent=False, force_show=True)
-            except Exception as e:
-                # Schedule error display on main thread
-                QTimer.singleShot(0, lambda: self._show_update_error(str(e)))
-            finally:
-                # Schedule cleanup on main thread
-                QTimer.singleShot(0, cleanup_loading)
-        
-        def cleanup_loading():
-            """Clean up the loading dialog"""
-            try:
-                self.loading_animation_active = False
-                loading_dialog.close()
-            except:
-                pass  # Dialog might already be destroyed
-        
-        def _show_update_error(error_msg):
-            """Show update check error"""
-            cleanup_loading()
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Update Check Failed", 
-                               f"Failed to check for updates:\n{error_msg}")
-        
-        # Start the update check in a separate thread
-        update_thread = threading.Thread(target=check_updates_thread, daemon=True)
-        update_thread.start()
-        
-        # Handle dialog close
-        def on_dialog_close():
-            self.loading_animation_active = False
-            cleanup_loading()
-        
-        loading_dialog.rejected.connect(on_dialog_close)
-        
-        # Show the dialog
-        loading_dialog.show()
+    # Removed old _show_update_loading_and_check method to prevent conflicts
+    # Now using the consolidated update checking system in UpdateManager
                                
     def append_log_with_api_error_detection(self, message):
         """Enhanced log appending that detects and highlights API errors"""
@@ -4169,20 +4054,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Ensure Payloads directory exists
                 os.makedirs("Payloads", exist_ok=True)
                 
-                # CRITICAL TEST: Are we even reaching this point?
-                self.append_log("="*60)
-                self.append_log("🔴 [CRITICAL TEST] About to call translation_main()")
-                self.append_log(f"🔴 [CRITICAL TEST] translation_main = {translation_main}")
-                self.append_log(f"🔴 [CRITICAL TEST] self.append_log = {self.append_log}")
-                self.append_log("="*60)
-                
                 # Run translation
-                self.append_log("🚀 Calling translation_main NOW...")
                 translation_main(
                     log_callback=self.append_log,
                     stop_callback=lambda: self.stop_requested
                 )
-                self.append_log("✅ translation_main returned!")
                 
                 if not self.stop_requested:
                     self.append_log("✅ Translation completed successfully!")
@@ -5434,20 +5310,11 @@ Important rules:
                     # Import traceback for better error info
                     import traceback
                     
-                    # CRITICAL TEST: Are we even reaching this point?
-                    self.append_log("="*60)
-                    self.append_log("🔴 [GLOSSARY CRITICAL TEST] About to call glossary_main()")
-                    self.append_log(f"🔴 [GLOSSARY CRITICAL TEST] glossary_main = {glossary_main}")
-                    self.append_log(f"🔴 [GLOSSARY CRITICAL TEST] self.append_log = {self.append_log}")
-                    self.append_log("="*60)
-                    
                     # Run glossary extraction with enhanced stop callback
-                    self.append_log("🚀 Calling glossary_main NOW...")
                     glossary_main(
                         log_callback=self.append_log,
                         stop_callback=enhanced_stop_callback
                     )
-                    self.append_log("✅ glossary_main returned!")
                 except Exception as e:
                     # Get the full traceback
                     tb_lines = traceback.format_exc()
@@ -6683,8 +6550,8 @@ Important rules:
            "Set Max Output Token Limit",
            "Enter max output tokens for API output (e.g., 16384, 32768, 65536):",
            value=self.max_output_tokens,
-           min=1,
-           max=2000000
+           minValue=1,
+           maxValue=2000000
        )
        if ok and val:
            self.max_output_tokens = val

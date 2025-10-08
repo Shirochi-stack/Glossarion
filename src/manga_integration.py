@@ -3783,7 +3783,9 @@ class MangaTranslationTab:
         self.start_button = QPushButton("▶ Start Translation")
         self.start_button.clicked.connect(self._toggle_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setMinimumHeight(90)  # Increased from 80 to 90
+        self.start_button.setMinimumHeight(90)  # Minimum height when space is constrained
+        # Set size policy to expand vertically to fill available space
+        self.start_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.start_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #28a745; "
@@ -3799,7 +3801,7 @@ class MangaTranslationTab:
             "  color: #666666; "
             "}"
         )
-        control_layout.addWidget(self.start_button)
+        control_layout.addWidget(self.start_button, stretch=1)  # Give it stretch factor
 
         # Add tooltip to show why button is disabled
         if not is_ready:
@@ -3813,11 +3815,10 @@ class MangaTranslationTab:
             tooltip_text = "Cannot start: " + ", ".join(reasons)
             self.start_button.setToolTip(tooltip_text)
         
-        # Add control buttons to LEFT COLUMN
-        left_column_layout.addWidget(control_frame)
+        # Add control buttons to LEFT COLUMN - with stretch so it expands to fill space
+        left_column_layout.addWidget(control_frame, stretch=1)
         
-        # Add stretch to balance columns
-        left_column_layout.addStretch()
+        # Add stretch to right column to balance
         right_column_layout.addStretch()
         
         # Set size policies to make columns expand and shrink properly
@@ -4051,9 +4052,9 @@ class MangaTranslationTab:
                 self._log("✅ Advanced settings saved and applied", "success")
             
             # Open the settings dialog
-            # Note: MangaSettingsDialog is still Tkinter-based, so pass Tkinter root
+            # MangaSettingsDialog is PySide6-based, so pass the manga integration dialog as parent
             MangaSettingsDialog(
-                parent=self.main_gui.master,  # Use Tkinter root instead of PySide6 dialog
+                parent=self.dialog,  # Use PySide6 manga integration dialog as parent
                 main_gui=self.main_gui,
                 config=self.main_gui.config,
                 callback=on_settings_saved
