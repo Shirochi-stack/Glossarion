@@ -82,6 +82,7 @@ def setup_other_settings_methods(gui_instance):
         '_check_azure_endpoint', '_update_azure_api_version_env',
         '_reset_anti_duplicate_defaults', '_get_ai_hunter_status_text',
         'create_ai_hunter_section', 'test_api_connections',
+        '_update_multi_key_status_label',
         # Prompt configuration dialogs
         'configure_translation_chunk_prompt', 'configure_image_chunk_prompt',
         'configure_image_compression',
@@ -1001,22 +1002,16 @@ def _create_response_handling_section(self, parent):
     multi_key_h = QHBoxLayout(multi_key_row)
     multi_key_h.setContentsMargins(0, 0, 0, 15)
     
-    # Show status if multi-key is enabled
-    if self.config.get('use_multi_api_keys', False):
-        multi_keys = self.config.get('multi_api_keys', [])
-        active_keys = sum(1 for k in multi_keys if k.get('enabled', True))
-        
-        status_label1 = QLabel("🔑 Multi-Key Mode:")
-        status_label1.setStyleSheet("font-weight: bold; font-size: 11pt;")
-        multi_key_h.addWidget(status_label1)
-        
-        status_label2 = QLabel(f"ACTIVE ({active_keys}/{len(multi_keys)} keys)")
-        status_label2.setStyleSheet("font-weight: bold; font-size: 11pt; color: green;")
-        multi_key_h.addWidget(status_label2)
-    else:
-        status_label = QLabel("🔑 Multi-Key Mode: DISABLED")
-        status_label.setStyleSheet("font-size: 11pt; color: gray;")
-        multi_key_h.addWidget(status_label)
+    # Create status labels and store references for dynamic updates
+    self.multi_key_status_label1 = QLabel("🔑 Multi-Key Mode:")
+    self.multi_key_status_label1.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    multi_key_h.addWidget(self.multi_key_status_label1)
+    
+    self.multi_key_status_label2 = QLabel()
+    multi_key_h.addWidget(self.multi_key_status_label2)
+    
+    # Update status initially
+    self._update_multi_key_status_label()
     
     multi_key_h.addStretch()
     
@@ -1616,6 +1611,23 @@ def open_multi_api_key_manager(self):
 #     
 #     return frame
             
+def _update_multi_key_status_label(self):
+    """Update the multi-key mode status label dynamically"""
+    try:
+        if not hasattr(self, 'multi_key_status_label2'):
+            return
+        
+        if self.config.get('use_multi_api_keys', False):
+            multi_keys = self.config.get('multi_api_keys', [])
+            active_keys = sum(1 for k in multi_keys if k.get('enabled', True))
+            self.multi_key_status_label2.setText(f"ACTIVE ({active_keys}/{len(multi_keys)} keys)")
+            self.multi_key_status_label2.setStyleSheet("font-weight: bold; font-size: 11pt; color: green;")
+        else:
+            self.multi_key_status_label2.setText("DISABLED")
+            self.multi_key_status_label2.setStyleSheet("font-size: 11pt; color: gray;")
+    except Exception:
+        pass
+
 def _toggle_multi_key_setting(self):
     """Toggle multi-key mode from settings dialog"""
     self.config['use_multi_api_keys'] = self.use_multi_api_keys_var

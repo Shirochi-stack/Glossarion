@@ -625,6 +625,13 @@ class MultiAPIKeyDialog(QDialog):
             
             # Save config
             self.translator_gui.save_config(show_message=False)
+            
+            # Update multi-key status label in other settings if it exists
+            if hasattr(self.translator_gui, '_update_multi_key_status_label'):
+                try:
+                    self.translator_gui._update_multi_key_status_label()
+                except Exception:
+                    pass
     
     def _create_dialog(self):
         """Create the main dialog using PySide6"""
@@ -1191,7 +1198,7 @@ class MultiAPIKeyDialog(QDialog):
         self._load_fallback_keys()
 
     def _test_all_fallbacks(self):
-        """Test all fallback keys"""
+        """Test all fallback keys in parallel"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
         if not fallback_keys:
@@ -1204,79 +1211,16 @@ class MultiAPIKeyDialog(QDialog):
             if item:
                 item.setText(2, "⏳ Testing...")
         
-        # Run tests in thread for all fallback keys
         # Ensure UnifiedClient uses the same shared pool instance
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        thread = threading.Thread(target=self._test_all_fallback_keys_batch)
-        thread.daemon = True
-        thread.start()
-
-
-    def _test_all_fallback_keys_batch(self):
-        """Test all fallback keys in batch"""
-        from unified_api_client import UnifiedClient
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
-        def test_single_key(index, key_data):
-            """Test a single fallback key"""
-            api_key = key_data.get('api_key', '')
-            model = key_data.get('model', '')
-            
-            try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
-                )
-                
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-                
-                response = client.send(
-                    messages,
-                    temperature=0.7,
-                    max_tokens=100
-                )
-                
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        return (index, True, "Passed")
-            except Exception as e:
-                print(f"Fallback key test failed: {e}")
-                return (index, False, str(e)[:30])
-            
-            return (index, False, "Failed")
-        
-        # Test all keys in parallel
-        with ThreadPoolExecutor(max_workers=min(5, len(fallback_keys))) as executor:
-            futures = []
-            for i, key_data in enumerate(fallback_keys):
-                future = executor.submit(test_single_key, i, key_data)
-                futures.append(future)
-            
-            # Process results as they complete
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    index, success, message = result
-                    # Update UI in main thread
-                    QTimer.singleShot(0, lambda idx=index, s=success: 
-                                     self._update_fallback_test_result(idx, s))
-        
-        # Show completion message
-        successful = sum(1 for future in futures if future.result() and future.result()[1])
-        total = len(fallback_keys)
-        QTimer.singleShot(0, lambda: self._show_status(
-            f"Fallback test complete: {successful}/{total} passed"))
+        # Submit all tests to executor in parallel
+        for i, key_data in enumerate(fallback_keys):
+            self._test_single_fallback_key(key_data, i)
 
     def _show_fallback_context_menu(self, position):
         """Show context menu for fallback keys - includes model name editing"""
@@ -3161,10 +3105,14 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
         
-        # Run tests on main thread using QTimer to avoid blocking
-        self._test_queue = list(indices)
+        # Run all tests in parallel using executor
         self._test_results = []
-        QTimer.singleShot(100, self._process_next_test)
+        self._total_tests = len(indices)
+        self._completed_tests = 0
+        
+        # Submit all tests to executor at once
+        for index in indices:
+            self._submit_single_test(index)
 
     def _test_all(self):
         """Test all API keys with inline progress"""
@@ -3193,28 +3141,22 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
         
-        # Run tests on main thread using QTimer to avoid blocking
-        self._test_queue = list(indices)
+        # Run all tests in parallel using executor
         self._test_results = []
-        QTimer.singleShot(100, self._process_next_test)
+        self._total_tests = len(indices)
+        self._completed_tests = 0
+        
+        # Submit all tests to executor at once
+        for index in indices:
+            self._submit_single_test(index)
 
-    def _process_next_test(self):
-        """Process next test in queue (runs on main thread via QTimer)"""
-        if not self._test_queue:
-            # All tests complete
-            self._finalize_tests()
-            return
-        
-        # Get next index to test
-        index = self._test_queue.pop(0)
-        
+    def _submit_single_test(self, index):
+        """Submit a single test to executor for parallel execution"""
         if index >= len(self.key_pool.keys):
-            # Invalid index, skip to next
-            QTimer.singleShot(10, self._process_next_test)
             return
         
         key = self.key_pool.keys[index]
-        print(f"[DEBUG] Testing key {index}: {key.model}")
+        print(f"[DEBUG] Submitting test for key {index}: {key.model}")
         
         # Run REAL API test using executor like translation does
         from concurrent.futures import ThreadPoolExecutor
@@ -3282,8 +3224,13 @@ class MultiAPIKeyDialog(QDialog):
             # Update UI
             self._refresh_key_list()
         
-        # Schedule next test
-        QTimer.singleShot(10, self._process_next_test)
+        # Track completion
+        self._completed_tests += 1
+        print(f"[DEBUG] Completed {self._completed_tests}/{self._total_tests} tests")
+        
+        # If all tests done, finalize
+        if self._completed_tests >= self._total_tests:
+            self._finalize_tests()
     
     def _finalize_tests(self):
         """Finalize after all tests complete"""
