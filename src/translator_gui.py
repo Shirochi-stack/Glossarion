@@ -2881,9 +2881,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.is_fullscreen = True
             
             # Make log area expand more in fullscreen
-            # Give the log (row 9) more stretch to use extra space
-            self.frame.setRowStretch(9, 3)  # Increased from 1 to 3
-            self.frame.setRowStretch(10, 2)  # Increased from 1 to 2
+            # Remove stretch from all rows except prompt (9) and log (10)
+            for r in range(12):
+                if r == 9:
+                    self.frame.setRowStretch(r, 0)  # Prompt doesn't stretch
+                elif r == 10:
+                    self.frame.setRowStretch(r, 5)  # Log gets all the stretch
+                else:
+                    self.frame.setRowStretch(r, 0)  # No other rows stretch
             
             self.append_log("🖥️ Fullscreen mode enabled (Press F11 to exit)")
         else:
@@ -2891,9 +2896,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.showNormal()
             self.is_fullscreen = False
             
-            # Restore default log area size
-            self.frame.setRowStretch(9, self._default_row_stretches.get(9, 1))
-            self.frame.setRowStretch(10, self._default_row_stretches.get(10, 1))
+            # Restore default stretches for all rows
+            for r in range(12):
+                self.frame.setRowStretch(r, self._default_row_stretches.get(r, 0))
             
             self.append_log("🖥️ Fullscreen mode disabled")
     
