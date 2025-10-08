@@ -2877,7 +2877,8 @@ class UnifiedClient:
                 print(f"[DEBUG] Custom endpoint override: {original_client_type} -> openai for model '{self.model}'")
                 logger.info(f"Custom endpoint enabled: Overriding {original_client_type} model {self.model} to use OpenAI client")
         elif not use_custom_endpoint and custom_base_url and self.client_type == 'openai':
-            logger.info("Custom OpenAI endpoint disabled via toggle, using default endpoint")
+            #logger.info("Custom OpenAI endpoint disabled via toggle, using default endpoint")
+            pass
         
         # If still no client type, show error with suggestions
         if not self.client_type:

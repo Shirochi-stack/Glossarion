@@ -1511,6 +1511,9 @@ Recent translations to summarize:
                 self.frame.setRowMinimumHeight(r, 200)
             elif r == 10:
                 self.frame.setRowMinimumHeight(r, 150)
+            elif r == 11:
+                # Keep toolbar row at fixed height (no stretch, no minimum to allow widget to control)
+                pass
         
         # Store row stretch defaults for fullscreen toggle
         self._default_row_stretches = {r: (1 if r in [9, 10] else 0) for r in range(12)}
@@ -2161,7 +2164,7 @@ Recent translations to summarize:
         # Output Token Limit button (row 9, column 0 - below label)
         self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens}")
         self.output_btn.clicked.connect(self.prompt_custom_token_limit)
-        self.output_btn.setStyleSheet("background-color: #17a2b8; color: white;")  # info
+        self.output_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding: 8px 6px;")  # info
         self.output_btn.setMinimumWidth(180)
         # Place below the label in a vertical layout
         output_container = QWidget()
@@ -2175,7 +2178,18 @@ Recent translations to summarize:
         # Run Translation button (row 9, column 4) - Fill the space
         self.run_button = QPushButton("Run Translation")
         self.run_button.clicked.connect(self.run_translation_thread)
-        self.run_button.setStyleSheet("background-color: #28a745; color: white; font-size: 14pt; font-weight: bold;")  # success
+        self.run_button.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-size: 14pt;
+                font-weight: bold;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #888888;
+            }
+        """)
         self.run_button.setMinimumWidth(150)
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Fill available space
         self.frame.addWidget(self.run_button, 9, 4, Qt.AlignmentFlag(0))  # No alignment = fill
@@ -2185,7 +2199,8 @@ Recent translations to summarize:
         # Log Text Edit (row 10, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        self.log_text.setMinimumHeight(400)  
+        self.log_text.setMinimumHeight(350)  # Set to 350 as requested
+        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Let it expand with layout
         self.log_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.log_text, 10, 0, 1, 5)  # row, col, rowspan, colspan
         
@@ -2800,17 +2815,34 @@ If you see multiple p-b cookies, use the one with the longest value."""
       
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
-        from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton
+        from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSizePolicy
         from PySide6.QtCore import Qt
         
         btn_frame = QWidget()
+        btn_frame.setMinimumHeight(50)  # Increased for taller buttons
+        btn_frame.setMaximumHeight(60)  # Increased for taller buttons
+        btn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Fixed vertical size
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setContentsMargins(0, 5, 0, 5)
         btn_layout.setSpacing(2)
         
         self.qa_button = QPushButton("QA Scan")
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setStyleSheet("background-color: #e67e22; color: white; padding: 6px; font-weight: bold;")
+        self.qa_button.setMinimumWidth(80)  # Prevent size changes
+        self.qa_button.setMinimumHeight(40)  # Increased button height
+        self.qa_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
+        self.qa_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                padding: 6px;
+                font-weight: bold;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #888888;
+            }
+        """)
         
         # Define toolbar items with button styles - modern color scheme
         style_colors = {
@@ -2847,12 +2879,28 @@ If you see multiple p-b cookies, use the one with the longest value."""
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
             btn = QPushButton(lbl)
             btn.clicked.connect(cmd)
+            btn.setMinimumHeight(40)  # Increased button height for all toolbar buttons
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
             color = style_colors.get(style, "#95a5a6")
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
             btn_layout.addWidget(btn)
             
             if lbl == "Extract Glossary":
                 self.glossary_button = btn
+                # Add disabled state styling for Extract Glossary button
+                btn.setMinimumWidth(120)  # Prevent size changes
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {color};
+                        color: white;
+                        padding: 6px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #555555;
+                        color: #888888;
+                    }}
+                """)
             elif lbl == "EPUB Converter":
                 self.epub_button = btn
             elif lbl == "Async Processing (50% Off)":
@@ -2881,14 +2929,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.is_fullscreen = True
             
             # Make log area expand more in fullscreen
-            # Remove stretch from all rows except prompt (9) and log (10)
+            # Set all rows to zero stretch except log (row 10)
             for r in range(12):
-                if r == 9:
-                    self.frame.setRowStretch(r, 0)  # Prompt doesn't stretch
-                elif r == 10:
+                if r == 10:
                     self.frame.setRowStretch(r, 5)  # Log gets all the stretch
                 else:
-                    self.frame.setRowStretch(r, 0)  # No other rows stretch
+                    self.frame.setRowStretch(r, 0)  # All other rows including toolbar (11) don't stretch
             
             self.append_log("🖥️ Fullscreen mode enabled (Press F11 to exit)")
         else:
@@ -5709,12 +5755,30 @@ Important rules:
        
        if translation_running:
            self.run_button.setText("Stop Translation")
-           self.run_button.setStyleSheet("background-color: #dc3545; color: white; font-size: 14pt; font-weight: bold;")  # red
+           self.run_button.setStyleSheet("""
+               QPushButton {
+                   background-color: #dc3545;
+                   color: white;
+                   font-size: 14pt;
+                   font-weight: bold;
+               }
+           """)
            self.run_button.clicked.connect(self.stop_translation)
            self.run_button.setEnabled(True)
        else:
            self.run_button.setText("Run Translation")
-           self.run_button.setStyleSheet("background-color: #28a745; color: white; font-size: 14pt; font-weight: bold;")  # green
+           self.run_button.setStyleSheet("""
+               QPushButton {
+                   background-color: #28a745;
+                   color: white;
+                   font-size: 14pt;
+                   font-weight: bold;
+               }
+               QPushButton:disabled {
+                   background-color: #555555;
+                   color: #888888;
+               }
+           """)
            self.run_button.clicked.connect(self.run_translation_thread)
            self.run_button.setEnabled(translation_main and not any_process_running)
        
@@ -5727,12 +5791,29 @@ Important rules:
            
            if glossary_running:
                self.glossary_button.setText("Stop Glossary")
-               self.glossary_button.setStyleSheet("background-color: #dc3545; color: white; padding: 6px;")  # red
+               self.glossary_button.setStyleSheet("""
+                   QPushButton {
+                       background-color: #dc3545;
+                       color: white;
+                       padding: 6px;
+                   }
+               """)
                self.glossary_button.clicked.connect(self.stop_glossary_extraction)
                self.glossary_button.setEnabled(True)
            else:
                self.glossary_button.setText("Extract Glossary")
-               self.glossary_button.setStyleSheet("background-color: #ffc107; color: black; padding: 6px;")  # yellow
+               self.glossary_button.setStyleSheet("""
+                   QPushButton {
+                       background-color: #e67e22;
+                       color: white;
+                       padding: 6px;
+                       font-weight: bold;
+                   }
+                   QPushButton:disabled {
+                       background-color: #555555;
+                       color: #888888;
+                   }
+               """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
                self.glossary_button.setEnabled(glossary_main and not any_process_running)
     
@@ -5763,12 +5844,29 @@ Important rules:
            
            if qa_running:
                self.qa_button.setText("Stop Scan")
-               self.qa_button.setStyleSheet("background-color: #dc3545; color: white; padding: 6px;")  # red
+               self.qa_button.setStyleSheet("""
+                   QPushButton {
+                       background-color: #dc3545;
+                       color: white;
+                       padding: 6px;
+                   }
+               """)
                self.qa_button.clicked.connect(self.stop_qa_scan)
                self.qa_button.setEnabled(True)
            else:
                self.qa_button.setText("QA Scan")
-               self.qa_button.setStyleSheet("background-color: #ffc107; color: black; padding: 6px;")  # yellow
+               self.qa_button.setStyleSheet("""
+                   QPushButton {
+                       background-color: #e67e22;
+                       color: white;
+                       padding: 6px;
+                       font-weight: bold;
+                   }
+                   QPushButton:disabled {
+                       background-color: #555555;
+                       color: #888888;
+                   }
+               """)
                self.qa_button.clicked.connect(self.run_qa_scan)
                self.qa_button.setEnabled(scan_html_folder and not any_process_running)
 

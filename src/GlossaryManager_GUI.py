@@ -36,40 +36,15 @@ class GlossaryManagerMixin:
     def _disable_tabwidget_mousewheel(tabwidget):
         """Disable mousewheel scrolling on a tab widget to prevent accidental tab switching"""
         tabwidget.wheelEvent = lambda event: None
-
-    def glossary_manager(self):
-        """Open comprehensive glossary management dialog"""
-        # Create standalone PySide6 dialog (no Tkinter parent)
-        # Note: self.master is a Tkinter window, so we use None as parent for PySide6
-        dialog = QDialog(None)
-        dialog.setWindowTitle("Glossary Manager")
+    
+    def _create_styled_checkbox(self, text):
+        """Create a checkbox with proper checkmark using text overlay"""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QFont
         
-        # Use screen ratios instead of fixed pixels
-        self._screen = QApplication.primaryScreen().geometry()
-        min_width = int(self._screen.width() * 0.4)   # 40% of screen width
-        min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
-        dialog.setMinimumSize(min_width, min_height)
-        
-        # Set window icon
-        try:
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-            if os.path.exists(icon_path):
-                dialog.setWindowIcon(QIcon(icon_path))
-        except Exception as e:
-            print(f"Could not load window icon: {e}")
-        
-        # Store dialog reference for use in nested functions
-        self.dialog = dialog
-        
-        # Apply global dark mode stylesheet similar to manga_integration
-        global_stylesheet = """
-            /* Global dark mode styling */
-            QDialog, QWidget {
-                background-color: #1e1e1e;
-                color: white;
-            }
-            
-            /* Checkbox styling */
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
             QCheckBox {
                 color: white;
                 spacing: 6px;
@@ -95,7 +70,88 @@ class GlossaryManagerMixin:
                 background-color: #1a1a1a;
                 border-color: #3a3a3a;
             }
-            
+        """)
+        
+        # Create checkmark overlay
+        checkmark = QLabel("✓", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly after widget is shown
+        def position_checkmark():
+            # Position over the checkbox indicator
+            checkmark.setGeometry(2, 1, 14, 14)
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark():
+            if checkbox.isChecked():
+                position_checkmark()
+                checkmark.show()
+            else:
+                checkmark.hide()
+        
+        checkbox.stateChanged.connect(update_checkmark)
+        # Delay initial positioning to ensure widget is properly rendered
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        
+        return checkbox
+
+    def glossary_manager(self):
+        """Open comprehensive glossary management dialog"""
+        # Create standalone PySide6 dialog (no Tkinter parent)
+        # Note: self.master is a Tkinter window, so we use None as parent for PySide6
+        dialog = QDialog(None)
+        dialog.setWindowTitle("Glossary Manager")
+        
+        # Use screen ratios instead of fixed pixels
+        self._screen = QApplication.primaryScreen().geometry()
+        min_width = int(self._screen.width() * 0.4)   # 40% of screen width
+        min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
+        dialog.setMinimumSize(min_width, min_height)
+        
+        # Set window icon
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"Could not load window icon: {e}")
+        
+        # Store dialog reference for use in nested functions
+        self.dialog = dialog
+        
+        # Apply simplified dark mode stylesheet
+        global_stylesheet = """
+            /* Global dark mode styling */
+            QDialog, QWidget {
+                background-color: #2d2d2d;
+                color: white;
+            }
+            QGroupBox {
+                color: white;
+                border: 1px solid #555;
+                margin: 5px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                color: white;
+                left: 10px;
+                padding: 0 5px;
+            }
+            QLabel {
+                color: white;
+                background: none;
+                border: none;
+            }
             /* Radio button styling */
             QRadioButton {
                 color: white;
@@ -598,7 +654,7 @@ class GlossaryManagerMixin:
         type_main_grid.setColumnStretch(1, 2)
         
         label = QLabel("Active Entry Types:")
-        label.setStyleSheet("font-weight: bold;")
+        # label.setStyleSheet("font-weight: bold;")
         type_list_layout.addWidget(label)
         
         # Scrollable frame for type checkboxes
@@ -637,7 +693,7 @@ class GlossaryManagerMixin:
                 row_layout.setContentsMargins(0, 2, 0, 2)
                 
                 # Checkbox
-                cb = QCheckBox(type_name)
+                cb = self._create_styled_checkbox(type_name)
                 cb.setChecked(type_config.get('enabled', True))
                 self.type_enabled_checkboxes[type_name] = cb
                 row_layout.addWidget(cb)
@@ -645,7 +701,7 @@ class GlossaryManagerMixin:
                 # Add gender indicator for types that support it
                 if type_config.get('has_gender', False):
                     label = QLabel("(has gender field)")
-                    label.setStyleSheet("color: gray; font-size: 9pt;")
+                    # label.setStyleSheet("color: gray; font-size: 9pt;")
                     row_layout.addWidget(label)
                 
                 row_layout.addStretch()
@@ -656,7 +712,7 @@ class GlossaryManagerMixin:
                     # Use screen ratio: ~3% of screen width
                     btn_width = int(self._screen.width() * 0.03)
                     delete_btn.setMaximumWidth(btn_width)
-                    delete_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+                    # delete_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
                     delete_btn.clicked.connect(lambda checked, t=type_name: remove_type(t))
                     row_layout.addWidget(delete_btn)
                 
@@ -671,7 +727,7 @@ class GlossaryManagerMixin:
         type_main_grid.addWidget(type_control_widget, 0, 1)
         
         label = QLabel("Add Custom Type:")
-        label.setStyleSheet("font-weight: bold;")
+        # label.setStyleSheet("font-weight: bold;")
         type_control_layout.addWidget(label)
         
         # Entry for new type field
@@ -681,7 +737,7 @@ class GlossaryManagerMixin:
         type_control_layout.addWidget(new_type_entry)
         
         # Checkbox for gender field
-        has_gender_checkbox = QCheckBox("Include gender field")
+        has_gender_checkbox = self._create_styled_checkbox("Include gender field")
         type_control_layout.addWidget(has_gender_checkbox)
         
         def add_custom_type():
@@ -724,7 +780,7 @@ class GlossaryManagerMixin:
         
         add_type_button = QPushButton("Add Type")
         add_type_button.clicked.connect(add_custom_type)
-        add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
+        # add_type_button.setStyleSheet("background-color: #28a745; color: white; padding: 5px;")
         type_control_layout.addWidget(add_type_button)
         type_control_layout.addStretch()
         
@@ -796,22 +852,22 @@ class GlossaryManagerMixin:
         
         # Honorifics filter toggle
         if not hasattr(self, 'disable_honorifics_checkbox'):
-            self.disable_honorifics_checkbox = QCheckBox("Disable honorifics filtering")
+            self.disable_honorifics_checkbox = self._create_styled_checkbox("Disable honorifics filtering")
             self.disable_honorifics_checkbox.setChecked(self.config.get('glossary_disable_honorifics_filter', False))
         
         duplicate_frame_layout.addWidget(self.disable_honorifics_checkbox)
         
         honorifics_label = QLabel("When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names")
-        honorifics_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        # honorifics_label.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
         duplicate_frame_layout.addWidget(honorifics_label)
         
         # Fuzzy matching slider
         fuzzy_label = QLabel("Fuzzy Matching Threshold:")
-        fuzzy_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        # fuzzy_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         duplicate_frame_layout.addWidget(fuzzy_label)
 
         desc_label = QLabel("Controls how similar names must be to be considered duplicates")
-        desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        # desc_label.setStyleSheet("color: gray; font-size: 9pt;")
         duplicate_frame_layout.addWidget(desc_label)
 
         # Slider widget
@@ -841,7 +897,7 @@ class GlossaryManagerMixin:
 
         # Description label
         fuzzy_desc_label = QLabel("")
-        fuzzy_desc_label.setStyleSheet("color: blue; font-size: 9pt; margin-top: 5px;")
+        # fuzzy_desc_label.setStyleSheet("color: white; font-size: 9pt; margin-top: 5px;")
         duplicate_frame_layout.addWidget(fuzzy_desc_label)
 
         # Token-efficient format toggle
@@ -851,17 +907,17 @@ class GlossaryManagerMixin:
 
         # Initialize variable if not exists
         if not hasattr(self, 'use_legacy_csv_checkbox'):
-            self.use_legacy_csv_checkbox = QCheckBox("Use legacy CSV format")
+            self.use_legacy_csv_checkbox = self._create_styled_checkbox("Use legacy CSV format")
             self.use_legacy_csv_checkbox.setChecked(self.config.get('glossary_use_legacy_csv', False))
 
         format_frame_layout.addWidget(self.use_legacy_csv_checkbox)
 
         label1 = QLabel("When disabled (default): Uses token-efficient format with sections (=== CHARACTERS ===)")
-        label1.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        # label1.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
         format_frame_layout.addWidget(label1)
 
         label2 = QLabel("When enabled: Uses traditional CSV format with repeated type columns")
-        label2.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
+        # label2.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
         format_frame_layout.addWidget(label2)
         
         # Update label when slider moves
@@ -896,11 +952,11 @@ class GlossaryManagerMixin:
         manual_layout.addWidget(prompt_frame)
         
         label1 = QLabel("Use {fields} for field list and {chapter_text} for content placeholder")
-        label1.setStyleSheet("color: blue; font-size: 9pt;")
+        # label1.setStyleSheet("color: white; font-size: 9pt;")
         prompt_frame_layout.addWidget(label1)
         
         label2 = QLabel("The {fields} placeholder will be replaced with the format specification")
-        label2.setStyleSheet("color: gray; font-size: 9pt;")
+        # label2.setStyleSheet("color: gray; font-size: 9pt;")
         prompt_frame_layout.addWidget(label2)
         
         self.manual_prompt_text = QTextEdit()
@@ -950,7 +1006,7 @@ Rules:
         
         reset_btn = QPushButton("Reset to Default")
         reset_btn.clicked.connect(reset_manual_prompt)
-        reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        # reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
         prompt_controls_layout.addWidget(reset_btn)
         prompt_controls_layout.addStretch()
         
@@ -974,12 +1030,12 @@ Rules:
         
         settings_grid.addWidget(QLabel("Rolling Window:"), 1, 0)
         if not hasattr(self, 'glossary_history_rolling_checkbox'):
-            self.glossary_history_rolling_checkbox = QCheckBox("Keep recent context instead of reset")
+            self.glossary_history_rolling_checkbox = self._create_styled_checkbox("Keep recent context instead of reset")
             self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
         settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 1, 1, 3)
         
         rolling_label = QLabel("When context limit is reached, keep recent chapters instead of clearing all history")
-        rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
+        # rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
         settings_grid.addWidget(rolling_label, 2, 0, 1, 4)
 
     def update_glossary_prompts(self):
@@ -1016,12 +1072,12 @@ Rules:
         auto_layout.addWidget(master_toggle_widget)
         
         if not hasattr(self, 'enable_auto_glossary_checkbox'):
-            self.enable_auto_glossary_checkbox = QCheckBox("Enable Automatic Glossary Generation")
+            self.enable_auto_glossary_checkbox = self._create_styled_checkbox("Enable Automatic Glossary Generation")
             self.enable_auto_glossary_checkbox.setChecked(self.config.get('enable_auto_glossary', False))
         master_toggle_layout.addWidget(self.enable_auto_glossary_checkbox)
         
         label = QLabel("(Automatic extraction and translation of character names/Terms)")
-        label.setStyleSheet("color: gray; font-size: 9pt;")
+        # label.setStyleSheet("color: gray; font-size: 9pt;")
         master_toggle_layout.addWidget(label)
         master_toggle_layout.addStretch()
         
@@ -1032,12 +1088,12 @@ Rules:
         auto_layout.addWidget(append_widget)
         
         if not hasattr(self, 'append_glossary_checkbox'):
-            self.append_glossary_checkbox = QCheckBox("Append Glossary to System Prompt")
+            self.append_glossary_checkbox = self._create_styled_checkbox("Append Glossary to System Prompt")
             self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
         append_layout.addWidget(self.append_glossary_checkbox)
         
         label2 = QLabel("(Applies to ALL glossaries - manual and automatic)")
-        label2.setStyleSheet("color: blue; font-size: 10pt; font-style: italic;")
+        # label2.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         append_layout.addWidget(label2)
         append_layout.addStretch()
         
@@ -1049,8 +1105,7 @@ Rules:
         auto_layout.addWidget(append_prompt_frame)
         
         self.append_prompt_text = QTextEdit()
-        self.append_prompt_text.setMinimumHeight(40)  # Reduced from 60
-        self.append_prompt_text.setMaximumHeight(40)  # Reduced from 60
+        self.append_prompt_text.setFixedHeight(60)
         self.append_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
         append_prompt_layout.addWidget(self.append_prompt_text)
         
@@ -1073,14 +1128,16 @@ Rules:
         
         reset_append_btn = QPushButton("Reset to Default")
         reset_append_btn.clicked.connect(reset_append_prompt)
-        reset_append_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        # reset_append_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
         append_prompt_controls_layout.addWidget(reset_append_btn)
         append_prompt_controls_layout.addStretch()
         
         # Create notebook for tabs
         notebook = QTabWidget()
-        self._disable_tabwidget_mousewheel(notebook)  # Disable mouse wheel tab switching
         auto_layout.addWidget(notebook)
+        
+        # Add stretch to eliminate the massive empty space
+        auto_layout.addStretch(1)
         
         # Tab 1: Extraction Settings
         extraction_tab = QWidget()
@@ -1145,7 +1202,7 @@ Rules:
         extraction_grid.addWidget(self.glossary_max_sentences_entry, 4, 1)
         
         ai_limit_label = QLabel("(Limit for AI processing)")
-        ai_limit_label.setStyleSheet("color: gray; font-size: 9pt;")
+        # ai_limit_label.setStyleSheet("color: gray; font-size: 9pt;")
         extraction_grid.addWidget(ai_limit_label, 4, 2, 1, 2)
         
         # Row 5 - Filter mode
@@ -1847,7 +1904,7 @@ Provide translations in the same numbered format."""
             main_layout.addSpacing(20)
             
             # Backup toggle
-            backup_checkbox = QCheckBox("Enable automatic backups before modifications")
+            backup_checkbox = self._create_styled_checkbox("Enable automatic backups before modifications")
             backup_checkbox.setChecked(self.config.get('glossary_auto_backup', True))
             main_layout.addWidget(backup_checkbox)
             main_layout.addSpacing(5)
@@ -1913,7 +1970,7 @@ Provide translations in the same numbered format."""
                 full_path = os.path.join(glossary_dir, "Backups")
                 
                 path_label = QLabel(f"{backup_path}/")
-                path_label.setStyleSheet("color: #0066cc; font-size: 9pt; margin-left: 10px;")
+                path_label.setStyleSheet("color: #7bb3e0; font-size: 9pt; margin-left: 10px;")
                 main_layout.addWidget(path_label)
                 
                 # Check if backup folder exists and show count
@@ -2078,7 +2135,7 @@ Provide translations in the same numbered format."""
                     preview_text += f"• Entries: {entry_count} → {top_n} ({entries_to_remove} removed)\n"
                     
                     preview_label.setText(preview_text)
-                    preview_label.setStyleSheet("color: blue; font-size: 10pt;")
+                    preview_label.setStyleSheet("color: #7bb3e0; font-size: 10pt;")
                     
                 except ValueError:
                     preview_label.setText("Please enter a valid number")
@@ -2214,12 +2271,12 @@ Provide translations in the same numbered format."""
                 conditions_layout.addWidget(type_group)
                 conditions_layout.addSpacing(10)
                 
-                char_check = QCheckBox("Keep characters")
+                char_check = self._create_styled_checkbox("Keep characters")
                 char_check.setChecked(True)
                 type_checks['character'] = char_check
                 type_layout.addWidget(char_check)
                 
-                term_check = QCheckBox("Keep terms/locations")
+                term_check = self._create_styled_checkbox("Keep terms/locations")
                 term_check.setChecked(True)
                 type_checks['term'] = term_check
                 type_layout.addWidget(term_check)

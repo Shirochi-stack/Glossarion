@@ -661,6 +661,7 @@ def _create_context_management_section(self, parent):
         "  color: white; "
         "  padding: 5px 12px; "
         "  font-size: 10pt; "
+        "  font-weight: bold; "
         "  border-radius: 3px; "
         "} "
         "QPushButton:hover { background-color: #138496; } "

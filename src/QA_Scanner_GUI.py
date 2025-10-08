@@ -92,71 +92,27 @@ class QAScannerMixin:
     """Mixin class containing QA Scanner methods for TranslatorGUI"""
     
     def _create_styled_checkbox(self, text):
-        """Create a checkbox with proper checkmark using text overlay"""
-        from PySide6.QtWidgets import QCheckBox, QLabel
-        from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QFont
+        """Create a checkbox with all checkmarks disabled"""
+        from PySide6.QtWidgets import QCheckBox
         
         checkbox = QCheckBox(text)
         checkbox.setStyleSheet("""
-            QCheckBox {
-                color: white;
-                spacing: 6px;
+            QCheckBox { 
+                color: white; 
             }
             QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #5a9fd4;
-                border-radius: 2px;
-                background-color: #2d2d2d;
+                background-image: none;
+                image: none;
+                content: none;
+                text: none;
             }
             QCheckBox::indicator:checked {
-                background-color: #2d2d2d;
-                border-color: #5a9fd4;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #7bb3e0;
-            }
-            QCheckBox:disabled {
-                color: #666666;
-            }
-            QCheckBox::indicator:disabled {
-                background-color: #1a1a1a;
-                border-color: #3a3a3a;
+                background-image: none;
+                image: none;
+                content: none;
+                text: none;
             }
         """)
-        
-        # Create checkmark overlay
-        checkmark = QLabel("✓", checkbox)
-        checkmark.setStyleSheet("""
-            QLabel {
-                color: white;
-                background: transparent;
-                font-weight: bold;
-                font-size: 11px;
-            }
-        """)
-        checkmark.setAlignment(Qt.AlignCenter)
-        checkmark.hide()
-        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)  # Make checkmark click-through
-        
-        # Position checkmark properly after widget is shown
-        def position_checkmark():
-            # Position over the checkbox indicator
-            checkmark.setGeometry(2, 1, 14, 14)
-        
-        # Show/hide checkmark based on checked state
-        def update_checkmark():
-            if checkbox.isChecked():
-                position_checkmark()
-                checkmark.show()
-            else:
-                checkmark.hide()
-        
-        checkbox.stateChanged.connect(update_checkmark)
-        # Delay initial positioning to ensure widget is properly rendered
-        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
-        
         return checkbox
     
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
