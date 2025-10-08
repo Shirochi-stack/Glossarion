@@ -51,7 +51,7 @@ class GlossaryManagerMixin:
         
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
-        min_width = int(self._screen.width() * 0.4)   # 40% of screen width
+        min_width = int(self._screen.width() * 0.38)   # 30% of screen width
         min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
         dialog.setMinimumSize(min_width, min_height)
         
@@ -328,10 +328,12 @@ class GlossaryManagerMixin:
                 border: 1px solid #4a5568;
                 padding: 8px 16px;
                 margin-right: 2px;
+                font-weight: bold;
             }
             QTabBar::tab:selected {
                 background-color: #5a9fd4;
                 border-bottom: 2px solid #5a9fd4;
+                font-weight: bold;
             }
             QTabBar::tab:hover {
                 background-color: #3a3a3a;
@@ -705,6 +707,7 @@ class GlossaryManagerMixin:
                 row_widget = QWidget()
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 2, 0, 2)
+                row_layout.setSpacing(6)
                 
                 # Checkbox
                 cb = self._create_styled_checkbox(type_name)
@@ -718,17 +721,28 @@ class GlossaryManagerMixin:
                     # label.setStyleSheet("color: gray; font-size: 9pt;")
                     row_layout.addWidget(label)
                 
-                row_layout.addStretch()
-                
-                # Delete button for custom types
+                # Delete button for custom types (place right after the label/text)
                 if type_name not in ['character', 'term']:
                     delete_btn = QPushButton("×")
-                    # Use screen ratio: ~3% of screen width
-                    btn_width = int(self._screen.width() * 0.03)
-                    delete_btn.setMaximumWidth(btn_width)
-                    # delete_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+                    delete_btn.setFixedWidth(24)
+                    delete_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #dc3545;  /* red */
+                            color: white;
+                            font-weight: bold;
+                            border: 1px solid #a71d2a;
+                            border-radius: 4px;
+                            padding: 0px 6px;
+                            min-height: 18px;
+                        }
+                        QPushButton:hover { background-color: #c82333; }
+                        QPushButton:pressed { background-color: #bd2130; }
+                    """)
                     delete_btn.clicked.connect(lambda checked, t=type_name: remove_type(t))
                     row_layout.addWidget(delete_btn)
+                
+                # Push any remaining content to the far right
+                row_layout.addStretch()
                 
                 self.type_checkbox_layout.addWidget(row_widget)
             
@@ -1020,7 +1034,17 @@ Rules:
         
         reset_btn = QPushButton("Reset to Default")
         reset_btn.clicked.connect(reset_manual_prompt)
-        # reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;  /* dark yellow */
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
         prompt_controls_layout.addWidget(reset_btn)
         prompt_controls_layout.addStretch()
         
@@ -1030,23 +1054,38 @@ Rules:
         manual_layout.addWidget(settings_frame)
         
         settings_grid = QGridLayout()
+        settings_grid.setContentsMargins(2, 4, 6, 6)
+        settings_grid.setHorizontalSpacing(8)
+        settings_grid.setVerticalSpacing(6)
         settings_frame_layout.addLayout(settings_grid)
         
-        settings_grid.addWidget(QLabel("Temperature:"), 0, 0)
+        # Compact label+field pair helper for manual Extraction Settings
+        def _m_pair(label_text, field_widget, label_width=120):
+            cont = QWidget()
+            h = QHBoxLayout(cont)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(label_width)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            h.addWidget(lbl)
+            h.addWidget(field_widget)
+            h.addStretch()
+            return cont
+        
+        # Temperature and Context Limit
         self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
         self.manual_temp_entry.setFixedWidth(80)
-        settings_grid.addWidget(self.manual_temp_entry, 0, 1)
-        
-        settings_grid.addWidget(QLabel("Context Limit:"), 0, 2)
         self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
         self.manual_context_entry.setFixedWidth(80)
-        settings_grid.addWidget(self.manual_context_entry, 0, 3)
+        settings_grid.addWidget(_m_pair("Temperature:", self.manual_temp_entry), 0, 0, 1, 2)
+        settings_grid.addWidget(_m_pair("Context Limit:", self.manual_context_entry), 0, 2, 1, 2)
         
-        settings_grid.addWidget(QLabel("Rolling Window:"), 1, 0)
+        # Rolling window checkbox + description
         if not hasattr(self, 'glossary_history_rolling_checkbox'):
             self.glossary_history_rolling_checkbox = self._create_styled_checkbox("Keep recent context instead of reset")
             self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
-        settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 1, 1, 3)
+        settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 0, 1, 4)
         
         rolling_label = QLabel("When context limit is reached, keep recent chapters instead of clearing all history")
         # rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
@@ -1142,7 +1181,17 @@ Rules:
         
         reset_append_btn = QPushButton("Reset to Default")
         reset_append_btn.clicked.connect(reset_append_prompt)
-        # reset_append_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        reset_append_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
         append_prompt_controls_layout.addWidget(reset_append_btn)
         append_prompt_controls_layout.addStretch()
         
@@ -1167,9 +1216,14 @@ Rules:
         # Extraction settings
         settings_label_frame = QGroupBox("Targeted Extraction Settings")
         settings_label_layout = QVBoxLayout(settings_label_frame)
+        settings_label_layout.setContentsMargins(6, 6, 6, 6)
         extraction_tab_layout.addWidget(settings_label_frame)
         
         extraction_grid = QGridLayout()
+        # Tighten spacing between labels and controls inside Targeted Extraction Settings
+        extraction_grid.setContentsMargins(2, 4, 6, 6)
+        extraction_grid.setHorizontalSpacing(8)
+        extraction_grid.setVerticalSpacing(6)
         settings_label_layout.addLayout(extraction_grid)
         
         # Initialize entry widgets with config values
@@ -1195,40 +1249,54 @@ Rules:
             self.glossary_max_sentences_entry = QLineEdit(str(self.config.get('glossary_max_sentences', 200)))
             self.glossary_max_sentences_entry.setFixedWidth(80)
         
-        # Row 1
-        extraction_grid.addWidget(QLabel("Min frequency:"), 0, 0)
-        extraction_grid.addWidget(self.glossary_min_frequency_entry, 0, 1)
+        # Helper: compact label+field pair in one cell
+        def _pair(label_text, field_widget, label_width=180):
+            cont = QWidget()
+            h = QHBoxLayout(cont)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(label_width)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            h.addWidget(lbl)
+            h.addWidget(field_widget)
+            h.addStretch()
+            return cont
         
-        extraction_grid.addWidget(QLabel("Max names:"), 0, 2)
-        extraction_grid.addWidget(self.glossary_max_names_entry, 0, 3)
+        # Row 1 (left/right pairs)
+        extraction_grid.addWidget(_pair("Min frequency:", self.glossary_min_frequency_entry), 0, 0, 1, 2)
+        extraction_grid.addWidget(_pair("Max names:", self.glossary_max_names_entry), 0, 2, 1, 2)
         
         # Row 2
-        extraction_grid.addWidget(QLabel("Max titles:"), 1, 0)
-        extraction_grid.addWidget(self.glossary_max_titles_entry, 1, 1)
-        
-        extraction_grid.addWidget(QLabel("Translation batch:"), 1, 2)
-        extraction_grid.addWidget(self.glossary_batch_size_entry, 1, 3)
+        extraction_grid.addWidget(_pair("Max titles:", self.glossary_max_titles_entry), 1, 0, 1, 2)
+        extraction_grid.addWidget(_pair("Translation batch:", self.glossary_batch_size_entry), 1, 2, 1, 2)
         
         # Row 3 - Max text size and chapter split
-        extraction_grid.addWidget(QLabel("Max text size:"), 3, 0)
-        extraction_grid.addWidget(self.glossary_max_text_size_entry, 3, 1)
-
-        extraction_grid.addWidget(QLabel("Chapter split threshold:"), 3, 2)
-        extraction_grid.addWidget(self.glossary_chapter_split_threshold_entry, 3, 3)
+        extraction_grid.addWidget(_pair("Max text size:", self.glossary_max_text_size_entry), 3, 0, 1, 2)
+        extraction_grid.addWidget(_pair("Chapter split threshold:", self.glossary_chapter_split_threshold_entry), 3, 2, 1, 2)
         
-        # Row 4 - Max sentences for glossary
-        extraction_grid.addWidget(QLabel("Max sentences:"), 4, 0)
-        extraction_grid.addWidget(self.glossary_max_sentences_entry, 4, 1)
-        
-        ai_limit_label = QLabel("(Limit for AI processing)")
-        # ai_limit_label.setStyleSheet("color: gray; font-size: 9pt;")
-        extraction_grid.addWidget(ai_limit_label, 4, 2, 1, 2)
+        # Row 4 - Max sentences for glossary (with inline hint)
+        ms_cont = QWidget()
+        ms_layout = QHBoxLayout(ms_cont)
+        ms_layout.setContentsMargins(0, 0, 0, 10)  # extra bottom padding
+        ms_layout.setSpacing(6)
+        ms_label = QLabel("Max sentences:")
+        ms_label.setFixedWidth(180)
+        ms_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ms_layout.addWidget(ms_label)
+        ms_layout.addWidget(self.glossary_max_sentences_entry)
+        hint = QLabel("(Limit for AI processing)")
+        hint.setStyleSheet("color: gray;")
+        ms_layout.addWidget(hint)
+        ms_layout.addStretch()
+        extraction_grid.addWidget(ms_cont, 4, 0, 1, 4)
         
         # Row 5 - Filter mode
         extraction_grid.addWidget(QLabel("Filter mode:"), 5, 0)
         filter_widget = QWidget()
         filter_layout = QHBoxLayout(filter_widget)
         filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
         extraction_grid.addWidget(filter_widget, 5, 1, 1, 3)
         
         if not hasattr(self, 'glossary_filter_mode_buttons'):
@@ -1264,6 +1332,7 @@ Rules:
         auto_fuzzy_widget = QWidget()
         auto_fuzzy_layout = QHBoxLayout(auto_fuzzy_widget)
         auto_fuzzy_layout.setContentsMargins(0, 0, 0, 0)
+        auto_fuzzy_layout.setSpacing(8)
         extraction_grid.addWidget(auto_fuzzy_widget, 7, 1, 1, 3)
         
         # Reuse the existing fuzzy threshold value
@@ -1373,7 +1442,17 @@ Rules:
         
         reset_auto_btn = QPushButton("Reset to Default")
         reset_auto_btn.clicked.connect(reset_auto_prompt)
-        reset_auto_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        reset_auto_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
         auto_prompt_controls_layout.addWidget(reset_auto_btn)
         auto_prompt_controls_layout.addStretch()
         
@@ -1445,7 +1524,17 @@ Text to analyze:
         
         reset_format_btn = QPushButton("Reset to Default")
         reset_format_btn.clicked.connect(reset_format_instructions)
-        reset_format_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        reset_format_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
         format_prompt_controls_layout.addWidget(reset_format_btn)
         format_prompt_controls_layout.addStretch()
         
@@ -1509,7 +1598,17 @@ Provide translations in the same numbered format."""
         
         reset_trans_btn = QPushButton("Reset to Default")
         reset_trans_btn.clicked.connect(reset_trans_prompt)
-        reset_trans_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 5px;")
+        reset_trans_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
         trans_prompt_controls_layout.addWidget(reset_trans_btn)
         trans_prompt_controls_layout.addStretch()
         
