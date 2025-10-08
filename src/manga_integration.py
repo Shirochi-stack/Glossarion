@@ -2567,15 +2567,14 @@ class MangaTranslationTab:
         full_page_layout.addWidget(full_page_title)
 
         # Enable/disable toggle
-        self.full_page_context_checked = self.main_gui.config.get('manga_full_page_context', True)
-
+        # Use value loaded in _load_rendering_settings during startup
         toggle_frame = QWidget()
         toggle_layout = QHBoxLayout(toggle_frame)
         toggle_layout.setContentsMargins(20, 0, 0, 0)
         toggle_layout.setSpacing(10)
 
         self.context_checkbox = self._create_styled_checkbox("Enable Full Page Context Translation")
-        self.context_checkbox.setChecked(self.full_page_context_checked)
+        self.context_checkbox.setChecked(bool(getattr(self, 'full_page_context_value', self.main_gui.config.get('manga_full_page_context', False))))
         self.context_checkbox.stateChanged.connect(self._on_context_toggle)
         toggle_layout.addWidget(self.context_checkbox)
 
@@ -2630,15 +2629,13 @@ class MangaTranslationTab:
         visual_layout.addWidget(visual_title)
 
         # Visual context toggle
-        self.visual_context_enabled_checked = self.main_gui.config.get('manga_visual_context_enabled', True)
-
         visual_toggle_frame = QWidget()
         visual_toggle_layout = QHBoxLayout(visual_toggle_frame)
         visual_toggle_layout.setContentsMargins(20, 0, 0, 0)
         visual_toggle_layout.setSpacing(10)
 
         self.visual_context_checkbox = self._create_styled_checkbox("Include page image in translation requests")
-        self.visual_context_checkbox.setChecked(self.visual_context_enabled_checked)
+        self.visual_context_checkbox.setChecked(bool(getattr(self, 'visual_context_enabled_value', self.main_gui.config.get('manga_visual_context_enabled', True))))
         self.visual_context_checkbox.stateChanged.connect(self._on_visual_context_toggle)
         visual_toggle_layout.addWidget(self.visual_context_checkbox)
 
@@ -2676,8 +2673,9 @@ class MangaTranslationTab:
         output_settings_layout.setSpacing(10)
         
         self.create_subfolder_checkbox = self._create_styled_checkbox("Create 'translated' subfolder for output")
-        self.create_subfolder_checkbox.setChecked(self.main_gui.config.get('manga_create_subfolder', True))
-        self.create_subfolder_checkbox.stateChanged.connect(self._save_rendering_settings)
+        self.create_subfolder_checkbox.setChecked(bool(getattr(self, 'create_subfolder_value', self.main_gui.config.get('manga_create_subfolder', True))))
+        # Persist when toggled
+        self.create_subfolder_checkbox.stateChanged.connect(self._on_create_subfolder_toggle)
         output_settings_layout.addWidget(self.create_subfolder_checkbox)
         output_settings_layout.addStretch()
         
@@ -3987,9 +3985,15 @@ class MangaTranslationTab:
         # Show the dialog
         help_dialog.exec()
 
-    def _on_visual_context_toggle(self):
+    def _on_visual_context_toggle(self, state=None):
         """Handle visual context toggle"""
-        enabled = self.visual_context_enabled_value
+        # Determine the new state from the checkbox if available; fall back to signal state
+        try:
+            enabled = bool(self.visual_context_checkbox.isChecked()) if hasattr(self, 'visual_context_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        # Update backing value and persist
+        self.visual_context_enabled_value = enabled
         self.main_gui.config['manga_visual_context_enabled'] = enabled
         
         # Update translator if it exists
@@ -4445,6 +4449,17 @@ class MangaTranslationTab:
         if hasattr(self, '_initializing') and self._initializing:
             return
         
+        # Before saving, refresh key toggle values from widgets if present
+        try:
+            if hasattr(self, 'context_checkbox'):
+                self.full_page_context_value = bool(self.context_checkbox.isChecked())
+            if hasattr(self, 'visual_context_checkbox'):
+                self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
+            if hasattr(self, 'create_subfolder_checkbox'):
+                self.create_subfolder_value = bool(self.create_subfolder_checkbox.isChecked())
+        except Exception:
+            pass
+        
         # Validate that variables exist and have valid values before saving
         try:
             # Ensure manga_settings structure exists
@@ -4587,6 +4602,10 @@ class MangaTranslationTab:
             if hasattr(self, 'full_page_context_prompt'):
                 self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
             
+            # Persist visual context setting alongside other toggles
+            if hasattr(self, 'visual_context_enabled_value'):
+                self.main_gui.config['manga_visual_context_enabled'] = self.visual_context_enabled_value
+            
             # OCR prompt
             if hasattr(self, 'ocr_prompt'):
                 self.main_gui.config['manga_ocr_prompt'] = self.ocr_prompt
@@ -4612,9 +4631,15 @@ class MangaTranslationTab:
             # Log error but don't crash
             print(f"Error saving manga settings: {e}")
     
-    def _on_context_toggle(self):
+    def _on_context_toggle(self, state=None):
         """Handle full page context toggle"""
-        enabled = self.full_page_context_value
+        # Read the checkbox state to update the backing value
+        try:
+            enabled = bool(self.context_checkbox.isChecked()) if hasattr(self, 'context_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self.full_page_context_value = enabled
+        # Persist via unified save path
         self._save_rendering_settings()
     
     def _edit_context_prompt(self):
@@ -7651,6 +7676,16 @@ class MangaTranslationTab:
         except Exception:
             pass
         self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
+    
+    def _on_create_subfolder_toggle(self, state=None):
+        """Handle create 'translated' subfolder toggle"""
+        try:
+            enabled = bool(self.create_subfolder_checkbox.isChecked()) if hasattr(self, 'create_subfolder_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self.create_subfolder_value = enabled
+        # Persist with the existing save mechanism
+        self._save_rendering_settings()
     
     def _translation_worker(self):
         """Worker thread for translation"""

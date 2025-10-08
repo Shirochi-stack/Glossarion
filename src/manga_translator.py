@@ -9699,7 +9699,7 @@ class MangaTranslator:
         """
         # For manga-ocr and other providers that use RT-DETR regions directly, trust RT-DETR
         # Splitting is only needed for Google/Azure which do full-page OCR
-        if hasattr(self, 'ocr_provider') and self.ocr_provider not in ('google', 'azure'):
+        if hasattr(self, 'ocr_provider') and self.ocr_provider not in ('google'):
             return [bubble_regions]  # Trust RT-DETR completely for these providers
         
         if len(bubble_regions) <= 1:
@@ -9777,7 +9777,7 @@ class MangaTranslator:
                             break
                 # BALANCED SPLIT CRITERIA:
                 # Split if gap is > 21px unless there's strong overlap (>62%)
-                elif closest_region and min_gap < 21:  # Within 21px - likely same bubble
+                elif closest_region and min_gap < 15:  # Within 21px - likely same bubble
                     group.append(current_region)
                     placed = True
                     break

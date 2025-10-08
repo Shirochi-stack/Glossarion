@@ -492,7 +492,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Use more reasonable window size ratios
         # 70% width and 85% height are more standard and fit better on single monitors
         width_ratio = 0.70   # 70% of screen width
-        height_ratio = 0.85  # 85% of available height
+        height_ratio = 0.88  # 88% of available height
         
         window_width = int(rect.width() * width_ratio)
         window_height = int(rect.height() * height_ratio)
@@ -6019,7 +6019,7 @@ Important rules:
             self.close()
             sys.exit(0)
 
-    def _start_autoscroll_delay(self, ms=500):
+    def _start_autoscroll_delay(self, ms=100):
         try:
             import time as _time
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
