@@ -2741,22 +2741,61 @@ class AsyncProcessingDialog:
         """Prepare environment variables from GUI settings"""
         env_vars = {}
         
-        # Core settings
-        env_vars['MODEL'] = self.gui.model_var.get()
-        env_vars['API_KEY'] = self.gui.api_key_entry.get().strip()
+        # Core settings - handle both PySide6 and tkinter
+        if hasattr(self.gui.model_var, 'get'):
+            env_vars['MODEL'] = self.gui.model_var.get()
+        else:
+            env_vars['MODEL'] = str(self.gui.model_var) if self.gui.model_var else ""
+            
+        if hasattr(self.gui.api_key_entry, 'get'):
+            env_vars['API_KEY'] = self.gui.api_key_entry.get().strip()
+        else:
+            env_vars['API_KEY'] = self.gui.api_key_entry.text().strip()
+            
         env_vars['OPENAI_API_KEY'] = env_vars['API_KEY']
         env_vars['OPENAI_OR_Gemini_API_KEY'] = env_vars['API_KEY']
         env_vars['GEMINI_API_KEY'] = env_vars['API_KEY']
-        env_vars['PROFILE_NAME'] = self.gui.lang_var.get().lower()
-        env_vars['CONTEXTUAL'] = '1' if self.gui.contextual_var.get() else '0'
-        env_vars['MAX_OUTPUT_TOKENS'] = str(self.gui.max_output_tokens)
-        env_vars['SYSTEM_PROMPT'] = self.gui.prompt_text.get("1.0", "end").strip()
-        env_vars['TRANSLATION_TEMPERATURE'] = str(self.gui.trans_temp.get())
-        env_vars['TRANSLATION_HISTORY_LIMIT'] = str(self.gui.trans_history.get())
         
-        # API settings
-        env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.get())
-        env_vars['TOKEN_LIMIT'] = self.gui.token_limit_entry.get() if hasattr(self.gui, 'token_limit_entry') else '200000'
+        if hasattr(self.gui.lang_var, 'get'):
+            env_vars['PROFILE_NAME'] = self.gui.lang_var.get().lower()
+        else:
+            env_vars['PROFILE_NAME'] = str(self.gui.lang_var).lower() if self.gui.lang_var else ""
+            
+        if hasattr(self.gui.contextual_var, 'get'):
+            env_vars['CONTEXTUAL'] = '1' if self.gui.contextual_var.get() else '0'
+        else:
+            env_vars['CONTEXTUAL'] = '1' if self.gui.contextual_var else '0'
+            
+        env_vars['MAX_OUTPUT_TOKENS'] = str(self.gui.max_output_tokens)
+        
+        if hasattr(self.gui.prompt_text, 'get'):
+            env_vars['SYSTEM_PROMPT'] = self.gui.prompt_text.get("1.0", "end").strip()
+        else:
+            env_vars['SYSTEM_PROMPT'] = self.gui.prompt_text.toPlainText().strip()
+            
+        if hasattr(self.gui.trans_temp, 'get'):
+            env_vars['TRANSLATION_TEMPERATURE'] = str(self.gui.trans_temp.get())
+        else:
+            env_vars['TRANSLATION_TEMPERATURE'] = str(self.gui.trans_temp)
+            
+        if hasattr(self.gui.trans_history, 'get'):
+            env_vars['TRANSLATION_HISTORY_LIMIT'] = str(self.gui.trans_history.get())
+        else:
+            env_vars['TRANSLATION_HISTORY_LIMIT'] = str(self.gui.trans_history)
+        
+        # API settings - handle both PySide6 and tkinter
+        if hasattr(self.gui.delay_entry, 'get'):
+            env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.get())
+        else:
+            env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.text() if hasattr(self.gui.delay_entry, 'text') else '2')
+            
+        if hasattr(self.gui, 'token_limit_entry'):
+            if hasattr(self.gui.token_limit_entry, 'get'):
+                env_vars['TOKEN_LIMIT'] = self.gui.token_limit_entry.get()
+            else:
+                env_vars['TOKEN_LIMIT'] = self.gui.token_limit_entry.text()
+        else:
+            env_vars['TOKEN_LIMIT'] = '200000'
         
         # Book title translation
         env_vars['TRANSLATE_BOOK_TITLE'] = "1" if self.gui.translate_book_title_var.get() else "0"

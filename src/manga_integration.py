@@ -3781,7 +3781,7 @@ class MangaTranslationTab:
         control_layout.setSpacing(15)
         
         self.start_button = QPushButton("▶ Start Translation")
-        self.start_button.clicked.connect(self._start_translation)
+        self.start_button.clicked.connect(self._toggle_translation)
         self.start_button.setEnabled(is_ready)
         self.start_button.setMinimumHeight(90)  # Increased from 80 to 90
         self.start_button.setStyleSheet(
@@ -3812,27 +3812,6 @@ class MangaTranslationTab:
                 reasons.append("Azure credentials not configured")
             tooltip_text = "Cannot start: " + ", ".join(reasons)
             self.start_button.setToolTip(tooltip_text)
-        
-        self.stop_button = QPushButton("⏹ Stop")
-        self.stop_button.clicked.connect(self._stop_translation)
-        self.stop_button.setEnabled(False)
-        self.stop_button.setMinimumHeight(90)  # Increased from 80 to 90
-        self.stop_button.setStyleSheet(
-            "QPushButton { "
-            "  background-color: #dc3545; "
-            "  color: white; "
-            "  padding: 22px 30px; "
-            "  font-size: 14pt; "
-            "  font-weight: bold; "
-            "  border-radius: 8px; "
-            "} "
-            "QPushButton:hover { background-color: #c82333; } "
-            "QPushButton:disabled { "
-            "  background-color: #2d2d2d; "
-            "  color: #999999; "
-            "}"
-        )
-        control_layout.addWidget(self.stop_button)
         
         # Add control buttons to LEFT COLUMN
         left_column_layout.addWidget(control_frame)
@@ -6502,8 +6481,21 @@ class MangaTranslationTab:
                         'debug': 'lightblue'
                     }
                     color = color_map.get(level, 'white')
-                    self.log_text.setTextColor(QColor(color))
-                    self.log_text.append(message)
+                    # Use textCursor for more compact logging (no extra spacing)
+                    from PySide6.QtGui import QTextCursor, QTextCharFormat
+                    cursor = self.log_text.textCursor()
+                    cursor.movePosition(QTextCursor.End)
+                    
+                    # Set color format BEFORE inserting text
+                    format = QTextCharFormat()
+                    format.setForeground(QColor(color))
+                    
+                    # Add newline if not first message
+                    if not cursor.atStart():
+                        cursor.insertText("\n")
+                    
+                    cursor.insertText(message, format)
+                    self.log_text.ensureCursorVisible()
                 except Exception:
                     pass
             else:
@@ -6585,8 +6577,21 @@ class MangaTranslationTab:
                             'debug': 'lightblue'
                         }
                         color = color_map.get(level, 'white')
-                        self.log_text.setTextColor(QColor(color))
-                        self.log_text.append(message)
+                        # Use textCursor for more compact logging (no extra spacing)
+                        from PySide6.QtGui import QTextCursor, QTextCharFormat
+                        cursor = self.log_text.textCursor()
+                        cursor.movePosition(QTextCursor.End)
+                        
+                        # Set color format BEFORE inserting text
+                        format = QTextCharFormat()
+                        format.setForeground(QColor(color))
+                        
+                        # Add newline if not first message
+                        if not cursor.atStart():
+                            cursor.insertText("\n")
+                        
+                        cursor.insertText(message, format)
+                        self.log_text.ensureCursorVisible()
                     except Exception:
                         pass
                     
@@ -6634,10 +6639,9 @@ class MangaTranslationTab:
                     _, state = update
                     if state == 'translation_started':
                         try:
-                            if hasattr(self, 'start_button') and self.start_button:
-                                self.start_button.setEnabled(False)
-                            if hasattr(self, 'stop_button') and self.stop_button:
-                                self.stop_button.setEnabled(True)
+                            # REMOVED: Don't disable start button - it's now a toggle button that should stay red/enabled
+                            # The button is already updated to Stop state in _start_translation()
+                            # Just disable file list to prevent modification during translation
                             if hasattr(self, 'file_listbox') and self.file_listbox:
                                 self.file_listbox.setEnabled(False)
                         except Exception:
@@ -6687,6 +6691,13 @@ class MangaTranslationTab:
             self._log(f"Failed to load inpainting model: {e}", "error")
             return False
             
+    def _toggle_translation(self):
+        """Toggle between start and stop translation"""
+        if self.is_running:
+            self._stop_translation()
+        else:
+            self._start_translation()
+    
     def _start_translation(self):
         """Start the translation process"""
         # Check files BEFORE redirecting stdout to avoid deadlock
@@ -6695,27 +6706,55 @@ class MangaTranslationTab:
             QMessageBox.warning(self.dialog, "No Files", "Please select manga images to translate.")
             return
         
-        # Immediately disable Start to prevent double-clicks
+        # Immediately update button to Stop state (red)
         try:
             if hasattr(self, 'start_button') and self.start_button:
-                self.start_button.setEnabled(False)
+                self.start_button.setText("⏹ Stop Translation")
+                self.start_button.setStyleSheet(
+                    "QPushButton { "
+                    "  background-color: #dc3545; "
+                    "  color: white; "
+                    "  padding: 22px 30px; "
+                    "  font-size: 14pt; "
+                    "  font-weight: bold; "
+                    "  border-radius: 8px; "
+                    "} "
+                    "QPushButton:hover { background-color: #c82333; } "
+                    "QPushButton:disabled { "
+                    "  background-color: #2d2d2d; "
+                    "  color: #666666; "
+                    "}"
+                )
+                self.start_button.setEnabled(True)
         except Exception:
             pass
         
         # Immediate minimal feedback using direct log append
         try:
             if hasattr(self, 'log_text') and self.log_text:
-                from PySide6.QtGui import QColor
-                self.log_text.setTextColor(QColor('white'))
-                self.log_text.append("Starting translation...")
+                from PySide6.QtGui import QColor, QTextCursor, QTextCharFormat
+                # Use textCursor for more compact logging (no extra spacing)
+                cursor = self.log_text.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                
+                # Set color format BEFORE inserting text
+                format = QTextCharFormat()
+                format.setForeground(QColor('white'))
+                
+                # Add newline if not first message
+                if not cursor.atStart():
+                    cursor.insertText("\n")
+                
+                cursor.insertText("Starting translation...", format)
+                self.log_text.ensureCursorVisible()
         except Exception:
             pass
         
         # Start heartbeat spinner so there's visible activity until logs stream
         self._start_startup_heartbeat()
         
-        # Reset all stop flags at the start of new translation
-        self.is_running = False
+        # CRITICAL: Set is_running=True IMMEDIATELY so toggle button works
+        self.is_running = True
         if hasattr(self, 'stop_flag'):
             self.stop_flag.clear()
         self._reset_global_cancellation()
@@ -6723,10 +6762,22 @@ class MangaTranslationTab:
         # Log start directly to GUI
         try:
             if hasattr(self, 'log_text') and self.log_text:
-                from PySide6.QtGui import QColor, QTextCursor
+                from PySide6.QtGui import QColor, QTextCursor, QTextCharFormat
                 from PySide6.QtCore import QTimer
-                self.log_text.setTextColor(QColor('white'))
-                self.log_text.append("🚀 Starting new manga translation batch")
+                # Use textCursor for more compact logging (no extra spacing)
+                cursor = self.log_text.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                
+                # Set color format BEFORE inserting text
+                format = QTextCharFormat()
+                format.setForeground(QColor('white'))
+                
+                # Add newline if not first message
+                if not cursor.atStart():
+                    cursor.insertText("\n")
+                
+                cursor.insertText("🚀 Starting new manga translation batch", format)
+                self.log_text.ensureCursorVisible()
                 
                 # Scroll to bottom after a short delay to ensure it happens after button processing
                 def scroll_to_bottom():
@@ -6912,8 +6963,18 @@ class MangaTranslationTab:
                 api_key = self.main_gui.config.get('api_key')
             
             # Try to get model - ALWAYS get the current selection from GUI
+            # Support both PySide6 (plain string) and Tkinter (StringVar with .get())
             if hasattr(self.main_gui, 'model_var'):
-                model = self.main_gui.model_var.get()
+                try:
+                    # Check if it's a tkinter StringVar (has .get() method)
+                    if hasattr(self.main_gui.model_var, 'get'):
+                        model = self.main_gui.model_var.get()
+                    else:
+                        # PySide6 - model_var is just a string
+                        model = self.main_gui.model_var
+                except Exception as e:
+                    print(f"[DEBUG] Error getting model from model_var: {e}")
+                    model = 'gemini-2.5-flash'  # fallback
             elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
                 model = self.main_gui.config.get('model')
             
@@ -7315,10 +7376,10 @@ class MangaTranslationTab:
         # Reset all global cancellation flags for new translation
         self._reset_global_cancellation()
         
-        # Update UI state (PySide6) - queue UI updates for main thread
-        self.is_running = True
+        # Note: is_running is already True from _start_translation()
+        # Just ensure stop_flag is clear
         self.stop_flag.clear()
-        # Queue UI updates to be processed by main thread
+        # Queue UI updates to be processed by main thread (just for file list disable)
         self.update_queue.put(('ui_state', 'translation_started'))
         
         # Log start message
@@ -7349,9 +7410,14 @@ class MangaTranslationTab:
                         self._log(f"API model: {getattr(c, 'model', 'unknown')}", "info")
             except Exception:
                 pass
-            self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
-            self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
-            self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
+            # Support both Tkinter (with .get()) and PySide6 (plain values)
+            contextual_enabled = self.main_gui.contextual_var.get() if hasattr(self.main_gui.contextual_var, 'get') else self.main_gui.contextual_var
+            trans_history = self.main_gui.trans_history.get() if hasattr(self.main_gui.trans_history, 'get') else self.main_gui.trans_history
+            rolling_enabled = self.main_gui.translation_history_rolling_var.get() if hasattr(self.main_gui.translation_history_rolling_var, 'get') else self.main_gui.translation_history_rolling_var
+            
+            self._log(f"Contextual: {'Enabled' if contextual_enabled else 'Disabled'}", "info")
+            self._log(f"History limit: {trans_history} exchanges", "info")
+            self._log(f"Rolling history: {'Enabled' if rolling_enabled else 'Disabled'}", "info")
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
         
         # Stop heartbeat before launching worker; now regular progress takes over
@@ -7369,7 +7435,12 @@ class MangaTranslationTab:
                 self.executor = self.main_gui.executor
             # Ensure env var reflects current worker setting from main GUI
             try:
-                os.environ["EXTRACTION_WORKERS"] = str(self.main_gui.extraction_workers_var.get())
+                # Support both Tkinter (with .get()) and PySide6 (plain value)
+                if hasattr(self.main_gui.extraction_workers_var, 'get'):
+                    workers = self.main_gui.extraction_workers_var.get()
+                else:
+                    workers = self.main_gui.extraction_workers_var
+                os.environ["EXTRACTION_WORKERS"] = str(workers)
             except Exception:
                 pass
             
@@ -7595,11 +7666,23 @@ class MangaTranslationTab:
             # for all providers (including custom endpoints).
             try:
                 import os as _os
-                _os.environ['BATCH_TRANSLATION'] = '1' if getattr(self.main_gui, 'batch_translation_var', None) and self.main_gui.batch_translation_var.get() else '0'
+                # Support both Tkinter (with .get()) and PySide6 (plain value)
+                batch_enabled = False
+                if hasattr(self.main_gui, 'batch_translation_var'):
+                    if hasattr(self.main_gui.batch_translation_var, 'get'):
+                        batch_enabled = bool(self.main_gui.batch_translation_var.get())
+                    else:
+                        batch_enabled = bool(self.main_gui.batch_translation_var)
+                _os.environ['BATCH_TRANSLATION'] = '1' if batch_enabled else '0'
+                
                 # Use GUI batch size if available; default to 3 to match existing default
                 bs_val = None
                 try:
-                    bs_val = str(int(self.main_gui.batch_size_var.get())) if hasattr(self.main_gui, 'batch_size_var') else None
+                    if hasattr(self.main_gui, 'batch_size_var'):
+                        if hasattr(self.main_gui.batch_size_var, 'get'):
+                            bs_val = str(int(self.main_gui.batch_size_var.get()))
+                        else:
+                            bs_val = str(int(self.main_gui.batch_size_var))
                 except Exception:
                     bs_val = None
                 _os.environ['BATCH_SIZE'] = bs_val or _os.environ.get('BATCH_SIZE', '3')
@@ -8370,6 +8453,28 @@ class MangaTranslationTab:
     def _stop_translation(self):
         """Stop the translation process"""
         if self.is_running:
+            # Immediately update button to show "Stopping..." state (gray, disabled)
+            try:
+                if hasattr(self, 'start_button') and self.start_button:
+                    self.start_button.setEnabled(False)
+                    self.start_button.setText("Stopping...")
+                    self.start_button.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #6c757d; "
+                        "  color: white; "
+                        "  padding: 22px 30px; "
+                        "  font-size: 14pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 8px; "
+                        "} "
+                        "QPushButton:disabled { "
+                        "  background-color: #6c757d; "
+                        "  color: white; "
+                        "}"
+                    )
+            except Exception:
+                pass
+            
             # Set local stop flag
             self.stop_flag.set()
             
@@ -8468,15 +8573,25 @@ class MangaTranslationTab:
             # Reset running flag
             self.is_running = False
             
-            # Check and update start_button if it exists (PySide6)
+            # Reset start button to original Start state (green)
             if hasattr(self, 'start_button') and self.start_button:
-                if not self.start_button.isEnabled():
-                    self.start_button.setEnabled(True)
-            
-            # Check and update stop_button if it exists (PySide6)
-            if hasattr(self, 'stop_button') and self.stop_button:
-                if self.stop_button.isEnabled():
-                    self.stop_button.setEnabled(False)
+                self.start_button.setText("▶ Start Translation")
+                self.start_button.setStyleSheet(
+                    "QPushButton { "
+                    "  background-color: #28a745; "
+                    "  color: white; "
+                    "  padding: 22px 30px; "
+                    "  font-size: 14pt; "
+                    "  font-weight: bold; "
+                    "  border-radius: 8px; "
+                    "} "
+                    "QPushButton:hover { background-color: #218838; } "
+                    "QPushButton:disabled { "
+                    "  background-color: #2d2d2d; "
+                    "  color: #666666; "
+                    "}"
+                )
+                self.start_button.setEnabled(True)
             
             # Re-enable file modification - check if listbox exists (PySide6)
             if hasattr(self, 'file_listbox') and self.file_listbox:

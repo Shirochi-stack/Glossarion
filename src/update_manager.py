@@ -14,17 +14,18 @@ from PySide6.QtWidgets import (
     QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QProgressBar, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QObject
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from datetime import datetime
 
-class UpdateManager:
+class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
     
     GITHUB_API_URL = "https://api.github.com/repos/Shirochi-stack/Glossarion/releases"
     GITHUB_LATEST_URL = "https://api.github.com/repos/Shirochi-stack/Glossarion/releases/latest"
     
     def __init__(self, main_gui, base_dir):
+        super().__init__()
         self.main_gui = main_gui
         self.base_dir = base_dir
         self.update_available = False
@@ -49,7 +50,7 @@ class UpdateManager:
             self.CURRENT_VERSION = main_gui.__version__
         else:
             # Extract from window title as fallback
-            title = self.main_gui.master.title()
+            title = self.main_gui.windowTitle()
             if 'v' in title:
                 self.CURRENT_VERSION = title.split('v')[-1].strip()
             else:
@@ -70,9 +71,9 @@ class UpdateManager:
                 'User-Agent': 'Glossarion-Updater'
             }
             
-            # Fetch multiple releases with retry logic
-            max_retries = 2
-            timeout = 10  # Reduced timeout
+            # Fetch multiple releases with minimal retry logic
+            max_retries = 1  # Reduced to prevent hanging
+            timeout = 5  # Very short timeout
             
             for attempt in range(max_retries + 1):
                 try:
@@ -155,9 +156,9 @@ class UpdateManager:
                 'User-Agent': 'Glossarion-Updater'
             }
             
-            # Try with shorter timeout and retry logic
-            max_retries = 2
-            timeout = 10  # Reduced from 30 seconds
+            # Try with very short timeout and minimal retries to prevent hanging
+            max_retries = 1  # Reduced from 2 to prevent long waits
+            timeout = 5  # Very short timeout to prevent hanging
             
             for attempt in range(max_retries + 1):
                 try:
@@ -179,8 +180,12 @@ class UpdateManager:
             # Save successful check time
             self._save_last_check_time()
             
-            # Fetch all releases for history regardless
-            self.all_releases = self.fetch_multiple_releases(count=10)
+            # Fetch all releases for history regardless (with timeout protection)
+            try:
+                self.all_releases = self.fetch_multiple_releases(count=10)
+            except Exception as e:
+                print(f"[DEBUG] Could not fetch release history: {e}")
+                self.all_releases = [release_data]  # Use just the latest release
             self.latest_release = release_data
             
             # Check if this version was skipped by user
@@ -193,7 +198,8 @@ class UpdateManager:
                 
                 # Show update dialog when update is available
                 print(f"[DEBUG] Showing update dialog for version {latest_version}")
-                self.main_gui.master.after(100, self.show_update_dialog)
+                # Use QTimer.singleShot for thread-safe UI updates
+                QTimer.singleShot(0, self.show_update_dialog)
                     
                 return True, release_data
             else:
@@ -202,7 +208,8 @@ class UpdateManager:
                 
                 # Show dialog if explicitly requested (from menu)
                 if force_show or not silent:
-                    self.main_gui.master.after(100, self.show_update_dialog)
+                    # Use QTimer.singleShot for thread-safe UI updates
+                    QTimer.singleShot(0, self.show_update_dialog)
                 
                 return False, None
                 
@@ -407,18 +414,20 @@ class UpdateManager:
         else:
             title = "Version History"
         
-        # Ensure QApplication exists
+        # Use existing QApplication instance - never create a new one
         app = QApplication.instance()
         if not app:
-            try:
-                QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-            except:
-                pass
-            app = QApplication(sys.argv)
+            print("[ERROR] No QApplication instance found - update dialog cannot be shown")
+            return
         
-        # Create PySide6 dialog
-        dialog = QDialog(None)
+        # Create PySide6 dialog with proper parent to prevent blocking other dialogs
+        parent_window = self.main_gui if hasattr(self.main_gui, 'show') else None
+        dialog = QDialog(parent_window)
         dialog.setWindowTitle(title)
+        
+        # Ensure dialog stays on top and gets focus
+        dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+        dialog.setAttribute(Qt.WA_ShowWithoutActivating, False)  # Ensure it gets focus
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
@@ -884,10 +893,16 @@ class UpdateManager:
         # Set dialog layout and show
         dialog.setLayout(main_layout)
         
-        # Show dialog using exec in main thread
-        # We need to show it non-blocking to work with tkinter main loop
-        dialog.setModal(False)
-        dialog.show()
+        # Show dialog as modal to parent window only (not application-wide)
+        if parent_window:
+            dialog.setModal(True)  # Modal to parent window only
+            dialog.show()
+        else:
+            # No parent - use non-modal but bring to front
+            dialog.setModal(False)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
         
         # Keep reference to prevent garbage collection
         self._update_dialog = dialog
@@ -914,7 +929,7 @@ class UpdateManager:
         dialog.close()
         
         # Show confirmation
-        msg = QMessageBox()
+        msg = QMessageBox(self.main_gui if hasattr(self.main_gui, 'show') else None)
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle("Version Skipped")
         msg.setText(f"Version {version_tag} will be skipped in future update checks.\n"
@@ -1006,7 +1021,7 @@ class UpdateManager:
         """Handle completed download"""
         dialog.close()
         
-        msg = QMessageBox()
+        msg = QMessageBox(self.main_gui if hasattr(self.main_gui, 'show') else None)
         msg.setIcon(QMessageBox.Question)
         msg.setWindowTitle("Download Complete")
         msg.setText("Update downloaded successfully.\n\n"
@@ -1071,11 +1086,11 @@ del "%~f0"
             
             # Exit current application
             print("[DEBUG] Closing application for update...")
-            self.main_gui.master.quit()
+            QApplication.quit()
             sys.exit(0)
             
         except Exception as e:
-            msg = QMessageBox()
+            msg = QMessageBox(self.main_gui if hasattr(self.main_gui, 'show') else None)
             msg.setIcon(QMessageBox.Critical)
             msg.setWindowTitle("Installation Error")
             msg.setText(f"Could not start update process:\n{str(e)}")

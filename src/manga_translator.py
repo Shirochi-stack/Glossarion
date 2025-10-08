@@ -631,30 +631,99 @@ class MangaTranslator:
         except Exception:
             pass
         
-        # Get all settings from GUI
-        self.api_delay = float(self.main_gui.delay_entry.get() if hasattr(main_gui, 'delay_entry') else 2.0)
+        # Get all settings from GUI - Support both Tkinter (.get()) and PySide6 (plain values)
+        # API delay
+        try:
+            if hasattr(main_gui, 'delay_entry'):
+                if hasattr(main_gui.delay_entry, 'get'):
+                    self.api_delay = float(main_gui.delay_entry.get())
+                elif hasattr(main_gui.delay_entry, 'text'):
+                    self.api_delay = float(main_gui.delay_entry.text())
+                else:
+                    self.api_delay = 2.0
+            else:
+                self.api_delay = 2.0
+        except Exception:
+            self.api_delay = 2.0
+        
         # Propagate API delay to unified_api_client via env var so its internal pacing/logging matches GUI
         try:
             os.environ["SEND_INTERVAL_SECONDS"] = str(self.api_delay)
         except Exception:
             pass
-        self.temperature = float(main_gui.trans_temp.get() if hasattr(main_gui, 'trans_temp') else 0.3)
+        
+        # Temperature
+        try:
+            if hasattr(main_gui, 'trans_temp'):
+                if hasattr(main_gui.trans_temp, 'get'):
+                    self.temperature = float(main_gui.trans_temp.get())
+                else:
+                    self.temperature = float(main_gui.trans_temp)
+            else:
+                self.temperature = 0.3
+        except Exception:
+            self.temperature = 0.3
+        
+        # Max tokens
         self.max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
+        
+        # Token limit
         if hasattr(main_gui, 'token_limit_disabled') and main_gui.token_limit_disabled:
             self.input_token_limit = None  # None means no limit
             self._log("📊 Input token limit: DISABLED (unlimited)")
         else:
-            token_limit_value = main_gui.token_limit_entry.get() if hasattr(main_gui, 'token_limit_entry') else '120000'
-            if token_limit_value and token_limit_value.strip().isdigit():
-                self.input_token_limit = int(token_limit_value.strip())
-            else:
-                self.input_token_limit = 120000  # Default
+            try:
+                if hasattr(main_gui, 'token_limit_entry'):
+                    if hasattr(main_gui.token_limit_entry, 'get'):
+                        token_limit_value = main_gui.token_limit_entry.get()
+                    elif hasattr(main_gui.token_limit_entry, 'text'):
+                        token_limit_value = main_gui.token_limit_entry.text()
+                    else:
+                        token_limit_value = '120000'
+                else:
+                    token_limit_value = '120000'
+                
+                if token_limit_value and token_limit_value.strip().isdigit():
+                    self.input_token_limit = int(token_limit_value.strip())
+                else:
+                    self.input_token_limit = 120000  # Default
+            except Exception:
+                self.input_token_limit = 120000
             self._log(f"📊 Input token limit: {self.input_token_limit} tokens")
         
-        # Get contextual settings from GUI
-        self.contextual_enabled = main_gui.contextual_var.get() if hasattr(main_gui, 'contextual_var') else False
-        self.translation_history_limit = int(main_gui.trans_history.get() if hasattr(main_gui, 'trans_history') else 3)
-        self.rolling_history_enabled = main_gui.translation_history_rolling_var.get() if hasattr(main_gui, 'translation_history_rolling_var') else False
+        # Get contextual settings from GUI - Support both Tkinter and PySide6
+        try:
+            if hasattr(main_gui, 'contextual_var'):
+                if hasattr(main_gui.contextual_var, 'get'):
+                    self.contextual_enabled = main_gui.contextual_var.get()
+                else:
+                    self.contextual_enabled = main_gui.contextual_var
+            else:
+                self.contextual_enabled = False
+        except Exception:
+            self.contextual_enabled = False
+        
+        try:
+            if hasattr(main_gui, 'trans_history'):
+                if hasattr(main_gui.trans_history, 'get'):
+                    self.translation_history_limit = int(main_gui.trans_history.get())
+                else:
+                    self.translation_history_limit = int(main_gui.trans_history)
+            else:
+                self.translation_history_limit = 3
+        except Exception:
+            self.translation_history_limit = 3
+        
+        try:
+            if hasattr(main_gui, 'translation_history_rolling_var'):
+                if hasattr(main_gui.translation_history_rolling_var, 'get'):
+                    self.rolling_history_enabled = main_gui.translation_history_rolling_var.get()
+                else:
+                    self.rolling_history_enabled = main_gui.translation_history_rolling_var
+            else:
+                self.rolling_history_enabled = False
+        except Exception:
+            self.rolling_history_enabled = False
         
         # Initialize HistoryManager placeholder
         self.history_manager = None
@@ -3607,16 +3676,30 @@ class MangaTranslator:
                         # Try to get API key and model from GUI if available
                         load_kwargs = {}
                         if hasattr(self, 'main_gui'):
-                            # Get API key from GUI
+                            # Get API key from GUI - Support both Tkinter and PySide6
                             if hasattr(self.main_gui, 'api_key_entry'):
-                                api_key = self.main_gui.api_key_entry.get()
-                                if api_key:
-                                    load_kwargs['api_key'] = api_key
-                            # Get model from GUI  
+                                try:
+                                    if hasattr(self.main_gui.api_key_entry, 'get'):
+                                        api_key = self.main_gui.api_key_entry.get()
+                                    elif hasattr(self.main_gui.api_key_entry, 'text'):
+                                        api_key = self.main_gui.api_key_entry.text()
+                                    else:
+                                        api_key = ''
+                                    if api_key:
+                                        load_kwargs['api_key'] = api_key
+                                except Exception:
+                                    pass
+                            # Get model from GUI - Support both Tkinter and PySide6
                             if hasattr(self.main_gui, 'model_var'):
-                                model = self.main_gui.model_var.get()
-                                if model:
-                                    load_kwargs['model'] = model
+                                try:
+                                    if hasattr(self.main_gui.model_var, 'get'):
+                                        model = self.main_gui.model_var.get()
+                                    else:
+                                        model = self.main_gui.model_var
+                                    if model:
+                                        load_kwargs['model'] = model
+                                except Exception:
+                                    pass
                         success = self.ocr_manager.load_provider(self.ocr_provider, **load_kwargs)
                         if not success:
                             raise Exception(f"Failed to initialize {self.ocr_provider}")
@@ -5374,8 +5457,14 @@ class MangaTranslator:
                 self._log("⏹️ Translation stopped before full page context processing", "warning")
                 return {}
             
-            # Get system prompt from GUI profile
-            profile_name = self.main_gui.profile_var.get()
+            # Get system prompt from GUI profile - Support both Tkinter and PySide6
+            try:
+                if hasattr(self.main_gui.profile_var, 'get'):
+                    profile_name = self.main_gui.profile_var.get()
+                else:
+                    profile_name = self.main_gui.profile_var
+            except Exception:
+                profile_name = 'Default'
 
             # Get the prompt from prompt_profiles dictionary
             system_prompt = ''
@@ -5834,8 +5923,14 @@ class MangaTranslator:
             
             self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
             
-            # Get system prompt from GUI profile
-            profile_name = self.main_gui.profile_var.get()
+            # Get system prompt from GUI profile - Support both Tkinter and PySide6
+            try:
+                if hasattr(self.main_gui.profile_var, 'get'):
+                    profile_name = self.main_gui.profile_var.get()
+                else:
+                    profile_name = self.main_gui.profile_var
+            except Exception:
+                profile_name = 'Default'
             
             # Ensure visual_context_enabled exists (temporary fix)
             if not hasattr(self, 'visual_context_enabled'):

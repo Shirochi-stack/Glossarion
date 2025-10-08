@@ -2297,8 +2297,19 @@ class GlossarionWeb:
                 print(f"\n\n=== MANGA TRANSLATOR INIT ERROR ===")
                 print(full_error)
                 print(f"\nocr_config: {ocr_config}")
-                print(f"\nmock_gui.model_var.get(): {mock_gui.model_var.get()}")
-                print(f"\nmock_gui.api_key_entry.get(): {type(mock_gui.api_key_entry.get())}")
+                # Handle both PySide6 and tkinter model_var
+                if hasattr(mock_gui.model_var, 'get'):
+                    model_info = mock_gui.model_var.get()
+                else:
+                    model_info = mock_gui.model_var
+                print(f"\nmock_gui.model_var: {model_info}")
+                
+                # Handle both PySide6 and tkinter api_key_entry
+                if hasattr(mock_gui.api_key_entry, 'get'):
+                    api_key_info = mock_gui.api_key_entry.get()
+                else:
+                    api_key_info = mock_gui.api_key_entry.text()
+                print(f"\nmock_gui.api_key_entry: {type(api_key_info)}")
                 print("=== END ERROR ===")
                 error_log = f"❌ Failed to initialize manga translator: {str(e)}\n\nCheck console for full traceback"
                 yield error_log, gr.update(visible=False), gr.update(visible=False), gr.update(value=error_log, visible=True), gr.update(visible=False), gr.update(value="Error"), gr.update(value=0)
