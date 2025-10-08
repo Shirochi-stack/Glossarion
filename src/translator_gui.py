@@ -1848,6 +1848,10 @@ Text to analyze:
         setup_other_settings_methods(self)
         
         self._setup_gui()
+        
+        # Initialize all environment variables after GUI setup but before first use
+        self.initialize_environment_variables()
+        
         self.metadata_batch_ui = MetadataBatchTranslatorUI(self)
         
         try:
@@ -7735,8 +7739,9 @@ Important rules:
     def save_config(self, show_message=True):
         """Persist all settings to config.json."""
         try:
-            # Add comprehensive environment variable debugging for all saves
-            if show_message:
+            # Add comprehensive environment variable debugging for all saves (only when debug mode is enabled)
+            debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
+            if show_message and debug_enabled:
                 self.append_log("🔍 [SAVE_CONFIG] Starting comprehensive config save with environment variable debugging...")
             
             # Create backup of existing config before saving
@@ -7842,7 +7847,7 @@ Important rules:
             self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
 
             # OpenRouter transport/compression toggles with debugging
-            if show_message:  # Only log debug info when not called silently
+            if show_message and debug_enabled:  # Only log debug info when debug mode is enabled
                 self.append_log("🔍 [DEBUG] Setting OpenRouter environment variables...")
                 
             openrouter_env_vars_set = []
@@ -7852,10 +7857,10 @@ Important rules:
                 new_val = '1' if self.openrouter_http_only_var.get() else '0'
                 os.environ['OPENROUTER_USE_HTTP_ONLY'] = new_val
                 openrouter_env_vars_set.append('OPENROUTER_USE_HTTP_ONLY')
-                if show_message and old_val != new_val:
+                if show_message and debug_enabled and old_val != new_val:
                     self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_USE_HTTP_ONLY: '{old_val}' → '{new_val}'")
             else:
-                if show_message:
+                if show_message and debug_enabled:
                     self.append_log("⚠️ [DEBUG] openrouter_http_only_var not found")
                     
             if hasattr(self, 'openrouter_accept_identity_var'):
@@ -7864,10 +7869,10 @@ Important rules:
                 new_val = '1' if self.openrouter_accept_identity_var.get() else '0'
                 os.environ['OPENROUTER_ACCEPT_IDENTITY'] = new_val
                 openrouter_env_vars_set.append('OPENROUTER_ACCEPT_IDENTITY')
-                if show_message and old_val != new_val:
+                if show_message and debug_enabled and old_val != new_val:
                     self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_ACCEPT_IDENTITY: '{old_val}' → '{new_val}'")
             else:
-                if show_message:
+                if show_message and debug_enabled:
                     self.append_log("⚠️ [DEBUG] openrouter_accept_identity_var not found")
                     
             if hasattr(self, 'openrouter_preferred_provider_var'):
@@ -7876,14 +7881,90 @@ Important rules:
                 new_val = self.openrouter_preferred_provider_var.get()
                 os.environ['OPENROUTER_PREFERRED_PROVIDER'] = new_val
                 openrouter_env_vars_set.append('OPENROUTER_PREFERRED_PROVIDER')
-                if show_message and old_val != new_val:
+                if show_message and debug_enabled and old_val != new_val:
                     self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_PREFERRED_PROVIDER: '{old_val}' → '{new_val}'")
             else:
-                if show_message:
-                    self.append_log("⚠️ [DEBUG] openrouter_preferred_provider_var not found")
+                # Fallback: set from config if variable doesn't exist
+                provider_from_config = self.config.get('openrouter_preferred_provider', '')
+                if provider_from_config:
+                    old_val = os.environ.get('OPENROUTER_PREFERRED_PROVIDER', '<NOT SET>')
+                    os.environ['OPENROUTER_PREFERRED_PROVIDER'] = provider_from_config
+                    openrouter_env_vars_set.append('OPENROUTER_PREFERRED_PROVIDER')
+                    if show_message and debug_enabled:
+                        self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_PREFERRED_PROVIDER (from config): '{old_val}' → '{provider_from_config}'")
+                elif show_message and debug_enabled:
+                    self.append_log("⚠️ [DEBUG] openrouter_preferred_provider_var not found and no config value")
                     
-            if show_message and openrouter_env_vars_set:
+            if show_message and debug_enabled and openrouter_env_vars_set:
                 self.append_log(f"🔍 [DEBUG] Set {len(openrouter_env_vars_set)} OpenRouter env vars: {', '.join(openrouter_env_vars_set)}")
+            
+            # Set glossary environment variables during save_config
+            if show_message and debug_enabled:
+                self.append_log("🔍 [DEBUG] Setting glossary environment variables...")
+                
+            glossary_env_vars_set = []
+            try:
+                # Glossary environment variables from config
+                glossary_env_mappings = [
+                    ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
+                    ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
+                    ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
+                    ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
+                    ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
+                    ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
+                    ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
+                    ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv', False) else '0'),
+                    ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 10))),
+                ]
+                
+                for env_key, env_value in glossary_env_mappings:
+                    try:
+                        old_value = os.environ.get(env_key, '<NOT SET>')
+                        os.environ[env_key] = str(env_value) if env_value is not None else ''
+                        new_value = os.environ[env_key]
+                        glossary_env_vars_set.append(env_key)
+                        
+                        if show_message and debug_enabled and old_value != new_value:
+                            self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value[:50]}{'...' if len(str(new_value)) > 50 else ''}'")
+                        elif show_message and debug_enabled:
+                            self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{str(new_value)[:30]}{'...' if len(str(new_value)) > 30 else ''}')")
+                            
+                    except Exception as e:
+                        if show_message and debug_enabled:
+                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+                
+                # JSON environment variables for glossary
+                try:
+                    custom_entry_types = self.config.get('custom_entry_types', {})
+                    if custom_entry_types:
+                        custom_types_json = json.dumps(custom_entry_types)
+                        old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
+                        os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
+                        glossary_env_vars_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
+                        if show_message and debug_enabled and old_types != custom_types_json:
+                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                except Exception as e:
+                    if show_message and debug_enabled:
+                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
+                
+                try:
+                    custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+                    if custom_glossary_fields:
+                        custom_fields_json = json.dumps(custom_glossary_fields)
+                        os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
+                        glossary_env_vars_set.append('GLOSSARY_CUSTOM_FIELDS')
+                        if show_message and debug_enabled:
+                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                except Exception as e:
+                    if show_message and debug_enabled:
+                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
+                        
+                if show_message and debug_enabled and glossary_env_vars_set:
+                    self.append_log(f"🔍 [DEBUG] Set {len(glossary_env_vars_set)} glossary env vars: {', '.join(glossary_env_vars_set)}")
+                    
+            except Exception as e:
+                if show_message and debug_enabled:
+                    self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var.get()
@@ -8214,7 +8295,7 @@ Important rules:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
             
             # Comprehensive environment variable verification after save
-            if show_message:
+            if show_message and debug_enabled:
                 self.append_log("🔍 [SAVE_CONFIG] Verifying environment variables after config save...")
                 
                 # Critical environment variables that should be set from config
@@ -8327,6 +8408,20 @@ Important rules:
             'EXTRACTION_WORKERS': 'Number of extraction worker threads',
             'ENABLE_GUI_YIELD': 'GUI yield during processing',
             'RETAIN_SOURCE_EXTENSION': 'Retain source file extension',
+            
+            # QA Scanner settings
+            'QA_FOREIGN_CHAR_THRESHOLD': 'Foreign character detection threshold',
+            'QA_TARGET_LANGUAGE': 'Target language for QA checks',
+            'QA_CHECK_ENCODING': 'Check for encoding issues',
+            'QA_CHECK_REPETITION': 'Check for repetitive text',
+            'QA_CHECK_ARTIFACTS': 'Check for translation artifacts',
+            'QA_CHECK_GLOSSARY_LEAKAGE': 'Check for glossary leakage',
+            'QA_MIN_FILE_LENGTH': 'Minimum file length for QA',
+            'QA_REPORT_FORMAT': 'QA report format',
+            'QA_AUTO_SAVE_REPORT': 'Auto-save QA reports',
+            'QA_CACHE_ENABLED': 'QA cache enabled',
+            'QA_PARAGRAPH_THRESHOLD': 'Paragraph structure threshold',
+            'AI_HUNTER_MAX_WORKERS': 'AI Hunter maximum workers',
         }
         
         # Optional environment variables
@@ -8416,6 +8511,27 @@ Important rules:
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
             ]
             
+            # Add QA Scanner environment variables
+            qa_settings = self.config.get('qa_scanner_settings', {})
+            ai_hunter_config = self.config.get('ai_hunter_config', {})
+            qa_env_mappings = [
+                ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 10))),
+                ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
+                ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
+                ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
+                ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
+                ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
+                ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
+                ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
+                ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
+                ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
+                ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                ('AI_HUNTER_MAX_WORKERS', str(ai_hunter_config.get('ai_hunter_max_workers', 1))),
+            ]
+            
+            # Combine all environment variable mappings
+            env_mappings.extend(qa_env_mappings)
+            
             initialized_count = 0
             for env_key, env_value in env_mappings:
                 try:
@@ -8453,8 +8569,13 @@ Important rules:
                 
             self.append_log(f"✅ [INIT] Successfully initialized {initialized_count} environment variables")
             
-            # Verify initialization
-            return self.debug_environment_variables(show_all=False)
+            # Verify initialization (optional - don't fail if debug method doesn't exist)
+            try:
+                return self.debug_environment_variables(show_all=False)
+            except AttributeError:
+                # Method doesn't exist (e.g., in test mocks), return True since variables were set
+                self.append_log("✅ [INIT] Environment variables initialized successfully (debug verification skipped)")
+                return True
             
         except Exception as e:
             self.append_log(f"❌ [INIT] Environment variable initialization failed: {e}")

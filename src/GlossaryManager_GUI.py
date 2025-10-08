@@ -55,7 +55,14 @@ class GlossaryManagerMixin:
         
         def save_glossary_settings():
             try:
-                self.append_log("🔍 [DEBUG] Starting glossary settings save process...")
+                debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
+                
+                def debug_log(message):
+                    """Helper function to conditionally log debug messages"""
+                    if debug_enabled:
+                        self.append_log(message)
+                
+                debug_log("🔍 [DEBUG] Starting glossary settings save process...")
                 
                 # Update prompts from text widgets
                 self.update_glossary_prompts()
@@ -74,28 +81,29 @@ class GlossaryManagerMixin:
                 
                 # Save all glossary-related settings with validation
                 settings_to_save = {
-                    'enable_auto_glossary': (self.enable_auto_glossary_var, lambda x: x.get()),
-                    'append_glossary': (self.append_glossary_var, lambda x: x.get()),
-                    'glossary_min_frequency': (self.glossary_min_frequency_var, lambda x: int(x.get())),
-                    'glossary_max_names': (self.glossary_max_names_var, lambda x: int(x.get())),
-                    'glossary_max_titles': (self.glossary_max_titles_var, lambda x: int(x.get())),
-                    'glossary_batch_size': (self.glossary_batch_size_var, lambda x: int(x.get())),
-                    'glossary_max_text_size': (self.glossary_max_text_size_var, lambda x: x.get()),
-                    'glossary_max_sentences': (self.glossary_max_sentences_var, lambda x: int(x.get())),
+                    'enable_auto_glossary': ('enable_auto_glossary_var', lambda x: x.get()),
+                    'append_glossary': ('append_glossary_var', lambda x: x.get()),
+                    'glossary_min_frequency': ('glossary_min_frequency_var', lambda x: int(x.get())),
+                    'glossary_max_names': ('glossary_max_names_var', lambda x: int(x.get())),
+                    'glossary_max_titles': ('glossary_max_titles_var', lambda x: int(x.get())),
+                    'glossary_batch_size': ('glossary_batch_size_var', lambda x: int(x.get())),
+                    'glossary_max_text_size': ('glossary_max_text_size_var', lambda x: x.get()),
+                    'glossary_max_sentences': ('glossary_max_sentences_var', lambda x: int(x.get())),
                 }
                 
                 failed_settings = []
-                for setting_name, (var_obj, converter) in settings_to_save.items():
+                for setting_name, (var_name, converter) in settings_to_save.items():
                     try:
-                        if hasattr(self, var_obj.get.__self__.__class__.__name__.lower() + '_var'):
+                        if hasattr(self, var_name):
+                            var_obj = getattr(self, var_name)
                             self.config[setting_name] = converter(var_obj)
-                            self.append_log(f"🔍 [DEBUG] Saved {setting_name}: {self.config[setting_name]}")
+                            debug_log(f"🔍 [DEBUG] Saved {setting_name}: {self.config[setting_name]}")
                         else:
-                            failed_settings.append(f"{setting_name} (variable not found)")
+                            failed_settings.append(f"{setting_name} (variable {var_name} not found)")
                     except Exception as e:
                         failed_settings.append(f"{setting_name} ({str(e)})")
                 
-                if failed_settings:
+                if failed_settings and debug_enabled:
                     self.append_log(f"⚠️ [DEBUG] Failed to save settings: {', '.join(failed_settings)}")
                 
                 # Save additional settings with error handling

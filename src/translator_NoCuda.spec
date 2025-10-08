@@ -123,6 +123,8 @@ app_files = [
 datas.extend(app_files)
 datas.append(('memory_usage_reporter.py', '.'))
 datas.append(('tqdm_safety.py', '.'))
+datas.append(('debug_env_vars.py', '.'))
+datas.append(('enable_debug_mode.py', '.'))
 
 # ============================================================================
 # ADD WINDOWS RUNTIME DEPENDENCIES
