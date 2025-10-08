@@ -3411,18 +3411,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # If scanning phase toggle is enabled, launch scanner after translation
                 # BUT only if translation completed successfully (not stopped by user)
                 try:
-                    self.append_log(f"📝 DEBUG: scan_phase_enabled_var={getattr(self, 'scan_phase_enabled_var', 'NOT SET')}")
-                    self.append_log(f"📝 DEBUG: translation_completed={translation_completed}")
-                    self.append_log(f"📝 DEBUG: stop_requested={self.stop_requested}")
-                    
                     if (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
                         translation_completed and not self.stop_requested):
                         mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
-                        self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode (post-translation)...")
+                        self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode...")
                         # Emit signal to trigger QA scan on main thread
                         self.trigger_qa_scan_signal.emit()
-                    else:
-                        self.append_log("⚠️ Post-translation scan conditions not met")
                 except Exception as e:
                     self.append_log(f"⚠️ Could not launch post-translation scan: {e}")
                     import traceback
@@ -6146,11 +6140,9 @@ Important rules:
     def _trigger_qa_scan_on_main_thread(self):
         """Handler called on main thread to trigger QA scan"""
         try:
-            self.append_log("🔵 Starting post-translation QA scan...")
             mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
             # Call run_qa_scan directly on the main thread with correct parameters
             self.run_qa_scan(mode_override=mode, non_interactive=True)
-            self.append_log("✅ QA scan launched successfully")
         except Exception as e:
             self.append_log(f"❌ Failed to start QA scan: {e}")
             import traceback

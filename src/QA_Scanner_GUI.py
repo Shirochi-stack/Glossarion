@@ -1031,11 +1031,7 @@ class QAScannerMixin:
         except Exception:
             pass
         
-        # Debug output for scanning phase
-        if non_interactive:
-            self.append_log(f"📝 Debug: auto_search_enabled = {auto_search_enabled}")
-            self.append_log(f"📝 Debug: epub_files_to_scan = {len(epub_files_to_scan)} files")
-            self.append_log(f"📝 Debug: Will run folder detection = {auto_search_enabled and epub_files_to_scan}")
+        # Debug output for scanning phase removed
         
         if auto_search_enabled and epub_files_to_scan:
             # Process each EPUB file to find its corresponding output folder
