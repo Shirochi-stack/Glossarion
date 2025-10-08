@@ -1,7 +1,6 @@
 # individual_endpoint_dialog.py
 """
 Individual Endpoint Configuration Dialog for Glossarion
-- Uses the application's WindowManager for consistent UI
 - Allows enabling/disabling per-key custom endpoint (e.g., Azure, Ollama/local OpenAI-compatible)
 - Persists changes to the in-memory key object and refreshes the parent list
 """

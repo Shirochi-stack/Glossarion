@@ -1,7 +1,6 @@
 # manga_integration.py
 """
 Enhanced GUI Integration module for Manga Translation with text visibility controls
-Integrates with TranslatorGUI using WindowManager and existing infrastructure
 Now includes full page context mode with customizable prompt
 """
 import sys
@@ -19,12 +18,6 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QDialog, QButtonGroup, QApplication)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent
 from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent
-import tkinter as tk
-from tkinter import ttk, filedialog as tk_filedialog, messagebox as tk_messagebox, scrolledtext
-try:
-    import ttkbootstrap as tb
-except ImportError:
-    tb = ttk
 from typing import List, Dict, Optional, Any
 from queue import Queue
 import logging
@@ -1004,15 +997,12 @@ class MangaTranslationTab:
             model_id = None
             selected_model_key = None
         
-        # Create download dialog with window manager - pass Tkinter root instead of PySide6 dialog
-        download_dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.main_gui.master,
-            f"Download {provider} Model",
-            width=600,
-            height=450,
-            max_width_ratio=0.6,
-            max_height_ratio=0.6
-        )
+        # Create download dialog using Tkinter directly (transitional code)
+        download_dialog = tk.Toplevel(self.main_gui.master)
+        download_dialog.title(f"Download {provider} Model")
+        download_dialog.geometry("600x450")
+        scrollable_frame = tk.Frame(download_dialog)
+        scrollable_frame.pack(fill=tk.BOTH, expand=True)
         
         # Info section
         info_frame = tk.LabelFrame(
@@ -1358,8 +1348,7 @@ class MangaTranslationTab:
         cancel_btn = tb.Button(button_frame, text="Close", command=cancel_download, bootstyle="secondary")
         cancel_btn.pack(side=tk.LEFT, padx=5)
     
-        # Auto-resize
-        self.main_gui.wm.auto_resize_dialog(download_dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.6)
+        # Window sizing handled by Tkinter geometry
     
     def _check_provider_status(self):
         """Check and display OCR provider status"""
@@ -1405,9 +1394,13 @@ class MangaTranslationTab:
         elif provider == 'custom-api':
             # Custom API - check for main API key
             api_key = None
-            if hasattr(self.main_gui, 'api_key_entry') and self.main_gui.api_key_entry.get().strip():
-                api_key = self.main_gui.api_key_entry.get().strip()
-            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+            if hasattr(self.main_gui, 'api_key_entry'):
+                try:
+                    # PySide6 QLineEdit uses .text()
+                    api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui.api_key_entry, 'text') else self.main_gui.api_key_entry.get().strip()
+                except:
+                    pass
+            if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
                 api_key = self.main_gui.config.get('api_key')
             
             # Check if AI bubble detection is enabled
@@ -1973,10 +1966,13 @@ class MangaTranslationTab:
         
         # Get API key
         try:
-            if hasattr(self.main_gui.api_key_entry, 'text'):
-                has_api_key = bool(self.main_gui.api_key_entry.text().strip())
-            elif hasattr(self.main_gui.api_key_entry, 'get'):
-                has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+            if hasattr(self.main_gui, 'api_key_entry'):
+                if hasattr(self.main_gui.api_key_entry, 'text'):  # PySide6
+                    has_api_key = bool(self.main_gui.api_key_entry.text().strip())
+                elif hasattr(self.main_gui.api_key_entry, 'get'):  # Tkinter
+                    has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+                else:
+                    has_api_key = False
             else:
                 has_api_key = False
         except:
@@ -2092,7 +2088,18 @@ class MangaTranslationTab:
         title_layout.addWidget(title_label)
         
         # Requirements check - based on selected OCR provider
-        has_api_key = bool(self.main_gui.api_key_entry.text().strip()) if hasattr(self.main_gui.api_key_entry, 'text') else bool(self.main_gui.api_key_entry.get().strip())
+        try:
+            if hasattr(self.main_gui, 'api_key_entry'):
+                if hasattr(self.main_gui.api_key_entry, 'text'):  # PySide6
+                    has_api_key = bool(self.main_gui.api_key_entry.text().strip())
+                elif hasattr(self.main_gui.api_key_entry, 'get'):  # Tkinter
+                    has_api_key = bool(self.main_gui.api_key_entry.get().strip())
+                else:
+                    has_api_key = False
+            else:
+                has_api_key = False
+        except:
+            has_api_key = False
         
         # Get the saved OCR provider to check appropriate credentials
         saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
@@ -2293,12 +2300,14 @@ class MangaTranslationTab:
         # Show current model from main GUI
         current_model = 'Unknown'
         try:
-            if hasattr(self.main_gui, 'model_combo') and hasattr(self.main_gui.model_combo, 'currentText'):
-                # PySide6 QComboBox
-                current_model = self.main_gui.model_combo.currentText()
+            if hasattr(self.main_gui, 'model_combo'):
+                if hasattr(self.main_gui.model_combo, 'currentText'):  # PySide6
+                    current_model = self.main_gui.model_combo.currentText()
+                elif hasattr(self.main_gui.model_combo, 'get'):  # Tkinter
+                    current_model = self.main_gui.model_combo.get()
             elif hasattr(self.main_gui, 'model_var'):
-                # Tkinter StringVar
-                current_model = self.main_gui.model_var.get() if hasattr(self.main_gui.model_var, 'get') else str(self.main_gui.model_var)
+                # Variable attribute
+                current_model = self.main_gui.model_var if isinstance(self.main_gui.model_var, str) else str(self.main_gui.model_var)
             elif hasattr(self.main_gui, 'config'):
                 # Fallback to config
                 current_model = self.main_gui.config.get('model', 'Unknown')
@@ -2512,20 +2521,20 @@ class MangaTranslationTab:
         settings_display_layout.setSpacing(3)
         
         # Contextual enabled status
-        contextual_status = "Enabled" if self.main_gui.contextual_var.get() else "Disabled"
+        contextual_status = "Enabled" if self.main_gui.contextual_var else "Disabled"
         self.contextual_status_label = QLabel(f"• Contextual Translation: {contextual_status}")
         status_font = QFont("Arial", 10)
         self.contextual_status_label.setFont(status_font)
         settings_display_layout.addWidget(self.contextual_status_label)
         
         # History limit
-        history_limit = self.main_gui.trans_history.get() if hasattr(self.main_gui, 'trans_history') else "3"
+        history_limit = self.main_gui.trans_history if hasattr(self.main_gui, 'trans_history') else "3"
         self.history_limit_label = QLabel(f"• Translation History Limit: {history_limit} exchanges")
         self.history_limit_label.setFont(status_font)
         settings_display_layout.addWidget(self.history_limit_label)
         
         # Rolling history status
-        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var.get() else "Disabled (Reset on Limit)"
+        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var else "Disabled (Reset on Limit)"
         self.rolling_status_label = QLabel(f"• Rolling History: {rolling_status}")
         self.rolling_status_label.setFont(status_font)
         settings_display_layout.addWidget(self.rolling_status_label)
@@ -4773,17 +4782,17 @@ class MangaTranslationTab:
         """Refresh context settings from main GUI"""
         # Actually fetch the current values from main GUI
         if hasattr(self.main_gui, 'contextual_var'):
-            contextual_enabled = self.main_gui.contextual_var.get()
+            contextual_enabled = self.main_gui.contextual_var
             if hasattr(self, 'contextual_status_label'):
                 self.contextual_status_label.setText(f"• Contextual Translation: {'Enabled' if contextual_enabled else 'Disabled'}")
         
         if hasattr(self.main_gui, 'trans_history'):
-            history_limit = self.main_gui.trans_history.get()
+            history_limit = self.main_gui.trans_history
             if hasattr(self, 'history_limit_label'):
                 self.history_limit_label.setText(f"• Translation History Limit: {history_limit} exchanges")
         
         if hasattr(self.main_gui, 'translation_history_rolling_var'):
-            rolling_enabled = self.main_gui.translation_history_rolling_var.get()
+            rolling_enabled = self.main_gui.translation_history_rolling_var
             rolling_status = "Enabled (Rolling Window)" if rolling_enabled else "Disabled (Reset on Limit)"
             if hasattr(self, 'rolling_status_label'):
                 self.rolling_status_label.setText(f"• Rolling History: {rolling_status}")
@@ -4792,10 +4801,13 @@ class MangaTranslationTab:
         current_model = None
         model_changed = False
         
-        if hasattr(self.main_gui, 'model_var'):
-            current_model = self.main_gui.model_var.get()
-        elif hasattr(self.main_gui, 'model_combo'):
-            current_model = self.main_gui.model_combo.get()
+        if hasattr(self.main_gui, 'model_combo'):
+            if hasattr(self.main_gui.model_combo, 'currentText'):  # PySide6
+                current_model = self.main_gui.model_combo.currentText()
+            elif hasattr(self.main_gui.model_combo, 'get'):  # Tkinter
+                current_model = self.main_gui.model_combo.get()
+        elif hasattr(self.main_gui, 'model_var'):
+            current_model = self.main_gui.model_var if isinstance(self.main_gui.model_var, str) else str(self.main_gui.model_var)
         elif hasattr(self.main_gui, 'config'):
             current_model = self.main_gui.config.get('model', 'Unknown')
         
@@ -4833,13 +4845,13 @@ class MangaTranslationTab:
             try:
                 # Update the history manager with current main GUI settings
                 if hasattr(self.main_gui, 'contextual_var'):
-                    self.translator.history_manager.contextual_enabled = self.main_gui.contextual_var.get()
+                    self.translator.history_manager.contextual_enabled = self.main_gui.contextual_var
                 
                 if hasattr(self.main_gui, 'trans_history'):
-                    self.translator.history_manager.max_history = int(self.main_gui.trans_history.get())
+                    self.translator.history_manager.max_history = int(self.main_gui.trans_history)
                 
                 if hasattr(self.main_gui, 'translation_history_rolling_var'):
-                    self.translator.history_manager.rolling_enabled = self.main_gui.translation_history_rolling_var.get()
+                    self.translator.history_manager.rolling_enabled = self.main_gui.translation_history_rolling_var
                 
                 # Reset the history to apply new settings
                 self.translator.history_manager.reset()

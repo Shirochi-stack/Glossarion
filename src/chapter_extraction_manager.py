@@ -399,69 +399,71 @@ class ChapterExtractionManager:
 
 # Example usage
 if __name__ == "__main__":
-    import tkinter as tk
-    from tkinter import filedialog
+    # Tkinter test code disabled - migrated to PySide6
+    # import tkinter as tk
+    # from tkinter import filedialog
     
-    def test_extraction():
-        """Test the extraction manager"""
-        
-        # Create a simple GUI for testing
-        root = tk.Tk()
-        root.title("Chapter Extraction Test")
-        root.geometry("800x600")
-        
-        # Text widget for logs
-        text = tk.Text(root, wrap=tk.WORD)
-        text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Log callback
-        def log_message(msg):
-            text.insert(tk.END, msg + "\n")
-            text.see(tk.END)
-            root.update_idletasks()
-        
-        # Progress callback
-        def progress_update(msg):
-            log_message(f"📊 Progress: {msg}")
-        
-        # Completion callback
-        def extraction_complete(result):
-            if result and result.get("success"):
-                log_message(f"✅ Extraction completed!")
-                log_message(f"   Chapters: {result.get('chapters', 0)}")
-            else:
-                log_message(f"❌ Extraction failed!")
-        
-        # Create manager
-        manager = ChapterExtractionManager(log_callback=log_message)
-        
-        # File selection
-        epub_path = filedialog.askopenfilename(
-            title="Select EPUB file",
-            filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
-        )
-        
-        if epub_path:
-            output_dir = os.path.splitext(os.path.basename(epub_path))[0]
-            
-            # Start extraction
-            manager.extract_chapters_async(
-                epub_path,
-                output_dir,
-                extraction_mode="smart",
-                progress_callback=progress_update,
-                completion_callback=extraction_complete
-            )
-        
-        # Button to stop
-        stop_btn = tk.Button(
-            root,
-            text="Stop Extraction",
-            command=lambda: manager.stop_extraction()
-        )
-        stop_btn.pack(pady=5)
-        
-        root.mainloop()
-    
-    # Run test
-    test_extraction()
+    # def test_extraction():
+    #     """Test the extraction manager"""
+    #     
+    #     # Create a simple GUI for testing
+    #     root = tk.Tk()
+    #     root.title("Chapter Extraction Test")
+    #     root.geometry("800x600")
+    #     
+    #     # Text widget for logs
+    #     text = tk.Text(root, wrap=tk.WORD)
+    #     text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    #     
+    #     # Log callback
+    #     def log_message(msg):
+    #         text.insert(tk.END, msg + "\n")
+    #         text.see(tk.END)
+    #         root.update_idletasks()
+    #     
+    #     # Progress callback
+    #     def progress_update(msg):
+    #         log_message(f"📊 Progress: {msg}")
+    #     
+    #     # Completion callback
+    #     def extraction_complete(result):
+    #         if result and result.get("success"):
+    #             log_message(f"✅ Extraction completed!")
+    #             log_message(f"   Chapters: {result.get('chapters', 0)}")
+    #         else:
+    #             log_message(f"❌ Extraction failed!")
+    #     
+    #     # Create manager
+    #     manager = ChapterExtractionManager(log_callback=log_message)
+    #     
+    #     # File selection
+    #     epub_path = filedialog.askopenfilename(
+    #         title="Select EPUB file",
+    #         filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+    #     )
+    #     
+    #     if epub_path:
+    #         output_dir = os.path.splitext(os.path.basename(epub_path))[0]
+    #         
+    #         # Start extraction
+    #         manager.extract_chapters_async(
+    #             epub_path,
+    #             output_dir,
+    #             extraction_mode="smart",
+    #             progress_callback=progress_update,
+    #             completion_callback=extraction_complete
+    #         )
+    #     
+    #     # Button to stop
+    #     stop_btn = tk.Button(
+    #         root,
+    #         text="Stop Extraction",
+    #         command=lambda: manager.stop_extraction()
+    #     )
+    #     stop_btn.pack(pady=5)
+    #     
+    #     root.mainloop()
+    # 
+    # # Run test
+    # test_extraction()
+    pass  # Test code disabled for PySide6 migration

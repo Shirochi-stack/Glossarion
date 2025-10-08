@@ -31,8 +31,6 @@ from langdetect import detect, LangDetectException
 from difflib import SequenceMatcher
 from collections import Counter, defaultdict
 from tqdm import tqdm
-import tkinter as tk
-from tkinter import filedialog, messagebox
 import threading
 import re
 import unicodedata

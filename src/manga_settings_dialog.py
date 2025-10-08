@@ -1,7 +1,6 @@
 # manga_settings_dialog.py
 """
 Enhanced settings dialog for manga translation with all settings visible
-Properly integrated with TranslatorGUI's WindowManager and UIHelper
 """
 
 import os

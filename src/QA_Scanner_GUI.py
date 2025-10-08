@@ -17,15 +17,9 @@ from PySide6.QtGui import QFont, QPixmap, QIcon
 import threading
 import traceback
 
-# Import required modules from translator_gui
-try:
-    from translator_gui import WindowManager, UIHelper
-    scan_html_folder = None  # Will be lazy-loaded from translator_gui
-except ImportError as e:
-    # Fallback if translator_gui not available (shouldn't happen in normal use)
-    WindowManager = None
-    UIHelper = None
-    scan_html_folder = None
+# WindowManager and UIHelper removed - not needed in PySide6
+# Qt handles window management and UI utilities automatically
+scan_html_folder = None  # Will be lazy-loaded from translator_gui
 
 
 def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
@@ -2547,7 +2541,6 @@ class QAScannerMixin:
         
         # Show the dialog (PySide6 handles sizing automatically)
         # Note: The dialog size is already set in the constructor (800x600)
-        # WindowManager's auto_resize_dialog is for Tkinter, not PySide6
         
         # Add a dummy _cleanup_scrolling method for compatibility
         dialog._cleanup_scrolling = lambda: None

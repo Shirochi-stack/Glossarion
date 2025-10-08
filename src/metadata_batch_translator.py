@@ -25,8 +25,7 @@ class MetadataBatchTranslatorUI:
     def __init__(self, parent_gui):
         """Initialize with reference to main TranslatorGUI"""
         self.gui = parent_gui
-        self.wm = parent_gui.wm
-        self.ui = parent_gui.ui
+        # WindowManager and UIHelper removed - not needed in PySide6
         
         # Initialize default prompts if not in config
         self._initialize_default_prompts()

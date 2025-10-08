@@ -444,7 +444,6 @@ class MultiAPIKeyDialog(QDialog):
         """Static method to create and show the dialog modally.
         
         This ensures proper PySide6 application context and returns after dialog closes.
-        Use this method when calling from tkinter code.
         """
         # Ensure QApplication exists
         app = QApplication.instance()
@@ -458,9 +457,8 @@ class MultiAPIKeyDialog(QDialog):
         return dialog
     
     def __init__(self, parent, translator_gui):
-        # Don't pass parent to super().__init__ if it's a tkinter window
         # PySide6 dialogs need QWidget parents or None
-        # Since we're being called from tkinter, create as standalone dialog
+        # Create as standalone top-level dialog
         super().__init__(None)  # Create as top-level dialog
         
         self.translator_gui = translator_gui

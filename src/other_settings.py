@@ -8,13 +8,8 @@ These methods are dynamically injected into the TranslatorGUI class.
 import os
 import json
 import re
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
 
-# Third-party imports
-import ttkbootstrap as tb
-
-# PySide6 imports for ongoing migration from Tkinter
+# PySide6 imports (fully migrated from Tkinter)
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -35,8 +30,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 # Local imports - these will be available through the TranslatorGUI instance
-# Import UIHelper and CONFIG_FILE from translator_gui for use in the methods
-from translator_gui import UIHelper, CONFIG_FILE
+# WindowManager and UIHelper removed - not needed in PySide6
+from translator_gui import CONFIG_FILE
 from ai_hunter_enhanced import AIHunterConfigGUI
 # Bring in backup management methods
 from config_backup import (
@@ -278,9 +273,9 @@ def configure_rolling_summary_prompts(self):
     dialog.show()
 
 def toggle_thinking_budget(self):
-    """Enable/disable thinking budget entry and labels based on checkbox state (Qt version)"""
+    """Enable/disable thinking budget entry and labels based on checkbox state (PySide6 version)"""
     try:
-        enabled = bool(self.enable_gemini_thinking_var.get())
+        enabled = bool(self.enable_gemini_thinking_var)
         if hasattr(self, 'thinking_budget_entry'):
             self.thinking_budget_entry.setEnabled(enabled)
         if hasattr(self, 'thinking_budget_label'):
@@ -291,9 +286,9 @@ def toggle_thinking_budget(self):
         pass
 
 def toggle_gpt_reasoning_controls(self):
-    """Enable/disable GPT reasoning controls and labels based on toggle state (Qt version)"""
+    """Enable/disable GPT reasoning controls and labels based on toggle state (PySide6 version)"""
     try:
-        enabled = bool(self.enable_gpt_thinking_var.get())
+        enabled = bool(self.enable_gpt_thinking_var)
         # Tokens entry and label
         if hasattr(self, 'gpt_reasoning_tokens_entry'):
             self.gpt_reasoning_tokens_entry.setEnabled(enabled)
@@ -472,8 +467,8 @@ def open_other_settings(self):
             # Mirror legacy behavior: persist some toggles on close
             if hasattr(self, 'retain_source_extension_var'):
                 try:
-                    self.config['retain_source_extension'] = self.retain_source_extension_var.get()
-                    os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var.get() else '0'
+                    self.config['retain_source_extension'] = self.retain_source_extension_var
+                    os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var else '0'
                 except Exception:
                     pass
             self.save_config(show_message=False)
@@ -546,7 +541,7 @@ def _create_context_management_section(self, parent):
     # Rolling summary toggle
     rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
     try:
-        rolling_cb.setChecked(bool(self.rolling_summary_var.get()))
+        rolling_cb.setChecked(bool(self.rolling_summary_var))
     except Exception:
         pass
     
@@ -555,7 +550,7 @@ def _create_context_management_section(self, parent):
     
     def _on_rolling_toggled(checked):
         try:
-            self.rolling_summary_var.set(bool(checked))
+            self.rolling_summary_var = bool(checked)
             # Enable/disable all rolling summary controls
             for control in rolling_controls:
                 control.setEnabled(bool(checked))
@@ -586,12 +581,12 @@ def _create_context_management_section(self, parent):
     role_combo.setFixedWidth(90)
     self._disable_combobox_mousewheel(role_combo)
     try:
-        role_combo.setCurrentText(self.summary_role_var.get())
+        role_combo.setCurrentText(self.summary_role_var)
     except Exception:
         pass
     def _on_role_changed(text):
         try:
-            self.summary_role_var.set(text)
+            self.summary_role_var = text
         except Exception:
             pass
     role_combo.currentTextChanged.connect(_on_role_changed)
@@ -606,12 +601,12 @@ def _create_context_management_section(self, parent):
     mode_combo.setFixedWidth(90)
     self._disable_combobox_mousewheel(mode_combo)
     try:
-        mode_combo.setCurrentText(self.rolling_summary_mode_var.get())
+        mode_combo.setCurrentText(self.rolling_summary_mode_var)
     except Exception:
         pass
     def _on_mode_changed(text):
         try:
-            self.rolling_summary_mode_var.set(text)
+            self.rolling_summary_mode_var = text
         except Exception:
             pass
     mode_combo.currentTextChanged.connect(_on_mode_changed)
@@ -625,12 +620,12 @@ def _create_context_management_section(self, parent):
     exchanges_edit = QLineEdit()
     exchanges_edit.setFixedWidth(70)
     try:
-        exchanges_edit.setText(str(self.rolling_summary_exchanges_var.get()))
+        exchanges_edit.setText(str(self.rolling_summary_exchanges_var))
     except Exception:
         pass
     def _on_exchanges_changed(text):
         try:
-            self.rolling_summary_exchanges_var.set(text)
+            self.rolling_summary_exchanges_var = text
         except Exception:
             pass
     exchanges_edit.textChanged.connect(_on_exchanges_changed)
@@ -643,12 +638,12 @@ def _create_context_management_section(self, parent):
     retain_edit = QLineEdit()
     retain_edit.setFixedWidth(70)
     try:
-        retain_edit.setText(str(self.rolling_summary_max_entries_var.get()))
+        retain_edit.setText(str(self.rolling_summary_max_entries_var))
     except Exception:
         pass
     def _on_retain_changed(text):
         try:
-            self.rolling_summary_max_entries_var.set(text)
+            self.rolling_summary_max_entries_var = text
         except Exception:
             pass
     retain_edit.textChanged.connect(_on_retain_changed)
@@ -718,12 +713,12 @@ def _create_context_management_section(self, parent):
 
     auto_cb = self._create_styled_checkbox("Check on startup")
     try:
-        auto_cb.setChecked(bool(self.auto_update_check_var.get()))
+        auto_cb.setChecked(bool(self.auto_update_check_var))
     except Exception:
         pass
     def _on_auto_update(checked):
         try:
-            self.auto_update_check_var.set(bool(checked))
+            self.auto_update_check_var = bool(checked)
         except Exception:
             pass
     auto_cb.toggled.connect(_on_auto_update)
@@ -800,12 +795,12 @@ def _create_response_handling_section(self, parent):
     
     gpt_enable_cb = self._create_styled_checkbox("Enable GPT / OR Thinking")
     try:
-        gpt_enable_cb.setChecked(bool(self.enable_gpt_thinking_var.get()))
+        gpt_enable_cb.setChecked(bool(self.enable_gpt_thinking_var))
     except Exception:
         pass
     def _on_gpt_thinking_toggle(checked):
         try:
-            self.enable_gpt_thinking_var.set(bool(checked))
+            self.enable_gpt_thinking_var = bool(checked)
             self.toggle_gpt_reasoning_controls()
         except Exception:
             pass
@@ -820,7 +815,7 @@ def _create_response_handling_section(self, parent):
     self.gpt_effort_combo.setFixedWidth(90)
     self._disable_combobox_mousewheel(self.gpt_effort_combo)
     try:
-        effort_val = self.gpt_effort_var.get()
+        effort_val = self.gpt_effort_var
         idx = self.gpt_effort_combo.findText(effort_val)
         if idx >= 0:
             self.gpt_effort_combo.setCurrentIndex(idx)
@@ -828,7 +823,7 @@ def _create_response_handling_section(self, parent):
         pass
     def _on_effort_changed(text):
         try:
-            self.gpt_effort_var.set(text)
+            self.gpt_effort_var = text
         except Exception:
             pass
     self.gpt_effort_combo.currentTextChanged.connect(_on_effort_changed)
@@ -845,12 +840,12 @@ def _create_response_handling_section(self, parent):
     self.gpt_reasoning_tokens_entry = QLineEdit()
     self.gpt_reasoning_tokens_entry.setFixedWidth(70)
     try:
-        self.gpt_reasoning_tokens_entry.setText(str(self.gpt_reasoning_tokens_var.get()))
+        self.gpt_reasoning_tokens_entry.setText(str(self.gpt_reasoning_tokens_var))
     except Exception:
         pass
     def _on_gpt_tokens_changed(text):
         try:
-            self.gpt_reasoning_tokens_var.set(text)
+            self.gpt_reasoning_tokens_var = text
         except Exception:
             pass
     self.gpt_reasoning_tokens_entry.textChanged.connect(_on_gpt_tokens_changed)
@@ -878,12 +873,12 @@ def _create_response_handling_section(self, parent):
     
     gemini_thinking_cb = self._create_styled_checkbox("Enable Gemini Thinking")
     try:
-        gemini_thinking_cb.setChecked(bool(self.enable_gemini_thinking_var.get()))
+        gemini_thinking_cb.setChecked(bool(self.enable_gemini_thinking_var))
     except Exception:
         pass
     def _on_gemini_thinking_toggle(checked):
         try:
-            self.enable_gemini_thinking_var.set(bool(checked))
+            self.enable_gemini_thinking_var = bool(checked)
             self.toggle_thinking_budget()
         except Exception:
             pass
@@ -896,12 +891,12 @@ def _create_response_handling_section(self, parent):
     self.thinking_budget_entry = QLineEdit()
     self.thinking_budget_entry.setFixedWidth(70)
     try:
-        self.thinking_budget_entry.setText(str(self.thinking_budget_var.get()))
+        self.thinking_budget_entry.setText(str(self.thinking_budget_var))
     except Exception:
         pass
     def _on_budget_changed(text):
         try:
-            self.thinking_budget_var.set(text)
+            self.thinking_budget_var = text
         except Exception:
             pass
     self.thinking_budget_entry.textChanged.connect(_on_budget_changed)
@@ -933,12 +928,12 @@ def _create_response_handling_section(self, parent):
     
     parallel_cb = self._create_styled_checkbox("Enable Parallel Processing")
     try:
-        parallel_cb.setChecked(bool(self.enable_parallel_extraction_var.get()))
+        parallel_cb.setChecked(bool(self.enable_parallel_extraction_var))
     except Exception:
         pass
     def _on_parallel_toggle(checked):
         try:
-            self.enable_parallel_extraction_var.set(bool(checked))
+            self.enable_parallel_extraction_var = bool(checked)
             self.toggle_extraction_workers()
         except Exception:
             pass
@@ -950,12 +945,12 @@ def _create_response_handling_section(self, parent):
     self.extraction_workers_entry = QLineEdit()
     self.extraction_workers_entry.setFixedWidth(50)
     try:
-        self.extraction_workers_entry.setText(str(self.extraction_workers_var.get()))
+        self.extraction_workers_entry.setText(str(self.extraction_workers_var))
     except Exception:
         pass
     def _on_workers_changed(text):
         try:
-            self.extraction_workers_var.set(text)
+            self.extraction_workers_var = text
         except Exception:
             pass
     self.extraction_workers_entry.textChanged.connect(_on_workers_changed)
@@ -976,12 +971,12 @@ def _create_response_handling_section(self, parent):
     
     gui_yield_cb = self._create_styled_checkbox("Enable GUI Responsiveness Yield")
     try:
-        gui_yield_cb.setChecked(bool(self.enable_gui_yield_var.get()))
+        gui_yield_cb.setChecked(bool(self.enable_gui_yield_var))
     except Exception:
         pass
     def _on_gui_yield_toggle(checked):
         try:
-            self.enable_gui_yield_var.set(bool(checked))
+            self.enable_gui_yield_var = bool(checked)
         except Exception:
             pass
     gui_yield_cb.toggled.connect(_on_gui_yield_toggle)
@@ -1063,12 +1058,12 @@ def _create_response_handling_section(self, parent):
     # Retry Truncated
     retry_truncated_cb = self._create_styled_checkbox("Auto-retry Truncated Responses")
     try:
-        retry_truncated_cb.setChecked(bool(self.retry_truncated_var.get()))
+        retry_truncated_cb.setChecked(bool(self.retry_truncated_var))
     except Exception:
         pass
     def _on_retry_truncated_toggle(checked):
         try:
-            self.retry_truncated_var.set(bool(checked))
+            self.retry_truncated_var = bool(checked)
         except Exception:
             pass
     retry_truncated_cb.toggled.connect(_on_retry_truncated_toggle)
@@ -1081,12 +1076,12 @@ def _create_response_handling_section(self, parent):
     retry_tokens_edit = QLineEdit()
     retry_tokens_edit.setFixedWidth(80)
     try:
-        retry_tokens_edit.setText(str(self.max_retry_tokens_var.get()))
+        retry_tokens_edit.setText(str(self.max_retry_tokens_var))
     except Exception:
         pass
     def _on_retry_tokens_changed(text):
         try:
-            self.max_retry_tokens_var.set(text)
+            self.max_retry_tokens_var = text
         except Exception:
             pass
     retry_tokens_edit.textChanged.connect(_on_retry_tokens_changed)
@@ -1108,12 +1103,12 @@ def _create_response_handling_section(self, parent):
     # Preserve Original Text on Failure
     preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
     try:
-        preserve_cb.setChecked(bool(self.preserve_original_text_var.get()))
+        preserve_cb.setChecked(bool(self.preserve_original_text_var))
     except Exception:
         pass
     def _on_preserve_toggle(checked):
         try:
-            self.preserve_original_text_var.set(bool(checked))
+            self.preserve_original_text_var = bool(checked)
         except Exception:
             pass
     preserve_cb.toggled.connect(_on_preserve_toggle)
@@ -1142,12 +1137,12 @@ def _create_response_handling_section(self, parent):
     compression_edit = QLineEdit()
     compression_edit.setFixedWidth(60)
     try:
-        compression_edit.setText(str(self.compression_factor_var.get()))
+        compression_edit.setText(str(self.compression_factor_var))
     except Exception:
         pass
     def _on_compression_changed(text):
         try:
-            self.compression_factor_var.set(text)
+            self.compression_factor_var = text
         except Exception:
             pass
     compression_edit.textChanged.connect(_on_compression_changed)
@@ -1170,12 +1165,12 @@ def _create_response_handling_section(self, parent):
     # Retry Duplicate
     retry_duplicate_cb = self._create_styled_checkbox("Auto-retry Duplicate Content")
     try:
-        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var.get()))
+        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var))
     except Exception:
         pass
     def _on_retry_duplicate_toggle(checked):
         try:
-            self.retry_duplicate_var.set(bool(checked))
+            self.retry_duplicate_var = bool(checked)
             update_detection_visibility()
         except Exception:
             pass
@@ -1189,12 +1184,12 @@ def _create_response_handling_section(self, parent):
     duplicate_edit = QLineEdit()
     duplicate_edit.setFixedWidth(40)
     try:
-        duplicate_edit.setText(str(self.duplicate_lookback_var.get()))
+        duplicate_edit.setText(str(self.duplicate_lookback_var))
     except Exception:
         pass
     def _on_duplicate_lookback_changed(text):
         try:
-            self.duplicate_lookback_var.set(text)
+            self.duplicate_lookback_var = text
         except Exception:
             pass
     duplicate_edit.textChanged.connect(_on_duplicate_lookback_changed)
@@ -1219,7 +1214,7 @@ def _create_response_handling_section(self, parent):
     # Function to show/hide detection options based on auto-retry toggle
     def update_detection_visibility():
         try:
-            if self.retry_duplicate_var.get():
+            if self.retry_duplicate_var:
                 self.detection_options_container.setVisible(True)
             else:
                 self.detection_options_container.setVisible(False)
@@ -1254,7 +1249,7 @@ def _create_response_handling_section(self, parent):
         
         # Show AI Hunter config for both ai-hunter and cascading modes
         try:
-            if self.duplicate_detection_mode_var.get() in ['ai-hunter', 'cascading']:
+            if self.duplicate_detection_mode_var in ['ai-hunter', 'cascading']:
                 self.create_ai_hunter_section(self.ai_hunter_container)
         except Exception:
             pass
@@ -1272,7 +1267,7 @@ def _create_response_handling_section(self, parent):
         rb = QRadioButton(text)
         rb.setContentsMargins(40, 2, 0, 2)
         try:
-            if self.duplicate_detection_mode_var.get() == value:
+            if self.duplicate_detection_mode_var == value:
                 rb.setChecked(True)
         except Exception:
             pass
@@ -1280,7 +1275,7 @@ def _create_response_handling_section(self, parent):
             def _cb(checked):
                 if checked:
                     try:
-                        self.duplicate_detection_mode_var.set(val)
+                        self.duplicate_detection_mode_var = val
                         update_ai_hunter_visibility()
                     except Exception:
                         pass
@@ -1302,12 +1297,12 @@ def _create_response_handling_section(self, parent):
     retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Chunks")
     retry_slow_cb.setContentsMargins(0, 15, 0, 0)
     try:
-        retry_slow_cb.setChecked(bool(self.retry_timeout_var.get()))
+        retry_slow_cb.setChecked(bool(self.retry_timeout_var))
     except Exception:
         pass
     def _on_retry_slow_toggle(checked):
         try:
-            self.retry_timeout_var.set(bool(checked))
+            self.retry_timeout_var = bool(checked)
         except Exception:
             pass
     retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
@@ -1320,12 +1315,12 @@ def _create_response_handling_section(self, parent):
     timeout_edit = QLineEdit()
     timeout_edit.setFixedWidth(60)
     try:
-        timeout_edit.setText(str(self.chunk_timeout_var.get()))
+        timeout_edit.setText(str(self.chunk_timeout_var))
     except Exception:
         pass
     def _on_timeout_changed(text):
         try:
-            self.chunk_timeout_var.set(text)
+            self.chunk_timeout_var = text
         except Exception:
             pass
     timeout_edit.textChanged.connect(_on_timeout_changed)
@@ -1356,16 +1351,16 @@ def _create_response_handling_section(self, parent):
     
     # Master toggle to enable/disable all HTTP tuning fields
     if not hasattr(self, 'enable_http_tuning_var'):
-        self.enable_http_tuning_var = tk.BooleanVar(value=self.config.get('enable_http_tuning', False))
+        self.enable_http_tuning_var = self.config.get('enable_http_tuning', False)
     
     self.http_tuning_checkbox = self._create_styled_checkbox("Enable HTTP timeout/pooling overrides")
     try:
-        self.http_tuning_checkbox.setChecked(bool(self.enable_http_tuning_var.get()))
+        self.http_tuning_checkbox.setChecked(bool(self.enable_http_tuning_var))
     except Exception:
         pass
     def _on_http_tuning_toggle(checked):
         try:
-            self.enable_http_tuning_var.set(bool(checked))
+            self.enable_http_tuning_var = bool(checked)
             if hasattr(self, '_toggle_http_tuning_controls'):
                 self._toggle_http_tuning_controls()
         except Exception:
@@ -1376,13 +1371,13 @@ def _create_response_handling_section(self, parent):
     
     # 2 column grid layout for more compact display
     if not hasattr(self, 'connect_timeout_var'):
-        self.connect_timeout_var = tk.StringVar(value=str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))))
+        self.connect_timeout_var = str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10')))
     if not hasattr(self, 'read_timeout_var'):
-        self.read_timeout_var = tk.StringVar(value=str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180')))))
+        self.read_timeout_var = str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180'))))
     if not hasattr(self, 'http_pool_connections_var'):
-        self.http_pool_connections_var = tk.StringVar(value=str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))))
+        self.http_pool_connections_var = str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20')))
     if not hasattr(self, 'http_pool_maxsize_var'):
-        self.http_pool_maxsize_var = tk.StringVar(value=str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))))
+        self.http_pool_maxsize_var = str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50')))
     
     # Create grid for 2-column layout
     http_grid = QWidget()
@@ -1397,12 +1392,12 @@ def _create_response_handling_section(self, parent):
     self.connect_timeout_entry = QLineEdit()
     self.connect_timeout_entry.setFixedWidth(70)
     try:
-        self.connect_timeout_entry.setText(str(self.connect_timeout_var.get()))
+        self.connect_timeout_entry.setText(str(self.connect_timeout_var))
     except Exception:
         pass
     def _on_connect_timeout_changed(text):
         try:
-            self.connect_timeout_var.set(text)
+            self.connect_timeout_var = text
         except Exception:
             pass
     self.connect_timeout_entry.textChanged.connect(_on_connect_timeout_changed)
@@ -1413,12 +1408,12 @@ def _create_response_handling_section(self, parent):
     self.read_timeout_entry = QLineEdit()
     self.read_timeout_entry.setFixedWidth(70)
     try:
-        self.read_timeout_entry.setText(str(self.read_timeout_var.get()))
+        self.read_timeout_entry.setText(str(self.read_timeout_var))
     except Exception:
         pass
     def _on_read_timeout_changed(text):
         try:
-            self.read_timeout_var.set(text)
+            self.read_timeout_var = text
         except Exception:
             pass
     self.read_timeout_entry.textChanged.connect(_on_read_timeout_changed)
@@ -1430,12 +1425,12 @@ def _create_response_handling_section(self, parent):
     self.http_pool_connections_entry = QLineEdit()
     self.http_pool_connections_entry.setFixedWidth(70)
     try:
-        self.http_pool_connections_entry.setText(str(self.http_pool_connections_var.get()))
+        self.http_pool_connections_entry.setText(str(self.http_pool_connections_var))
     except Exception:
         pass
     def _on_pool_conn_changed(text):
         try:
-            self.http_pool_connections_var.set(text)
+            self.http_pool_connections_var = text
         except Exception:
             pass
     self.http_pool_connections_entry.textChanged.connect(_on_pool_conn_changed)
@@ -1446,12 +1441,12 @@ def _create_response_handling_section(self, parent):
     self.http_pool_maxsize_entry = QLineEdit()
     self.http_pool_maxsize_entry.setFixedWidth(70)
     try:
-        self.http_pool_maxsize_entry.setText(str(self.http_pool_maxsize_var.get()))
+        self.http_pool_maxsize_entry.setText(str(self.http_pool_maxsize_var))
     except Exception:
         pass
     def _on_pool_maxsize_changed(text):
         try:
-            self.http_pool_maxsize_var.set(text)
+            self.http_pool_maxsize_var = text
         except Exception:
             pass
     self.http_pool_maxsize_entry.textChanged.connect(_on_pool_maxsize_changed)
@@ -1461,16 +1456,16 @@ def _create_response_handling_section(self, parent):
     
     # Optional toggle: ignore server Retry-After header
     if not hasattr(self, 'ignore_retry_after_var'):
-        self.ignore_retry_after_var = tk.BooleanVar(value=bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1')))
+        self.ignore_retry_after_var = bool(self.config.get('ignore_retry_after', str(os.environ.get('IGNORE_RETRY_AFTER', '0')) == '1'))
     
     self.ignore_retry_after_checkbox = self._create_styled_checkbox("Ignore server Retry-After header (use local backoff)")
     try:
-        self.ignore_retry_after_checkbox.setChecked(bool(self.ignore_retry_after_var.get()))
+        self.ignore_retry_after_checkbox.setChecked(bool(self.ignore_retry_after_var))
     except Exception:
         pass
     def _on_ignore_retry_after_toggle(checked):
         try:
-            self.ignore_retry_after_var.set(bool(checked))
+            self.ignore_retry_after_var = bool(checked)
         except Exception:
             pass
     self.ignore_retry_after_checkbox.toggled.connect(_on_ignore_retry_after_toggle)
@@ -1505,18 +1500,18 @@ def _create_response_handling_section(self, parent):
     
     # Create MAX_RETRIES variable if it doesn't exist
     if not hasattr(self, 'max_retries_var'):
-        self.max_retries_var = tk.StringVar(value=str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))))
+        self.max_retries_var = str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7')))
     
     retries_h.addWidget(QLabel("Maximum retry attempts:"))
     max_retries_edit = QLineEdit()
     max_retries_edit.setFixedWidth(40)
     try:
-        max_retries_edit.setText(str(self.max_retries_var.get()))
+        max_retries_edit.setText(str(self.max_retries_var))
     except Exception:
         pass
     def _on_max_retries_changed(text):
         try:
-            self.max_retries_var.set(text)
+            self.max_retries_var = text
         except Exception:
             pass
     max_retries_edit.textChanged.connect(_on_max_retries_changed)
@@ -1534,12 +1529,12 @@ def _create_response_handling_section(self, parent):
     indefinite_retry_cb = self._create_styled_checkbox("Indefinite Rate Limit Retry")
     indefinite_retry_cb.setContentsMargins(20, 0, 0, 0)
     try:
-        indefinite_retry_cb.setChecked(bool(self.indefinite_rate_limit_retry_var.get()))
+        indefinite_retry_cb.setChecked(bool(self.indefinite_rate_limit_retry_var))
     except Exception:
         pass
     def _on_indefinite_retry_toggle(checked):
         try:
-            self.indefinite_rate_limit_retry_var.set(bool(checked))
+            self.indefinite_rate_limit_retry_var = bool(checked)
         except Exception:
             pass
     indefinite_retry_cb.toggled.connect(_on_indefinite_retry_toggle)
@@ -1587,54 +1582,55 @@ def open_multi_api_key_manager(self):
         import traceback
         traceback.print_exc()
 
-def _create_multi_key_row(self, parent):
-    """Create a compact multi-key configuration row"""
-    frame = tk.Frame(parent)
-    frame.pack(fill=tk.X, pady=5)
-    
-    # Status indicator
-    if self.config.get('use_multi_api_keys', False):
-        keys = self.config.get('multi_api_keys', [])
-        active = sum(1 for k in keys if k.get('enabled', True))
-        
-        # Checkbox to enable/disable
-        tb.Checkbutton(frame, text="Multi API Key Mode", 
-                      variable=self.use_multi_api_keys_var,
-                      bootstyle="round-toggle",
-                      command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
-        
-        # Status
-        tk.Label(frame, text=f"({active}/{len(keys)} active)", 
-                font=('TkDefaultFont', 10), fg='green').pack(side=tk.LEFT, padx=(5, 0))
-    else:
-        tb.Checkbutton(frame, text="Multi API Key Mode", 
-                      variable=self.use_multi_api_keys_var,
-                      bootstyle="round-toggle",
-                      command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
-    
-    # Configure button
-    tb.Button(frame, text="Configure Keys...", 
-              command=self.open_multi_api_key_manager,
-              bootstyle="primary-outline").pack(side=tk.LEFT, padx=(20, 0))
-    
-    return frame
+# DEPRECATED Tkinter function - not used in PySide6 version
+# def _create_multi_key_row(self, parent):
+#     """Create a compact multi-key configuration row"""
+#     frame = tk.Frame(parent)
+#     frame.pack(fill=tk.X, pady=5)
+#     
+#     # Status indicator
+#     if self.config.get('use_multi_api_keys', False):
+#         keys = self.config.get('multi_api_keys', [])
+#         active = sum(1 for k in keys if k.get('enabled', True))
+#         
+#         # Checkbox to enable/disable
+#         tb.Checkbutton(frame, text="Multi API Key Mode", 
+#                       variable=self.use_multi_api_keys_var,
+#                       bootstyle="round-toggle",
+#                       command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
+#         
+#         # Status
+#         tk.Label(frame, text=f"({active}/{len(keys)} active)", 
+#                 font=('TkDefaultFont', 10), fg='green').pack(side=tk.LEFT, padx=(5, 0))
+#     else:
+#         tb.Checkbutton(frame, text="Multi API Key Mode", 
+#                       variable=self.use_multi_api_keys_var,
+#                       bootstyle="round-toggle",
+#                       command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
+#     
+#     # Configure button
+#     tb.Button(frame, text="Configure Keys...", 
+#               command=self.open_multi_api_key_manager,
+#               bootstyle="primary-outline").pack(side=tk.LEFT, padx=(20, 0))
+#     
+#     return frame
             
 def _toggle_multi_key_setting(self):
     """Toggle multi-key mode from settings dialog"""
-    self.config['use_multi_api_keys'] = self.use_multi_api_keys_var.get()
+    self.config['use_multi_api_keys'] = self.use_multi_api_keys_var
     # Don't save immediately, let the dialog's save button handle it
 
 def toggle_extraction_workers(self):
-    """Enable/disable extraction workers entry based on toggle (Qt version)"""
+    """Enable/disable extraction workers entry based on toggle (PySide6 version)"""
     try:
-        enabled = bool(self.enable_parallel_extraction_var.get())
+        enabled = bool(self.enable_parallel_extraction_var)
         
         if hasattr(self, 'extraction_workers_entry'):
             self.extraction_workers_entry.setEnabled(enabled)
         
         if enabled:
             # Set environment variable
-            os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
+            os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var)
         else:
             # Set to 1 worker (sequential) when disabled
             os.environ["EXTRACTION_WORKERS"] = "1"
@@ -1647,81 +1643,83 @@ def toggle_extraction_workers(self):
     except Exception:
         pass
 
-def _setup_provider_combobox_bindings(self):
-    """Setup bindings for OpenRouter provider combobox with autocomplete"""
-    try:
-        # Bind to key release events for live filtering and autofill
-        self.openrouter_provider_combo.bind('<KeyRelease>', self._on_provider_combo_keyrelease)
-        # Commit best match on Enter
-        self.openrouter_provider_combo.bind('<Return>', self._commit_provider_autocomplete)
-        # Also bind to FocusOut to validate selection
-        self.openrouter_provider_combo.bind('<FocusOut>', lambda e: self._validate_provider_selection())
-    except Exception:
-        pass  # Silently fail if combo doesn't exist
+# DEPRECATED Tkinter function - not used in PySide6 version
+# def _setup_provider_combobox_bindings(self):
+#     """Setup bindings for OpenRouter provider combobox with autocomplete"""
+#     try:
+#         # Bind to key release events for live filtering and autofill
+#         self.openrouter_provider_combo.bind('<KeyRelease>', self._on_provider_combo_keyrelease)
+#         # Commit best match on Enter
+#         self.openrouter_provider_combo.bind('<Return>', self._commit_provider_autocomplete)
+#         # Also bind to FocusOut to validate selection
+#         self.openrouter_provider_combo.bind('<FocusOut>', lambda e: self._validate_provider_selection())
+#     except Exception:
+#         pass  # Silently fail if combo doesn't exist
 
-def _on_provider_combo_keyrelease(self, event=None):
-    """Provider combobox type-to-search with autocomplete (reuses model dropdown logic)"""
-    try:
-        combo = self.openrouter_provider_combo
-        typed = combo.get()
-        prev = getattr(self, '_provider_prev_text', '')
-        keysym = (getattr(event, 'keysym', '') or '').lower()
-
-        # Navigation/commit keys: don't interfere
-        if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
-            return
-
-        # Ensure we have the full source list
-        source = getattr(self, '_provider_all_values', [])
-        if not source:
-            return
-
-        # Compute match set
-        first_match = None
-        if typed:
-            lowered = typed.lower()
-            # Prefix matches first
-            pref = [v for v in source if v.lower().startswith(lowered)]
-            # Contains matches second
-            cont = [v for v in source if lowered in v.lower() and v not in pref]
-            if pref:
-                first_match = pref[0]
-            elif cont:
-                first_match = cont[0]
-
-        # Decide whether to autofill
-        grew = len(typed) > len(prev) and typed.startswith(prev)
-        is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
-        try:
-            at_end = combo.index(tk.INSERT) == len(typed)
-        except Exception:
-            at_end = True
-        try:
-            has_selection = combo.selection_present()
-        except Exception:
-            has_selection = False
-
-        # Gentle autofill only when appending at the end
-        do_autofill_text = first_match is not None and grew and at_end and not has_selection and not is_deletion
-
-        if do_autofill_text:
-            # Only complete if it's a true prefix match
-            if first_match.lower().startswith(typed.lower()) and first_match != typed:
-                combo.set(first_match)
-                try:
-                    combo.icursor(len(typed))
-                    combo.selection_range(len(typed), len(first_match))
-                except Exception:
-                    pass
-
-        # If we have a match and the dropdown is open, scroll/highlight it
-        if first_match:
-            self._scroll_provider_list_to_value(first_match)
-
-        # Remember current text for next event
-        self._provider_prev_text = typed
-    except Exception:
-        pass  # Silently handle errors
+# DEPRECATED Tkinter function - not used in PySide6 version  
+# def _on_provider_combo_keyrelease(self, event=None):
+#     """Provider combobox type-to-search with autocomplete (reuses model dropdown logic)"""
+#     try:
+#         combo = self.openrouter_provider_combo
+#         typed = combo.get()
+#         prev = getattr(self, '_provider_prev_text', '')
+#         keysym = (getattr(event, 'keysym', '') or '').lower()
+# 
+#         # Navigation/commit keys: don't interfere
+#         if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
+#             return
+# 
+#         # Ensure we have the full source list
+#         source = getattr(self, '_provider_all_values', [])
+#         if not source:
+#             return
+# 
+#         # Compute match set
+#         first_match = None
+#         if typed:
+#             lowered = typed.lower()
+#             # Prefix matches first
+#             pref = [v for v in source if v.lower().startswith(lowered)]
+#             # Contains matches second
+#             cont = [v for v in source if lowered in v.lower() and v not in pref]
+#             if pref:
+#                 first_match = pref[0]
+#             elif cont:
+#                 first_match = cont[0]
+# 
+#         # Decide whether to autofill
+#         grew = len(typed) > len(prev) and typed.startswith(prev)
+#         is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
+#         try:
+#             at_end = combo.index(tk.INSERT) == len(typed)
+#         except Exception:
+#             at_end = True
+#         try:
+#             has_selection = combo.selection_present()
+#         except Exception:
+#             has_selection = False
+# 
+#         # Gentle autofill only when appending at the end
+#         do_autofill_text = first_match is not None and grew and at_end and not has_selection and not is_deletion
+# 
+#         if do_autofill_text:
+#             # Only complete if it's a true prefix match
+#             if first_match.lower().startswith(typed.lower()) and first_match != typed:
+#                 combo.set(first_match)
+#                 try:
+#                     combo.icursor(len(typed))
+#                     combo.selection_range(len(typed), len(first_match))
+#                 except Exception:
+#                     pass
+# 
+#         # If we have a match and the dropdown is open, scroll/highlight it
+#         if first_match:
+#             self._scroll_provider_list_to_value(first_match)
+# 
+#         # Remember current text for next event
+#         self._provider_prev_text = typed
+#     except Exception:
+#         pass  # Silently handle errors
 
 def _commit_provider_autocomplete(self, event=None):
     """On Enter, commit to the best matching provider"""
@@ -1776,16 +1774,16 @@ def _scroll_provider_list_to_value(self, value: str):
 def _validate_provider_selection(self):
     """Validate that the provider selection is from the list or default to Auto"""
     try:
-        typed = self.openrouter_preferred_provider_var.get()
+        typed = self.openrouter_preferred_provider_var
         source = getattr(self, '_provider_all_values', [])
         if typed and typed not in source:
             # Find closest match or default to Auto
             lowered = typed.lower()
             matches = [v for v in source if lowered in v.lower()]
             if matches:
-                self.openrouter_preferred_provider_var.set(matches[0])
+                self.openrouter_preferred_provider_var = matches[0]
             else:
-                self.openrouter_preferred_provider_var.set('Auto')
+                self.openrouter_preferred_provider_var = 'Auto'
     except Exception:
         pass
     
@@ -1839,7 +1837,7 @@ def _get_ai_hunter_status_text(self):
     ai_config = self.config.get('ai_hunter_config', {})
     
     # AI Hunter is shown when the detection mode is set to 'ai-hunter' or 'cascading'
-    if self.duplicate_detection_mode_var.get() not in ['ai-hunter', 'cascading']:
+    if self.duplicate_detection_mode_var not in ['ai-hunter', 'cascading']:
         return "AI Hunter: Not Selected"
     
     if not ai_config.get('enabled', True):
@@ -1876,7 +1874,7 @@ def show_ai_hunter_settings(self):
                     # Widget has been destroyed
                     pass
             if hasattr(self, 'ai_hunter_enabled_var'):
-                self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
+                self.ai_hunter_enabled_var = self.config.get('ai_hunter_config', {}).get('enabled', True)
         
         # Store reference to prevent garbage collection
         self._ai_hunter_gui = AIHunterConfigGUI(None, self.config, on_config_saved)
@@ -2493,9 +2491,11 @@ def toggle_ai_hunter(self):
     if 'ai_hunter_config' not in self.config:
         self.config['ai_hunter_config'] = {}
     
-    self.config['ai_hunter_config']['enabled'] = self.ai_hunter_enabled_var.get()
+    self.config['ai_hunter_config']['enabled'] = self.ai_hunter_enabled_var
     self.save_config()
-    self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+    # Note: ai_hunter_status_label is QLabel in PySide6, use setText instead of config
+    if hasattr(self.ai_hunter_status_label, 'setText'):
+        self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
 
 def _create_prompt_management_section(self, parent):
     """Create meta data section (formerly prompt management) - PySide6"""
@@ -2515,12 +2515,12 @@ def _create_prompt_management_section(self, parent):
     
     translate_title_cb = self._create_styled_checkbox("Translate Book Title")
     try:
-        translate_title_cb.setChecked(bool(self.translate_book_title_var.get()))
+        translate_title_cb.setChecked(bool(self.translate_book_title_var))
     except Exception:
         pass
     def _on_translate_title_toggle(checked):
         try:
-            self.translate_book_title_var.set(bool(checked))
+            self.translate_book_title_var = bool(checked)
         except Exception:
             pass
     translate_title_cb.toggled.connect(_on_translate_title_toggle)
@@ -2567,7 +2567,7 @@ def _create_prompt_management_section(self, parent):
     # Master toggle for batch header translation
     batch_toggle_cb = self._create_styled_checkbox("Batch Translate Headers")
     try:
-        batch_toggle_cb.setChecked(bool(self.batch_translate_headers_var.get()))
+        batch_toggle_cb.setChecked(bool(self.batch_translate_headers_var))
     except Exception:
         pass
     
@@ -2579,12 +2579,12 @@ def _create_prompt_management_section(self, parent):
     batch_entry = QLineEdit()
     batch_entry.setFixedWidth(100)
     try:
-        batch_entry.setText(str(self.headers_per_batch_var.get()))
+        batch_entry.setText(str(self.headers_per_batch_var))
     except Exception:
         pass
     def _on_headers_per_batch_changed(text):
         try:
-            self.headers_per_batch_var.set(text)
+            self.headers_per_batch_var = text
         except Exception:
             pass
     batch_entry.textChanged.connect(_on_headers_per_batch_changed)
@@ -2600,12 +2600,12 @@ def _create_prompt_management_section(self, parent):
     
     update_cb = self._create_styled_checkbox("Update headers in HTML files")
     try:
-        update_cb.setChecked(bool(self.update_html_headers_var.get()))
+        update_cb.setChecked(bool(self.update_html_headers_var))
     except Exception:
         pass
     def _on_update_html_toggle(checked):
         try:
-            self.update_html_headers_var.set(bool(checked))
+            self.update_html_headers_var = bool(checked)
         except Exception:
             pass
     update_cb.toggled.connect(_on_update_html_toggle)
@@ -2615,12 +2615,12 @@ def _create_prompt_management_section(self, parent):
     
     save_cb = self._create_styled_checkbox("Save translations to .txt")
     try:
-        save_cb.setChecked(bool(self.save_header_translations_var.get()))
+        save_cb.setChecked(bool(self.save_header_translations_var))
     except Exception:
         pass
     def _on_save_translations_toggle(checked):
         try:
-            self.save_header_translations_var.set(bool(checked))
+            self.save_header_translations_var = bool(checked)
         except Exception:
             pass
     save_cb.toggled.connect(_on_save_translations_toggle)
@@ -2636,12 +2636,12 @@ def _create_prompt_management_section(self, parent):
     
     ignore_header_cb = self._create_styled_checkbox("Ignore header")
     try:
-        ignore_header_cb.setChecked(bool(self.ignore_header_var.get()))
+        ignore_header_cb.setChecked(bool(self.ignore_header_var))
     except Exception:
         pass
     def _on_ignore_header_toggle(checked):
         try:
-            self.ignore_header_var.set(bool(checked))
+            self.ignore_header_var = bool(checked)
         except Exception:
             pass
     ignore_header_cb.toggled.connect(_on_ignore_header_toggle)
@@ -2651,12 +2651,12 @@ def _create_prompt_management_section(self, parent):
     
     ignore_title_cb = self._create_styled_checkbox("Ignore title")
     try:
-        ignore_title_cb.setChecked(bool(self.ignore_title_var.get()))
+        ignore_title_cb.setChecked(bool(self.ignore_title_var))
     except Exception:
         pass
     def _on_ignore_title_toggle(checked):
         try:
-            self.ignore_title_var.set(bool(checked))
+            self.ignore_title_var = bool(checked)
         except Exception:
             pass
     ignore_title_cb.toggled.connect(_on_ignore_title_toggle)
@@ -2679,8 +2679,8 @@ def _create_prompt_management_section(self, parent):
     # Toggle function for enabling/disabling controls
     def _toggle_header_controls(checked):
         try:
-            enabled = bool(self.batch_translate_headers_var.get())
-            self.batch_translate_headers_var.set(bool(checked))
+            enabled = bool(self.batch_translate_headers_var)
+            self.batch_translate_headers_var = bool(checked)
         except Exception:
             pass
         headers_per_batch_label.setEnabled(checked)
@@ -2695,7 +2695,7 @@ def _create_prompt_management_section(self, parent):
     
     # Initialize disabled state
     try:
-        _toggle_header_controls(bool(self.batch_translate_headers_var.get()))
+        _toggle_header_controls(bool(self.batch_translate_headers_var))
     except Exception:
         _toggle_header_controls(False)
     
@@ -2739,12 +2739,12 @@ def _create_prompt_management_section(self, parent):
     # NCX-only navigation toggle
     ncx_cb = self._create_styled_checkbox("Use NCX-only Navigation (Compatibility Mode)")
     try:
-        ncx_cb.setChecked(bool(self.force_ncx_only_var.get()))
+        ncx_cb.setChecked(bool(self.force_ncx_only_var))
     except Exception:
         pass
     def _on_ncx_toggle(checked):
         try:
-            self.force_ncx_only_var.set(bool(checked))
+            self.force_ncx_only_var = bool(checked)
         except Exception:
             pass
     ncx_cb.toggled.connect(_on_ncx_toggle)
@@ -2754,12 +2754,12 @@ def _create_prompt_management_section(self, parent):
     # CSS Attachment toggle
     css_cb = self._create_styled_checkbox("Attach CSS to Chapters (Fixes styling issues)")
     try:
-        css_cb.setChecked(bool(self.attach_css_to_chapters_var.get()))
+        css_cb.setChecked(bool(self.attach_css_to_chapters_var))
     except Exception:
         pass
     def _on_css_toggle(checked):
         try:
-            self.attach_css_to_chapters_var.set(bool(checked))
+            self.attach_css_to_chapters_var = bool(checked)
         except Exception:
             pass
     css_cb.toggled.connect(_on_css_toggle)
@@ -2769,12 +2769,12 @@ def _create_prompt_management_section(self, parent):
     # Output file naming
     retain_cb = self._create_styled_checkbox("Retain source extension (no 'response_' prefix)")
     try:
-        retain_cb.setChecked(bool(self.retain_source_extension_var.get()))
+        retain_cb.setChecked(bool(self.retain_source_extension_var))
     except Exception:
         pass
     def _on_retain_toggle(checked):
         try:
-            self.retain_source_extension_var.set(bool(checked))
+            self.retain_source_extension_var = bool(checked)
         except Exception:
             pass
     retain_cb.toggled.connect(_on_retain_toggle)
@@ -2820,12 +2820,12 @@ def _create_processing_options_section(self, parent):
     reinforce_edit = QLineEdit()
     reinforce_edit.setFixedWidth(60)
     try:
-        reinforce_edit.setText(str(self.reinforcement_freq_var.get()))
+        reinforce_edit.setText(str(self.reinforcement_freq_var))
     except Exception:
         pass
     def _on_reinforce_changed(text):
         try:
-            self.reinforcement_freq_var.set(text)
+            self.reinforcement_freq_var = text
         except Exception:
             pass
     reinforce_edit.textChanged.connect(_on_reinforce_changed)
@@ -2837,12 +2837,12 @@ def _create_processing_options_section(self, parent):
     # Emergency Paragraph Restoration
     emergency_cb = self._create_styled_checkbox("Emergency Paragraph Restoration")
     try:
-        emergency_cb.setChecked(bool(self.emergency_restore_var.get()))
+        emergency_cb.setChecked(bool(self.emergency_restore_var))
     except Exception:
         pass
     def _on_emergency_toggle(checked):
         try:
-            self.emergency_restore_var.set(bool(checked))
+            self.emergency_restore_var = bool(checked)
         except Exception:
             pass
     emergency_cb.toggled.connect(_on_emergency_toggle)
@@ -2857,12 +2857,12 @@ def _create_processing_options_section(self, parent):
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
     try:
-        decimal_cb.setChecked(bool(self.enable_decimal_chapters_var.get()))
+        decimal_cb.setChecked(bool(self.enable_decimal_chapters_var))
     except Exception:
         pass
     def _on_decimal_toggle(checked):
         try:
-            self.enable_decimal_chapters_var.set(bool(checked))
+            self.enable_decimal_chapters_var = bool(checked)
         except Exception:
             pass
     decimal_cb.toggled.connect(_on_decimal_toggle)
@@ -2881,20 +2881,14 @@ def _create_processing_options_section(self, parent):
     # Initialize variables if not exists
     if not hasattr(self, 'text_extraction_method_var'):
         if self.config.get('extraction_mode') == 'enhanced':
-            self.text_extraction_method_var = tk.StringVar(value='enhanced')
-            self.file_filtering_level_var = tk.StringVar(
-                value=self.config.get('enhanced_filtering', 'smart')
-            )
+            self.text_extraction_method_var = 'enhanced'
+            self.file_filtering_level_var = self.config.get('enhanced_filtering', 'smart')
         else:
-            self.text_extraction_method_var = tk.StringVar(value='standard')
-            self.file_filtering_level_var = tk.StringVar(
-                value=self.config.get('extraction_mode', 'smart')
-            )
+            self.text_extraction_method_var = 'standard'
+            self.file_filtering_level_var = self.config.get('extraction_mode', 'smart')
     
     if not hasattr(self, 'enhanced_preserve_structure_var'):
-        self.enhanced_preserve_structure_var = tk.BooleanVar(
-            value=self.config.get('enhanced_preserve_structure', True)
-        )
+        self.enhanced_preserve_structure_var = self.config.get('enhanced_preserve_structure', True)
     
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")
@@ -2907,14 +2901,14 @@ def _create_processing_options_section(self, parent):
     # Standard extraction
     standard_rb = QRadioButton("Standard (BeautifulSoup)")
     try:
-        if self.text_extraction_method_var.get() == "standard":
+        if self.text_extraction_method_var == "standard":
             standard_rb.setChecked(True)
     except Exception:
         pass
     def _on_standard_selected(checked):
         if checked:
             try:
-                self.text_extraction_method_var.set("standard")
+                self.text_extraction_method_var = "standard"
                 self.on_extraction_method_change()
             except Exception:
                 pass
@@ -2931,14 +2925,14 @@ def _create_processing_options_section(self, parent):
     # Enhanced extraction
     enhanced_rb = QRadioButton("🚀 Enhanced (html2text)")
     try:
-        if self.text_extraction_method_var.get() == "enhanced":
+        if self.text_extraction_method_var == "enhanced":
             enhanced_rb.setChecked(True)
     except Exception:
         pass
     def _on_enhanced_selected(checked):
         if checked:
             try:
-                self.text_extraction_method_var.set("enhanced")
+                self.text_extraction_method_var = "enhanced"
                 self.on_extraction_method_change()
             except Exception:
                 pass
@@ -2959,12 +2953,12 @@ def _create_processing_options_section(self, parent):
     
     preserve_cb = self._create_styled_checkbox("Preserve Markdown Structure")
     try:
-        preserve_cb.setChecked(bool(self.enhanced_preserve_structure_var.get()))
+        preserve_cb.setChecked(bool(self.enhanced_preserve_structure_var))
     except Exception:
         pass
     def _on_preserve_toggle(checked):
         try:
-            self.enhanced_preserve_structure_var.set(bool(checked))
+            self.enhanced_preserve_structure_var = bool(checked)
         except Exception:
             pass
     preserve_cb.toggled.connect(_on_preserve_toggle)
@@ -2995,14 +2989,14 @@ def _create_processing_options_section(self, parent):
     # Smart filtering
     smart_rb = QRadioButton("Smart (Aggressive Filtering)")
     try:
-        if self.file_filtering_level_var.get() == "smart":
+        if self.file_filtering_level_var == "smart":
             smart_rb.setChecked(True)
     except Exception:
         pass
     def _on_smart_selected(checked):
         if checked:
             try:
-                self.file_filtering_level_var.set("smart")
+                self.file_filtering_level_var = "smart"
             except Exception:
                 pass
     smart_rb.toggled.connect(_on_smart_selected)
@@ -3018,14 +3012,14 @@ def _create_processing_options_section(self, parent):
     # Comprehensive filtering
     comprehensive_rb = QRadioButton("Comprehensive (Moderate Filtering)")
     try:
-        if self.file_filtering_level_var.get() == "comprehensive":
+        if self.file_filtering_level_var == "comprehensive":
             comprehensive_rb.setChecked(True)
     except Exception:
         pass
     def _on_comprehensive_selected(checked):
         if checked:
             try:
-                self.file_filtering_level_var.set("comprehensive")
+                self.file_filtering_level_var = "comprehensive"
             except Exception:
                 pass
     comprehensive_rb.toggled.connect(_on_comprehensive_selected)
@@ -3041,14 +3035,14 @@ def _create_processing_options_section(self, parent):
     # Full extraction
     full_rb = QRadioButton("Full (No Filtering)")
     try:
-        if self.file_filtering_level_var.get() == "full":
+        if self.file_filtering_level_var == "full":
             full_rb.setChecked(True)
     except Exception:
         pass
     def _on_full_selected(checked):
         if checked:
             try:
-                self.file_filtering_level_var.set("full")
+                self.file_filtering_level_var = "full"
             except Exception:
                 pass
     full_rb.toggled.connect(_on_full_selected)
@@ -3063,17 +3057,15 @@ def _create_processing_options_section(self, parent):
     
     # Force BeautifulSoup for Traditional APIs
     if not hasattr(self, 'force_bs_for_traditional_var'):
-        self.force_bs_for_traditional_var = tk.BooleanVar(
-            value=self.config.get('force_bs_for_traditional', True)
-        )
+        self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
     force_bs_cb = self._create_styled_checkbox("Force BeautifulSoup for DeepL / Google Translate / Google Free")
     try:
-        force_bs_cb.setChecked(bool(self.force_bs_for_traditional_var.get()))
+        force_bs_cb.setChecked(bool(self.force_bs_for_traditional_var))
     except Exception:
         pass
     def _on_force_bs_toggle(checked):
         try:
-            self.force_bs_for_traditional_var.set(bool(checked))
+            self.force_bs_for_traditional_var = bool(checked)
         except Exception:
             pass
     force_bs_cb.toggled.connect(_on_force_bs_toggle)
@@ -3093,18 +3085,16 @@ def _create_processing_options_section(self, parent):
     
     # Disable Chapter Merging
     if not hasattr(self, 'disable_chapter_merging_var'):
-        self.disable_chapter_merging_var = tk.BooleanVar(
-            value=self.config.get('disable_chapter_merging', False)
-        )
+        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', False)
     
     disable_merging_cb = self._create_styled_checkbox("Disable Chapter Merging")
     try:
-        disable_merging_cb.setChecked(bool(self.disable_chapter_merging_var.get()))
+        disable_merging_cb.setChecked(bool(self.disable_chapter_merging_var))
     except Exception:
         pass
     def _on_disable_merging_toggle(checked):
         try:
-            self.disable_chapter_merging_var.set(bool(checked))
+            self.disable_chapter_merging_var = bool(checked)
         except Exception:
             pass
     disable_merging_cb.toggled.connect(_on_disable_merging_toggle)
@@ -3122,12 +3112,12 @@ def _create_processing_options_section(self, parent):
     # Disable Image Gallery
     gallery_cb = self._create_styled_checkbox("Disable Image Gallery in EPUB")
     try:
-        gallery_cb.setChecked(bool(self.disable_epub_gallery_var.get()))
+        gallery_cb.setChecked(bool(self.disable_epub_gallery_var))
     except Exception:
         pass
     def _on_gallery_toggle(checked):
         try:
-            self.disable_epub_gallery_var.set(bool(checked))
+            self.disable_epub_gallery_var = bool(checked)
         except Exception:
             pass
     gallery_cb.toggled.connect(_on_gallery_toggle)
@@ -3142,12 +3132,12 @@ def _create_processing_options_section(self, parent):
     # Disable Automatic Cover Creation
     cover_cb = self._create_styled_checkbox("Disable Automatic Cover Creation")
     try:
-        cover_cb.setChecked(bool(self.disable_automatic_cover_creation_var.get()))
+        cover_cb.setChecked(bool(self.disable_automatic_cover_creation_var))
     except Exception:
         pass
     def _on_cover_toggle(checked):
         try:
-            self.disable_automatic_cover_creation_var.set(bool(checked))
+            self.disable_automatic_cover_creation_var = bool(checked)
         except Exception:
             pass
     cover_cb.toggled.connect(_on_cover_toggle)
@@ -3162,12 +3152,12 @@ def _create_processing_options_section(self, parent):
     # Translate cover.html
     translate_cover_cb = self._create_styled_checkbox("Translate cover.html (Skip Override)")
     try:
-        translate_cover_cb.setChecked(bool(self.translate_cover_html_var.get()))
+        translate_cover_cb.setChecked(bool(self.translate_cover_html_var))
     except Exception:
         pass
     def _on_translate_cover_toggle(checked):
         try:
-            self.translate_cover_html_var.set(bool(checked))
+            self.translate_cover_html_var = bool(checked)
         except Exception:
             pass
     translate_cover_cb.toggled.connect(_on_translate_cover_toggle)
@@ -3182,12 +3172,12 @@ def _create_processing_options_section(self, parent):
     # Disable 0-based Chapter Detection
     zero_detect_cb = self._create_styled_checkbox("Disable 0-based Chapter Detection")
     try:
-        zero_detect_cb.setChecked(bool(self.disable_zero_detection_var.get()))
+        zero_detect_cb.setChecked(bool(self.disable_zero_detection_var))
     except Exception:
         pass
     def _on_zero_detect_toggle(checked):
         try:
-            self.disable_zero_detection_var.set(bool(checked))
+            self.disable_zero_detection_var = bool(checked)
         except Exception:
             pass
     zero_detect_cb.toggled.connect(_on_zero_detect_toggle)
@@ -3202,12 +3192,12 @@ def _create_processing_options_section(self, parent):
     # Use Header as Output Name
     header_output_cb = self._create_styled_checkbox("Use Header as Output Name")
     try:
-        header_output_cb.setChecked(bool(self.use_header_as_output_var.get()))
+        header_output_cb.setChecked(bool(self.use_header_as_output_var))
     except Exception:
         pass
     def _on_header_output_toggle(checked):
         try:
-            self.use_header_as_output_var.set(bool(checked))
+            self.use_header_as_output_var = bool(checked)
         except Exception:
             pass
     header_output_cb.toggled.connect(_on_header_output_toggle)
@@ -3232,19 +3222,17 @@ def _create_processing_options_section(self, parent):
     offset_h.addWidget(QLabel("Chapter Number Offset:"))
     
     if not hasattr(self, 'chapter_number_offset_var'):
-        self.chapter_number_offset_var = tk.StringVar(
-            value=str(self.config.get('chapter_number_offset', '0'))
-        )
+        self.chapter_number_offset_var = str(self.config.get('chapter_number_offset', '0'))
     
     offset_edit = QLineEdit()
     offset_edit.setFixedWidth(60)
     try:
-        offset_edit.setText(str(self.chapter_number_offset_var.get()))
+        offset_edit.setText(str(self.chapter_number_offset_var))
     except Exception:
         pass
     def _on_offset_changed(text):
         try:
-            self.chapter_number_offset_var.set(text)
+            self.chapter_number_offset_var = text
         except Exception:
             pass
     offset_edit.textChanged.connect(_on_offset_changed)
@@ -3271,12 +3259,12 @@ def _create_processing_options_section(self, parent):
     
     scan_cb = self._create_styled_checkbox("Enable post-translation Scanning phase")
     try:
-        scan_cb.setChecked(bool(self.scan_phase_enabled_var.get()))
+        scan_cb.setChecked(bool(self.scan_phase_enabled_var))
     except Exception:
         pass
     def _on_scan_toggle(checked):
         try:
-            self.scan_phase_enabled_var.set(bool(checked))
+            self.scan_phase_enabled_var = bool(checked)
         except Exception:
             pass
     scan_cb.toggled.connect(_on_scan_toggle)
@@ -3290,7 +3278,7 @@ def _create_processing_options_section(self, parent):
     scan_combo.setFixedWidth(120)
     self._disable_combobox_mousewheel(scan_combo)
     try:
-        mode_val = self.scan_phase_mode_var.get()
+        mode_val = self.scan_phase_mode_var
         idx = scan_combo.findText(mode_val)
         if idx >= 0:
             scan_combo.setCurrentIndex(idx)
@@ -3298,7 +3286,7 @@ def _create_processing_options_section(self, parent):
         pass
     def _on_scan_mode_changed(text):
         try:
-            self.scan_phase_mode_var.set(text)
+            self.scan_phase_mode_var = text
         except Exception:
             pass
     scan_combo.currentTextChanged.connect(_on_scan_mode_changed)
@@ -3314,12 +3302,12 @@ def _create_processing_options_section(self, parent):
     # Conservative Batching
     batch_cb = self._create_styled_checkbox("Use Conservative Batching")
     try:
-        batch_cb.setChecked(bool(self.conservative_batching_var.get()))
+        batch_cb.setChecked(bool(self.conservative_batching_var))
     except Exception:
         pass
     def _on_batch_toggle(checked):
         try:
-            self.conservative_batching_var.set(bool(checked))
+            self.conservative_batching_var = bool(checked)
         except Exception:
             pass
     batch_cb.toggled.connect(_on_batch_toggle)
@@ -3344,18 +3332,16 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(safety_title)
     
     if not hasattr(self, 'disable_gemini_safety_var'):
-        self.disable_gemini_safety_var = tk.BooleanVar(
-            value=self.config.get('disable_gemini_safety', False)
-        )
+        self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', False)
     
     safety_cb = self._create_styled_checkbox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
     try:
-        safety_cb.setChecked(bool(self.disable_gemini_safety_var.get()))
+        safety_cb.setChecked(bool(self.disable_gemini_safety_var))
     except Exception:
         pass
     def _on_safety_toggle(checked):
         try:
-            self.disable_gemini_safety_var.set(bool(checked))
+            self.disable_gemini_safety_var = bool(checked)
         except Exception:
             pass
     safety_cb.toggled.connect(_on_safety_toggle)
@@ -3374,18 +3360,16 @@ def _create_processing_options_section(self, parent):
     
     # OpenRouter Transport Preference
     if not hasattr(self, 'openrouter_http_only_var'):
-        self.openrouter_http_only_var = tk.BooleanVar(
-            value=self.config.get('openrouter_use_http_only', False)
-        )
+        self.openrouter_http_only_var = self.config.get('openrouter_use_http_only', False)
     
     http_only_cb = self._create_styled_checkbox("Use HTTP-only for OpenRouter (bypass SDK)")
     try:
-        http_only_cb.setChecked(bool(self.openrouter_http_only_var.get()))
+        http_only_cb.setChecked(bool(self.openrouter_http_only_var))
     except Exception:
         pass
     def _on_http_only_toggle(checked):
         try:
-            self.openrouter_http_only_var.set(bool(checked))
+            self.openrouter_http_only_var = bool(checked)
         except Exception:
             pass
     http_only_cb.toggled.connect(_on_http_only_toggle)
@@ -3399,18 +3383,16 @@ def _create_processing_options_section(self, parent):
     
     # OpenRouter Disable Compression
     if not hasattr(self, 'openrouter_accept_identity_var'):
-        self.openrouter_accept_identity_var = tk.BooleanVar(
-            value=self.config.get('openrouter_accept_identity', False)
-        )
+        self.openrouter_accept_identity_var = self.config.get('openrouter_accept_identity', False)
     
     accept_identity_cb = self._create_styled_checkbox("Disable compression for OpenRouter (Accept-Encoding)")
     try:
-        accept_identity_cb.setChecked(bool(self.openrouter_accept_identity_var.get()))
+        accept_identity_cb.setChecked(bool(self.openrouter_accept_identity_var))
     except Exception:
         pass
     def _on_accept_identity_toggle(checked):
         try:
-            self.openrouter_accept_identity_var.set(bool(checked))
+            self.openrouter_accept_identity_var = bool(checked)
         except Exception:
             pass
     accept_identity_cb.toggled.connect(_on_accept_identity_toggle)
@@ -3424,9 +3406,7 @@ def _create_processing_options_section(self, parent):
     
     # OpenRouter: Provider preference
     if not hasattr(self, 'openrouter_preferred_provider_var'):
-        self.openrouter_preferred_provider_var = tk.StringVar(
-            value=self.config.get('openrouter_preferred_provider', 'DeepInfra')
-        )
+        self.openrouter_preferred_provider_var = self.config.get('openrouter_preferred_provider', 'DeepInfra')
     
     provider_w = QWidget()
     provider_h = QHBoxLayout(provider_w)
@@ -3454,16 +3434,16 @@ def _create_processing_options_section(self, parent):
     provider_combo.setFixedWidth(160)  # Reduced for more compact layout
     self._disable_combobox_mousewheel(provider_combo)
     try:
-        idx = provider_combo.findText(self.openrouter_preferred_provider_var.get())
+        idx = provider_combo.findText(self.openrouter_preferred_provider_var)
         if idx >= 0:
             provider_combo.setCurrentIndex(idx)
         else:
-            provider_combo.setCurrentText(self.openrouter_preferred_provider_var.get())
+            provider_combo.setCurrentText(self.openrouter_preferred_provider_var)
     except Exception:
         pass
     def _on_provider_changed(text):
         try:
-            self.openrouter_preferred_provider_var.set(text)
+            self.openrouter_preferred_provider_var = text
         except Exception:
             pass
     provider_combo.currentTextChanged.connect(_on_provider_changed)
@@ -3474,7 +3454,7 @@ def _create_processing_options_section(self, parent):
     # Store reference for potential autocomplete logic (Tkinter specific, may not be needed)
     self.openrouter_provider_combo = provider_combo
     self._provider_all_values = provider_options
-    self._provider_prev_text = self.openrouter_preferred_provider_var.get()
+    self._provider_prev_text = self.openrouter_preferred_provider_var
     
     section_v.addWidget(provider_w)
     
@@ -3500,7 +3480,7 @@ def on_extraction_method_change(self):
     if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'enhanced_options_frame'):
         try:
             # Qt version: use setVisible instead of pack/pack_forget
-            if self.text_extraction_method_var.get() == 'enhanced':
+            if self.text_extraction_method_var == 'enhanced':
                 self.enhanced_options_frame.setVisible(True)
             else:
                 self.enhanced_options_frame.setVisible(False)
@@ -3532,12 +3512,12 @@ def _create_image_translation_section(self, parent):
     # Enable Image Translation
     enable_cb = self._create_styled_checkbox("Enable Image Translation")
     try:
-        enable_cb.setChecked(bool(self.enable_image_translation_var.get()))
+        enable_cb.setChecked(bool(self.enable_image_translation_var))
     except Exception:
         pass
     def _on_enable_image_toggle(checked):
         try:
-            self.enable_image_translation_var.set(bool(checked))
+            self.enable_image_translation_var = bool(checked)
         except Exception:
             pass
     enable_cb.toggled.connect(_on_enable_image_toggle)
@@ -3551,12 +3531,12 @@ def _create_image_translation_section(self, parent):
     # Process Long Images
     webnovel_cb = self._create_styled_checkbox("Process Long Images (Web Novel Style)")
     try:
-        webnovel_cb.setChecked(bool(self.process_webnovel_images_var.get()))
+        webnovel_cb.setChecked(bool(self.process_webnovel_images_var))
     except Exception:
         pass
     def _on_webnovel_toggle(checked):
         try:
-            self.process_webnovel_images_var.set(bool(checked))
+            self.process_webnovel_images_var = bool(checked)
         except Exception:
             pass
     webnovel_cb.toggled.connect(_on_webnovel_toggle)
@@ -3570,12 +3550,12 @@ def _create_image_translation_section(self, parent):
     # Hide labels and remove OCR images
     hide_cb = self._create_styled_checkbox("Hide labels and remove OCR images")
     try:
-        hide_cb.setChecked(bool(self.hide_image_translation_label_var.get()))
+        hide_cb.setChecked(bool(self.hide_image_translation_label_var))
     except Exception:
         pass
     def _on_hide_toggle(checked):
         try:
-            self.hide_image_translation_label_var.set(bool(checked))
+            self.hide_image_translation_label_var = bool(checked)
         except Exception:
             pass
     hide_cb.toggled.connect(_on_hide_toggle)
@@ -3591,12 +3571,12 @@ def _create_image_translation_section(self, parent):
     # Watermark Removal
     watermark_cb = self._create_styled_checkbox("Enable Watermark Removal")
     try:
-        watermark_cb.setChecked(bool(self.enable_watermark_removal_var.get()))
+        watermark_cb.setChecked(bool(self.enable_watermark_removal_var))
     except Exception:
         pass
     def _on_watermark_toggle(checked):
         try:
-            self.enable_watermark_removal_var.set(bool(checked))
+            self.enable_watermark_removal_var = bool(checked)
             _toggle_watermark_options()
         except Exception:
             pass
@@ -3611,12 +3591,12 @@ def _create_image_translation_section(self, parent):
     # Save Cleaned Images
     self.save_cleaned_checkbox = self._create_styled_checkbox("Save Cleaned Images")
     try:
-        self.save_cleaned_checkbox.setChecked(bool(self.save_cleaned_images_var.get()))
+        self.save_cleaned_checkbox.setChecked(bool(self.save_cleaned_images_var))
     except Exception:
         pass
     def _on_save_cleaned_toggle(checked):
         try:
-            self.save_cleaned_images_var.set(bool(checked))
+            self.save_cleaned_images_var = bool(checked)
         except Exception:
             pass
     self.save_cleaned_checkbox.toggled.connect(_on_save_cleaned_toggle)
@@ -3631,12 +3611,12 @@ def _create_image_translation_section(self, parent):
     # Advanced Watermark Removal
     self.advanced_watermark_checkbox = self._create_styled_checkbox("Advanced Watermark Removal")
     try:
-        self.advanced_watermark_checkbox.setChecked(bool(self.advanced_watermark_removal_var.get()))
+        self.advanced_watermark_checkbox.setChecked(bool(self.advanced_watermark_removal_var))
     except Exception:
         pass
     def _on_advanced_watermark_toggle(checked):
         try:
-            self.advanced_watermark_removal_var.set(bool(checked))
+            self.advanced_watermark_removal_var = bool(checked)
         except Exception:
             pass
     self.advanced_watermark_checkbox.toggled.connect(_on_advanced_watermark_toggle)
@@ -3675,17 +3655,24 @@ def _create_image_translation_section(self, parent):
         entry = QLineEdit()
         entry.setFixedWidth(80)
         try:
-            entry.setText(str(var.get()))
+            entry.setText(str(var))
         except Exception:
             pass
-        def _make_entry_callback(v):
+        def _make_entry_callback(var_name):
             def _cb(text):
                 try:
-                    v.set(text)
+                    setattr(self, var_name, text)
                 except Exception:
                     pass
             return _cb
-        entry.textChanged.connect(_make_entry_callback(var))
+        # Extract variable name from var reference
+        var_name = None
+        for name in ['webnovel_min_height_var', 'max_images_per_chapter_var', 'image_chunk_height_var', 'image_chunk_overlap_var']:
+            if hasattr(self, name) and getattr(self, name) is var:
+                var_name = name
+                break
+        if var_name:
+            entry.textChanged.connect(_make_entry_callback(var_name))
         settings_grid.addWidget(entry, row, 1, Qt.AlignLeft)
     
     right_v.addWidget(settings_w)
@@ -3694,12 +3681,12 @@ def _create_image_translation_section(self, parent):
     # Send tall image chunks in single API call
     single_api_cb = self._create_styled_checkbox("Send tall image chunks in single API call (NOT RECOMMENDED)")
     try:
-        single_api_cb.setChecked(bool(self.single_api_image_chunks_var.get()))
+        single_api_cb.setChecked(bool(self.single_api_image_chunks_var))
     except Exception:
         pass
     def _on_single_api_toggle(checked):
         try:
-            self.single_api_image_chunks_var.set(bool(checked))
+            self.single_api_image_chunks_var = bool(checked)
         except Exception:
             pass
     single_api_cb.toggled.connect(_on_single_api_toggle)
@@ -3753,12 +3740,12 @@ def _create_image_translation_section(self, parent):
     # Dependency logic for watermark options
     def _toggle_watermark_options():
         try:
-            enabled = bool(self.enable_watermark_removal_var.get())
+            enabled = bool(self.enable_watermark_removal_var)
             self.save_cleaned_checkbox.setEnabled(enabled)
             self.advanced_watermark_checkbox.setEnabled(enabled)
             if not enabled:
-                self.save_cleaned_images_var.set(False)
-                self.advanced_watermark_removal_var.set(False)
+                self.save_cleaned_images_var = False
+                self.advanced_watermark_removal_var = False
         except Exception:
             pass
     
@@ -3778,7 +3765,7 @@ def on_extraction_mode_change(self):
     """Handle extraction mode changes and show/hide Enhanced options"""
     try:
         # Qt version: use setVisible instead of pack/pack_forget
-        if self.extraction_mode_var.get() == 'enhanced':
+        if self.extraction_mode_var == 'enhanced':
             if hasattr(self, 'enhanced_options_separator'):
                 self.enhanced_options_separator.setVisible(True)
             if hasattr(self, 'enhanced_options_frame'):
@@ -3809,15 +3796,15 @@ def _create_anti_duplicate_section(self, parent):
     section_v.addWidget(desc_label)
     
     # Enable/Disable toggle
-    self.enable_anti_duplicate_var = tk.BooleanVar(value=self.config.get('enable_anti_duplicate', False))
+    self.enable_anti_duplicate_var = self.config.get('enable_anti_duplicate', False)
     enable_cb = self._create_styled_checkbox("Enable Anti-Duplicate Parameters")
     try:
-        enable_cb.setChecked(bool(self.enable_anti_duplicate_var.get()))
+        enable_cb.setChecked(bool(self.enable_anti_duplicate_var))
     except Exception:
         pass
     def _on_enable_anti_dup_toggle(checked):
         try:
-            self.enable_anti_duplicate_var.set(bool(checked))
+            self.enable_anti_duplicate_var = bool(checked)
             self._toggle_anti_duplicate_controls()
         except Exception:
             pass
@@ -3836,8 +3823,11 @@ def _create_anti_duplicate_section(self, parent):
     self.anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
     
     # Top-P (Nucleus Sampling)
-    def _create_slider_row(parent_layout, label_text, var, min_val, max_val, decimals=2, is_int=False):
-        """Helper to create a slider row with label and value display"""
+    def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False):
+        """Helper to create a slider row with label and value display
+        var_holder: object that holds the variable (typically self)
+        var_name: string name of the attribute to set
+        """
         row_w = QWidget()
         row_h = QHBoxLayout(row_w)
         row_h.setContentsMargins(0, 5, 0, 5)
@@ -3851,7 +3841,8 @@ def _create_anti_duplicate_section(self, parent):
             slider.setMinimum(int(min_val))
             slider.setMaximum(int(max_val))
             try:
-                slider.setValue(int(var.get()))
+                current_val = getattr(var_holder, var_name, min_val)
+                slider.setValue(int(current_val))
             except Exception:
                 pass
         else:
@@ -3860,7 +3851,7 @@ def _create_anti_duplicate_section(self, parent):
             slider.setMinimum(0)
             slider.setMaximum(steps)
             try:
-                current = float(var.get())
+                current = float(getattr(var_holder, var_name, min_val))
                 slider.setValue(int((current - min_val) / (max_val - min_val) * steps))
             except Exception:
                 pass
@@ -3876,14 +3867,14 @@ def _create_anti_duplicate_section(self, parent):
             try:
                 if is_int:
                     actual_value = value
-                    var.set(actual_value)
+                    setattr(var_holder, var_name, actual_value)
                     if actual_value == 0:
                         value_lbl.setText("OFF")
                     else:
                         value_lbl.setText(f"{actual_value}")
                 else:
                     actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
-                    var.set(actual_value)
+                    setattr(var_holder, var_name, actual_value)
                     if decimals == 1:
                         value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
                     else:
@@ -3898,20 +3889,20 @@ def _create_anti_duplicate_section(self, parent):
         parent_layout.addWidget(row_w)
         return slider, value_lbl
     
-    self.top_p_var = tk.DoubleVar(value=self.config.get('top_p', 1.0))
-    top_p_slider, self.top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self.top_p_var, 0.1, 1.0, decimals=2)
+    self.top_p_var = self.config.get('top_p', 1.0)
+    top_p_slider, self.top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'top_p_var', 0.1, 1.0, decimals=2)
     
     # Top-K (Vocabulary Limit)
-    self.top_k_var = tk.IntVar(value=self.config.get('top_k', 0))
-    top_k_slider, self.top_k_value_label = _create_slider_row(core_v, "Top-K (Vocabulary Limit):", self.top_k_var, 0, 100, is_int=True)
+    self.top_k_var = self.config.get('top_k', 0)
+    top_k_slider, self.top_k_value_label = _create_slider_row(core_v, "Top-K (Vocabulary Limit):", self, 'top_k_var', 0, 100, is_int=True)
     
     # Frequency Penalty
-    self.frequency_penalty_var = tk.DoubleVar(value=self.config.get('frequency_penalty', 0.0))
-    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self.frequency_penalty_var, 0.0, 2.0, decimals=1)
+    self.frequency_penalty_var = self.config.get('frequency_penalty', 0.0)
+    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'frequency_penalty_var', 0.0, 2.0, decimals=1)
     
     # Presence Penalty
-    self.presence_penalty_var = tk.DoubleVar(value=self.config.get('presence_penalty', 0.0))
-    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self.presence_penalty_var, 0.0, 2.0, decimals=1)
+    self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
+    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=1)
     
     core_v.addStretch()
     
@@ -3922,12 +3913,12 @@ def _create_anti_duplicate_section(self, parent):
     self.anti_duplicate_notebook.addTab(advanced_frame, "Advanced")
     
     # Repetition Penalty
-    self.repetition_penalty_var = tk.DoubleVar(value=self.config.get('repetition_penalty', 1.0))
-    rep_slider, self.rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self.repetition_penalty_var, 1.0, 2.0, decimals=2)
+    self.repetition_penalty_var = self.config.get('repetition_penalty', 1.0)
+    rep_slider, self.rep_penalty_value_label = _create_slider_row(advanced_v, "Repetition Penalty:", self, 'repetition_penalty_var', 1.0, 2.0, decimals=2)
     
     # Candidate Count (Gemini)
-    self.candidate_count_var = tk.IntVar(value=self.config.get('candidate_count', 1))
-    candidate_slider, self.candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self.candidate_count_var, 1, 4, is_int=True)
+    self.candidate_count_var = self.config.get('candidate_count', 1)
+    candidate_slider, self.candidate_value_label = _create_slider_row(advanced_v, "Candidate Count (Gemini):", self, 'candidate_count_var', 1, 4, is_int=True)
     
     advanced_v.addStretch()
     
@@ -3943,16 +3934,16 @@ def _create_anti_duplicate_section(self, parent):
     stop_h.setContentsMargins(0, 5, 0, 5)
     stop_h.addWidget(QLabel("Custom Stop Sequences:"))
     
-    self.custom_stop_sequences_var = tk.StringVar(value=self.config.get('custom_stop_sequences', ''))
+    self.custom_stop_sequences_var = self.config.get('custom_stop_sequences', '')
     stop_entry = QLineEdit()
     stop_entry.setFixedWidth(300)
     try:
-        stop_entry.setText(str(self.custom_stop_sequences_var.get()))
+        stop_entry.setText(str(self.custom_stop_sequences_var))
     except Exception:
         pass
     def _on_stop_seq_changed(text):
         try:
-            self.custom_stop_sequences_var.set(text)
+            self.custom_stop_sequences_var = text
         except Exception:
             pass
     stop_entry.textChanged.connect(_on_stop_seq_changed)
@@ -3972,15 +3963,15 @@ def _create_anti_duplicate_section(self, parent):
     self.anti_duplicate_notebook.addTab(bias_frame, "Logit Bias")
     
     # Logit Bias Enable
-    self.logit_bias_enabled_var = tk.BooleanVar(value=self.config.get('logit_bias_enabled', False))
+    self.logit_bias_enabled_var = self.config.get('logit_bias_enabled', False)
     bias_cb = self._create_styled_checkbox("Enable Logit Bias (OpenAI only)")
     try:
-        bias_cb.setChecked(bool(self.logit_bias_enabled_var.get()))
+        bias_cb.setChecked(bool(self.logit_bias_enabled_var))
     except Exception:
         pass
     def _on_bias_enable_toggle(checked):
         try:
-            self.logit_bias_enabled_var.set(bool(checked))
+            self.logit_bias_enabled_var = bool(checked)
         except Exception:
             pass
     bias_cb.toggled.connect(_on_bias_enable_toggle)
@@ -3988,8 +3979,8 @@ def _create_anti_duplicate_section(self, parent):
     bias_v.addWidget(bias_cb)
     
     # Logit Bias Strength
-    self.logit_bias_strength_var = tk.DoubleVar(value=self.config.get('logit_bias_strength', -0.5))
-    bias_slider, self.bias_strength_value_label = _create_slider_row(bias_v, "Bias Strength:", self.logit_bias_strength_var, -2.0, 2.0, decimals=1)
+    self.logit_bias_strength_var = self.config.get('logit_bias_strength', -0.5)
+    bias_slider, self.bias_strength_value_label = _create_slider_row(bias_v, "Bias Strength:", self, 'logit_bias_strength_var', -2.0, 2.0, decimals=1)
     
     # Preset bias targets
     preset_title = QLabel("Preset Bias Targets:")
@@ -3997,29 +3988,29 @@ def _create_anti_duplicate_section(self, parent):
     preset_title.setContentsMargins(0, 10, 0, 5)
     bias_v.addWidget(preset_title)
     
-    self.bias_common_words_var = tk.BooleanVar(value=self.config.get('bias_common_words', False))
+    self.bias_common_words_var = self.config.get('bias_common_words', False)
     common_cb = self._create_styled_checkbox("Bias against common words (the, and, said)")
     try:
-        common_cb.setChecked(bool(self.bias_common_words_var.get()))
+        common_cb.setChecked(bool(self.bias_common_words_var))
     except Exception:
         pass
     def _on_common_toggle(checked):
         try:
-            self.bias_common_words_var.set(bool(checked))
+            self.bias_common_words_var = bool(checked)
         except Exception:
             pass
     common_cb.toggled.connect(_on_common_toggle)
     bias_v.addWidget(common_cb)
     
-    self.bias_repetitive_phrases_var = tk.BooleanVar(value=self.config.get('bias_repetitive_phrases', False))
+    self.bias_repetitive_phrases_var = self.config.get('bias_repetitive_phrases', False)
     phrases_cb = self._create_styled_checkbox("Bias against repetitive phrases")
     try:
-        phrases_cb.setChecked(bool(self.bias_repetitive_phrases_var.get()))
+        phrases_cb.setChecked(bool(self.bias_repetitive_phrases_var))
     except Exception:
         pass
     def _on_phrases_toggle(checked):
         try:
-            self.bias_repetitive_phrases_var.set(bool(checked))
+            self.bias_repetitive_phrases_var = bool(checked)
         except Exception:
             pass
     phrases_cb.toggled.connect(_on_phrases_toggle)
@@ -4071,7 +4062,7 @@ def _create_anti_duplicate_section(self, parent):
 def _toggle_anti_duplicate_controls(self):
     """Enable/disable anti-duplicate parameter controls (Qt version)"""
     try:
-        enabled = bool(self.enable_anti_duplicate_var.get())
+        enabled = bool(self.enable_anti_duplicate_var)
     except Exception:
         enabled = False
     
@@ -4085,7 +4076,7 @@ def _toggle_anti_duplicate_controls(self):
 def _toggle_http_tuning_controls(self):
     """Enable/disable the HTTP timeout/pooling controls as a group (Qt version)"""
     try:
-        enabled = bool(self.enable_http_tuning_var.get()) if hasattr(self, 'enable_http_tuning_var') else False
+        enabled = bool(self.enable_http_tuning_var) if hasattr(self, 'enable_http_tuning_var') else False
     except Exception:
         enabled = False
     
@@ -4131,40 +4122,40 @@ def _reset_anti_duplicate_defaults(self):
     
     # Reset all variables to defaults
     if hasattr(self, 'enable_anti_duplicate_var'):
-        self.enable_anti_duplicate_var.set(False)
+        self.enable_anti_duplicate_var = False
     
     if hasattr(self, 'top_p_var'):
-        self.top_p_var.set(1.0)  # Default = no effect
+        self.top_p_var = 1.0  # Default = no effect
     
     if hasattr(self, 'top_k_var'):
-        self.top_k_var.set(0)  # Default = disabled
+        self.top_k_var = 0  # Default = disabled
     
     if hasattr(self, 'frequency_penalty_var'):
-        self.frequency_penalty_var.set(0.0)  # Default = no penalty
+        self.frequency_penalty_var = 0.0  # Default = no penalty
     
     if hasattr(self, 'presence_penalty_var'):
-        self.presence_penalty_var.set(0.0)  # Default = no penalty
+        self.presence_penalty_var = 0.0  # Default = no penalty
     
     if hasattr(self, 'repetition_penalty_var'):
-        self.repetition_penalty_var.set(1.0)  # Default = no penalty
+        self.repetition_penalty_var = 1.0  # Default = no penalty
     
     if hasattr(self, 'candidate_count_var'):
-        self.candidate_count_var.set(1)  # Default = single response
+        self.candidate_count_var = 1  # Default = single response
     
     if hasattr(self, 'custom_stop_sequences_var'):
-        self.custom_stop_sequences_var.set("")  # Default = empty
+        self.custom_stop_sequences_var = ""  # Default = empty
     
     if hasattr(self, 'logit_bias_enabled_var'):
-        self.logit_bias_enabled_var.set(False)  # Default = disabled
+        self.logit_bias_enabled_var = False  # Default = disabled
     
     if hasattr(self, 'logit_bias_strength_var'):
-        self.logit_bias_strength_var.set(-0.5)  # Default strength
+        self.logit_bias_strength_var = -0.5  # Default strength
     
     if hasattr(self, 'bias_common_words_var'):
-        self.bias_common_words_var.set(False)  # Default = disabled
+        self.bias_common_words_var = False  # Default = disabled
     
     if hasattr(self, 'bias_repetitive_phrases_var'):
-        self.bias_repetitive_phrases_var.set(False)  # Default = disabled
+        self.bias_repetitive_phrases_var = False  # Default = disabled
     
     # Update enable/disable state
     self._toggle_anti_duplicate_controls()
@@ -4190,12 +4181,12 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     # Checkbox to enable/disable custom endpoint
     enable_cb = self._create_styled_checkbox("Enable Custom OpenAI Endpoint")
     try:
-        enable_cb.setChecked(bool(self.use_custom_openai_endpoint_var.get()))
+        enable_cb.setChecked(bool(self.use_custom_openai_endpoint_var))
     except Exception:
         pass
     def _on_enable_custom_endpoint(checked):
         try:
-            self.use_custom_openai_endpoint_var.set(bool(checked))
+            self.use_custom_openai_endpoint_var = bool(checked)
             self.toggle_custom_endpoint_ui()
         except Exception:
             pass
@@ -4208,15 +4199,15 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     openai_h.setContentsMargins(0, 5, 0, 5)
     openai_h.addWidget(QLabel("Override API Endpoint:"))
     
-    self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
+    self.openai_base_url_var = self.config.get('openai_base_url', '')
     self.openai_base_url_entry = QLineEdit()
     try:
-        self.openai_base_url_entry.setText(str(self.openai_base_url_var.get()))
+        self.openai_base_url_entry.setText(str(self.openai_base_url_var))
     except Exception:
         pass
     def _on_openai_url_changed(text):
         try:
-            self.openai_base_url_var.set(text)
+            self.openai_base_url_var = text
             self._check_azure_endpoint()
         except Exception:
             pass
@@ -4225,7 +4216,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     self.openai_clear_button = QPushButton("Clear")
     self.openai_clear_button.setFixedWidth(80)
-    self.openai_clear_button.clicked.connect(lambda: self.openai_base_url_var.set(""))
+    self.openai_clear_button.clicked.connect(lambda: setattr(self, 'openai_base_url_var', ""))
     openai_h.addWidget(self.openai_clear_button)
     section_v.addWidget(openai_row)
     
@@ -4243,7 +4234,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     # Azure API version combo
     try:
-        self.azure_api_version_var.set(self.config.get('azure_api_version', '2024-08-01-preview'))
+        self.azure_api_version_var = self.config.get('azure_api_version', '2024-08-01-preview')
     except Exception:
         pass
     versions = [
@@ -4257,14 +4248,14 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.azure_version_combo.setFixedWidth(200)
     self._disable_combobox_mousewheel(self.azure_version_combo)
     try:
-        idx = self.azure_version_combo.findText(self.azure_api_version_var.get())
+        idx = self.azure_version_combo.findText(self.azure_api_version_var)
         if idx >= 0:
             self.azure_version_combo.setCurrentIndex(idx)
     except Exception:
         pass
     def _on_azure_version_changed(text):
         try:
-            self.azure_api_version_var.set(text)
+            self.azure_api_version_var = text
             self._update_azure_api_version_env()
         except Exception:
             pass
@@ -4293,15 +4284,15 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     groq_h.setContentsMargins(0, 5, 0, 5)
     groq_h.addWidget(QLabel("Groq/Local Base URL:"))
     
-    self.groq_base_url_var = tk.StringVar(value=self.config.get('groq_base_url', ''))
+    self.groq_base_url_var = self.config.get('groq_base_url', '')
     self.groq_base_url_entry = QLineEdit()
     try:
-        self.groq_base_url_entry.setText(str(self.groq_base_url_var.get()))
+        self.groq_base_url_entry.setText(str(self.groq_base_url_var))
     except Exception:
         pass
     def _on_groq_url_changed(text):
         try:
-            self.groq_base_url_var.set(text)
+            self.groq_base_url_var = text
         except Exception:
             pass
     self.groq_base_url_entry.textChanged.connect(_on_groq_url_changed)
@@ -4309,7 +4300,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     groq_clear_btn = QPushButton("Clear")
     groq_clear_btn.setFixedWidth(80)
-    groq_clear_btn.clicked.connect(lambda: self.groq_base_url_var.set(""))
+    groq_clear_btn.clicked.connect(lambda: setattr(self, 'groq_base_url_var', ""))
     groq_h.addWidget(groq_clear_btn)
     additional_v.addWidget(groq_row)
     
@@ -4324,15 +4315,15 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     fireworks_h.setContentsMargins(0, 5, 0, 5)
     fireworks_h.addWidget(QLabel("Fireworks Base URL:"))
     
-    self.fireworks_base_url_var = tk.StringVar(value=self.config.get('fireworks_base_url', ''))
+    self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
     self.fireworks_base_url_entry = QLineEdit()
     try:
-        self.fireworks_base_url_entry.setText(str(self.fireworks_base_url_var.get()))
+        self.fireworks_base_url_entry.setText(str(self.fireworks_base_url_var))
     except Exception:
         pass
     def _on_fireworks_url_changed(text):
         try:
-            self.fireworks_base_url_var.set(text)
+            self.fireworks_base_url_var = text
         except Exception:
             pass
     self.fireworks_base_url_entry.textChanged.connect(_on_fireworks_url_changed)
@@ -4340,7 +4331,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     fireworks_clear_btn = QPushButton("Clear")
     fireworks_clear_btn.setFixedWidth(80)
-    fireworks_clear_btn.clicked.connect(lambda: self.fireworks_base_url_var.set(""))
+    fireworks_clear_btn.clicked.connect(lambda: setattr(self, 'fireworks_base_url_var', ""))
     fireworks_h.addWidget(fireworks_clear_btn)
     additional_v.addWidget(fireworks_row)
     
@@ -4354,12 +4345,12 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     # Gemini OpenAI-Compatible Endpoint
     gemini_cb = self._create_styled_checkbox("Enable Gemini OpenAI-Compatible Endpoint")
     try:
-        gemini_cb.setChecked(bool(self.use_gemini_openai_endpoint_var.get()))
+        gemini_cb.setChecked(bool(self.use_gemini_openai_endpoint_var))
     except Exception:
         pass
     def _on_gemini_endpoint_toggle(checked):
         try:
-            self.use_gemini_openai_endpoint_var.set(bool(checked))
+            self.use_gemini_openai_endpoint_var = bool(checked)
             self.toggle_gemini_endpoint()
         except Exception:
             pass
@@ -4375,12 +4366,12 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     self.gemini_endpoint_entry = QLineEdit()
     try:
-        self.gemini_endpoint_entry.setText(str(self.gemini_openai_endpoint_var.get()))
+        self.gemini_endpoint_entry.setText(str(self.gemini_openai_endpoint_var))
     except Exception:
         pass
     def _on_gemini_url_changed(text):
         try:
-            self.gemini_openai_endpoint_var.set(text)
+            self.gemini_openai_endpoint_var = text
         except Exception:
             pass
     self.gemini_endpoint_entry.textChanged.connect(_on_gemini_url_changed)
@@ -4388,7 +4379,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     self.gemini_clear_button = QPushButton("Clear")
     self.gemini_clear_button.setFixedWidth(80)
-    self.gemini_clear_button.clicked.connect(lambda: self.gemini_openai_endpoint_var.set(""))
+    self.gemini_clear_button.clicked.connect(lambda: setattr(self, 'gemini_openai_endpoint_var', ""))
     gemini_h.addWidget(self.gemini_clear_button)
     additional_v.addWidget(gemini_row)
     
@@ -4421,12 +4412,12 @@ def _create_custom_api_endpoints_section(self, parent_frame):
 def _check_azure_endpoint(self, *args):
     """Check if endpoint is Azure and update UI (Qt version)"""
     try:
-        if not self.use_custom_openai_endpoint_var.get():
+        if not self.use_custom_openai_endpoint_var:
             if hasattr(self, 'azure_version_frame'):
                 self.azure_version_frame.setVisible(False)
             return
             
-        url = self.openai_base_url_var.get()
+        url = self.openai_base_url_var
         if '.azure.com' in url or '.cognitiveservices' in url:
             if hasattr(self, 'api_key_label'):
                 try:
@@ -4453,7 +4444,7 @@ def _check_azure_endpoint(self, *args):
 def _update_azure_api_version_env(self, *args):
     """Update the AZURE_API_VERSION environment variable when the setting changes"""
     try:
-        api_version = self.azure_api_version_var.get()
+        api_version = self.azure_api_version_var
         if api_version:
             os.environ['AZURE_API_VERSION'] = api_version
             #print(f"✅ Updated Azure API Version in environment: {api_version}")
@@ -4463,7 +4454,7 @@ def _update_azure_api_version_env(self, *args):
 def toggle_gemini_endpoint(self):
     """Enable/disable Gemini endpoint entry based on toggle (Qt version)"""
     try:
-        enabled = bool(self.use_gemini_openai_endpoint_var.get())
+        enabled = bool(self.use_gemini_openai_endpoint_var)
         if hasattr(self, 'gemini_endpoint_entry'):
             self.gemini_endpoint_entry.setEnabled(enabled)
         if hasattr(self, 'gemini_clear_button'):
@@ -4474,7 +4465,7 @@ def toggle_gemini_endpoint(self):
 def toggle_custom_endpoint_ui(self):
     """Enable/disable the OpenAI base URL entry and detect Azure (Qt version)"""
     try:
-        enabled = bool(self.use_custom_openai_endpoint_var.get())
+        enabled = bool(self.use_custom_openai_endpoint_var)
         
         if hasattr(self, 'openai_base_url_entry'):
             self.openai_base_url_entry.setEnabled(enabled)
@@ -4483,7 +4474,7 @@ def toggle_custom_endpoint_ui(self):
         
         if enabled:
             # Check if it's Azure
-            url = self.openai_base_url_var.get()
+            url = self.openai_base_url_var
             if '.azure.com' in url or '.cognitiveservices' in url:
                 if hasattr(self, 'api_key_label'):
                     try:
@@ -4571,8 +4562,15 @@ def test_api_connections(self):
         QMessageBox.critical(None, "Error", "OpenAI library not installed")
         return
     
-    # Get API key from the main GUI
-    api_key = self.api_key_entry.get() if hasattr(self, 'api_key_entry') else self.config.get('api_key', '')
+    # Get API key from the main GUI  
+    api_key = ''
+    if hasattr(self, 'api_key_entry'):
+        if hasattr(self.api_key_entry, 'text'):  # PySide6 QLineEdit
+            api_key = self.api_key_entry.text()
+        elif hasattr(self.api_key_entry, 'get'):  # Tkinter Entry
+            api_key = self.api_key_entry.get()
+    if not api_key:
+        api_key = self.config.get('api_key', '')
     if not api_key:
         api_key = "sk-dummy-key"  # For local models
     
@@ -4580,14 +4578,14 @@ def test_api_connections(self):
     endpoints_to_test = []
     
     # OpenAI endpoint - only test if checkbox is enabled
-    if self.use_custom_openai_endpoint_var.get():
-        openai_url = self.openai_base_url_var.get()
+    if self.use_custom_openai_endpoint_var:
+        openai_url = self.openai_base_url_var
         if openai_url:
             # Check if it's Azure
             if '.azure.com' in openai_url or '.cognitiveservices' in openai_url:
                 # Azure endpoint
-                deployment = self.model_var.get() if hasattr(self, 'model_var') else "gpt-35-turbo"
-                api_version = self.azure_api_version_var.get() if hasattr(self, 'azure_api_version_var') else "2024-08-01-preview"
+                deployment = self.model_var if hasattr(self, 'model_var') else "gpt-35-turbo"
+                api_version = self.azure_api_version_var if hasattr(self, 'azure_api_version_var') else "2024-08-01-preview"
                 
                 # Format Azure URL
                 if '/openai/deployments/' not in openai_url:
@@ -4598,32 +4596,32 @@ def test_api_connections(self):
                 endpoints_to_test.append(("Azure OpenAI", azure_url, deployment, "azure"))
             else:
                 # Regular custom endpoint
-                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
         else:
             # Use default OpenAI endpoint if checkbox is on but no custom URL provided
-            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
     
     # Groq endpoint
     if hasattr(self, 'groq_base_url_var'):
-        groq_url = self.groq_base_url_var.get()
+        groq_url = self.groq_base_url_var
         if groq_url:
             # For Groq, we need a groq-prefixed model
-            current_model = self.model_var.get() if hasattr(self, 'model_var') else "llama-3-70b"
+            current_model = self.model_var if hasattr(self, 'model_var') else "llama-3-70b"
             groq_model = current_model if current_model.startswith('groq/') else current_model.replace('groq/', '')
             endpoints_to_test.append(("Groq/Local", groq_url, groq_model))
     
     # Fireworks endpoint
     if hasattr(self, 'fireworks_base_url_var'):
-        fireworks_url = self.fireworks_base_url_var.get()
+        fireworks_url = self.fireworks_base_url_var
         if fireworks_url:
             # For Fireworks, we need the accounts/ prefix
-            current_model = self.model_var.get() if hasattr(self, 'model_var') else "llama-v3-70b-instruct"
+            current_model = self.model_var if hasattr(self, 'model_var') else "llama-v3-70b-instruct"
             fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
             endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
     
     # Gemini OpenAI-Compatible endpoint
-    if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var.get():
-        gemini_url = self.gemini_openai_endpoint_var.get()
+    if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
+        gemini_url = self.gemini_openai_endpoint_var
         if gemini_url:
             # Ensure the endpoint ends with /openai/ for compatibility
             if not gemini_url.endswith('/openai/'):
@@ -4633,7 +4631,7 @@ def test_api_connections(self):
                     gemini_url = gemini_url + '/openai/'
             
             # For Gemini OpenAI-compatible endpoints, use the current model or a suitable default
-            current_model = self.model_var.get() if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
+            current_model = self.model_var if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
             # Remove any 'gemini/' prefix for the OpenAI-compatible endpoint
             gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
             endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
@@ -4739,7 +4737,12 @@ def delete_translated_headers_file(self):
         if not epub_files_to_process:
             epub_path = self.get_current_epub_path()
             if not epub_path:
-                entry_path = self.entry_epub.get().strip()
+                entry_path = ''
+                if hasattr(self, 'entry_epub'):
+                    if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
+                        entry_path = self.entry_epub.text().strip()
+                    elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
+                        entry_path = self.entry_epub.get().strip()
                 if entry_path and entry_path != "No file selected" and os.path.exists(entry_path):
                     epub_path = entry_path
             
@@ -4876,7 +4879,12 @@ def validate_epub_structure_gui(self):
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
     
-    input_path = self.entry_epub.get()
+    input_path = ''
+    if hasattr(self, 'entry_epub'):
+        if hasattr(self.entry_epub, 'text'):  # PySide6 QLineEdit
+            input_path = self.entry_epub.text()
+        elif hasattr(self.entry_epub, 'get'):  # Tkinter Entry
+            input_path = self.entry_epub.get()
     if not input_path:
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
@@ -4963,47 +4971,81 @@ def validate_epub_structure_gui(self):
 
 def on_profile_select(self, event=None):
     """Load the selected profile's prompt into the text area."""
-    name = self.profile_var.get()
+    # Get the current profile name from the combobox
+    name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+    
+    # Update profile_var to match
+    self.profile_var = name
+    
     prompt = self.prompt_profiles.get(name, "")
-    self.prompt_text.delete("1.0", tk.END)
-    self.prompt_text.insert("1.0", prompt)
+    
+    # PySide6: Clear and set QTextEdit content
+    self.prompt_text.clear()
+    self.prompt_text.setPlainText(prompt)
+    
     self.config['active_profile'] = name
 
 def save_profile(self):
     """Save current prompt under selected profile and persist."""
     from PySide6.QtWidgets import QMessageBox
-    name = self.profile_var.get().strip()
+    
+    # Get name from combobox or profile_var
+    name = self.profile_menu.currentText().strip() if hasattr(self, 'profile_menu') else self.profile_var.strip()
+    
     if not name:
         QMessageBox.critical(None, "Error", "Profile cannot be empty.")
         return
-    content = self.prompt_text.get('1.0', tk.END).strip()
+    
+    # PySide6: Get text from QTextEdit
+    content = self.prompt_text.toPlainText().strip()
+    
     self.prompt_profiles[name] = content
     self.config['prompt_profiles'] = self.prompt_profiles
     self.config['active_profile'] = name
-    self.profile_menu['values'] = list(self.prompt_profiles.keys())
+    
+    # Update combobox items
+    self.profile_menu.clear()
+    self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+    self.profile_menu.setCurrentText(name)
+    
     QMessageBox.information(None, "Saved", f"Profile '{name}' saved.")
     self.save_profiles()
 
 def delete_profile(self):
     """Delete the selected profile."""
     from PySide6.QtWidgets import QMessageBox
-    name = self.profile_var.get()
+    
+    # Get name from combobox or profile_var
+    name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+    
     if name not in self.prompt_profiles:
         QMessageBox.critical(None, "Error", f"Profile '{name}' not found.")
         return
+    
     result = QMessageBox.question(None, "Delete", f"Are you sure you want to delete language '{name}'?",
                                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    
     if result == QMessageBox.Yes:
         del self.prompt_profiles[name]
         self.config['prompt_profiles'] = self.prompt_profiles
+        
         if self.prompt_profiles:
             new = next(iter(self.prompt_profiles))
-            self.profile_var.set(new)
+            self.profile_var = new
+            
+            # Update combobox
+            self.profile_menu.clear()
+            self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+            self.profile_menu.setCurrentText(new)
+            
             self.on_profile_select()
         else:
-            self.profile_var.set("")
-            self.prompt_text.delete('1.0', tk.END)
-        self.profile_menu['values'] = list(self.prompt_profiles.keys())
+            self.profile_var = ""
+            
+            # Clear combobox and text
+            self.profile_menu.clear()
+            self.prompt_text.clear()
+        
         self.save_profiles()
 
 def save_profiles(self):
@@ -5015,7 +5057,10 @@ def save_profiles(self):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         data['prompt_profiles'] = self.prompt_profiles
-        data['active_profile'] = self.profile_var.get()
+        
+        # Get current profile from combobox or profile_var
+        data['active_profile'] = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+        
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -5023,27 +5068,51 @@ def save_profiles(self):
 
 def import_profiles(self):
     """Import profiles from a JSON file, merging into existing ones."""
-    from PySide6.QtWidgets import QMessageBox
-    path = filedialog.askopenfilename(title="Import Profiles", filetypes=[("JSON files","*.json")])
+    from PySide6.QtWidgets import QMessageBox, QFileDialog
+    
+    path, _ = QFileDialog.getOpenFileName(
+        None, 
+        "Import Profiles", 
+        "", 
+        "JSON files (*.json);;All files (*.*)"
+    )
+    
     if not path:
         return
+    
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        
         self.prompt_profiles.update(data)
         self.config['prompt_profiles'] = self.prompt_profiles
-        self.profile_menu['values'] = list(self.prompt_profiles.keys())
+        
+        # Update combobox
+        self.profile_menu.clear()
+        self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+        
         QMessageBox.information(None, "Imported", f"Imported {len(data)} profiles.")
     except Exception as e:
         QMessageBox.critical(None, "Error", f"Failed to import profiles: {e}")
 
 def export_profiles(self):
     """Export all profiles to a JSON file."""
-    from PySide6.QtWidgets import QMessageBox
-    path = filedialog.asksaveasfilename(title="Export Profiles", defaultextension=".json", 
-                                      filetypes=[("JSON files","*.json")])
+    from PySide6.QtWidgets import QMessageBox, QFileDialog
+    
+    path, _ = QFileDialog.getSaveFileName(
+        None, 
+        "Export Profiles", 
+        "", 
+        "JSON files (*.json);;All files (*.*)"
+    )
+    
     if not path:
         return
+    
+    # Add .json extension if not present
+    if not path.endswith('.json'):
+        path += '.json'
+    
     try:
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(self.prompt_profiles, f, ensure_ascii=False, indent=2)

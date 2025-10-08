@@ -15,12 +15,8 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QColor, QIcon
 
-# Import from translator_gui if available
-try:
-    from translator_gui import WindowManager, UIHelper
-except ImportError:
-    WindowManager = None
-    UIHelper = None
+# WindowManager and UIHelper removed - not needed in PySide6
+# Qt handles window management and UI utilities automatically
 
 
 class GlossaryManagerMixin:

@@ -8,13 +8,18 @@ import io, json, logging, math, os, shutil, sys, threading, time, re, concurrent
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+
+# PySide6 imports (replacing Tkinter)
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
+                                QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
+                                QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
+                                QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
+                                QSizePolicy, QSplitter, QProgressBar, QStyle)
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent
+from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat
+
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback
-# Third-Party
-import ttkbootstrap as tb
-from ttkbootstrap.constants import *
 from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
 from metadata_batch_translator import MetadataBatchTranslatorUI
@@ -338,981 +343,161 @@ def load_application_icon(window, base_dir):
         logging.warning(f"Could not load icon image: {e}")
     return None
 
-class UIHelper:
-    """Consolidated UI utility functions"""
-    
-    @staticmethod
-    def setup_text_undo_redo(text_widget):
-        """Set up undo/redo bindings for a text widget"""
-        # NUCLEAR OPTION: Disable built-in undo completely
-        try:
-            text_widget.config(undo=False)
-        except:
-            pass
-        
-        # Remove ALL possible z-related bindings
-        all_z_bindings = [
-            'z', 'Z', '<z>', '<Z>', '<Key-z>', '<Key-Z>', 
-            '<Alt-z>', '<Alt-Z>', '<Meta-z>', '<Meta-Z>', 
-            '<Mod1-z>', '<Mod1-Z>', '<<Undo>>', '<<Redo>>',
-            '<Control-Key-z>', '<Control-Key-Z>'
-        ]
-        
-        for seq in all_z_bindings:
-            try:
-                text_widget.unbind(seq)
-                text_widget.unbind_all(seq)  
-                text_widget.unbind_class('Text', seq)
-            except:
-                pass
-        
-        # Create our own undo/redo stack with better management
-        class UndoRedoManager:
-            def __init__(self):
-                self.undo_stack = []
-                self.redo_stack = []
-                self.is_undoing = False
-                self.is_redoing = False
-                self.last_action_was_undo = False
-                
-            def save_state(self):
-                """Save current state to undo stack"""
-                if self.is_undoing or self.is_redoing:
-                    return
-                    
-                try:
-                    content = text_widget.get(1.0, tk.END)
-                    # Only save if content changed
-                    if not self.undo_stack or self.undo_stack[-1] != content:
-                        self.undo_stack.append(content)
-                        if len(self.undo_stack) > 100:
-                            self.undo_stack.pop(0)
-                        # Only clear redo stack if this is a new edit (not from undo)
-                        if not self.last_action_was_undo:
-                            self.redo_stack.clear()
-                        self.last_action_was_undo = False
-                except:
-                    pass
-            
-            def undo(self):
-                """Perform undo"""
-                #print(f"[DEBUG] Undo called. Stack size: {len(self.undo_stack)}, Redo stack: {len(self.redo_stack)}")
-                if len(self.undo_stack) > 1:
-                    self.is_undoing = True
-                    self.last_action_was_undo = True
-                    try:
-                        # Save cursor position
-                        cursor_pos = text_widget.index(tk.INSERT)
-                        
-                        # Move current state to redo stack
-                        current = self.undo_stack.pop()
-                        self.redo_stack.append(current)
-                        
-                        # Restore previous state
-                        previous = self.undo_stack[-1]
-                        text_widget.delete(1.0, tk.END)
-                        text_widget.insert(1.0, previous.rstrip('\n'))
-                        
-                        # Restore cursor position
-                        try:
-                            text_widget.mark_set(tk.INSERT, cursor_pos)
-                            text_widget.see(tk.INSERT)
-                        except:
-                            text_widget.mark_set(tk.INSERT, "1.0")
-                            
-                        #print(f"[DEBUG] Undo complete. New redo stack size: {len(self.redo_stack)}")
-                    finally:
-                        self.is_undoing = False
-                return "break"
-            
-            def redo(self):
-                """Perform redo"""
-                print(f"[DEBUG] Redo called. Redo stack size: {len(self.redo_stack)}")
-                if self.redo_stack:
-                    self.is_redoing = True
-                    try:
-                        # Save cursor position
-                        cursor_pos = text_widget.index(tk.INSERT)
-                        
-                        # Get next state
-                        next_state = self.redo_stack.pop()
-                        
-                        # Add to undo stack
-                        self.undo_stack.append(next_state)
-                        
-                        # Restore state
-                        text_widget.delete(1.0, tk.END)
-                        text_widget.insert(1.0, next_state.rstrip('\n'))
-                        
-                        # Restore cursor position
-                        try:
-                            text_widget.mark_set(tk.INSERT, cursor_pos)
-                            text_widget.see(tk.INSERT)
-                        except:
-                            text_widget.mark_set(tk.INSERT, "end-1c")
-                            
-                        print(f"[DEBUG] Redo complete. Remaining redo stack: {len(self.redo_stack)}")
-                    finally:
-                        self.is_redoing = False
-                        self.last_action_was_undo = True
-                return "break"
-        
-        # Create manager instance
-        manager = UndoRedoManager()
-        
-        # CRITICAL: Override ALL key handling to intercept 'z'
-        def handle_key_press(event):
-            """Intercept ALL key presses"""
-            # Check for 'z' or 'Z'
-            if event.keysym.lower() == 'z':
-                # Check if Control is pressed
-                if event.state & 0x4:  # Control key is pressed
-                    # This is Control+Z - let it pass to our undo handler
-                    return None  # Let it pass through to our Control+Z binding
-                else:
-                    # Just 'z' without Control - insert it manually
-                    if event.char in ['z', 'Z']:
-                        try:
-                            text_widget.insert(tk.INSERT, event.char)
-                        except:
-                            pass
-                        return "break"
-            
-            # Check for Control+Y (redo)  
-            if event.keysym.lower() == 'y' and (event.state & 0x4):
-                return None  # Let it pass through to our Control+Y binding
-            
-            # All other keys pass through
-            return None
-        
-        # Bind with highest priority
-        text_widget.bind('<Key>', handle_key_press, add=False)
-        
-        # Bind undo/redo commands
-        text_widget.bind('<Control-z>', lambda e: manager.undo())
-        text_widget.bind('<Control-Z>', lambda e: manager.undo())
-        text_widget.bind('<Control-y>', lambda e: manager.redo())
-        text_widget.bind('<Control-Y>', lambda e: manager.redo())
-        text_widget.bind('<Control-Shift-z>', lambda e: manager.redo())
-        text_widget.bind('<Control-Shift-Z>', lambda e: manager.redo())
-        
-        # macOS bindings
-        text_widget.bind('<Command-z>', lambda e: manager.undo())
-        text_widget.bind('<Command-Z>', lambda e: manager.undo())
-        text_widget.bind('<Command-Shift-z>', lambda e: manager.redo())
-        
-        # Track changes more efficiently
-        save_timer = [None]
-        
-        def schedule_save():
-            """Schedule a save operation with debouncing"""
-            # Cancel any pending save
-            if save_timer[0]:
-                text_widget.after_cancel(save_timer[0])
-            # Schedule new save
-            save_timer[0] = text_widget.after(200, manager.save_state)
-        
-        def on_text_modified(event=None):
-            """Handle text modifications"""
-            # Don't save during undo/redo or for modifier keys
-            if event and event.keysym in ['Control_L', 'Control_R', 'Alt_L', 'Alt_R', 
-                                         'Shift_L', 'Shift_R', 'Left', 'Right', 'Up', 'Down',
-                                         'Home', 'End', 'Prior', 'Next']:
-                return
-            
-            if not manager.is_undoing and not manager.is_redoing:
-                schedule_save()
-        
-        # More efficient change tracking
-        text_widget.bind('<KeyRelease>', on_text_modified)
-        text_widget.bind('<<Paste>>', lambda e: text_widget.after(10, manager.save_state))
-        text_widget.bind('<<Cut>>', lambda e: text_widget.after(10, manager.save_state))
-        
-        # Save initial state
-        def initialize():
-            """Initialize with current content"""
-            try:
-                content = text_widget.get(1.0, tk.END)
-                manager.undo_stack.append(content)
-                #print(f"[DEBUG] Initial state saved. Content length: {len(content)}")
-            except:
-                pass
-        
-        text_widget.after(50, initialize)
-    
-    @staticmethod
-    def setup_dialog_scrolling(dialog_window, canvas):
-        """Setup mouse wheel scrolling for dialogs"""
-        def on_mousewheel(event):
-            try: 
-                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            except: 
-                pass
-        
-        def on_mousewheel_linux(event, direction):
-            try:
-                if canvas.winfo_exists():
-                    canvas.yview_scroll(direction, "units")
-            except tk.TclError: 
-                pass
-        
-        # Bind events TO THE CANVAS AND DIALOG, NOT GLOBALLY
-        dialog_window.bind("<MouseWheel>", on_mousewheel)
-        dialog_window.bind("<Button-4>", lambda e: on_mousewheel_linux(e, -1))
-        dialog_window.bind("<Button-5>", lambda e: on_mousewheel_linux(e, 1))
-        
-        canvas.bind("<MouseWheel>", on_mousewheel)
-        canvas.bind("<Button-4>", lambda e: on_mousewheel_linux(e, -1))
-        canvas.bind("<Button-5>", lambda e: on_mousewheel_linux(e, 1))
-        
-        # Return cleanup function
-        def cleanup_bindings():
-            try:
-                dialog_window.unbind("<MouseWheel>")
-                dialog_window.unbind("<Button-4>")
-                dialog_window.unbind("<Button-5>")
-                canvas.unbind("<MouseWheel>")
-                canvas.unbind("<Button-4>")
-                canvas.unbind("<Button-5>")
-            except: 
-                pass
-        
-        return cleanup_bindings
-    
-    @staticmethod
-    def create_button_resize_handler(button, base_width, base_height, 
-                                   master_window, reference_width, reference_height):
-        """Create a resize handler for dynamic button scaling"""
-        def on_resize(event):
-            if event.widget is master_window:
-                sx = event.width / reference_width
-                sy = event.height / reference_height
-                s = min(sx, sy)
-                new_w = int(base_width * s)
-                new_h = int(base_height * s)
-                ipadx = max(0, (new_w - base_width) // 2)
-                ipady = max(0, (new_h - base_height) // 2)
-                button.grid_configure(ipadx=ipadx, ipady=ipady)
-        
-        return on_resize
-    
-    @staticmethod
-    def setup_scrollable_text(parent, **text_kwargs):
-        """Create a scrolled text widget with undo/redo support"""
-        # Remove undo=True from kwargs if present, as we'll handle it ourselves
-        text_kwargs.pop('undo', None)
-        text_kwargs.pop('autoseparators', None)
-        text_kwargs.pop('maxundo', None)
-        
-        # Create ScrolledText without built-in undo
-        text_widget = scrolledtext.ScrolledText(parent, **text_kwargs)
-        
-        # Apply our custom undo/redo setup
-        UIHelper.setup_text_undo_redo(text_widget)
-        
-        # Extra protection for ScrolledText widgets
-        UIHelper._fix_scrolledtext_z_key(text_widget)
-        
-        return text_widget
-    
-    @staticmethod
-    def _fix_scrolledtext_z_key(scrolled_widget):
-        """Apply additional fixes specifically for ScrolledText widgets"""
-        # ScrolledText stores the actual Text widget in different ways depending on version
-        # Try to find the actual text widget
-        text_widget = None
-        
-        # Method 1: Direct attribute
-        if hasattr(scrolled_widget, 'text'):
-            text_widget = scrolled_widget.text
-        # Method 2: It might be the widget itself
-        elif hasattr(scrolled_widget, 'insert') and hasattr(scrolled_widget, 'delete'):
-            text_widget = scrolled_widget
-        # Method 3: Look in children
-        else:
-            for child in scrolled_widget.winfo_children():
-                if isinstance(child, tk.Text):
-                    text_widget = child
-                    break
-        
-        if not text_widget:
-            # If we can't find the text widget, work with scrolled_widget directly
-            text_widget = scrolled_widget
-        
-        # Remove ALL 'z' related bindings at all levels
-        for widget in [text_widget, scrolled_widget]:
-            for seq in ['z', 'Z', '<z>', '<Z>', '<Key-z>', '<Key-Z>', 
-                       '<<Undo>>', '<<Redo>>', '<Alt-z>', '<Alt-Z>',
-                       '<Meta-z>', '<Meta-Z>', '<Mod1-z>', '<Mod1-Z>']:
-                try:
-                    widget.unbind(seq)
-                    widget.unbind_all(seq)
-                except:
-                    pass
-        
-        # Override the 'z' key completely
-        def intercept_z(event):
-            if event.char in ['z', 'Z']:
-                if not (event.state & 0x4):  # No Control key
-                    text_widget.insert(tk.INSERT, event.char)
-                    return "break"
-            return None
-        
-        # Bind with high priority to both widgets
-        text_widget.bind('<KeyPress>', intercept_z, add=False)
-        text_widget.bind('z', lambda e: intercept_z(e))
-        text_widget.bind('Z', lambda e: intercept_z(e))
-    
-    @staticmethod
-    def block_text_editing(text_widget):
-        """Make a text widget read-only but allow selection and copying"""
-        def block_editing(event):
-            # Allow copy
-            if event.state & 0x4 and event.keysym.lower() == 'c':
-                return None
-            # Allow select all
-            if event.state & 0x4 and event.keysym.lower() == 'a':
-                text_widget.tag_add(tk.SEL, "1.0", tk.END)
-                text_widget.mark_set(tk.INSERT, "1.0")
-                text_widget.see(tk.INSERT)
-                return "break"
-            # Allow navigation
-            if event.keysym in ['Left', 'Right', 'Up', 'Down', 'Home', 'End', 'Prior', 'Next']:
-                return None
-            # Allow shift selection
-            if event.state & 0x1:
-                return None
-            return "break"
-        
-        text_widget.bind("<Key>", block_editing)
-    
-    @staticmethod
-    def disable_spinbox_mousewheel(spinbox):
-        """Disable mousewheel scrolling on a spinbox to prevent accidental value changes"""
-        def block_wheel(event):
-            return "break"
-        
-        spinbox.bind("<MouseWheel>", block_wheel)  # Windows
-        spinbox.bind("<Button-4>", block_wheel)    # Linux scroll up
-        spinbox.bind("<Button-5>", block_wheel)    # Linux scroll down
-        
-class WindowManager:
-    """Unified window geometry and dialog management - FULLY REFACTORED V2"""
-    
-    def __init__(self, base_dir):
-        self.base_dir = base_dir
-        self.ui = UIHelper()
-        self._stored_geometries = {}
-        self._pending_operations = {}
-        self._dpi_scale = None
-        self._topmost_protection_active = {}
-        self._force_safe_ratios = False
-        self._primary_monitor_width = None  # Cache the detected width
+# UIHelper class removed - not needed in PySide6
+# PySide6 has built-in undo/redo support
 
-    def toggle_safe_ratios(self):
-        """Toggle forcing 1080p Windows ratios"""
-        self._force_safe_ratios = not self._force_safe_ratios
-        return self._force_safe_ratios
-    
-    def get_dpi_scale(self, window):
-        """Get and cache DPI scaling factor"""
-        if self._dpi_scale is None:
-            try:
-                self._dpi_scale = window.tk.call('tk', 'scaling') / 1.333
-            except:
-                self._dpi_scale = 1.0
-        return self._dpi_scale
-    
-    def responsive_size(self, window, base_width, base_height, 
-                       scale_factor=None, center=True, use_full_height=True):
-        """Size window responsively based on primary monitor"""
-        
-        # Auto-detect primary monitor
-        primary_width = self.detect_primary_monitor_width(window)
-        screen_height = window.winfo_screenheight()
-        
-        if use_full_height:
-            width = min(int(base_width * 1.2), int(primary_width * 0.98))
-            height = int(screen_height * 0.98)
-        else:
-            width = base_width
-            height = base_height
-            
-            if width > primary_width * 0.9:
-                width = int(primary_width * 0.85)
-            if height > screen_height * 0.9:
-                height = int(screen_height * 0.85)
-        
-        if center:
-            x = (primary_width - width) // 2
-            y = (screen_height - height) // 2
-            geometry_str = f"{width}x{height}+{x}+{y}"
-        else:
-            geometry_str = f"{width}x{height}"
-        
-        window.geometry(geometry_str)
-        window.attributes('-topmost', False)
-        
-        return width, height
+# WindowManager class removed - not needed in PySide6
+# Qt handles window management automatically
 
-    def setup_window(self, window, width=None, height=None, 
-                    center=True, icon=True, hide_initially=False,
-                    max_width_ratio=0.98, max_height_ratio=0.98,
-                    min_width=400, min_height=300):
-        """Universal window setup with auto-detected primary monitor"""
-        
-        if hide_initially:
-            window.withdraw()
-        
-        window.attributes('-topmost', False)
-        
-        if icon:
-            window.after_idle(lambda: load_application_icon(window, self.base_dir))
-        
-        primary_width = self.detect_primary_monitor_width(window)
-        screen_height = window.winfo_screenheight()
-        dpi_scale = self.get_dpi_scale(window)
-        
-        if width is None:
-            width = min_width
-        else:
-            width = int(width / dpi_scale)
-            
-        if height is None:
-            height = int(screen_height * max_height_ratio)
-        else:
-            height = int(height / dpi_scale)
-        
-        max_width = int(primary_width * max_width_ratio)  # Use primary width
-        max_height = int(screen_height * max_height_ratio)
-        
-        final_width = max(min_width, min(width, max_width))
-        final_height = max(min_height, min(height, max_height))
-        
-        if center:
-            x = max(0, (primary_width - final_width) // 2)  # Center on primary
-            y = 5
-            geometry_str = f"{final_width}x{final_height}+{x}+{y}"
-        else:
-            geometry_str = f"{final_width}x{final_height}"
-        
-        window.geometry(geometry_str)
-        
-        if hide_initially:
-            window.after(10, window.deiconify)
-        
-        return final_width, final_height
-    
-    def get_monitor_from_coord(self, x, y):
-        """Get monitor info for coordinates (for multi-monitor support)"""
-        # This is a simplified version - returns primary monitor info
-        # For true multi-monitor, you'd need to use win32api or other libraries
-        monitors = []
-        
-        # Try to detect if window is on secondary monitor
-        # This is a heuristic - if x > screen_width, likely on second monitor
-        primary_width = self.root.winfo_screenwidth() if hasattr(self, 'root') else 1920
-        
-        if x > primary_width:
-            # Likely on second monitor
-            return {'x': primary_width, 'width': primary_width, 'height': 1080}
-        else:
-            # Primary monitor
-            return {'x': 0, 'width': primary_width, 'height': 1080}
-    
-    def _fix_maximize_behavior(self, window):
-        """Fix the standard Windows maximize button for multi-monitor"""
-        # Store original window protocol
-        original_state_change = None
-        
-        def on_window_state_change(event):
-            """Intercept maximize from title bar button"""
-            if event.widget == window:
-                try:
-                    state = window.state()
-                    if state == 'zoomed':
-                        # Window was just maximized - fix it
-                        window.after(10, lambda: self._proper_maximize(window))
-                except:
-                    pass
-        
-        # Bind to window state changes to intercept maximize
-        window.bind('<Configure>', on_window_state_change, add='+')
-    
-    def _proper_maximize(self, window):
-        """Properly maximize window to current monitor only"""
-        try:
-            # Get current position
-            x = window.winfo_x()
-            screen_width = window.winfo_screenwidth()
-            screen_height = window.winfo_screenheight()
-            
-            # Check if on secondary monitor
-            if x > screen_width or x < -screen_width/2:
-                # Likely on a secondary monitor
-                # Force back to primary monitor for now
-                window.state('normal')
-                window.geometry(f"{screen_width-100}x{screen_height-100}+50+50")
-                window.state('zoomed')
-            
-            # The zoomed state should now respect monitor boundaries
-            
-        except Exception as e:
-            print(f"Error in proper maximize: {e}")
-    
-    def auto_resize_dialog(self, dialog, canvas=None, max_width_ratio=0.9, max_height_ratio=0.95):
-        """Auto-resize dialog based on content"""
-        
-        # Override ratios if 1080p mode is on
-        if self._force_safe_ratios:
-            max_height_ratio = min(max_height_ratio, 0.85)  # Force 85% max
-            max_width_ratio = min(max_width_ratio, 0.85)
-        
-        was_hidden = not dialog.winfo_viewable()
-        
-        def perform_resize():
-            try:
-                screen_width = dialog.winfo_screenwidth()
-                screen_height = dialog.winfo_screenheight()
-                dpi_scale = self.get_dpi_scale(dialog)
-                
-                final_height = int(screen_height * max_height_ratio)
-                
-                if canvas and canvas.winfo_exists():
-                    scrollable_frame = None
-                    for child in canvas.winfo_children():
-                        if isinstance(child, ttk.Frame):
-                            scrollable_frame = child
-                            break
-                    
-                    if scrollable_frame and scrollable_frame.winfo_exists():
-                        content_width = scrollable_frame.winfo_reqwidth()
-                        # Add 5% more space to content width, plus scrollbar space
-                        window_width = int(content_width * 1.15) + 120
-                    else:
-                        window_width = int(dialog.winfo_reqwidth() * 1.15)
-                else:
-                    window_width = int(dialog.winfo_reqwidth() * 1.15)
-                
-                window_width = int(window_width / dpi_scale)
-                
-                max_width = int(screen_width * max_width_ratio)
-                final_width = min(window_width, max_width)
-                final_width = max(final_width, 600)
-                
-                x = (screen_width - final_width) // 2
-                y = max(20, (screen_height - final_height) // 2)
-                
-                dialog.geometry(f"{final_width}x{final_height}+{x}+{y}")
-                
-                if was_hidden and dialog.winfo_exists():
-                    dialog.deiconify()
-                
-                return final_width, final_height
-                
-            except tk.TclError:
-                return None, None
-        
-        dialog.after(20, perform_resize)
-        return None, None
-    
-    def setup_scrollable(self, parent_window, title, width=None, height=None,
-                        modal=True, resizable=True, max_width_ratio=0.9, 
-                        max_height_ratio=0.95, **kwargs):
-        """Create a scrollable dialog with proper setup"""
-        
-        dialog = tk.Toplevel(parent_window)
-        dialog.title(title)
-        dialog.withdraw()
-        
-        # Ensure not topmost
-        dialog.attributes('-topmost', False)
-        
-        if not resizable:
-            dialog.resizable(False, False)
-        
-        if modal:
-            dialog.transient(parent_window)
-            # Don't grab - it blocks other windows
-        
-        dialog.after_idle(lambda: load_application_icon(dialog, self.base_dir))
-        
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        dpi_scale = self.get_dpi_scale(dialog)
-        
-        if height is None:
-            height = int(screen_height * max_height_ratio)
-        else:
-            height = int(height / dpi_scale)
-            
-        if width is None or width == 0:
-            width = int(screen_width * 0.8)
-        else:
-            width = int(width / dpi_scale)
-        
-        width = min(width, int(screen_width * max_width_ratio))
-        height = min(height, int(screen_height * max_height_ratio))
-        
-        x = (screen_width - width) // 2
-        y = max(20, (screen_height - height) // 2)
-        dialog.geometry(f"{width}x{height}+{x}+{y}")
-        
-        main_container = tk.Frame(dialog)
-        main_container.pack(fill=tk.BOTH, expand=True)
-        
-        canvas = tk.Canvas(main_container, bg='white', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        
-        def configure_scroll_region(event=None):
-            if canvas.winfo_exists():
-                canvas.configure(scrollregion=canvas.bbox("all"))
-                canvas_width = canvas.winfo_width()
-                if canvas_width > 1:
-                    canvas.itemconfig(canvas_window, width=canvas_width)
-        
-        scrollable_frame.bind("<Configure>", configure_scroll_region)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
-        
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        
-        cleanup_scrolling = self.ui.setup_dialog_scrolling(dialog, canvas)
-        
-        dialog._cleanup_scrolling = cleanup_scrolling
-        dialog._canvas = canvas
-        dialog._scrollable_frame = scrollable_frame
-        dialog._kwargs = kwargs
-        
-        dialog.after(50, dialog.deiconify)
-        
-        return dialog, scrollable_frame, canvas
-    
-    def create_simple_dialog(self, parent, title, width=None, height=None, 
-                           modal=True, hide_initially=True):
-        """Create a simple non-scrollable dialog"""
-        
-        dialog = tk.Toplevel(parent)
-        dialog.title(title)
-        
-        # Ensure not topmost
-        dialog.attributes('-topmost', False)
-        
-        if modal:
-            dialog.transient(parent)
-            # Don't grab - it blocks other windows
-        
-        dpi_scale = self.get_dpi_scale(dialog)
-        
-        adjusted_width = None
-        adjusted_height = None
-        
-        if width is not None:
-            adjusted_width = int(width / dpi_scale)
-        
-        if height is not None:
-            adjusted_height = int(height / dpi_scale)
-        else:
-            screen_height = dialog.winfo_screenheight()
-            adjusted_height = int(screen_height * 0.98)
-        
-        final_width, final_height = self.setup_window(
-            dialog, 
-            width=adjusted_width, 
-            height=adjusted_height,
-            hide_initially=hide_initially,
-            max_width_ratio=0.98, 
-            max_height_ratio=0.98
-        )
-        
-        return dialog
-    
-    def setup_maximize_support(self, window):
-        """Setup F11 to maximize window - simple working version"""
-        
-        def toggle_maximize(event=None):
-            """F11 toggles maximize"""
-            current = window.state()
-            if current == 'zoomed':
-                window.state('normal')
-            else:
-                window.state('zoomed')
-            return "break"
-        
-        # Bind F11
-        window.bind('<F11>', toggle_maximize)
-        
-        # Bind Escape to exit maximize only
-        window.bind('<Escape>', lambda e: window.state('normal') if window.state() == 'zoomed' else None)
-        
-        return toggle_maximize
-    
-    def setup_fullscreen_support(self, window):
-        """Legacy method - just calls setup_maximize_support"""
-        return self.setup_maximize_support(window)
-    
-    def _setup_maximize_fix(self, window):
-        """Setup for Windows title bar maximize button"""
-        # For now, just let Windows handle maximize naturally
-        # Most modern Windows versions handle multi-monitor maximize correctly
-        pass
-    
-    def _fix_multi_monitor_maximize(self, window):
-        """No longer needed - Windows handles maximize correctly"""
-        pass
-    
-    def store_geometry(self, window, key):
-        """Store window geometry for later restoration"""
-        if window.winfo_exists():
-            self._stored_geometries[key] = window.geometry()
-    
-    def restore_geometry(self, window, key, delay=100):
-        """Restore previously stored geometry"""
-        if key in self._stored_geometries:
-            geometry = self._stored_geometries[key]
-            window.after(delay, lambda: window.geometry(geometry) if window.winfo_exists() else None)
-    
-    def toggle_window_maximize(self, window):
-        """Toggle maximize state for any window (multi-monitor safe)"""
-        try:
-            current_state = window.state()
-            
-            if current_state == 'zoomed':
-                # Restore to normal
-                window.state('normal')
-            else:
-                # Get current monitor
-                x = window.winfo_x()
-                screen_width = window.winfo_screenwidth()
-                
-                # Ensure window is fully on one monitor before maximizing
-                if x >= screen_width:
-                    # On second monitor
-                    window.geometry(f"+{screen_width}+0")
-                elif x + window.winfo_width() > screen_width:
-                    # Spanning monitors - move to primary
-                    window.geometry(f"+0+0")
-                
-                # Maximize to current monitor
-                window.state('zoomed')
-                
-        except Exception as e:
-            print(f"Error toggling maximize: {e}")
-            # Fallback method
-            self._manual_maximize(window)
-    
-    def _manual_maximize(self, window):
-        """Manual maximize implementation as fallback"""
-        if not hasattr(window, '_maximize_normal_geometry'):
-            window._maximize_normal_geometry = None
-        
-        if window._maximize_normal_geometry:
-            # Restore
-            window.geometry(window._maximize_normal_geometry)
-            window._maximize_normal_geometry = None
-        else:
-            # Store current
-            window._maximize_normal_geometry = window.geometry()
-            
-            # Get dimensions
-            x = window.winfo_x()
-            screen_width = window.winfo_screenwidth()
-            screen_height = window.winfo_screenheight()
-            
-            # Determine monitor
-            if x >= screen_width:
-                new_x = screen_width
-            else:
-                new_x = 0
-            
-            # Leave space for taskbar
-            taskbar_height = 40
-            usable_height = screen_height - taskbar_height
-            
-            window.geometry(f"{screen_width}x{usable_height}+{new_x}+0")
-            
-    def detect_primary_monitor_width(self, reference_window):
-        """Auto-detect primary monitor width"""
-        if self._primary_monitor_width is not None:
-            return self._primary_monitor_width
-        
-        try:
-            # Create a hidden test window at origin (0,0) - should be on primary monitor
-            test = tk.Toplevel(reference_window)
-            test.withdraw()
-            test.overrideredirect(True)  # No window decorations
-            
-            # Position at origin
-            test.geometry("100x100+0+0")
-            test.update_idletasks()
-            
-            # Now maximize it to get the monitor's dimensions
-            test.state('zoomed')
-            test.update_idletasks()
-            
-            # Get the maximized width - this is the primary monitor width
-            primary_width = test.winfo_width()
-            primary_height = test.winfo_height()
-            
-            test.destroy()
-            
-            # Get total desktop width for comparison
-            total_width = reference_window.winfo_screenwidth()
-            screen_height = reference_window.winfo_screenheight()
-            
-            print(f"[DEBUG] Maximized test window: {primary_width}x{primary_height}")
-            print(f"[DEBUG] Total desktop: {total_width}x{screen_height}")
-            
-            # If the maximized width equals total width, check for dual monitors
-            if primary_width >= total_width * 0.95:
-                # Maximized window = total desktop width, need to detect if dual monitor
-                aspect = total_width / screen_height
-                print(f"[DEBUG] Aspect ratio: {aspect:.2f}")
-                
-                # For dual monitors detection:
-                # - Two 1920x1080 monitors = 3840x1080 (aspect 3.56)
-                # - Two 2560x1440 monitors = 5120x1440 (aspect 3.56)
-                # - Two 1280x1440 monitors = 2560x1440 (aspect 1.78)
-                # Single ultrawide:
-                # - 3440x1440 = aspect 2.39
-                # - 2560x1080 = aspect 2.37
-                
-                # If width is exactly double a common resolution, it's dual monitors
-                if total_width == 3840 and screen_height == 1080:
-                    # Two 1920x1080 monitors
-                    primary_width = 1920
-                    print(f"[DEBUG] Detected dual 1920x1080 monitors: {primary_width}")
-                elif total_width == 2560 and screen_height == 1440:
-                    # Two 1280x1440 monitors OR could be single 1440p
-                    # Check if this is likely dual by seeing if half width makes sense
-                    primary_width = 1280
-                    print(f"[DEBUG] Detected dual 1280x1440 monitors: {primary_width}")
-                elif total_width == 5120 and screen_height == 1440:
-                    # Two 2560x1440 monitors
-                    primary_width = 2560
-                    print(f"[DEBUG] Detected dual 2560x1440 monitors: {primary_width}")
-                elif aspect > 3.0:
-                    # Likely dual monitor based on aspect ratio
-                    primary_width = total_width // 2
-                    print(f"[DEBUG] Detected dual monitors by aspect ratio: {primary_width}")
-                else:
-                    # Single ultrawide or normal monitor
-                    print(f"[DEBUG] Single monitor detected: {primary_width}")
-            else:
-                print(f"[DEBUG] Primary monitor width detected: {primary_width}")
-            
-            self._primary_monitor_width = primary_width
-            print(f"✅ Final primary monitor width: {primary_width}")
-            return primary_width
-            
-        except Exception as e:
-            print(f"⚠️ Error detecting monitor: {e}")
-            # Fallback to common resolutions based on height
-            height = reference_window.winfo_screenheight()
-            if height >= 2160:
-                return 3840  # 4K
-            elif height >= 1440:
-                return 2560  # 1440p
-            elif height >= 1080:
-                return 1920  # 1080p
-            else:
-                return 1366  # 720p
-
-    def center_window(self, window):
-        """Center a window on primary screen with auto-detection and taskbar awareness"""
-        def do_center():
-            if window.winfo_exists():
-                window.update_idletasks()
-                width = window.winfo_width()
-                height = window.winfo_height()
-                screen_height = window.winfo_screenheight()
-                
-                # Auto-detect primary monitor width
-                primary_width = self.detect_primary_monitor_width(window)
-                
-                # Windows taskbar is typically 40-50px at the bottom
-                taskbar_height = 50
-                usable_height = screen_height - taskbar_height
-                
-                # Center horizontally on primary monitor (which starts at x=0)
-                # If window is wider than primary monitor, center it anyway
-                # (it will extend into the second monitor, which is fine)
-                x = (primary_width - width) // 2
-                
-                # Allow negative x if window is wider - this centers it on primary monitor
-                # even if it extends into second monitor
-                
-                # Position vertically - lower on screen
-                y = 50
-                
-                print(f"[DEBUG] Positioning window at: {x}, {y} (size: {width}x{height})")
-                print(f"[DEBUG] Primary monitor width: {primary_width}, Screen height: {screen_height}")
-                
-                window.geometry(f"+{x}+{y}")
-        
-        # Execute immediately (no after_idle delay)
-        do_center()
-    
+   
 # Import QA Scanner, Retranslation, and Glossary Manager mixins
 from QA_Scanner_GUI import QAScannerMixin
 from Retranslation_GUI import RetranslationMixin
 from GlossaryManager_GUI import GlossaryManagerMixin
 
-class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin):
-    def __init__(self, master):
-        # Initialization
-        master.configure(bg='#2b2b2b')
-        self.master = master
+class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QMainWindow):
+    def __init__(self, parent=None):
+        # Initialize QMainWindow
+        super().__init__(parent)
+        
+        # Store master reference for compatibility (will be self now)
+        self.master = self
         self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        self.wm = WindowManager(self.base_dir)
-        self.ui = UIHelper()
-        master.attributes('-topmost', False)
-        master.lift()
+        
+        # Set window properties with comprehensive dark theme styling
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1e1e1e;
+            }
+            QWidget {
+                background-color: #1e1e1e;
+                color: white;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+            QLineEdit, QTextEdit {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QLineEdit:focus, QTextEdit:focus {
+                border-color: #5a9fd4;
+            }
+            QLineEdit:disabled, QTextEdit:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            QPushButton {
+                background-color: #3d3d3d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 5px 10px;
+            }
+            QPushButton:hover {
+                background-color: #4d4d4d;
+                border-color: #5a9fd4;
+            }
+            QPushButton:pressed {
+                background-color: #2d2d2d;
+            }
+            QPushButton:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            QComboBox {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QComboBox:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border: 1px solid #3a3a3a;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #5a9fd4;
+            }
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+            QMenu {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #4a5568;
+            }
+            QMenu::item:selected {
+                background-color: #5a9fd4;
+            }
+        """)
+        
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
         __version__ = "5.2.0"
-        self.__version__ = __version__  # Store as instance variable
-        master.title(f"Glossarion v{__version__}")
+        self.__version__ = __version__
+        self.setWindowTitle(f"Glossarion v{__version__}")
         
-        # Get screen dimensions - need to detect primary monitor width first
-        screen_height = master.winfo_screenheight()
+        # Get screen dimensions
+        screen = QApplication.primaryScreen()
+        rect = screen.availableGeometry()
         
-        # Detect primary monitor width (not combined width of all monitors)
-        primary_width = self.wm.detect_primary_monitor_width(master)
+        # Use more reasonable window size ratios
+        # 70% width and 85% height are more standard and fit better on single monitors
+        width_ratio = 0.70   # 70% of screen width
+        height_ratio = 0.85  # 85% of available height
         
-        # Set window size - making it wider as requested
-        # 95% was 1216px, +30% = ~1580px, which is 1.234x the primary monitor
-        # This will span slightly into the second monitor but centered on primary
-        width_ratio = 1.23  # 123% of primary monitor width (30% wider than before)
-        # Account for Windows taskbar (typically 40-50px)
-        taskbar_height = 50
-        usable_height = screen_height - taskbar_height
-        height_ratio = 0.92  # 92% of usable height (slightly reduced)
-        
-        window_width = int(primary_width * width_ratio)
-        window_height = int(usable_height * height_ratio)
+        window_width = int(rect.width() * width_ratio)
+        window_height = int(rect.height() * height_ratio)
         
         print(f"[DEBUG] Calculated window size: {window_width}x{window_height}")
-        print(f"[DEBUG] Primary width: {primary_width}, Usable height: {usable_height}")
+        print(f"[DEBUG] Screen dimensions: {rect.width()}x{rect.height()}")
         print(f"[DEBUG] Width ratio: {width_ratio}, Height ratio: {height_ratio}")
         
         # Apply size
-        master.geometry(f"{window_width}x{window_height}")
+        self.resize(window_width, window_height)
         
-        # Set minimum size as ratio too
-        min_width = int(primary_width * 0.5)  # 50% minimum of primary monitor
-        min_height = int(usable_height * 0.5)  # 50% minimum
-        master.minsize(min_width, min_height)
+        # Set minimum size (40% of screen as minimum)
+        min_width = int(rect.width() * 0.40)
+        min_height = int(rect.height() * 0.40)
+        self.setMinimumSize(min_width, min_height)
         
-        self.wm.center_window(master)
-        
-        # Setup fullscreen support
-        self.wm.setup_fullscreen_support(master)
+        # Center window on screen
+        self.move(rect.center() - self.rect().center())
         
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")
         
@@ -1332,21 +517,15 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin):
         self.auto_loaded_glossary_for_file = None
         self.manual_glossary_manually_loaded = False
         
-        self.master.protocol("WM_DELETE_WINDOW", self.on_close)
-        
         # Load icon
         ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
         if os.path.isfile(ico_path):
-            try: master.iconbitmap(ico_path)
-            except: pass
+            try:
+                self.setWindowIcon(QIcon(ico_path))
+            except:
+                pass
         
         self.logo_img = None
-        try:
-            from PIL import Image, ImageTk
-            self.logo_img = ImageTk.PhotoImage(Image.open(ico_path)) if os.path.isfile(ico_path) else None
-            if self.logo_img: master.iconphoto(False, self.logo_img)
-        except Exception as e:
-            logging.error(f"Failed to load logo: {e}")
         
         # Load config
         try:
@@ -1381,18 +560,14 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin):
         # before the settings UI creates these variables. This prevents attribute errors
         # when features (like glossary extraction) access them at startup.
         try:
-            self.openrouter_http_only_var = tk.BooleanVar(
-                value=self.config.get('openrouter_use_http_only', False)
-            )
+            self.openrouter_http_only_var = self.config.get('openrouter_use_http_only', False)
         except Exception:
-            self.openrouter_http_only_var = tk.BooleanVar(value=False)
+            self.openrouter_http_only_var = False
         
         try:
-            self.openrouter_accept_identity_var = tk.BooleanVar(
-                value=self.config.get('openrouter_accept_identity', False)
-            )
+            self.openrouter_accept_identity_var = self.config.get('openrouter_accept_identity', False)
         except Exception:
-            self.openrouter_accept_identity_var = tk.BooleanVar(value=False)
+            self.openrouter_accept_identity_var = False
             
         # Initialize retain_source_extension env var on startup
         try:
@@ -1400,55 +575,50 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin):
         except Exception:
             pass
         
-        if self.config.get('force_safe_ratios', False):
-            self.wm._force_safe_ratios = True
-            # Update button after GUI is created
-            self.master.after(500, lambda: (
-                self.safe_ratios_btn.config(text="📐 1080p: ON", bootstyle="success") 
-                if hasattr(self, 'safe_ratios_btn') else None
-            ))
+        # Force safe ratios is not needed in PySide6
+        # Window sizing is handled by Qt's layout system
     
-        # Initialize auto-update check and other variables
-        self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
-        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))
-        self.single_api_image_chunks_var = tk.BooleanVar(value=False)
-        self.enable_gemini_thinking_var = tk.BooleanVar(value=self.config.get('enable_gemini_thinking', True))
-        self.thinking_budget_var = tk.StringVar(value=str(self.config.get('thinking_budget', '-1')))
+        # Initialize auto-update check and other variables (converted from Tkinter to Python vars)
+        self.auto_update_check_var = self.config.get('auto_update_check', True)
+        self.force_ncx_only_var = self.config.get('force_ncx_only', True)
+        self.single_api_image_chunks_var = False
+        self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
+        self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         # NEW: GPT/OpenRouter reasoning controls
-        self.enable_gpt_thinking_var = tk.BooleanVar(value=self.config.get('enable_gpt_thinking', True))
-        self.gpt_reasoning_tokens_var = tk.StringVar(value=str(self.config.get('gpt_reasoning_tokens', '2000')))
-        self.gpt_effort_var = tk.StringVar(value=self.config.get('gpt_effort', 'medium'))
-        self.thread_delay_var = tk.StringVar(value=str(self.config.get('thread_submission_delay', 0.5)))
+        self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
+        self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
+        self.gpt_effort_var = self.config.get('gpt_effort', 'medium')
+        self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.5))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
-        self.disable_chapter_merging_var = tk.BooleanVar(value=self.config.get('disable_chapter_merging', False))
+        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', False)
         self.selected_files = []
         self.current_file_index = 0
-        self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
-        self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
-        self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2025-01-01-preview'))
+        self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
+        self.gemini_openai_endpoint_var = self.config.get('gemini_openai_endpoint', '')
+        self.azure_api_version_var = self.config.get('azure_api_version', '2025-01-01-preview')
         # Set initial Azure API version environment variable
         azure_version = self.config.get('azure_api_version', '2025-01-01-preview')
         os.environ['AZURE_API_VERSION'] = azure_version
         print(f"🔧 Initial Azure API Version set: {azure_version}")
-        self.use_fallback_keys_var = tk.BooleanVar(value=self.config.get('use_fallback_keys', False))
+        self.use_fallback_keys_var = self.config.get('use_fallback_keys', False)
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
-            self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))
-        self.use_legacy_csv_var = tk.BooleanVar(value=self.config.get('glossary_use_legacy_csv', False))
+            self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
+        self.use_legacy_csv_var = self.config.get('glossary_use_legacy_csv', False)
 
         
         # Initialize the variables with default values
-        self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
-        self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 2))
+        self.enable_parallel_extraction_var = self.config.get('enable_parallel_extraction', True)
+        self.extraction_workers_var = self.config.get('extraction_workers', 2)
         # GUI yield toggle - disabled by default for maximum speed
-        self.enable_gui_yield_var = tk.BooleanVar(value=self.config.get('enable_gui_yield', True))
+        self.enable_gui_yield_var = self.config.get('enable_gui_yield', True)
 
         # Set initial environment variable and ensure executor
-        if self.enable_parallel_extraction_var.get():
+        if self.enable_parallel_extraction_var:
             # Set workers for glossary extraction optimization
-            workers = self.extraction_workers_var.get()
+            workers = self.extraction_workers_var
             os.environ["EXTRACTION_WORKERS"] = str(workers)
             # Also enable glossary parallel processing explicitly
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "1"
@@ -1458,8 +628,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin):
             os.environ["GLOSSARY_PARALLEL_ENABLED"] = "0"
         
         # Set GUI yield environment variable (disabled by default for maximum speed)
-        os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var.get() else '0'
-        print(f"⚡ GUI yield: {'ENABLED (responsive)' if self.enable_gui_yield_var.get() else 'DISABLED (maximum speed)'}")
+        os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var else '0'
+        print(f"⚡ GUI yield: {'ENABLED (responsive)' if self.enable_gui_yield_var else 'DISABLED (maximum speed)'}")
         
         # Initialize the executor based on current settings
         try:
@@ -1469,39 +639,39 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin):
 
 
         # Initialize compression-related variables
-        self.enable_image_compression_var = tk.BooleanVar(value=self.config.get('enable_image_compression', False))
-        self.auto_compress_enabled_var = tk.BooleanVar(value=self.config.get('auto_compress_enabled', True))
-        self.target_image_tokens_var = tk.StringVar(value=str(self.config.get('target_image_tokens', 1000)))
-        self.image_format_var = tk.StringVar(value=self.config.get('image_compression_format', 'auto'))
-        self.webp_quality_var = tk.IntVar(value=self.config.get('webp_quality', 85))
-        self.jpeg_quality_var = tk.IntVar(value=self.config.get('jpeg_quality', 85))
-        self.png_compression_var = tk.IntVar(value=self.config.get('png_compression', 6))
-        self.max_image_dimension_var = tk.StringVar(value=str(self.config.get('max_image_dimension', 2048)))
-        self.max_image_size_mb_var = tk.StringVar(value=str(self.config.get('max_image_size_mb', 10)))
-        self.preserve_transparency_var = tk.BooleanVar(value=self.config.get('preserve_transparency', False)) 
-        self.preserve_original_format_var = tk.BooleanVar(value=self.config.get('preserve_original_format', False)) 
-        self.optimize_for_ocr_var = tk.BooleanVar(value=self.config.get('optimize_for_ocr', True))
-        self.progressive_encoding_var = tk.BooleanVar(value=self.config.get('progressive_encoding', True))
-        self.save_compressed_images_var = tk.BooleanVar(value=self.config.get('save_compressed_images', False))
-        self.image_chunk_overlap_var = tk.StringVar(value=str(self.config.get('image_chunk_overlap', '1')))
+        self.enable_image_compression_var = self.config.get('enable_image_compression', False)
+        self.auto_compress_enabled_var = self.config.get('auto_compress_enabled', True)
+        self.target_image_tokens_var = str(self.config.get('target_image_tokens', 1000))
+        self.image_format_var = self.config.get('image_compression_format', 'auto')
+        self.webp_quality_var = self.config.get('webp_quality', 85)
+        self.jpeg_quality_var = self.config.get('jpeg_quality', 85)
+        self.png_compression_var = self.config.get('png_compression', 6)
+        self.max_image_dimension_var = str(self.config.get('max_image_dimension', 2048))
+        self.max_image_size_mb_var = str(self.config.get('max_image_size_mb', 10))
+        self.preserve_transparency_var = self.config.get('preserve_transparency', False)
+        self.preserve_original_format_var = self.config.get('preserve_original_format', False)
+        self.optimize_for_ocr_var = self.config.get('optimize_for_ocr', True)
+        self.progressive_encoding_var = self.config.get('progressive_encoding', True)
+        self.save_compressed_images_var = self.config.get('save_compressed_images', False)
+        self.image_chunk_overlap_var = str(self.config.get('image_chunk_overlap', '1'))
 
         # Glossary-related variables (existing)
-        self.append_glossary_var = tk.BooleanVar(value=self.config.get('append_glossary', False))
-        self.glossary_min_frequency_var = tk.StringVar(value=str(self.config.get('glossary_min_frequency', 2)))
-        self.glossary_max_names_var = tk.StringVar(value=str(self.config.get('glossary_max_names', 50)))
-        self.glossary_max_titles_var = tk.StringVar(value=str(self.config.get('glossary_max_titles', 30)))
-        self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
-        self.glossary_max_text_size_var = tk.StringVar(value=str(self.config.get('glossary_max_text_size', 50000)))
-        self.glossary_chapter_split_threshold_var = tk.StringVar(value=self.config.get('glossary_chapter_split_threshold', '8192'))
-        self.glossary_max_sentences_var = tk.StringVar(value=str(self.config.get('glossary_max_sentences', 200)))
-        self.glossary_filter_mode_var = tk.StringVar(value=self.config.get('glossary_filter_mode', 'all'))
+        self.append_glossary_var = self.config.get('append_glossary', False)
+        self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
+        self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
+        self.glossary_max_titles_var = str(self.config.get('glossary_max_titles', 30))
+        self.glossary_batch_size_var = str(self.config.get('glossary_batch_size', 50))
+        self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 50000))
+        self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '8192')
+        self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 200))
+        self.glossary_filter_mode_var = self.config.get('glossary_filter_mode', 'all')
 
         
         # NEW: Additional glossary settings
-        self.strip_honorifics_var = tk.BooleanVar(value=self.config.get('strip_honorifics', True))
-        self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
-        self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.3)))
-        self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 5)))
+        self.strip_honorifics_var = self.config.get('strip_honorifics', True)
+        self.disable_honorifics_var = self.config.get('glossary_disable_honorifics_filter', False)
+        self.manual_temp_var = str(self.config.get('manual_glossary_temperature', 0.3))
+        self.manual_context_var = str(self.config.get('manual_context_limit', 5))
         
         # Custom glossary fields and entry types
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
@@ -1556,10 +726,10 @@ Text to analyze:
 {text_sample}""")  
         
         # Initialize custom API endpoint variables
-        self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
-        self.groq_base_url_var = tk.StringVar(value=self.config.get('groq_base_url', ''))
-        self.fireworks_base_url_var = tk.StringVar(value=self.config.get('fireworks_base_url', ''))
-        self.use_custom_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_custom_openai_endpoint', False))
+        self.openai_base_url_var = self.config.get('openai_base_url', '')
+        self.groq_base_url_var = self.config.get('groq_base_url', '')
+        self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
+        self.use_custom_openai_endpoint_var = self.config.get('use_custom_openai_endpoint', False)
         
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
@@ -1570,37 +740,34 @@ Text to analyze:
             # This ensures default prompts are in config
         except ImportError:
             print("Metadata translation UI not available")
-        self.batch_translate_headers_var = tk.BooleanVar(value=self.config.get('batch_translate_headers', False))
-        self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '400'))
-        self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
-        self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
-        self.ignore_header_var = tk.BooleanVar(value=self.config.get('ignore_header', False))
-        self.ignore_title_var = tk.BooleanVar(value=self.config.get('ignore_title', False))
-        self.attach_css_to_chapters_var = tk.BooleanVar(value=self.config.get('attach_css_to_chapters', False)) 
+        self.batch_translate_headers_var = self.config.get('batch_translate_headers', False)
+        self.headers_per_batch_var = self.config.get('headers_per_batch', '400')
+        self.update_html_headers_var = self.config.get('update_html_headers', True)
+        self.save_header_translations_var = self.config.get('save_header_translations', True)
+        self.ignore_header_var = self.config.get('ignore_header', False)
+        self.ignore_title_var = self.config.get('ignore_title', False)
+        self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
         
         # Retain exact source extension and disable 'response_' prefix
-        self.retain_source_extension_var = tk.BooleanVar(value=self.config.get('retain_source_extension', False))
+        self.retain_source_extension_var = self.config.get('retain_source_extension', False)
 
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
-        self.master.after(500, lambda: self.on_model_change() if hasattr(self, 'model_var') else None)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, lambda: self.on_model_change() if hasattr(self, 'model_var') else None)
         
         
         # Async processing settings
-        self.async_wait_for_completion_var = tk.BooleanVar(value=False)
-        self.async_poll_interval_var = tk.IntVar(value=60)
+        self.async_wait_for_completion_var = False
+        self.async_poll_interval_var = 60
         
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
-            self.enhanced_filtering_var = tk.StringVar(
-                value=self.config.get('enhanced_filtering', 'smart')
-            )
+            self.enhanced_filtering_var = self.config.get('enhanced_filtering', 'smart')
         
         # Preserve structure toggle
         if not hasattr(self, 'enhanced_preserve_structure_var'):
-            self.enhanced_preserve_structure_var = tk.BooleanVar(
-                value=self.config.get('enhanced_preserve_structure', True)
-            )
+            self.enhanced_preserve_structure_var = self.config.get('enhanced_preserve_structure', True)
              
         # Initialize update manager AFTER config is loaded
         try:
@@ -1613,7 +780,8 @@ Text to analyze:
             
             if auto_check_enabled:
                 print("[DEBUG] Scheduling update check for 5 seconds from now...")
-                self.master.after(5000, self._check_updates_on_startup)
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(5000, self._check_updates_on_startup)
             else:
                 print("[DEBUG] Auto-update check is disabled")
         except ImportError as e:
@@ -1888,50 +1056,41 @@ Text to analyze:
         if hasattr(self, 'update_manager') and self.update_manager:
             self._show_update_loading_and_check()
         else:
-            messagebox.showerror("Update Check", 
+            QMessageBox.critical(self, "Update Check", 
                                "Update manager is not available.\n"
                                "Please check the GitHub releases page manually:\n"
                                "https://github.com/Shirochi-stack/Glossarion/releases")
 
     def _show_update_loading_and_check(self):
         """Show animated loading dialog while checking for updates"""
-        import tkinter as tk
-        import tkinter.ttk as ttk
-        from PIL import Image, ImageTk
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QIcon, QPixmap
+        from PIL import Image
         import threading
         import os
         
         # Create loading dialog
-        loading_dialog = tk.Toplevel(self.master)
-        loading_dialog.title("Checking for Updates")
-        loading_dialog.geometry("300x150")
-        loading_dialog.resizable(False, False)
-        loading_dialog.transient(self.master)
-        loading_dialog.grab_set()
+        loading_dialog = QDialog(self)
+        loading_dialog.setWindowTitle("Checking for Updates")
+        loading_dialog.setFixedSize(300, 150)
+        loading_dialog.setModal(True)
         
         # Set the proper application icon for the dialog
         try:
-            # Use the same icon loading method as the main application
-            load_application_icon(loading_dialog, self.base_dir)
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                loading_dialog.setWindowIcon(QIcon(ico_path))
         except Exception as e:
             print(f"Could not load icon for loading dialog: {e}")
         
-        # Position dialog at mouse cursor
-        try:
-            mouse_x = self.master.winfo_pointerx()
-            mouse_y = self.master.winfo_pointery()
-            # Offset slightly so dialog doesn't cover cursor
-            loading_dialog.geometry("+%d+%d" % (mouse_x + 10, mouse_y + 10))
-        except:
-            # Fallback to center of main window if mouse position fails
-            loading_dialog.geometry("+%d+%d" % (
-                self.master.winfo_rootx() + 50,
-                self.master.winfo_rooty() + 50
-            ))
+        # Position dialog at center of parent
+        loading_dialog.move(self.geometry().center() - loading_dialog.rect().center())
         
-        # Create main frame
-        main_frame = ttk.Frame(loading_dialog, padding="20")
-        main_frame.pack(fill="both", expand=True)
+        # Create main layout
+        main_layout = QVBoxLayout(loading_dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)
         
         # Try to load and resize the icon (same approach as main GUI)
         icon_label = None
@@ -1939,50 +1098,46 @@ Text to analyze:
             ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
             if os.path.isfile(ico_path):
                 # Load and resize image
-                original_image = Image.open(ico_path)
-                # Resize to 48x48 for loading animation
-                resized_image = original_image.resize((48, 48), Image.Resampling.LANCZOS)
-                self.loading_icon = ImageTk.PhotoImage(resized_image)
-                
-                icon_label = ttk.Label(main_frame, image=self.loading_icon)
-                icon_label.pack(pady=(0, 10))
+                icon_pixmap = QPixmap(ico_path).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon_label = QLabel()
+                icon_label.setPixmap(icon_pixmap)
+                icon_label.setAlignment(Qt.AlignCenter)
+                main_layout.addWidget(icon_label)
         except Exception as e:
             print(f"Could not load loading icon: {e}")
         
         # Add loading text
-        loading_text = ttk.Label(main_frame, text="Checking for updates...", 
-                                font=('TkDefaultFont', 11))
-        loading_text.pack()
+        loading_text = QLabel("Checking for updates...")
+        loading_text.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(loading_text)
         
         # Add progress bar
-        progress_bar = ttk.Progressbar(main_frame, mode='indeterminate')
-        progress_bar.pack(pady=(10, 10), fill='x')
-        progress_bar.start(10)  # Start animation
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 0)  # Indeterminate mode
+        main_layout.addWidget(progress_bar)
         
         # Animation state
         self.loading_animation_active = True
         self.loading_rotation = 0
         
         def animate_icon():
-            """Animate the loading icon by rotating it"""
-            if not self.loading_animation_active or not icon_label:
+            """Animate the loading text"""
+            if not self.loading_animation_active:
                 return
                 
             try:
-                if hasattr(self, 'loading_icon'):
-                    # Simple text-based animation instead of rotation
-                    dots = "." * ((self.loading_rotation // 10) % 4)
-                    loading_text.config(text=f"Checking for updates{dots}")
-                    self.loading_rotation += 1
-                    
-                    # Schedule next animation frame
-                    loading_dialog.after(100, animate_icon)
+                # Simple text-based animation
+                dots = "." * ((self.loading_rotation // 10) % 4)
+                loading_text.setText(f"Checking for updates{dots}")
+                self.loading_rotation += 1
+                
+                # Schedule next animation frame
+                QTimer.singleShot(100, animate_icon)
             except:
                 pass  # Dialog might have been destroyed
         
-        # Start icon animation if we have an icon
-        if icon_label:
-            animate_icon()
+        # Start text animation
+        animate_icon()
         
         def check_updates_thread():
             """Run update check in background thread"""
@@ -1991,25 +1146,24 @@ Text to analyze:
                 self.update_manager.check_for_updates(silent=False, force_show=True)
             except Exception as e:
                 # Schedule error display on main thread
-                loading_dialog.after(0, lambda: self._show_update_error(str(e)))
+                QTimer.singleShot(0, lambda: self._show_update_error(str(e)))
             finally:
                 # Schedule cleanup on main thread
-                loading_dialog.after(0, cleanup_loading)
+                QTimer.singleShot(0, cleanup_loading)
         
         def cleanup_loading():
             """Clean up the loading dialog"""
             try:
                 self.loading_animation_active = False
-                progress_bar.stop()
-                loading_dialog.grab_release()
-                loading_dialog.destroy()
+                loading_dialog.close()
             except:
                 pass  # Dialog might already be destroyed
         
         def _show_update_error(error_msg):
             """Show update check error"""
             cleanup_loading()
-            messagebox.showerror("Update Check Failed", 
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Update Check Failed", 
                                f"Failed to check for updates:\n{error_msg}")
         
         # Start the update check in a separate thread
@@ -2021,7 +1175,10 @@ Text to analyze:
             self.loading_animation_active = False
             cleanup_loading()
         
-        loading_dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
+        loading_dialog.rejected.connect(on_dialog_close)
+        
+        # Show the dialog
+        loading_dialog.show()
                                
     def append_log_with_api_error_detection(self, message):
         """Enhanced log appending that detects and highlights API errors"""
@@ -2069,12 +1226,12 @@ Text to analyze:
         if operation_name != "manual" and not self.config.get('glossary_auto_backup', True):
             return True
         
-        if not self.current_glossary_data or not self.editor_file_var.get():
+        if not self.current_glossary_data or not self.editor_file_var:
             return True
         
         try:
             # Get the original glossary file path
-            original_path = self.editor_file_var.get()
+            original_path = self.editor_file_var
             original_dir = os.path.dirname(original_path)
             original_name = os.path.basename(original_path)
             
@@ -2110,8 +1267,10 @@ Text to analyze:
             # Log the actual error
             self.append_log(f"⚠️ Backup failed: {str(e)}")
             # Ask user if they want to continue anyway
-            return messagebox.askyesno("Backup Failed", 
-                                      f"Failed to create backup: {str(e)}\n\nContinue anyway?")
+            reply = QMessageBox.question(self, "Backup Failed", 
+                                      f"Failed to create backup: {str(e)}\n\nContinue anyway?",
+                                      QMessageBox.Yes | QMessageBox.No)
+            return reply == QMessageBox.Yes
 
     def get_current_epub_path(self):
         """Get the currently selected EPUB path from various sources"""
@@ -2124,7 +1283,7 @@ Text to analyze:
             # From config
             lambda: self.config.get('last_epub_path', None) if hasattr(self, 'config') else None,
             # From file path variable (if it exists)
-            lambda: self.epub_file_path.get() if hasattr(self, 'epub_file_path') and self.epub_file_path.get() else None,
+            lambda: self.epub_file_path if hasattr(self, 'epub_file_path') and self.epub_file_path else None,
             # From current translation
             lambda: getattr(self, 'current_epub_path', None),
         ]
@@ -2172,7 +1331,7 @@ Text to analyze:
     def open_manga_translator(self):
         """Open manga translator in a new window"""
         if not MANGA_SUPPORT:
-            messagebox.showwarning("Not Available", "Manga translation modules not found.")
+            QMessageBox.warning(self, "Not Available", "Manga translation modules not found.")
             return
         
         # Always open directly - model preloading will be handled inside the manga tab
@@ -2185,7 +1344,7 @@ Text to analyze:
             from PySide6.QtWidgets import QApplication, QDialog, QWidget, QVBoxLayout, QScrollArea
             from PySide6.QtCore import Qt
         except ImportError:
-            messagebox.showerror("Missing Dependency", 
+            QMessageBox.critical(self, "Missing Dependency", 
                                "PySide6 is required for manga translation. Please install it:\npip install PySide6")
             return
         
@@ -2333,11 +1492,12 @@ Recent translations to summarize:
             self.config['glossary_duplicate_key_mode'] = 'fuzzy'
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
-            self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))        
+            self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
         
         # Create all config variables with helper
         def create_var(var_type, key, default):
-            return var_type(value=self.config.get(key, default))
+            # For PySide6 conversion: just return the value directly
+            return self.config.get(key, default)
                 
         # Boolean variables
         bool_vars = [
@@ -2382,7 +1542,7 @@ Recent translations to summarize:
         ]
         
         for var_name, key, default in bool_vars:
-            setattr(self, var_name, create_var(tk.BooleanVar, key, default))
+            setattr(self, var_name, create_var(bool, key, default))
         
         # String variables
         str_vars = [
@@ -2410,12 +1570,10 @@ Recent translations to summarize:
         ]
         
         for var_name, key, default in str_vars:
-            setattr(self, var_name, create_var(tk.StringVar, key, str(default)))
+            setattr(self, var_name, create_var(str, key, str(default)))
         
         # NEW: Initialize extraction mode variable
-        self.extraction_mode_var = tk.StringVar(
-            value=self.config.get('extraction_mode', 'smart')
-        )
+        self.extraction_mode_var = self.config.get('extraction_mode', 'smart')
         
         self.book_title_prompt = self.config.get('book_title_prompt', 
             "Translate this book title to English while retaining any acronyms:")
@@ -2426,22 +1584,34 @@ Recent translations to summarize:
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
-        self.profile_var = tk.StringVar(value=active)
+        self.profile_var = active
         self.lang_var = self.profile_var
         
         # Detection mode
-        self.duplicate_detection_mode_var = tk.StringVar(value=self.config.get('duplicate_detection_mode', 'basic'))
+        self.duplicate_detection_mode_var = self.config.get('duplicate_detection_mode', 'basic')
 
     def _setup_gui(self):
         """Initialize all GUI components"""
-        self.frame = tb.Frame(self.master, padding=10)
-        self.frame.pack(fill=tk.BOTH, expand=True)
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
         
-        # Configure grid
+        # Create main layout (QGridLayout for precise control)
+        self.frame = QGridLayout(central_widget)
+        self.frame.setContentsMargins(10, 10, 10, 10)
+        self.frame.setSpacing(5)
+        
+        # Configure grid column stretches
         for i in range(5):
-            self.frame.grid_columnconfigure(i, weight=1 if i in [1, 3] else 0)
+            self.frame.setColumnStretch(i, 1 if i in [1, 3] else 0)
+        
+        # Configure grid row stretches and minimum heights
         for r in range(12):
-            self.frame.grid_rowconfigure(r, weight=1 if r in [9, 10] else 0, minsize=200 if r == 9 else 150 if r == 10 else 0)
+            self.frame.setRowStretch(r, 1 if r in [9, 10] else 0)
+            if r == 9:
+                self.frame.setRowMinimumHeight(r, 200)
+            elif r == 10:
+                self.frame.setRowMinimumHeight(r, 150)
         
         # Create UI elements using helper methods
         self.create_file_section()
@@ -2451,12 +1621,16 @@ Recent translations to summarize:
         self._create_api_section()
         self._create_prompt_section()
         self._create_log_section()
-        self._make_bottom_toolbar()
+        
+        # Add bottom toolbar to layout
+        bottom_toolbar = self._make_bottom_toolbar()
+        self.frame.addWidget(bottom_toolbar, 11, 0, 1, 5)  # Span all 5 columns at row 11
         
         # Apply token limit state
         if self.token_limit_disabled:
-            self.token_limit_entry.config(state=tk.DISABLED)
-            self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
+            self.token_limit_entry.setEnabled(False)
+            self.toggle_token_btn.setText("Enable Input Token Limit")
+            self.toggle_token_btn.setStyleSheet("background-color: #28a745;")  # success-outline
         
         self.on_profile_select()
         self.append_log("🚀 Glossarion v5.2.0 - Ready to use!")
@@ -2481,90 +1655,84 @@ Recent translations to summarize:
         self.current_file_index = 0
         
         # File label
-        tb.Label(self.frame, text="Input File(s):").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        file_label = QLabel("Input File(s):")
+        self.frame.addWidget(file_label, 0, 0, Qt.AlignLeft)
         
         # File entry
-        self.entry_epub = tb.Entry(self.frame, width=50)
-        self.entry_epub.grid(row=0, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
-        self.entry_epub.insert(0, "No file selected")
+        self.entry_epub = QLineEdit()
+        self.entry_epub.setText("No file selected")
+        self.entry_epub.setMinimumWidth(400)
+        self.frame.addWidget(self.entry_epub, 0, 1, 1, 3)  # row, col, rowspan, colspan
+        
+        # Create browse menu button with dropdown
+        self.btn_browse_menu = QPushButton("Browse ▼")
+        self.btn_browse_menu.setMinimumWidth(100)
+        self.btn_browse_menu.setStyleSheet("background-color: #007bff; color: white;")  # primary
         
         # Create browse menu
-        self.browse_menu = tk.Menu(self.master, tearoff=0, font=('Arial', 12))
-        self.browse_menu.add_command(label="📄 Select Files", command=self.browse_files)
-        self.browse_menu.add_command(label="📁 Select Folder", command=self.browse_folder)
-        self.browse_menu.add_separator()
-        self.browse_menu.add_command(label="🗑️ Clear Selection", command=self.clear_file_selection)
+        self.browse_menu = QMenu(self)
+        self.browse_menu.addAction("📄 Select Files", self.browse_files)
+        self.browse_menu.addAction("📁 Select Folder", self.browse_folder)
+        self.browse_menu.addSeparator()
+        self.browse_menu.addAction("🗑️ Clear Selection", self.clear_file_selection)
         
-        # Create browse menu button
-        self.btn_browse_menu = tb.Menubutton(
-            self.frame,
-            text="Browse ▼",
-            menu=self.browse_menu,
-            width=12,
-            bootstyle="primary"
-        )
-        self.btn_browse_menu.grid(row=0, column=4, sticky=tk.EW, padx=5, pady=5)
+        # Attach menu to button
+        self.btn_browse_menu.setMenu(self.browse_menu)
+        self.frame.addWidget(self.btn_browse_menu, 0, 4)
         
         # File selection status label (shows file count and details)
-        self.file_status_label = tb.Label(
-            self.frame,
-            text="",
-            font=('Arial', 9),
-            bootstyle="info"
-        )
-        self.file_status_label.grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
+        self.file_status_label = QLabel("")
+        self.file_status_label.setStyleSheet("color: #17a2b8; font-size: 9pt;")
+        self.frame.addWidget(self.file_status_label, 1, 1, 1, 3, Qt.AlignLeft)
         
         # Google Cloud Credentials button
-        self.gcloud_button = tb.Button(
-            self.frame, 
-            text="GCloud Creds", 
-            command=self.select_google_credentials, 
-            width=12,
-            state=tk.DISABLED,
-            bootstyle="secondary"
-        )
-        self.gcloud_button.grid(row=2, column=4, sticky=tk.EW, padx=5, pady=5)
+        self.gcloud_button = QPushButton("GCloud Creds")
+        self.gcloud_button.clicked.connect(self.select_google_credentials)
+        self.gcloud_button.setMinimumWidth(100)
+        self.gcloud_button.setEnabled(False)
+        self.gcloud_button.setStyleSheet("background-color: #6c757d; color: white;")  # secondary
+        self.frame.addWidget(self.gcloud_button, 2, 4)
         
         # Vertex AI Location text entry
-        self.vertex_location_var = tk.StringVar(value=self.config.get('vertex_ai_location', 'us-east5'))
-        self.vertex_location_entry = tb.Entry(
-            self.frame,
-            textvariable=self.vertex_location_var,
-            width=12
-        )
-        self.vertex_location_entry.grid(row=3, column=4, sticky=tk.EW, padx=5, pady=5)
+        self.vertex_location_var = self.config.get('vertex_ai_location', 'us-east5')
+        self.vertex_location_entry = QLineEdit(self.vertex_location_var)
+        self.vertex_location_entry.setMinimumWidth(100)
+        self.frame.addWidget(self.vertex_location_entry, 3, 4)
         
         # Hide by default
-        self.vertex_location_entry.grid_remove()
+        self.vertex_location_entry.hide()
         
         # Status label for credentials
-        self.gcloud_status_label = tb.Label(
-            self.frame,
-            text="",
-            font=('Arial', 9),
-            bootstyle="secondary"
-        )
-        self.gcloud_status_label.grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
+        self.gcloud_status_label = QLabel("")
+        self.gcloud_status_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
+        self.frame.addWidget(self.gcloud_status_label, 2, 1, 1, 3, Qt.AlignLeft)
         
         # Optional: Add checkbox for enhanced functionality
-        options_frame = tb.Frame(self.frame)
-        options_frame.grid(row=1, column=4, columnspan=1, sticky=tk.EW, padx=5, pady=5)
+        options_frame = QWidget()
+        options_layout = QHBoxLayout(options_frame)
+        options_layout.setContentsMargins(0, 0, 0, 0)
         
         # Deep scan option for folders
-        self.deep_scan_var = tk.BooleanVar(value=False)
-        self.deep_scan_check = tb.Checkbutton(
-            options_frame,
-            text="include subfolders",
-            variable=self.deep_scan_var,
-            bootstyle="round-toggle"
-        )
-        self.deep_scan_check.pack(side='left')
+        self.deep_scan_var = False
+        self.deep_scan_check = QCheckBox("include subfolders")
+        self.deep_scan_check.setChecked(self.deep_scan_var)
+        self.deep_scan_check.stateChanged.connect(self._on_deep_scan_changed)
+        options_layout.addWidget(self.deep_scan_check)
+        options_layout.addStretch()
+        
+        self.frame.addWidget(options_frame, 1, 4)
+    
+    def _on_deep_scan_changed(self, state):
+        """Handle deep scan checkbox state change"""
+        self.deep_scan_var = (state == Qt.Checked)
 
     def select_google_credentials(self):
         """Select Google Cloud credentials JSON file"""
-        filename = filedialog.askopenfilename(
-            title="Select Google Cloud Credentials JSON",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON",
+            "",
+            "JSON files (*.json);;All files (*.*)"
         )
         
         if filename:
@@ -2578,40 +1746,41 @@ Recent translations to summarize:
                         self.save_config()
                         
                         # Update UI
-                        self.gcloud_status_label.config(
-                            text=f"✓ Credentials: {os.path.basename(filename)} (Project: {creds_data.get('project_id', 'Unknown')})",
-                            foreground='green'
+                        self.gcloud_status_label.setText(
+                            f"✓ Credentials: {os.path.basename(filename)} (Project: {creds_data.get('project_id', 'Unknown')})"
                         )
+                        self.gcloud_status_label.setStyleSheet("color: green; font-size: 9pt;")
                         
                         # Set environment variable for child processes
                         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = filename
                         
                         self.append_log(f"Google Cloud credentials loaded: {os.path.basename(filename)}")
                     else:
-                        messagebox.showerror(
+                        QMessageBox.critical(
+                            self,
                             "Error", 
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
 
-    def on_model_change(self, event=None):
+    def on_model_change(self, index=None):
         """Handle model selection change from dropdown or manual input"""
         # Get the current model value (from dropdown or manually typed)
-        model = self.model_var.get()
+        model = self.model_var
         
         # Show Google Cloud Credentials button for Vertex AI models AND Google Translate
         needs_google_creds = False
         
         if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
             needs_google_creds = True
-            self.vertex_location_entry.grid()  # Show location selector for Vertex
+            self.vertex_location_entry.show()  # Show location selector for Vertex
         elif model == 'google-translate':
             needs_google_creds = True
-            self.vertex_location_entry.grid_remove()  # Hide location selector for Google Translate
+            self.vertex_location_entry.hide()  # Hide location selector for Google Translate
         
         if needs_google_creds:
-            self.gcloud_button.config(state=tk.NORMAL)
+            self.gcloud_button.setEnabled(True)
             
             # Check if credentials are already loaded
             if self.config.get('google_cloud_credentials'):
@@ -2628,20 +1797,14 @@ Recent translations to summarize:
                             else:
                                 status_text = f"✓ Credentials: {os.path.basename(creds_path)} (Project: {project_id})"
                             
-                            self.gcloud_status_label.config(
-                                text=status_text,
-                                foreground='green'
-                            )
+                            self.gcloud_status_label.setText(status_text)
+                            self.gcloud_status_label.setStyleSheet("color: green; font-size: 9pt;")
                     except:
-                        self.gcloud_status_label.config(
-                            text="⚠ Error reading credentials",
-                            foreground='red'
-                        )
+                        self.gcloud_status_label.setText("⚠ Error reading credentials")
+                        self.gcloud_status_label.setStyleSheet("color: red; font-size: 9pt;")
                 else:
-                    self.gcloud_status_label.config(
-                        text="⚠ Credentials file not found",
-                        foreground='red'
-                    )
+                    self.gcloud_status_label.setText("⚠ Credentials file not found")
+                    self.gcloud_status_label.setStyleSheet("color: red; font-size: 9pt;")
             else:
                 # Different prompts for different services
                 if model == 'google-translate':
@@ -2649,450 +1812,426 @@ Recent translations to summarize:
                 else:
                     warning_text = "⚠ No Google Cloud credentials selected"
                 
-                self.gcloud_status_label.config(
-                    text=warning_text,
-                    foreground='orange'
-                )
+                self.gcloud_status_label.setText(warning_text)
+                self.gcloud_status_label.setStyleSheet("color: orange; font-size: 9pt;")
         else:
             # Not a Google service, hide everything
-            self.gcloud_button.config(state=tk.DISABLED)
-            self.vertex_location_entry.grid_remove()
-            self.gcloud_status_label.config(text="")
+            self.gcloud_button.setEnabled(False)
+            self.vertex_location_entry.hide()
+            self.gcloud_status_label.setText("")
 
+    # PySide6 helper method for model text changes
+    def _on_model_text_changed(self, text):
+        """Handle model combobox text changes"""
+        # Update the model_var to the current text
+        self.model_var = text
+        
+        # Check for POE model
+        if hasattr(self, '_check_poe_model'):
+            self._check_poe_model()
+    
     # Also add this to bind manual typing events to the combobox
     def setup_model_combobox_bindings(self):
         """Setup bindings for manual model input in combobox with autocomplete"""
-        # Bind to key release events for live filtering and autofill
-        self.model_combo.bind('<KeyRelease>', self._on_model_combo_keyrelease)
-        # Commit best match on Enter
-        self.model_combo.bind('<Return>', self._commit_model_autocomplete)
-        # Also bind to FocusOut to catch when user clicks away after typing
-        self.model_combo.bind('<FocusOut>', self.on_model_change)
-        # Keep the existing binding for dropdown selection
-        self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
+        # PySide6: QComboBox already has built-in autocomplete
+        # We can set the completer for better UX
+        from PySide6.QtWidgets import QCompleter
+        from PySide6.QtCore import Qt
         
-    def _on_model_combo_keyrelease(self, event=None):
-        """Combobox type-to-search without filtering values.
-        - Keeps the full model list intact; does not replace the Combobox values.
-        - Finds the best match and, if the dropdown is open, scrolls/highlights to it.
-        - Does NOT auto-fill text on deletion or mid-string edits (and by default avoids autofill).
-        - Calls on_model_change only when the entry text actually changes.
-        """
-        try:
-            combo = self.model_combo
-            typed = combo.get()
-            prev = getattr(self, '_model_prev_text', '')
-            keysym = (getattr(event, 'keysym', '') or '').lower()
-
-            # Navigation/commit keys: don't interfere; Combobox handles selection events
-            if keysym in {'up', 'down', 'left', 'right', 'return', 'escape', 'tab'}:
-                return
-
-            # Ensure we have the full source list
-            if not hasattr(self, '_model_all_values') or not self._model_all_values:
-                try:
-                    self._model_all_values = list(combo['values'])
-                except Exception:
-                    self._model_all_values = []
-
-            source = self._model_all_values
-
-            # Compute match set without altering combobox values
-            first_match = None
-            if typed:
-                lowered = typed.lower()
-                pref = [v for v in source if v.lower().startswith(lowered)]
-                cont = [v for v in source if lowered in v.lower()] if not pref else []
-                if pref:
-                    first_match = pref[0]
-                elif cont:
-                    first_match = cont[0]
-
-            # Decide whether to perform any autofill: default to no text autofill
-            grew = len(typed) > len(prev) and typed.startswith(prev)
-            is_deletion = keysym in {'backspace', 'delete'} or len(typed) < len(prev)
-            try:
-                at_end = combo.index(tk.INSERT) == len(typed)
-            except Exception:
-                at_end = True
-            try:
-                has_selection = combo.selection_present()
-            except Exception:
-                has_selection = False
-
-            # Gentle autofill only when appending at the end (not on delete or mid-string edits)
-            do_autofill_text = first_match is not None and grew and at_end and not has_selection and not is_deletion
-
-            if do_autofill_text:
-                # Only complete if it's a true prefix match to avoid surprising jumps
-                if first_match.lower().startswith(typed.lower()) and first_match != typed:
-                    combo.set(first_match)
-                    try:
-                        combo.icursor(len(typed))
-                        combo.selection_range(len(typed), len(first_match))
-                    except Exception:
-                        pass
-
-            # If we have a match and the dropdown is open, scroll/highlight it (values intact)
-            if first_match:
-                self._scroll_model_list_to_value(first_match)
-
-            # Remember current text for next event
-            self._model_prev_text = typed
-
-            # Only trigger change logic when the text actually changed
-            if typed != prev:
-                self.on_model_change()
-        except Exception as e:
-            try:
-                logging.debug(f"Model combobox autocomplete error: {e}")
-            except Exception:
-                pass
-
-    def _commit_model_autocomplete(self, event=None):
-        """On Enter, commit to the best matching model (prefix preferred, then contains)."""
-        try:
-            combo = self.model_combo
-            typed = combo.get()
-            source = getattr(self, '_model_all_values', []) or list(combo['values'])
-            match = None
-            if typed:
-                lowered = typed.lower()
-                pref = [v for v in source if v.lower().startswith(lowered)]
-                cont = [v for v in source if lowered in v.lower()] if not pref else []
-                match = pref[0] if pref else (cont[0] if cont else None)
-            if match and match != typed:
-                combo.set(match)
-            # Move cursor to end and clear any selection
-            try:
-                combo.icursor('end')
-                try:
-                    combo.selection_clear()
-                except Exception:
-                    combo.selection_range(0, 0)
-            except Exception:
-                pass
-            # Update prev text and trigger change
-            self._model_prev_text = combo.get()
-            self.on_model_change()
-        except Exception as e:
-            try:
-                logging.debug(f"Model combobox enter-commit error: {e}")
-            except Exception:
-                pass
-        return "break"
-
-    def _ensure_model_dropdown_open(self):
-        """Open the combobox dropdown if it isn't already visible."""
-        try:
-            tkobj = self.model_combo.tk
-            popdown = tkobj.eval(f'ttk::combobox::PopdownWindow {self.model_combo._w}')
-            viewable = int(tkobj.eval(f'winfo viewable {popdown}'))
-            if not viewable:
-                # Prefer internal Post proc
-                tkobj.eval(f'ttk::combobox::Post {self.model_combo._w}')
-        except Exception:
-            # Fallback: try keyboard event to open
-            try:
-                self.model_combo.event_generate('<Down>')
-            except Exception:
-                pass
-
-    def _scroll_model_list_to_value(self, value: str):
-        """If the combobox dropdown is open, scroll to and highlight the given value.
-        Uses Tk internals for ttk::combobox to access the popdown listbox.
-        Safe no-op if anything fails.
-        """
-        try:
-            values = getattr(self, '_model_all_values', []) or list(self.model_combo['values'])
-            if value not in values:
-                return
-            index = values.index(value)
-            # Resolve the internal popdown listbox for this combobox
-            popdown = self.model_combo.tk.eval(f'ttk::combobox::PopdownWindow {self.model_combo._w}')
-            listbox = f'{popdown}.f.l'
-            tkobj = self.model_combo.tk
-            # Scroll and highlight the item
-            tkobj.call(listbox, 'see', index)
-            tkobj.call(listbox, 'selection', 'clear', 0, 'end')
-            tkobj.call(listbox, 'selection', 'set', index)
-            tkobj.call(listbox, 'activate', index)
-        except Exception:
-            # Dropdown may be closed or internals unavailable; ignore
-            pass
+        completer = QCompleter(self._model_all_values)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        self.model_combo.setCompleter(completer)
+        
+    # Note: These Tkinter-specific methods are replaced by PySide6's QCompleter
+    # which provides built-in autocomplete functionality
     def _create_model_section(self):
         """Create model selection section"""
-        tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        # Model label
+        model_label = QLabel("Model:")
+        self.frame.addWidget(model_label, 1, 0, Qt.AlignLeft)
+        
+        # Get default model and model list
         default_model = self.config.get('model', 'gemini-2.0-flash')
-        self.model_var = tk.StringVar(value=default_model)
+        self.model_var = default_model
         models = get_model_options()
         self._model_all_values = models
-        self.model_combo = tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal")
-        self.model_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
+        
+        # Create editable combobox
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.addItems(models)
+        self.model_combo.setCurrentText(default_model)
+        self.model_combo.setMinimumWidth(200)
+        self.frame.addWidget(self.model_combo, 1, 1, 1, 2)  # row, col, rowspan, colspan
         
         # Track previous text to make autocomplete less aggressive
-        self._model_prev_text = self.model_var.get()
+        self._model_prev_text = default_model
         
-        self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
+        # Connect signals
+        self.model_combo.currentIndexChanged.connect(self.on_model_change)
+        self.model_combo.editTextChanged.connect(self._on_model_text_changed)
+        
+        # Setup autocomplete bindings
         self.setup_model_combobox_bindings()
-        self.model_var.trace('w', self._check_poe_model)
+        
+        # Initial check
         self.on_model_change()
     
     def _create_profile_section(self):
         """Create profile/profile section"""
-        tb.Label(self.frame, text="Profile:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
-        self.profile_menu = tb.Combobox(self.frame, textvariable=self.profile_var,
-                                       values=list(self.prompt_profiles.keys()), state="normal")
-        self.profile_menu.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=5)
-        self.profile_menu.bind("<<ComboboxSelected>>", self.on_profile_select)
-        self.profile_menu.bind("<Return>", self.on_profile_select)
-        tb.Button(self.frame, text="Save Profile", command=self.save_profile, width=14).grid(row=2, column=2, sticky=tk.W, padx=5, pady=5)
-        tb.Button(self.frame, text="Delete Profile", command=self.delete_profile, width=14).grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
+        # Profile label
+        profile_label = QLabel("Profile:")
+        self.frame.addWidget(profile_label, 2, 0, Qt.AlignLeft)
+        
+        # Profile combobox
+        self.profile_menu = QComboBox()
+        self.profile_menu.setEditable(True)
+        self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+        self.profile_menu.setCurrentText(self.profile_var)
+        self.profile_menu.setMinimumWidth(150)
+        self.frame.addWidget(self.profile_menu, 2, 1)
+        
+        # Connect signals for profile selection
+        self.profile_menu.currentIndexChanged.connect(lambda: self.on_profile_select())
+        self.profile_menu.lineEdit().returnPressed.connect(lambda: self.on_profile_select())
+        
+        # Save Profile button
+        save_profile_btn = QPushButton("Save Profile")
+        save_profile_btn.clicked.connect(self.save_profile)
+        save_profile_btn.setMinimumWidth(100)
+        self.frame.addWidget(save_profile_btn, 2, 2)
+        
+        # Delete Profile button
+        delete_profile_btn = QPushButton("Delete Profile")
+        delete_profile_btn.clicked.connect(self.delete_profile)
+        delete_profile_btn.setMinimumWidth(100)
+        self.frame.addWidget(delete_profile_btn, 2, 3)
     
     def _create_settings_section(self):
         """Create all settings controls"""
         # Threading delay (with extra spacing at top)
-        tb.Label(self.frame, text="Threading delay (s):").grid(row=3, column=0, sticky=tk.W, padx=5, pady=(15, 5))  # (top, bottom)
-        self.thread_delay_entry = tb.Entry(self.frame, textvariable=self.thread_delay_var, width=8)
-        self.thread_delay_entry.grid(row=3, column=1, sticky=tk.W, padx=5, pady=(15, 5))  # Match the label padding
+        thread_delay_label = QLabel("Threading delay (s):")
+        self.frame.addWidget(thread_delay_label, 3, 0, Qt.AlignLeft)
+        
+        self.thread_delay_entry = QLineEdit()
+        self.thread_delay_entry.setText(str(self.thread_delay_var))
+        self.thread_delay_entry.setMaximumWidth(80)
+        self.frame.addWidget(self.thread_delay_entry, 3, 1, Qt.AlignLeft)
 
         # API delay (left side)
-        tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
-        self.delay_entry = tb.Entry(self.frame, width=8)
-        self.delay_entry.insert(0, str(self.config.get('delay', 2)))
-        self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        api_delay_label = QLabel("API call delay (s):")
+        self.frame.addWidget(api_delay_label, 4, 0, Qt.AlignLeft)
+        
+        self.delay_entry = QLineEdit()
+        self.delay_entry.setText(str(self.config.get('delay', 2)))
+        self.delay_entry.setMaximumWidth(80)
+        self.frame.addWidget(self.delay_entry, 4, 1, Qt.AlignLeft)
 
         # Optional help text (spanning both columns)
-        tb.Label(self.frame, text="(0 = simultaneous)", 
-                 font=('TkDefaultFont', 8), foreground='gray').grid(row=3, column=2, sticky=tk.W, padx=5, pady=(15, 5))
+        help_label = QLabel("(0 = simultaneous)")
+        help_label.setStyleSheet("color: gray; font-size: 8pt;")
+        self.frame.addWidget(help_label, 3, 2, Qt.AlignLeft)
         
         # Chapter Range
-        tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
-        self.chapter_range_entry = tb.Entry(self.frame, width=12)
-        self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
-        self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        chapter_range_label = QLabel("Chapter range (e.g., 5-10):")
+        self.frame.addWidget(chapter_range_label, 5, 0, Qt.AlignLeft)
+        
+        self.chapter_range_entry = QLineEdit()
+        self.chapter_range_entry.setText(self.config.get('chapter_range', ''))
+        self.chapter_range_entry.setMaximumWidth(120)
+        self.frame.addWidget(self.chapter_range_entry, 5, 1, Qt.AlignLeft)
         
         # Token limit
-        tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
-        self.token_limit_entry = tb.Entry(self.frame, width=8)
-        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 200000)))
-        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        token_limit_label = QLabel("Input Token limit:")
+        self.frame.addWidget(token_limit_label, 6, 0, Qt.AlignLeft)
         
-        self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
-                                         command=self.toggle_token_limit, bootstyle="danger-outline", width=21)
-        self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        self.token_limit_entry = QLineEdit()
+        self.token_limit_entry.setText(str(self.config.get('token_limit', 200000)))
+        self.token_limit_entry.setMaximumWidth(80)
+        self.frame.addWidget(self.token_limit_entry, 6, 1, Qt.AlignLeft)
+        
+        self.toggle_token_btn = QPushButton("Disable Input Token Limit")
+        self.toggle_token_btn.clicked.connect(self.toggle_token_limit)
+        self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white;")
+        self.toggle_token_btn.setMinimumWidth(150)
+        self.frame.addWidget(self.toggle_token_btn, 7, 1, Qt.AlignLeft)
         
         # Contextual Translation (right side, row 3) - with extra padding on top
-        tb.Checkbutton(self.frame, text="Contextual Translation", variable=self.contextual_var,
-                      command=self._on_contextual_toggle).grid(
-            row=3, column=2, columnspan=2, sticky=tk.W, padx=5, pady=(25, 5))  # Added extra top padding
+        self.contextual_checkbox = QCheckBox("Contextual Translation")
+        self.contextual_checkbox.setChecked(self.contextual_var)
+        self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
+        self.frame.addWidget(self.contextual_checkbox, 3, 2, 1, 2, Qt.AlignLeft)
         
         # Translation History Limit (row 4)
-        self.trans_history_label = tb.Label(self.frame, text="Translation History Limit:")
-        self.trans_history_label.grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
-        self.trans_history = tb.Entry(self.frame, width=6)
-        self.trans_history.insert(0, str(self.config.get('translation_history_limit', 2)))
-        self.trans_history.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
+        self.trans_history_label = QLabel("Translation History Limit:")
+        self.frame.addWidget(self.trans_history_label, 4, 2, Qt.AlignLeft)
+        
+        self.trans_history = QLineEdit()
+        self.trans_history.setText(str(self.config.get('translation_history_limit', 2)))
+        self.trans_history.setMaximumWidth(60)
+        self.frame.addWidget(self.trans_history, 4, 3, Qt.AlignLeft)
         
         # Rolling History (row 5)
-        self.rolling_checkbox = tb.Checkbutton(self.frame, text="Rolling History Window", variable=self.translation_history_rolling_var,
-                      bootstyle="round-toggle")
-        self.rolling_checkbox.grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
-        self.rolling_history_desc = tk.Label(self.frame, text="(Keep recent history instead of purging)",
-                font=('TkDefaultFont', 11), fg='gray')
-        self.rolling_history_desc.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
+        self.rolling_checkbox = QCheckBox("Rolling History Window")
+        self.rolling_checkbox.setChecked(self.translation_history_rolling_var)
+        self.frame.addWidget(self.rolling_checkbox, 5, 2, Qt.AlignLeft)
+        
+        self.rolling_history_desc = QLabel("(Keep recent history instead of purging)")
+        self.rolling_history_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        self.frame.addWidget(self.rolling_history_desc, 5, 3, Qt.AlignLeft)
         
         # Temperature (row 6)
-        tb.Label(self.frame, text="Temperature:").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
-        self.trans_temp = tb.Entry(self.frame, width=6)
-        self.trans_temp.insert(0, str(self.config.get('translation_temperature', 0.3)))
-        self.trans_temp.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
+        temp_label = QLabel("Temperature:")
+        self.frame.addWidget(temp_label, 6, 2, Qt.AlignLeft)
+        
+        self.trans_temp = QLineEdit()
+        self.trans_temp.setText(str(self.config.get('translation_temperature', 0.3)))
+        self.trans_temp.setMaximumWidth(60)
+        self.frame.addWidget(self.trans_temp, 6, 3, Qt.AlignLeft)
         
         # Batch Translation (row 7)
-        self.batch_checkbox = tb.Checkbutton(self.frame, text="Batch Translation", variable=self.batch_translation_var,
-                      bootstyle="round-toggle")
-        self.batch_checkbox.grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
-        self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
-        self.batch_size_entry.grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
+        self.batch_checkbox = QCheckBox("Batch Translation")
+        self.batch_checkbox.setChecked(self.batch_translation_var)
+        self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
+        self.frame.addWidget(self.batch_checkbox, 7, 2, Qt.AlignLeft)
         
-        # Set batch entry state
-        self.batch_size_entry.config(state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED)
-        self.batch_translation_var.trace('w', lambda *args: self.batch_size_entry.config(
-            state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED))
+        self.batch_size_entry = QLineEdit()
+        self.batch_size_entry.setText(str(self.batch_size_var))
+        self.batch_size_entry.setMaximumWidth(60)
+        self.frame.addWidget(self.batch_size_entry, 7, 3, Qt.AlignLeft)
         
-        # Hidden entries for compatibility
-        self.title_trim = tb.Entry(self.frame, width=6)
-        self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
-        self.group_trim = tb.Entry(self.frame, width=6)
-        self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
-        self.traits_trim = tb.Entry(self.frame, width=6)
-        self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
-        self.refer_trim = tb.Entry(self.frame, width=6)
-        self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
-        self.loc_trim = tb.Entry(self.frame, width=6)
-        self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
+        # Set batch entry initial state
+        self.batch_size_entry.setEnabled(self.batch_translation_var)
+        
+        # Hidden entries for compatibility (not displayed, just storing values)
+        self.title_trim = QLineEdit()
+        self.title_trim.setText(str(self.config.get('title_trim_count', 1)))
+        self.title_trim.setMaximumWidth(60)
+        self.title_trim.hide()
+        
+        self.group_trim = QLineEdit()
+        self.group_trim.setText(str(self.config.get('group_affiliation_trim_count', 1)))
+        self.group_trim.setMaximumWidth(60)
+        self.group_trim.hide()
+        
+        self.traits_trim = QLineEdit()
+        self.traits_trim.setText(str(self.config.get('traits_trim_count', 1)))
+        self.traits_trim.setMaximumWidth(60)
+        self.traits_trim.hide()
+        
+        self.refer_trim = QLineEdit()
+        self.refer_trim.setText(str(self.config.get('refer_trim_count', 1)))
+        self.refer_trim.setMaximumWidth(60)
+        self.refer_trim.hide()
+        
+        self.loc_trim = QLineEdit()
+        self.loc_trim.setText(str(self.config.get('locations_trim_count', 1)))
+        self.loc_trim.setMaximumWidth(60)
+        self.loc_trim.hide()
         
         # Set initial state based on contextual translation
         self._on_contextual_toggle()
 
-    def _on_contextual_toggle(self):
+    def _on_contextual_toggle(self, state=None):
         """Handle contextual translation toggle - enable/disable related controls"""
-        is_contextual = self.contextual_var.get()
+        # If called with a state (Qt.CheckState), update the var
+        if state is not None:
+            self.contextual_var = (state == Qt.Checked)
         
-        # Disable controls when contextual is ON, enable when OFF
-        state = tk.NORMAL if is_contextual else tk.DISABLED
+        is_contextual = self.contextual_var
         
         # Disable/enable translation history limit entry and gray out label
-        self.trans_history.config(state=state)
-        self.trans_history_label.config(foreground='white' if is_contextual else 'gray')
+        self.trans_history.setEnabled(is_contextual)
+        label_color = 'white' if is_contextual else 'gray'
+        self.trans_history_label.setStyleSheet(f"color: {label_color};")
         
         # Disable/enable rolling history checkbox and gray out description
-        self.rolling_checkbox.config(state=state)
-        self.rolling_history_desc.config(foreground='gray' if is_contextual else '#404040')
+        self.rolling_checkbox.setEnabled(is_contextual)
+        desc_color = 'gray' if is_contextual else '#404040'
+        self.rolling_history_desc.setStyleSheet(f"color: {desc_color}; font-size: 9pt;")
+    
+    def _on_batch_toggle(self, state=None):
+        """Handle batch translation toggle - enable/disable batch size entry"""
+        # If called with a state (Qt.CheckState), update the var
+        if state is not None:
+            self.batch_translation_var = (state == Qt.Checked)
+        
+        # Enable/disable batch size entry based on checkbox state
+        self.batch_size_entry.setEnabled(self.batch_translation_var)
+    
+    def _on_remove_artifacts_toggle(self, state=None):
+        """Handle Remove AI Artifacts toggle"""
+        # If called with a state (Qt.CheckState), update the var
+        if state is not None:
+            self.REMOVE_AI_ARTIFACTS_var = (state == Qt.Checked)
     
     def _create_api_section(self):
         """Create API key section"""
-        self.api_key_label = tb.Label(self.frame, text="OpenAI/Gemini/... API Key:")
-        self.api_key_label.grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
-        self.api_key_entry = tb.Entry(self.frame, show='*')
-        self.api_key_entry.grid(row=8, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
+        # API Key Label (row 8)
+        self.api_key_label = QLabel("OpenAI/Gemini/... API Key:")
+        self.frame.addWidget(self.api_key_label, 8, 0, Qt.AlignLeft)
+        
+        # API Key Entry (row 8, spans 3 columns)
+        self.api_key_entry = QLineEdit()
+        self.api_key_entry.setEchoMode(QLineEdit.Password)  # Show '*' instead of text
         initial_key = self.config.get('api_key', '')
         if initial_key:
-            self.api_key_entry.insert(0, initial_key)
-        tb.Button(self.frame, text="Show", command=self.toggle_api_visibility, width=12).grid(row=8, column=4, sticky=tk.EW, padx=5, pady=5)
+            self.api_key_entry.setText(initial_key)
+        self.frame.addWidget(self.api_key_entry, 8, 1, 1, 3)  # row, col, rowspan, colspan
         
-        # Other Settings button
-        tb.Button(self.frame, text="⚙️  Other Setting", command=self.open_other_settings,
-                 bootstyle="info-outline", width=15).grid(row=7, column=4, sticky=tk.EW, padx=5, pady=5)
+        # Show/Hide API Key button (row 8)
+        self.show_api_btn = QPushButton("Show")
+        self.show_api_btn.clicked.connect(self.toggle_api_visibility)
+        self.show_api_btn.setMinimumWidth(100)
+        self.frame.addWidget(self.show_api_btn, 8, 4)
         
-        # Remove AI Artifacts
-        tb.Checkbutton(self.frame, text="Remove AI Artifacts", variable=self.REMOVE_AI_ARTIFACTS_var,
-                      bootstyle="round-toggle").grid(row=7, column=0, columnspan=5, sticky=tk.W, padx=5, pady=(0,5))
+        # Other Settings button (row 7, column 4)
+        other_settings_btn = QPushButton("⚙️  Other Setting")
+        other_settings_btn.clicked.connect(self.open_other_settings)
+        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white;")  # info-outline
+        other_settings_btn.setMinimumWidth(120)
+        self.frame.addWidget(other_settings_btn, 7, 4)
+        
+        # Remove AI Artifacts checkbox (row 7, spans all columns)
+        self.remove_artifacts_checkbox = QCheckBox("Remove AI Artifacts")
+        self.remove_artifacts_checkbox.setChecked(self.REMOVE_AI_ARTIFACTS_var)
+        self.remove_artifacts_checkbox.stateChanged.connect(self._on_remove_artifacts_toggle)
+        self.frame.addWidget(self.remove_artifacts_checkbox, 7, 0, 1, 5, Qt.AlignLeft)
     
     def _create_prompt_section(self):
-        """Create system prompt section with UIHelper"""
-        tb.Label(self.frame, text="System Prompt:").grid(row=9, column=0, sticky=tk.NW, padx=5, pady=5)
+        """Create system prompt section"""
+        # System Prompt Label (row 9, column 0)
+        prompt_label = QLabel("System Prompt:")
+        self.frame.addWidget(prompt_label, 9, 0, Qt.AlignTop | Qt.AlignLeft)
         
-        # Use UIHelper to create text widget with undo/redo
-        self.prompt_text = self.ui.setup_scrollable_text(
-            self.frame, 
-            height=5, 
-            width=60, 
-            wrap='word'
-        )
-        self.prompt_text.grid(row=9, column=1, columnspan=3, sticky=tk.NSEW, padx=5, pady=5)
+        # System Prompt Text Edit (row 9, spans 3 columns)
+        self.prompt_text = QTextEdit()
+        self.prompt_text.setMinimumHeight(150)
+        self.prompt_text.setAcceptRichText(False)  # Plain text only
+        self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
         
-        # Output Token Limit button
-        self.output_btn = tb.Button(self.frame, text=f"Output Token Limit: {self.max_output_tokens}",
-                                   command=self.prompt_custom_token_limit, bootstyle="info", width=22)
-        self.output_btn.grid(row=9, column=0, sticky=tk.W, padx=5, pady=5)
+        # Output Token Limit button (row 9, column 0 - below label)
+        self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens}")
+        self.output_btn.clicked.connect(self.prompt_custom_token_limit)
+        self.output_btn.setStyleSheet("background-color: #17a2b8; color: white;")  # info
+        self.output_btn.setMinimumWidth(180)
+        # Place below the label in a vertical layout
+        output_container = QWidget()
+        output_layout = QVBoxLayout(output_container)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.addWidget(prompt_label)
+        output_layout.addWidget(self.output_btn)
+        output_layout.addStretch()
+        self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
         
-        # Run Translation button
-        self.run_button = tb.Button(self.frame, text="Run Translation", command=self.run_translation_thread,
-                                   bootstyle="success", width=14)
-        self.run_button.grid(row=9, column=4, sticky=tk.N+tk.S+tk.EW, padx=5, pady=5)
-        self.master.update_idletasks()
-        self.run_base_w = self.run_button.winfo_width()
-        self.run_base_h = self.run_button.winfo_height()
-        
-        # Setup resize handler
-        self._resize_handler = self.ui.create_button_resize_handler(
-            self.run_button, 
-            self.run_base_w, 
-            self.run_base_h,
-            self.master,
-            BASE_WIDTH,
-            BASE_HEIGHT
-        )
+        # Run Translation button (row 9, column 4)
+        self.run_button = QPushButton("Run Translation")
+        self.run_button.clicked.connect(self.run_translation_thread)
+        self.run_button.setStyleSheet("background-color: #28a745; color: white; font-size: 14pt; font-weight: bold;")  # success
+        self.run_button.setMinimumWidth(150)
+        self.run_button.setMinimumHeight(100)
+        self.frame.addWidget(self.run_button, 9, 4)
     
     def _create_log_section(self):
-        """Create log text area with UIHelper"""
-        self.log_text = scrolledtext.ScrolledText(self.frame, wrap=tk.WORD)
-        self.log_text.grid(row=10, column=0, columnspan=5, sticky=tk.NSEW, padx=5, pady=5)
-        
-        # Use UIHelper to block editing
-        self.ui.block_text_editing(self.log_text)
+        """Create log text area"""
+        # Log Text Edit (row 10, spans all 5 columns)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)  # Make it read-only
+        self.log_text.setMinimumHeight(200)
+        self.log_text.setAcceptRichText(False)  # Plain text only
+        self.frame.addWidget(self.log_text, 10, 0, 1, 5)  # row, col, rowspan, colspan
         
         # Setup context menu
-        self.log_text.bind("<Button-3>", self._show_context_menu)
-        if sys.platform == "darwin":
-            self.log_text.bind("<Button-2>", self._show_context_menu)
+        self.log_text.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.log_text.customContextMenuRequested.connect(self._show_context_menu)
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
-        model = self.model_var.get().lower()
+        model = self.model_var.lower()  # model_var is now a string, not a StringVar
         
         # Check if POE model is selected
         if model.startswith('poe/'):
-            current_key = self.api_key_entry.get().strip()
+            current_key = self.api_key_entry.text().strip()
             
             # Only show helper if no valid POE cookie is set
             if not current_key.startswith('p-b:'):
                 # Use a flag to prevent showing multiple times in same session
                 if not getattr(self, '_poe_helper_shown', False):
                     self._poe_helper_shown = True
-                    # Change self.root to self.master
-                    self.master.after(100, self._show_poe_setup_dialog)
+                    # Use QTimer instead of after
+                    QTimer.singleShot(100, self._show_poe_setup_dialog)
         else:
             # Reset flag when switching away from POE
             self._poe_helper_shown = False
 
     def _show_poe_setup_dialog(self):
         """Show POE cookie setup dialog"""
-        # Create dialog using WindowManager
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.master,
-            "POE Authentication Required",
-            width=650,
-            height=450,
-            max_width_ratio=0.8,
-            max_height_ratio=0.85
-        )
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("POE Authentication Required")
+        dialog.setMinimumSize(650, 450)
+        
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Content widget
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
         
         # Header
-        header_frame = tk.Frame(scrollable_frame)
-        header_frame.pack(fill='x', padx=20, pady=(20, 10))
-        
-        tk.Label(header_frame, text="POE Cookie Authentication",
-                font=('TkDefaultFont', 12, 'bold')).pack()
+        header_label = QLabel("POE Cookie Authentication")
+        header_font = QFont()
+        header_font.setPointSize(12)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        content_layout.addWidget(header_label)
         
         # Important notice
-        notice_frame = tk.Frame(scrollable_frame)
-        notice_frame.pack(fill='x', padx=20, pady=(0, 20))
+        notice_label1 = QLabel("⚠️ POE uses HttpOnly cookies that cannot be accessed by JavaScript")
+        notice_label1.setStyleSheet("color: red; font-weight: bold;")
+        content_layout.addWidget(notice_label1)
         
-        tk.Label(notice_frame, 
-                text="⚠️ POE uses HttpOnly cookies that cannot be accessed by JavaScript",
-                foreground='red', font=('TkDefaultFont', 10, 'bold')).pack()
+        notice_label2 = QLabel("You must manually copy the cookie from Developer Tools")
+        notice_label2.setStyleSheet("color: gray;")
+        content_layout.addWidget(notice_label2)
         
-        tk.Label(notice_frame,
-                text="You must manually copy the cookie from Developer Tools",
-                foreground='gray').pack()
+        content_layout.addSpacing(10)
         
         # Instructions
-        self._create_poe_manual_instructions(scrollable_frame)
+        self._create_poe_manual_instructions(content_layout)
+        
+        scroll.setWidget(content)
+        main_layout.addWidget(scroll)
         
         # Button
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill='x', padx=20, pady=(10, 20))
-        
         def close_dialog():
-            dialog.destroy()
+            dialog.accept()
             # Check if user added a cookie
-            current_key = self.api_key_entry.get().strip()
-            if model := self.model_var.get().lower():
-                if model.startswith('poe/') and not current_key.startswith('p-b:'):
-                    self.append_log("⚠️ POE models require cookie authentication. Please add your p-b cookie to the API key field.")
+            current_key = self.api_key_entry.text().strip()
+            model = self.model_var.lower()
+            if model.startswith('poe/') and not current_key.startswith('p-b:'):
+                self.append_log("⚠️ POE models require cookie authentication. Please add your p-b cookie to the API key field.")
         
-        tb.Button(button_frame, text="Close", command=close_dialog,
-                 bootstyle="secondary").pack()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(close_dialog)
+        close_btn.setStyleSheet("background-color: #6c757d; color: white;")
+        main_layout.addWidget(close_btn)
         
-        # Auto-resize and show
-        self.wm.auto_resize_dialog(dialog, canvas)
+        dialog.exec()
 
-    def _create_poe_manual_instructions(self, parent):
+    def _create_poe_manual_instructions(self, parent_layout):
         """Create manual instructions for getting POE cookie"""
-        frame = tk.LabelFrame(parent, text="How to Get Your POE Cookie")
-        frame.pack(fill='both', expand=True, padx=20, pady=10)
+        # Group box for instructions
+        group_box = QLabel("How to Get Your POE Cookie")
+        group_box.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        parent_layout.addWidget(group_box)
         
         # Step-by-step with visual formatting
         steps = [
@@ -3110,55 +2249,64 @@ Recent translations to summarize:
         ]
         
         for num, text, style in steps:
-            step_frame = tk.Frame(frame)
-            step_frame.pack(anchor='w', padx=20, pady=2)
-            
-            if style == "indent":
-                tk.Label(step_frame, text="    ").pack(side='left')
+            step_widget = QWidget()
+            step_layout = QHBoxLayout(step_widget)
+            step_layout.setContentsMargins(20 if style != "indent" else 40, 2, 0, 2)
             
             if num:
-                tk.Label(step_frame, text=num, font=('TkDefaultFont', 10, 'bold'),
-                        width=3).pack(side='left')
+                num_label = QLabel(num)
+                num_label.setStyleSheet("font-weight: bold;")
+                num_label.setFixedWidth(30)
+                step_layout.addWidget(num_label)
             
-            tk.Label(step_frame, text=text).pack(side='left')
+            text_label = QLabel(text)
+            step_layout.addWidget(text_label)
+            step_layout.addStretch()
+            
+            parent_layout.addWidget(step_widget)
+        
+        parent_layout.addSpacing(10)
         
         # Example
-        example_frame = tk.LabelFrame(parent, text="Example API Key Format")
-        example_frame.pack(fill='x', padx=20, pady=(10, 0))
+        example_label = QLabel("Example API Key Format")
+        example_label.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        parent_layout.addWidget(example_label)
         
-        example_entry = tk.Entry(example_frame, font=('Consolas', 11))
-        example_entry.pack(padx=10, pady=10, fill='x')
-        example_entry.insert(0, "p-b:RyP5ORQXFO8qXbiTBKD2vA%3D%3D")
-        example_entry.config(state='readonly')
+        example_entry = QLineEdit()
+        example_entry.setText("p-b:RyP5ORQXFO8qXbiTBKD2vA%3D%3D")
+        example_entry.setReadOnly(True)
+        example_entry.setFont(QFont("Consolas", 11))
+        parent_layout.addWidget(example_entry)
+        
+        parent_layout.addSpacing(10)
         
         # Additional info
-        info_frame = tk.Frame(parent)
-        info_frame.pack(fill='x', padx=20, pady=(10, 0))
-        
         info_text = """Note: The cookie value is usually a long string ending with %3D%3D
-    If you see multiple p-b cookies, use the one with the longest value."""
+If you see multiple p-b cookies, use the one with the longest value."""
         
-        tk.Label(info_frame, text=info_text, foreground='gray',
-                justify='left').pack(anchor='w')
+        info_label = QLabel(info_text)
+        info_label.setStyleSheet("color: gray;")
+        info_label.setWordWrap(True)
+        parent_layout.addWidget(info_label)
 
     def open_async_processing(self):
         """Open the async processing dialog"""
         # Check if translation is running
         if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
             self.append_log("⚠️ Cannot open async processing while translation is in progress.")
-            messagebox.showwarning("Process Running", "Please wait for the current translation to complete.")
+            QMessageBox.warning(self, "Process Running", "Please wait for the current translation to complete.")
             return
         
         # Check if glossary extraction is running
         if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
             self.append_log("⚠️ Cannot open async processing while glossary extraction is in progress.")
-            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete.")
+            QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete.")
             return
         
         # Check if file is selected
         if not hasattr(self, 'file_path') or not self.file_path:
             self.append_log("⚠️ Please select a file before opening async processing.")
-            messagebox.showwarning("No File Selected", "Please select an EPUB or TXT file first.")
+            QMessageBox.warning(self, "No File Selected", "Please select an EPUB or TXT file first.")
             return
         
         try:
@@ -3171,18 +2319,19 @@ Recent translations to summarize:
             
             # Show the dialog
             self.append_log("Opening async processing dialog...")
-            self._show_async_processing_dialog(self.master, self)
+            self._show_async_processing_dialog(self, self)
             
         except ImportError as e:
             self.append_log(f"❌ Failed to load async processing module: {e}")
-            messagebox.showerror(
+            QMessageBox.critical(
+                self,
                 "Module Not Found", 
                 "The async processing module could not be loaded.\n"
                 "Please ensure async_api_processor.py is in the same directory."
             )
         except Exception as e:
             self.append_log(f"❌ Error opening async processing: {e}")
-            messagebox.showerror("Error", f"Failed to open async processing: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to open async processing: {str(e)}")
 
     def _lazy_load_modules(self, splash_callback=None):
         """Load heavy modules only when needed - Enhanced with thread safety, retry logic, and progress tracking"""
@@ -3417,7 +2566,7 @@ Recent translations to summarize:
             
             # Enhanced module availability checking with better integration
             if hasattr(self, 'master'):
-                self.master.after(0, self._check_modules)
+                QTimer.singleShot(0, self._check_modules)
             
             # Return success status - maintain compatibility by returning True if any modules loaded
             # But also check for critical module failures
@@ -3604,11 +2753,26 @@ Recent translations to summarize:
       
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
-        btn_frame = tb.Frame(self.frame)
-        btn_frame.grid(row=11, column=0, columnspan=5, sticky=tk.EW, pady=5)
+        from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton
+        from PySide6.QtCore import Qt
         
-        self.qa_button = tb.Button(btn_frame, text="QA Scan", command=self.run_qa_scan, bootstyle="warning")
-        self.qa_button.grid(row=0, column=99, sticky=tk.EW, padx=5)
+        btn_frame = QWidget()
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 5, 0, 5)
+        btn_layout.setSpacing(2)
+        
+        self.qa_button = QPushButton("QA Scan")
+        self.qa_button.clicked.connect(self.run_qa_scan)
+        self.qa_button.setStyleSheet("background-color: #ffc107; color: black; padding: 6px;")
+        
+        # Define toolbar items with button styles
+        style_colors = {
+            "info": "#17a2b8",
+            "warning": "#ffc107",
+            "secondary": "#6c757d",
+            "primary": "#007bff",
+            "success": "#28a745"
+        }
         
         toolbar_items = [
             ("EPUB Converter", self.epub_converter, "info"),
@@ -3632,10 +2796,15 @@ Recent translations to summarize:
             ("📐 1080p: OFF", self.toggle_safe_ratios, "secondary"), 
         ])
         
+        # Create buttons
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
-            btn_frame.columnconfigure(idx, weight=1)
-            btn = tb.Button(btn_frame, text=lbl, command=cmd, bootstyle=style)
-            btn.grid(row=0, column=idx, sticky=tk.EW, padx=2)
+            btn = QPushButton(lbl)
+            btn.clicked.connect(cmd)
+            color = style_colors.get(style, "#6c757d")
+            text_color = "black" if style == "warning" else "white"
+            btn.setStyleSheet(f"background-color: {color}; color: {text_color}; padding: 6px;")
+            btn_layout.addWidget(btn)
+            
             if lbl == "Extract Glossary":
                 self.glossary_button = btn
             elif lbl == "EPUB Converter":
@@ -3645,28 +2814,17 @@ Recent translations to summarize:
             elif lbl == "Async Processing (50% Off)":
                 self.async_button = btn
         
-        self.frame.grid_rowconfigure(12, weight=0)
+        # Add QA button at the end
+        btn_layout.addWidget(self.qa_button)
+        
+        # Add toolbar to main layout
+        # Note: This will need to be integrated into the main GUI layout in _setup_gui
+        return btn_frame
 
     def toggle_safe_ratios(self):
-        """Toggle 1080p Windows ratios mode"""
-        is_safe = self.wm.toggle_safe_ratios()
-        
-        if is_safe:
-            self.safe_ratios_btn.config(
-                text="📐 1080p: ON",
-                bootstyle="success"
-            )
-            self.append_log("✅ 1080p Windows ratios enabled - all dialogs will fit on screen")
-        else:
-            self.safe_ratios_btn.config(
-                text="📐 1080p: OFF",
-                bootstyle="secondary"
-            )
-            self.append_log("❌ 1080p Windows ratios disabled - using default sizes")
-        
-        # Save preference
-        self.config['force_safe_ratios'] = is_safe
-        self.save_config()
+        """Toggle 1080p Windows ratios mode - not needed in PySide6"""
+        # This feature is not needed in PySide6 as Qt handles window sizing appropriately
+        self.append_log("ℹ️ Window ratio toggle not needed in PySide6 - Qt handles sizing automatically")
  
     def _get_opf_file_order(self, file_list):
         """
@@ -3899,7 +3057,7 @@ Recent translations to summarize:
         if (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()) or \
            (hasattr(self, 'glossary_future') and self.glossary_future and not self.glossary_future.done()):
             self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
-            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before starting translation.")
+            QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete before starting translation.")
             return
         
         if self.translation_thread and self.translation_thread.is_alive():
@@ -3908,9 +3066,9 @@ Recent translations to summarize:
         
         # Check if files are selected
         if not hasattr(self, 'selected_files') or not self.selected_files:
-            file_path = self.entry_epub.get().strip()
+            file_path = self.entry_epub.text().strip()
             if not file_path or file_path.startswith("No file selected") or "files selected" in file_path:
-                messagebox.showerror("Error", "Please select file(s) to translate.")
+                QMessageBox.critical(self, "Error", "Please select file(s) to translate.")
                 return
             self.selected_files = [file_path]
         
@@ -3946,7 +3104,7 @@ Recent translations to summarize:
         self.translation_thread.start()
         
         # Schedule button update check
-        self.master.after(100, self.update_run_button)
+        QTimer.singleShot(100, self.update_run_button)
 
     def run_translation_wrapper(self):
         """Wrapper that handles ALL initialization in background thread"""
@@ -4043,12 +3201,12 @@ Recent translations to summarize:
             # If scanning phase toggle is enabled, launch scanner after translation
             # BUT only if translation completed successfully (not stopped by user)
             try:
-                if (getattr(self, 'scan_phase_enabled_var', None) and self.scan_phase_enabled_var.get() and 
+                if (getattr(self, 'scan_phase_enabled_var', None) and self.scan_phase_enabled_var and 
                     translation_completed and not self.stop_requested):
-                    mode = self.scan_phase_mode_var.get() if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
+                    mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
                     self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode (post-translation)...")
                     # Non-interactive: skip dialogs and use auto-search
-                    self.master.after(0, lambda: self.run_qa_scan(mode_override=mode, non_interactive=True))
+                    QTimer.singleShot(0, lambda: self.run_qa_scan(mode_override=mode, non_interactive=True))
             except Exception:
                 pass
             
@@ -4069,7 +3227,7 @@ Recent translations to summarize:
                     del os.environ[var]
             
             # Update button state on main thread
-            self.master.after(0, self.update_run_button)
+            QTimer.singleShot(0, self.update_run_button)
 
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
@@ -4235,7 +3393,7 @@ Recent translations to summarize:
                 
             self.translation_thread = None
             self.current_file_index = 0
-            self.master.after(0, self.update_run_button)
+            QTimer.singleShot(0, self.update_run_button)
 
     def _process_image_file(self, image_path, combined_output_dir=None):
         """Process a single image file using the direct image translation API with progress tracking"""
@@ -4436,7 +3594,7 @@ Recent translations to summarize:
             self.image_progress_manager.update(image_path, content_hash, status="in_progress")
             
             # Check if image translation is enabled
-            if not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var.get():
+            if not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var:
                 self.append_log(f"⚠️ Image translation not enabled. Enable it in settings to translate images.")
                 return False
             
@@ -4468,8 +3626,8 @@ Recent translations to summarize:
             file_index = getattr(self, 'current_file_index', 0) + 1
             
             # Get API key and model
-            api_key = self.api_key_entry.get().strip()
-            model = self.model_var.get().strip()
+            api_key = self.api_key_entry.text().strip()
+            model = self.model_var.strip()
             
             if not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
@@ -4567,12 +3725,12 @@ Recent translations to summarize:
             # Check if we should append glossary to the prompt
             append_glossary = self.config.get('append_glossary', True)  # Default to True
             if hasattr(self, 'append_glossary_var'):
-                append_glossary = self.append_glossary_var.get()
+                append_glossary = self.append_glossary_var
             
             # Check if automatic glossary is enabled
             enable_auto_glossary = self.config.get('enable_auto_glossary', False)
             if hasattr(self, 'enable_auto_glossary_var'):
-                enable_auto_glossary = self.enable_auto_glossary_var.get()
+                enable_auto_glossary = self.enable_auto_glossary_var
             
             if append_glossary:
                 # Check for manual glossary
@@ -4664,8 +3822,8 @@ Recent translations to summarize:
                     del os.environ['DEFER_GLOSSARY_APPEND']
             
             # Get temperature and max tokens from GUI
-            temperature = float(self.temperature_entry.get()) if hasattr(self, 'temperature_entry') else 0.3
-            max_tokens = int(self.max_output_tokens_var.get()) if hasattr(self, 'max_output_tokens_var') else 8192
+            temperature = float(self.temperature_entry.text()) if hasattr(self, 'temperature_entry') else 0.3
+            max_tokens = int(self.max_output_tokens_var) if hasattr(self, 'max_output_tokens_var') else 8192
             
             # Build messages for vision API
             messages = [
@@ -4956,8 +4114,8 @@ Recent translations to summarize:
                 self.append_log("❌ Translation module is not available")
                 return False
 
-            api_key = self.api_key_entry.get()
-            model = self.model_var.get()
+            api_key = self.api_key_entry.text()
+            model = self.model_var
             
             # Validate API key and model (same as original)
             if '@' in model or model.startswith('vertex/'):
@@ -5007,10 +4165,10 @@ Recent translations to summarize:
                 # Set up environment (same as original)
                 self.append_log(f"🔧 Setting up environment variables...")
                 self.append_log(f"📖 File: {os.path.basename(file_path)}")
-                self.append_log(f"🤖 Model: {self.model_var.get()}")
+                self.append_log(f"🤖 Model: {self.model_var}")
                 
                 # Get the system prompt and log first 100 characters
-                system_prompt = self.prompt_text.get("1.0", "end").strip()
+                system_prompt = self.prompt_text.toPlainText().strip()
                 prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
                 self.append_log(f"📝 System prompt: {prompt_preview}")
                 self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
@@ -5043,7 +4201,7 @@ Recent translations to summarize:
                 os.environ.update(env_vars)
                 
                 # Handle chapter range
-                chap_range = self.chapter_range_entry.get().strip()
+                chap_range = self.chapter_range_entry.text().strip()
                 if chap_range:
                     os.environ['CHAPTER_RANGE'] = chap_range
                     self.append_log(f"📊 Chapter Range: {chap_range}")
@@ -5052,7 +4210,7 @@ Recent translations to summarize:
                 if hasattr(self, 'token_limit_disabled') and self.token_limit_disabled:
                     os.environ['MAX_INPUT_TOKENS'] = ''
                 else:
-                    token_val = self.token_limit_entry.get().strip()
+                    token_val = self.token_limit_entry.text().strip()
                     if token_val and token_val.isdigit():
                         os.environ['MAX_INPUT_TOKENS'] = token_val
                     else:
@@ -5113,7 +4271,7 @@ Recent translations to summarize:
 
         # Get Google Cloud project ID if using Vertex AI
         google_cloud_project = ''
-        model = self.model_var.get()
+        model = self.model_var
         if '@' in model or model.startswith('vertex/'):
             google_creds = self.config.get('google_cloud_credentials')
             if google_creds and os.path.exists(google_creds):
@@ -5127,8 +4285,8 @@ Recent translations to summarize:
         # Handle extraction mode - check which variables exist
         if hasattr(self, 'text_extraction_method_var'):
             # New cleaner UI variables
-            extraction_method = self.text_extraction_method_var.get()
-            filtering_level = self.file_filtering_level_var.get()
+            extraction_method = self.text_extraction_method_var
+            filtering_level = self.file_filtering_level_var
             
             if extraction_method == 'enhanced':
                 extraction_mode = 'enhanced'
@@ -5138,12 +4296,10 @@ Recent translations to summarize:
                 enhanced_filtering = 'smart'  # default
         else:
             # Old UI variables
-            extraction_mode = self.extraction_mode_var.get()
+            extraction_mode = self.extraction_mode_var
             if extraction_mode == 'enhanced':
-                enhanced_filtering = getattr(self, 'enhanced_filtering_var', tk.StringVar(value='smart')).get()
+                enhanced_filtering = getattr(self, 'enhanced_filtering_var', 'smart')
             else:
-
-
                 enhanced_filtering = 'smart'
                     
         # Ensure multi-key env toggles are set early for the main translation path as well
@@ -5161,131 +4317,131 @@ Recent translations to summarize:
 
         return {
             'EPUB_PATH': epub_path,
-            'MODEL': self.model_var.get(),
-            'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
-            'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
-            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.get().strip() or '0.5',
+            'MODEL': self.model_var,
+            'CONTEXTUAL': '1' if self.contextual_var else '0',
+            'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
+            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.strip() or '0.5',
             'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
             'OPENAI_OR_Gemini_API_KEY': api_key,
             'GEMINI_API_KEY': api_key,
-            'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
-            'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var.get() else "0",
+            'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
+            'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
-            'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
-            'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var.get()) else ("1" if self.config.get('use_rolling_summary') else "0"),
+            'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var else "0",
+            'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var) else ("1" if self.config.get('use_rolling_summary') else "0"),
             'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
-            'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var.get(),
-            'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),
+            'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var,
+            'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var,
             'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
             'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
-            'ROLLING_SUMMARY_MAX_ENTRIES': self.rolling_summary_max_entries_var.get(),
-            'PROFILE_NAME': self.lang_var.get().lower(),
-            'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
-            'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
+            'ROLLING_SUMMARY_MAX_ENTRIES': self.rolling_summary_max_entries_var,
+            'PROFILE_NAME': self.lang_var.lower(),
+            'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
+            'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': os.getcwd(),
-            'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
+            'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
-            'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
-            'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
-            'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
-            'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
-            'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
-            'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var.get() else "0",
-            'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
-            'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
-            'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
-            'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
-            'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
-            'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var.get() else "0",
-            'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': self.glossary_chapter_split_threshold_var.get(),
-            'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var.get(),
-            'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var.get() else "0",
+            'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
+            'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var,
+            'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
+            'MAX_RETRY_TOKENS': self.max_retry_tokens_var,
+            'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
+            'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
+            'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var,
+            'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var,
+            'GLOSSARY_MAX_NAMES': self.glossary_max_names_var,
+            'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var,
+            'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var,
+            'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var else "0",
+            'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': self.glossary_chapter_split_threshold_var,
+            'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var,
+            'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
             'AUTO_GLOSSARY_PROMPT': self.auto_glossary_prompt if hasattr(self, 'auto_glossary_prompt') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
-            'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var.get() else '0',
-            'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
-            'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
-            'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
-            'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
+            'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
+            'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
+            'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
+            'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var,
+            'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var,
             'IMAGE_API_DELAY': '1.0',
             'SAVE_IMAGE_TRANSLATIONS': '1',
-            'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
-            'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
-            'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
-            'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
+            'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var,
+            'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
+            'RETRY_TIMEOUT': "1" if self.retry_timeout_var else "0",
+            'CHUNK_TIMEOUT': self.chunk_timeout_var,
             # New network/HTTP controls
             'ENABLE_HTTP_TUNING': '1' if self.config.get('enable_http_tuning', False) else '0',
             'CONNECT_TIMEOUT': str(self.config.get('connect_timeout', os.environ.get('CONNECT_TIMEOUT', '10'))),
             'READ_TIMEOUT': str(self.config.get('read_timeout', os.environ.get('READ_TIMEOUT', os.environ.get('CHUNK_TIMEOUT', '180')))),
             'HTTP_POOL_CONNECTIONS': str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))),
             'HTTP_POOL_MAXSIZE': str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))),
-            'IGNORE_RETRY_AFTER': '1' if (hasattr(self, 'ignore_retry_after_var') and self.ignore_retry_after_var.get()) else '0',
+            'IGNORE_RETRY_AFTER': '1' if (hasattr(self, 'ignore_retry_after_var') and self.ignore_retry_after_var) else '0',
             'MAX_RETRIES': str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))),
             'INDEFINITE_RATE_LIMIT_RETRY': '1' if self.config.get('indefinite_rate_limit_retry', False) else '0',
             # Scanning/QA settings
             'SCAN_PHASE_ENABLED': '1' if self.config.get('scan_phase_enabled', False) else '0',
             'SCAN_PHASE_MODE': self.config.get('scan_phase_mode', 'quick-scan'),
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
-            'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
-            'BATCH_SIZE': self.batch_size_var.get(),
-            'CONSERVATIVE_BATCHING': "1" if self.conservative_batching_var.get() else "0",
-            'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
-            'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
-            'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var.get() else '0',
-            'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var.get() if self.gemini_openai_endpoint_var.get() else '',
-            "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
+            'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
+            'BATCH_SIZE': self.batch_size_var,
+            'CONSERVATIVE_BATCHING': "1" if self.conservative_batching_var else "0",
+            'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
+            'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
+            'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
+            'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else '',
+            "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
-            'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var.get(),
-            'GLOSSARY_MAX_SENTENCES': self.glossary_max_sentences_var.get(),
+            'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var,
+            'GLOSSARY_MAX_SENTENCES': self.glossary_max_sentences_var,
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
             "ENHANCED_FILTERING": enhanced_filtering,
-            "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get() else "0",
-            'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', tk.BooleanVar(value=False)).get() else '0',
+            "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', True) else "0",
+            'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
             
             # For new UI
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
             "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
-            'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
-            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
-            'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0",
-            'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', tk.BooleanVar(value=False)).get() else "0",
-            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
-            'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
-            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
-            'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
-            'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
-            'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
-            'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
-            'COMPRESSION_FACTOR': self.compression_factor_var.get(),
+            'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var else '0',
+            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
+            'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
+            'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', False) else "0",
+            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var,
+            'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var), 
+            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var else "0",
+            'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var else "0",
+            'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var else "0",
+            'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var else "0",
+            'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var else "0",
+            'COMPRESSION_FACTOR': self.compression_factor_var,
             'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
             'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
-            'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
-            'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
-            'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
-            'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+            'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var else '0',
+            'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var else "0",
+            'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var else "0",
+            'THINKING_BUDGET': self.thinking_budget_var if self.enable_gemini_thinking_var else '0',
             # GPT/OpenRouter reasoning
-            'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var.get() else "0",
-            'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var.get() if self.enable_gpt_thinking_var.get() else '',
-            'GPT_EFFORT': self.gpt_effort_var.get(),
+            'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
+            'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
+            'GPT_EFFORT': self.gpt_effort_var,
             'OPENROUTER_EXCLUDE': '1',
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
-            'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
-            'GROQ_API_URL': self.groq_base_url_var.get() if self.groq_base_url_var.get() else '',
-            'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
-            'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var.get() else '0',
+            'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var if self.openai_base_url_var else '',
+            'GROQ_API_URL': self.groq_base_url_var if self.groq_base_url_var else '',
+            'FIREWORKS_API_URL': self.fireworks_base_url_var if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var else '',
+            'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var else '0',
 
             # Image compression settings
             'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
@@ -5302,16 +4458,16 @@ Recent translations to summarize:
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
-            'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var.get(),
+            'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var,
 
 
             # Metadata and batch header translation settings
             'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
             'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
-            'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var.get() else "0",
-            'HEADERS_PER_BATCH': self.headers_per_batch_var.get(),
-            'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
-            'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
+            'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var else "0",
+            'HEADERS_PER_BATCH': self.headers_per_batch_var,
+            'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
+            'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
             'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
             'LANG_PROMPT_BEHAVIOR': self.config.get('lang_prompt_behavior', 'auto'),
             'FORCED_SOURCE_LANG': self.config.get('forced_source_lang', 'Korean'),
@@ -5322,24 +4478,24 @@ Recent translations to summarize:
             'AI_HUNTER_CONFIG': json.dumps(self.config.get('ai_hunter_config', {})),
 
             # Anti-duplicate parameters
-            'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
-            'TOP_P': str(self.top_p_var.get()) if hasattr(self, 'top_p_var') else '1.0',
-            'TOP_K': str(self.top_k_var.get()) if hasattr(self, 'top_k_var') else '0',
-            'FREQUENCY_PENALTY': str(self.frequency_penalty_var.get()) if hasattr(self, 'frequency_penalty_var') else '0.0',
-            'PRESENCE_PENALTY': str(self.presence_penalty_var.get()) if hasattr(self, 'presence_penalty_var') else '0.0',
-            'REPETITION_PENALTY': str(self.repetition_penalty_var.get()) if hasattr(self, 'repetition_penalty_var') else '1.0',
-            'CANDIDATE_COUNT': str(self.candidate_count_var.get()) if hasattr(self, 'candidate_count_var') else '1',
-            'CUSTOM_STOP_SEQUENCES': self.custom_stop_sequences_var.get() if hasattr(self, 'custom_stop_sequences_var') else '',
-            'LOGIT_BIAS_ENABLED': '1' if hasattr(self, 'logit_bias_enabled_var') and self.logit_bias_enabled_var.get() else '0',
-            'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var.get()) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
-            'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
-            'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0',
+            'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var else '0',
+            'TOP_P': str(self.top_p_var) if hasattr(self, 'top_p_var') else '1.0',
+            'TOP_K': str(self.top_k_var) if hasattr(self, 'top_k_var') else '0',
+            'FREQUENCY_PENALTY': str(self.frequency_penalty_var) if hasattr(self, 'frequency_penalty_var') else '0.0',
+            'PRESENCE_PENALTY': str(self.presence_penalty_var) if hasattr(self, 'presence_penalty_var') else '0.0',
+            'REPETITION_PENALTY': str(self.repetition_penalty_var) if hasattr(self, 'repetition_penalty_var') else '1.0',
+            'CANDIDATE_COUNT': str(self.candidate_count_var) if hasattr(self, 'candidate_count_var') else '1',
+            'CUSTOM_STOP_SEQUENCES': self.custom_stop_sequences_var if hasattr(self, 'custom_stop_sequences_var') else '',
+            'LOGIT_BIAS_ENABLED': '1' if hasattr(self, 'logit_bias_enabled_var') and self.logit_bias_enabled_var else '0',
+            'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
+            'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var else '0',
+            'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var else '0',
             'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
-            'VERTEX_AI_LOCATION': self.vertex_location_var.get() if hasattr(self, 'vertex_location_var') else 'us-east5',
-            'IS_AZURE_ENDPOINT': '1' if (self.use_custom_openai_endpoint_var.get() and 
-                                  ('.azure.com' in self.openai_base_url_var.get() or 
-                                   '.cognitiveservices' in self.openai_base_url_var.get())) else '0',
+            'VERTEX_AI_LOCATION': self.vertex_location_var.text() if hasattr(self, 'vertex_location_var') else 'us-east5',
+            'IS_AZURE_ENDPOINT': '1' if (self.use_custom_openai_endpoint_var and 
+                                  ('.azure.com' in self.openai_base_url_var or 
+                                   '.cognitiveservices' in self.openai_base_url_var)) else '0',
             'AZURE_API_VERSION': str(self.config.get('azure_api_version', '2024-08-01-preview')),
             
            # Multi API Key support
@@ -5356,7 +4512,7 @@ Recent translations to summarize:
         if ((hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
             (hasattr(self, 'translation_future') and self.translation_future and not self.translation_future.done())):
             self.append_log("⚠️ Cannot run glossary extraction while translation is in progress.")
-            messagebox.showwarning("Process Running", "Please wait for translation to complete before extracting glossary.")
+            QMessageBox.warning(self, "Process Running", "Please wait for translation to complete before extracting glossary.")
             return
         
         if self.glossary_thread and self.glossary_thread.is_alive():
@@ -5366,9 +4522,9 @@ Recent translations to summarize:
         # Check if files are selected
         if not hasattr(self, 'selected_files') or not self.selected_files:
             # Try to get file from entry field (backward compatibility)
-            file_path = self.entry_epub.get().strip()
+            file_path = self.entry_epub.text().strip()
             if not file_path or file_path.startswith("No file selected") or "files selected" in file_path:
-                messagebox.showerror("Error", "Please select file(s) to extract glossary from.")
+                QMessageBox.critical(self, "Error", "Please select file(s) to extract glossary from.")
                 return
             self.selected_files = [file_path]
         
@@ -5392,7 +4548,7 @@ Recent translations to summarize:
             thread_name = f"GlossaryThread_{int(time.time())}"
             self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
             self.glossary_thread.start()
-        self.master.after(100, self.update_run_button)
+        QTimer.singleShot(100, self.update_run_button)
 
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly - handles multiple files and different file types"""
@@ -5509,7 +4665,7 @@ Recent translations to summarize:
                 
             self.glossary_thread = None
             self.current_file_index = 0
-            self.master.after(0, self.update_run_button)
+            QTimer.singleShot(0, self.update_run_button)
 
     def _process_image_folder_for_glossary(self, folder_name, image_files):
         """Process all images from a folder and create a combined glossary with new format"""
@@ -5525,8 +4681,8 @@ Recent translations to summarize:
             skipped = 0
             
             # Get API key and model
-            api_key = self.api_key_entry.get().strip()
-            model = self.model_var.get().strip()
+            api_key = self.api_key_entry.text().strip()
+            model = self.model_var
             
             if not api_key or not model:
                 self.append_log("❌ Error: API key and model required")
@@ -5545,8 +4701,8 @@ Recent translations to summarize:
             
             # Get temperature and other settings from glossary config
             temperature = float(self.config.get('manual_glossary_temperature', 0.1))
-            max_tokens = int(self.max_output_tokens_var.get()) if hasattr(self, 'max_output_tokens_var') else 8192
-            api_delay = float(self.delay_entry.get()) if hasattr(self, 'delay_entry') else 2.0
+            max_tokens = int(self.max_output_tokens) if hasattr(self, 'max_output_tokens') else 8192
+            api_delay = float(self.delay_entry.text()) if hasattr(self, 'delay_entry') else 2.0
             
             self.append_log(f"🔧 Glossary extraction settings:")
             self.append_log(f"   Temperature: {temperature}")
@@ -6143,10 +5299,10 @@ Important rules:
 
     def _extract_glossary_from_text_file(self, file_path):
         """Extract glossary from EPUB or TXT file using existing glossary extraction"""
-        # Skip glossary extraction for traditional APIs
+            # Skip glossary extraction for traditional APIs
         try:
-            api_key = self.api_key_entry.get()
-            model = self.model_var.get()
+            api_key = self.api_key_entry.text()
+            model = self.model_var
             if is_traditional_translation_api(model):
                self.append_log("ℹ️ Skipping automatic glossary extraction (not supported by Google Translate / DeepL translation APIs)")
                return {}
@@ -6185,33 +5341,33 @@ Important rules:
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
                     'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 2)),
-                    'MODEL': self.model_var.get(),
+                    'MODEL': self.model_var,
                     'OPENAI_API_KEY': api_key,
                     'OPENAI_OR_Gemini_API_KEY': api_key,
                     'API_KEY': api_key,
                     'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
-                    'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
-                    'BATCH_SIZE': str(self.batch_size_var.get()),
+                    'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
+                    'BATCH_SIZE': str(self.batch_size_var),
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
-                    'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
+                    'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
-                    'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
+                    'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var else "0",
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
-                    'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var.get() else '0',
+                    'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
-                    'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
-                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.get().strip() or '0.5',
-                    'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
+                    'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
+                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.strip() or '0.5',
+                    'CONTEXTUAL': '1' if self.contextual_var else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
                     # NEW GLOSSARY ADDITIONS
-                    'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var.get()),
-                    'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var.get()),
-                    'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var.get()),
-                    'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var.get()),
-                    'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var.get() else "0",
-                    'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
-                    'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '1',
+                    'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
+                    'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
+                    'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
+                    'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var),
+                    'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
+                    'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
+                    'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'auto_glossary_prompt', ''),
                     'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
                     'GLOSSARY_TRANSLATION_PROMPT': getattr(self, 'glossary_translation_prompt', ''),
@@ -6256,7 +5412,7 @@ Important rules:
 
                 os.environ.update(env_updates)
                 
-                chap_range = self.chapter_range_entry.get().strip()
+                chap_range = self.chapter_range_entry.text().strip()
                 if chap_range:
                     self.append_log(f"📊 Chapter Range: {chap_range} (glossary extraction will only process these chapters)")
                 
@@ -6264,7 +5420,7 @@ Important rules:
                     os.environ['MAX_INPUT_TOKENS'] = ''
                     self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
                 else:
-                    token_val = self.token_limit_entry.get().strip()
+                    token_val = self.token_limit_entry.text().strip()
                     if token_val and token_val.isdigit():
                         os.environ['MAX_INPUT_TOKENS'] = token_val
                         self.append_log(f"🎯 Input Token Limit: {token_val}")
@@ -6365,24 +5521,24 @@ Important rules:
        
        if fallback_compile_epub is None:
            self.append_log("❌ EPUB converter module is not available")
-           messagebox.showerror("Module Error", "EPUB converter module is not available.")
+           QMessageBox.critical(self, "Module Error", "EPUB converter module is not available.")
            return
        
        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
            self.append_log("⚠️ Cannot run EPUB converter while translation is in progress.")
-           messagebox.showwarning("Process Running", "Please wait for translation to complete before converting EPUB.")
+           QMessageBox.warning(self, "Process Running", "Please wait for translation to complete before converting EPUB.")
            return
        
        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
            self.append_log("⚠️ Cannot run EPUB converter while glossary extraction is in progress.")
-           messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before converting EPUB.")
+           QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete before converting EPUB.")
            return
        
        if hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive():
            self.stop_epub_converter()
            return
        
-       folder = filedialog.askdirectory(title="Select translation output folder")
+       folder = QFileDialog.getExistingDirectory(self, "Select translation output folder")
        if not folder:
            return
        
@@ -6395,7 +5551,7 @@ Important rules:
            # Ensure button state is refreshed when the future completes
            def _epub_done_callback(f):
                try:
-                   self.master.after(0, lambda: (setattr(self, 'epub_future', None), self.update_run_button()))
+                   QTimer.singleShot(0, lambda: (setattr(self, 'epub_future', None), self.update_run_button()))
                except Exception:
                    pass
            try:
@@ -6405,7 +5561,7 @@ Important rules:
        else:
            self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
            self.epub_thread.start()
-       self.master.after(100, self.update_run_button)
+       QTimer.singleShot(100, self.update_run_button)
  
     def run_epub_converter_direct(self):
         """Run EPUB converter directly without blocking GUI"""
@@ -6414,9 +5570,9 @@ Important rules:
             self.append_log("📦 Starting EPUB Converter...")
             
             # Set environment variables for EPUB converter
-            os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
-            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', tk.BooleanVar(value=False)).get() else "0"
-            os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_cover_html_var', tk.BooleanVar(value=False)).get() else "0"
+            os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var else "0"
+            os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0"
+            os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_cover_html_var', False) else "0"
 
             source_epub_file = os.path.join(folder, 'source_epub.txt')
             if os.path.exists(source_epub_file):
@@ -6435,25 +5591,25 @@ Important rules:
                 self.append_log("ℹ️ No source EPUB reference found - using filename-based ordering")
             
             # Set API credentials and model
-            api_key = self.api_key_entry.get()
+            api_key = self.api_key_entry.text()
             if api_key:
                 os.environ['API_KEY'] = api_key
                 os.environ['OPENAI_API_KEY'] = api_key
                 os.environ['OPENAI_OR_Gemini_API_KEY'] = api_key
             
-            model = self.model_var.get()
+            model = self.model_var
             if model:
                 os.environ['MODEL'] = model
             
             # Set translation parameters from GUI
-            os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.get())
+            os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
             os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
             
             # Set batch translation settings
-            os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var.get() else "0"
-            os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var.get())
-            os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var.get() else "0"
-            os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var.get() else "0"
+            os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var else "0"
+            os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var)
+            os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
+            os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
             
             # Set metadata translation settings
             os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
@@ -6465,13 +5621,13 @@ Important rules:
             self.append_log(f"[DEBUG] Enabled fields: {[k for k, v in self.translate_metadata_fields.items() if v]}")
             
             # Set book title translation settings
-            os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var.get() else "0"
+            os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
             os.environ['BOOK_TITLE_PROMPT'] = self.book_title_prompt
             os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', 
                 "You are a translator. Respond with only the translated text, nothing else.")
             
             # Set prompts
-            os.environ['SYSTEM_PROMPT'] = self.prompt_text.get("1.0", "end").strip()
+            os.environ['SYSTEM_PROMPT'] = self.prompt_text.toPlainText().strip()
             
             fallback_compile_epub(folder, log_callback=self.append_log)
             
@@ -6482,7 +5638,7 @@ Important rules:
                 if epub_files:
                     epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
                     out_file = os.path.join(folder, epub_files[0])
-                    self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
+                    QTimer.singleShot(0, lambda: QMessageBox.information(self, "EPUB Compilation Success", f"Created: {out_file}"))
                 else:
                     self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
             
@@ -6491,7 +5647,7 @@ Important rules:
             self.append_log(f"❌ EPUB Converter error: {error_str}")
             
             if "Document is empty" not in error_str:
-                self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
+                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "EPUB Converter Failed", f"Error: {error_str}"))
             else:
                 self.append_log("📋 Check the log above for details about what went wrong.")
         
@@ -6507,21 +5663,21 @@ Important rules:
                     pass
             self.stop_requested = False
             # Schedule GUI update on main thread
-            self.master.after(0, self.update_run_button)
+            QTimer.singleShot(0, self.update_run_button)
         
     def toggle_token_limit(self):
        """Toggle whether the token-limit entry is active or not."""
        if not self.token_limit_disabled:
-           self.token_limit_entry.config(state=tk.DISABLED)
-           self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
+           self.token_limit_entry.setEnabled(False)
+           self.toggle_token_btn.setText("Enable Input Token Limit")
            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
            self.token_limit_disabled = True
        else:
-           self.token_limit_entry.config(state=tk.NORMAL)
-           if not self.token_limit_entry.get().strip():
-               self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
-           self.toggle_token_btn.config(text="Disable Input Token Limit", bootstyle="danger-outline")
-           self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.get()} tokens (applies to both translation and glossary extraction)")
+           self.token_limit_entry.setEnabled(True)
+           if not self.token_limit_entry.text().strip():
+               self.token_limit_entry.setText(str(self.config.get('token_limit', 1000000)))
+           self.toggle_token_btn.setText("Disable Input Token Limit")
+           self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
 
     def update_run_button(self):
@@ -6547,43 +5703,82 @@ Important rules:
        
        # Translation button
        if translation_running:
-           self.run_button.config(text="Stop Translation", command=self.stop_translation,
-                                bootstyle="danger", state=tk.NORMAL)
+           self.run_button.setText("Stop Translation")
+           try:
+               self.run_button.clicked.disconnect()
+           except:
+               pass
+           self.run_button.clicked.connect(self.stop_translation)
+           self.run_button.setEnabled(True)
        else:
-           self.run_button.config(text="Run Translation", command=self.run_translation_thread,
-                                bootstyle="success", state=tk.NORMAL if translation_main and not any_process_running else tk.DISABLED)
+           self.run_button.setText("Run Translation")
+           try:
+               self.run_button.clicked.disconnect()
+           except:
+               pass
+           self.run_button.clicked.connect(self.run_translation_thread)
+           self.run_button.setEnabled(translation_main and not any_process_running)
        
        # Glossary button
        if hasattr(self, 'glossary_button'):
            if glossary_running:
-               self.glossary_button.config(text="Stop Glossary", command=self.stop_glossary_extraction,
-                                         bootstyle="danger", state=tk.NORMAL)
+               self.glossary_button.setText("Stop Glossary")
+               try:
+                   self.glossary_button.clicked.disconnect()
+               except:
+                   pass
+               self.glossary_button.clicked.connect(self.stop_glossary_extraction)
+               self.glossary_button.setEnabled(True)
            else:
-               self.glossary_button.config(text="Extract Glossary", command=self.run_glossary_extraction_thread,
-                                         bootstyle="warning", state=tk.NORMAL if glossary_main and not any_process_running else tk.DISABLED)
+               self.glossary_button.setText("Extract Glossary")
+               try:
+                   self.glossary_button.clicked.disconnect()
+               except:
+                   pass
+               self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
+               self.glossary_button.setEnabled(glossary_main and not any_process_running)
     
        # EPUB button
        if hasattr(self, 'epub_button'):
            if epub_running:
-               self.epub_button.config(text="Stop EPUB", command=self.stop_epub_converter,
-                                     bootstyle="danger", state=tk.NORMAL)
+               self.epub_button.setText("Stop EPUB")
+               try:
+                   self.epub_button.clicked.disconnect()
+               except:
+                   pass
+               self.epub_button.clicked.connect(self.stop_epub_converter)
+               self.epub_button.setEnabled(True)
            else:
-               self.epub_button.config(text="EPUB Converter", command=self.epub_converter,
-                                     bootstyle="info", state=tk.NORMAL if fallback_compile_epub and not any_process_running else tk.DISABLED)
+               self.epub_button.setText("EPUB Converter")
+               try:
+                   self.epub_button.clicked.disconnect()
+               except:
+                   pass
+               self.epub_button.clicked.connect(self.epub_converter)
+               self.epub_button.setEnabled(fallback_compile_epub and not any_process_running)
        
        # QA button
        if hasattr(self, 'qa_button'):
-           self.qa_button.config(state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED)
-       if qa_running:
-           self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, 
-                                 bootstyle="danger", state=tk.NORMAL)
-       else:
-           self.qa_button.config(text="QA Scan", command=self.run_qa_scan, 
-                                 bootstyle="warning", state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED)   
+           if qa_running:
+               self.qa_button.setText("Stop Scan")
+               try:
+                   self.qa_button.clicked.disconnect()
+               except:
+                   pass
+               self.qa_button.clicked.connect(self.stop_qa_scan)
+               self.qa_button.setEnabled(True)
+           else:
+               self.qa_button.setText("QA Scan")
+               try:
+                   self.qa_button.clicked.disconnect()
+               except:
+                   pass
+               self.qa_button.clicked.connect(self.run_qa_scan)
+               self.qa_button.setEnabled(scan_html_folder and not any_process_running)
 
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
-        current_file = self.entry_epub.get() if hasattr(self, 'entry_epub') else None
+        current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
         
         # Set environment variable to suppress multi-key logging
         os.environ['TRANSLATION_CANCELLED'] = '1'
@@ -6629,15 +5824,14 @@ Important rules:
         self.update_run_button()
         
         if current_file and hasattr(self, 'entry_epub'):
-            self.master.after(100, lambda: self.preserve_file_path(current_file))
+            QTimer.singleShot(100, lambda: self.preserve_file_path(current_file))
 
     def preserve_file_path(self, file_path):
        """Helper to ensure file path stays in the entry field"""
        if hasattr(self, 'entry_epub') and file_path:
-           current = self.entry_epub.get()
+           current = self.entry_epub.text()
            if not current or current != file_path:
-               self.entry_epub.delete(0, tk.END)
-               self.entry_epub.insert(0, file_path)
+               self.entry_epub.setText(file_path)
 
     def stop_glossary_extraction(self):
        """Stop glossary extraction specifically"""
@@ -6686,7 +5880,9 @@ Important rules:
        
 
     def on_close(self):
-        if messagebox.askokcancel("Quit", "Are you sure you want to exit?"):
+        reply = QMessageBox.question(self, "Quit", "Are you sure you want to exit?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
             self.stop_requested = True
             
             # Save and encrypt config before closing
@@ -6702,7 +5898,7 @@ Important rules:
             except Exception:
                 pass
             
-            self.master.destroy()
+            self.close()
             sys.exit(0)
 
     def append_log(self, message):
@@ -6714,7 +5910,11 @@ Important rules:
                    print(message)
                    return
                try:
-                   exists = bool(self.log_text.winfo_exists())
+                   # Check if widget still exists (QTextEdit doesn't have winfo_exists)
+                   if not self.log_text.isVisible() and not self.log_text.parent():
+                       exists = False
+                   else:
+                       exists = True
                except Exception:
                    exists = False
                if not exists:
@@ -6723,21 +5923,35 @@ Important rules:
                
                at_bottom = False
                try:
-                   at_bottom = self.log_text.yview()[1] >= 0.98
+                   # Get scrollbar and check if at bottom
+                   scrollbar = self.log_text.verticalScrollBar()
+                   at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
                except Exception:
                    at_bottom = False
                
                is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
                
                if is_memory:
-                   self.log_text.insert(tk.END, message + "\n", "memory")
-                   if "memory" not in self.log_text.tag_names():
-                       self.log_text.tag_config("memory", foreground="#4CAF50", font=('TkDefaultFont', 10, 'italic'))
+                   # Apply green color formatting for memory messages
+                   cursor = self.log_text.textCursor()
+                   cursor.movePosition(QTextCursor.End)
+                   
+                   # Set format for memory text
+                   format = QTextCharFormat()
+                   format.setForeground(QColor("#4CAF50"))
+                   font = QFont()
+                   font.setItalic(True)
+                   format.setFont(font)
+                   
+                   cursor.insertText(message + "\n", format)
                else:
-                   self.log_text.insert(tk.END, message + "\n")
+                   # Regular text append
+                   self.log_text.append(message)
                
                if at_bottom:
-                   self.log_text.see(tk.END)
+                   # Scroll to bottom
+                   scrollbar = self.log_text.verticalScrollBar()
+                   scrollbar.setValue(scrollbar.maximum())
            except Exception:
                # As a last resort, print to stdout to avoid crashing callbacks
                try:
@@ -6749,7 +5963,7 @@ Important rules:
            _append()
        else:
            try:
-               self.master.after(0, _append)
+               QTimer.singleShot(0, _append)
            except Exception:
                # If the master window is gone, just print
                try:
@@ -6761,10 +5975,18 @@ Important rules:
        """Update a status line in the log safely (fallback to print)."""
        def _update():
            try:
-               if not hasattr(self, 'log_text') or not self.log_text.winfo_exists():
+               if not hasattr(self, 'log_text'):
                    print(message)
                    return
-               content = self.log_text.get("1.0", "end-1c")
+               try:
+                   if not self.log_text.isVisible() and not self.log_text.parent():
+                       print(message)
+                       return
+               except:
+                   print(message)
+                   return
+                   
+               content = self.log_text.toPlainText()
                lines = content.split('\n')
                
                status_markers = ['⏳', '📊', '✅', '❌', '🔄']
@@ -6782,19 +6004,26 @@ Important rules:
                    status_msg = f"📊 {message}"
                
                if is_status_line and lines[-1].strip().startswith(('⏳', '📊')):
-                   start_pos = f"{len(lines)}.0"
-                   self.log_text.delete(f"{start_pos} linestart", "end")
+                   # Remove the last line and replace with new status
+                   cursor = self.log_text.textCursor()
+                   cursor.movePosition(QTextCursor.End)
+                   cursor.select(QTextCursor.LineUnderCursor)
+                   cursor.removeSelectedText()
+                   cursor.deletePreviousChar()  # Remove the newline
+                   
                    if len(lines) > 1:
-                       self.log_text.insert("end", "\n" + status_msg)
+                       self.log_text.append(status_msg)
                    else:
-                       self.log_text.insert("end", status_msg)
+                       cursor.insertText(status_msg)
                else:
                    if content and not content.endswith('\n'):
-                       self.log_text.insert("end", "\n" + status_msg)
+                       self.log_text.append(status_msg)
                    else:
-                       self.log_text.insert("end", status_msg + "\n")
+                       self.log_text.append(status_msg)
                
-               self.log_text.see("end")
+               # Scroll to bottom
+               scrollbar = self.log_text.verticalScrollBar()
+               scrollbar.setValue(scrollbar.maximum())
            except Exception:
                try:
                    print(message)
@@ -6805,7 +6034,7 @@ Important rules:
            _update()
        else:
            try:
-               self.master.after(0, _update)
+               QTimer.singleShot(0, _update)
            except Exception:
                try:
                    print(message)
@@ -6876,38 +6105,37 @@ Important rules:
        
        self.append_log(msg)
 
-    def _show_context_menu(self, event):
+    def _show_context_menu(self, pos):
        """Show context menu for log text"""
-       try:
-           context_menu = tk.Menu(self.master, tearoff=0)
-           
-           try:
-               self.log_text.selection_get()
-               context_menu.add_command(label="Copy", command=self.copy_selection)
-           except tk.TclError:
-               context_menu.add_command(label="Copy", state="disabled")
-           
-           context_menu.add_separator()
-           context_menu.add_command(label="Select All", command=self.select_all_log)
-           
-           context_menu.tk_popup(event.x_root, event.y_root)
-       finally:
-           context_menu.grab_release()
+       context_menu = QMenu(self)
+       
+       # Check if there's selected text
+       cursor = self.log_text.textCursor()
+       has_selection = cursor.hasSelection()
+       
+       copy_action = context_menu.addAction("Copy")
+       copy_action.triggered.connect(self.copy_selection)
+       copy_action.setEnabled(has_selection)
+       
+       context_menu.addSeparator()
+       
+       select_all_action = context_menu.addAction("Select All")
+       select_all_action.triggered.connect(self.select_all_log)
+       
+       # Show the context menu at the cursor position
+       context_menu.exec(self.log_text.mapToGlobal(pos))
 
     def copy_selection(self):
        """Copy selected text from log to clipboard"""
-       try:
-           text = self.log_text.selection_get()
-           self.master.clipboard_clear()
-           self.master.clipboard_append(text)
-       except tk.TclError:
-           pass
+       cursor = self.log_text.textCursor()
+       if cursor.hasSelection():
+           selected_text = cursor.selectedText()
+           clipboard = QApplication.clipboard()
+           clipboard.setText(selected_text)
 
     def select_all_log(self):
        """Select all text in the log"""
-       self.log_text.tag_add(tk.SEL, "1.0", tk.END)
-       self.log_text.mark_set(tk.INSERT, "1.0")
-       self.log_text.see(tk.INSERT)
+       self.log_text.selectAll()
 
     def auto_load_glossary_for_file(self, file_path):
         """Automatically load glossary if it exists in the output folder"""
@@ -6979,30 +6207,35 @@ Important rules:
     # File Selection Methods
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
-        paths = filedialog.askopenfilenames(
-            title="Select File(s) - Hold Ctrl/Shift to select multiple",
-            filetypes=[
-                ("Supported files", "*.epub;*.cbz;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
-                ("EPUB/CBZ", "*.epub;*.cbz"),
-                ("EPUB files", "*.epub"),
-                ("Comic Book Zip", "*.cbz"),
-                ("Text files", "*.txt;*.json"),
-                ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
-                ("PNG files", "*.png"),
-                ("JPEG files", "*.jpg;*.jpeg"),
-                ("GIF files", "*.gif"),
-                ("BMP files", "*.bmp"),
-                ("WebP files", "*.webp"),
-                ("All files", "*.*")
-            ]
+        file_filter = (
+            "Supported files (*.epub *.cbz *.txt *.json *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "EPUB/CBZ (*.epub *.cbz);;"
+            "EPUB files (*.epub);;"
+            "Comic Book Zip (*.cbz);;"
+            "Text files (*.txt *.json);;"
+            "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "PNG files (*.png);;"
+            "JPEG files (*.jpg *.jpeg);;"
+            "GIF files (*.gif);;"
+            "BMP files (*.bmp);;"
+            "WebP files (*.webp);;"
+            "All files (*.*)"
+        )
+        
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select File(s) - Hold Ctrl/Shift to select multiple",
+            "",
+            file_filter
         )
         if paths:
-            self._handle_file_selection(list(paths))
+            self._handle_file_selection(paths)
 
     def browse_folder(self):
         """Select an entire folder of files"""
-        folder_path = filedialog.askdirectory(
-            title="Select Folder Containing Files to Translate"
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder Containing Files to Translate"
         )
         if folder_path:
             # Find all supported files in the folder
@@ -7010,7 +6243,7 @@ Important rules:
             files = []
             
             # Recursively find files if deep scan is enabled
-            if hasattr(self, 'deep_scan_var') and self.deep_scan_var.get():
+            if hasattr(self, 'deep_scan_var') and self.deep_scan_var:
                 for root, dirs, filenames in os.walk(folder_path):
                     for filename in filenames:
                         file_path = os.path.join(root, filename)
@@ -7029,13 +6262,13 @@ Important rules:
                 self._handle_file_selection(sorted(files))
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
-                messagebox.showwarning("No Files Found", 
+                QMessageBox.warning(self, "No Files Found", 
                                      f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, TXT, PNG, JPG, JPEG, GIF, BMP, WebP")
 
     def clear_file_selection(self):
         """Clear all selected files"""
-        self.entry_epub.delete(0, tk.END)
-        self.entry_epub.insert(0, "No file selected")
+        self.entry_epub.clear()
+        self.entry_epub.setText("No file selected")
         self.selected_files = []
         self.file_path = None
         self.current_file_index = 0
@@ -7120,7 +6353,7 @@ Important rules:
             pass
         
         # Update the entry field
-        self.entry_epub.delete(0, tk.END)
+        self.entry_epub.clear()
         
         # Define image extensions
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
@@ -7132,9 +6365,9 @@ Important rules:
                 # Show original JSON filename in parentheses
                 original_json = self.json_conversions[processed_paths[0]]
                 display_path = f"{processed_paths[0]} (from {os.path.basename(original_json)})"
-                self.entry_epub.insert(0, display_path)
+                self.entry_epub.setText(display_path)
             else:
-                self.entry_epub.insert(0, processed_paths[0])
+                self.entry_epub.setText(processed_paths[0])
             self.file_path = processed_paths[0]  # For backward compatibility
         else:
             # Multiple files - display count and summary
@@ -7156,7 +6389,7 @@ Important rules:
                 summary_parts.append(f"{len(images)} images")
             
             display_text = f"{len(paths)} files selected ({', '.join(summary_parts)})"
-            self.entry_epub.insert(0, display_text)
+            self.entry_epub.setText(display_text)
             self.file_path = processed_paths[0]  # Set first file as primary
         
         # Check if these are image files
@@ -7164,8 +6397,8 @@ Important rules:
         
         if image_files:
             # Enable image translation if not already enabled
-            if hasattr(self, 'enable_image_translation_var') and not self.enable_image_translation_var.get():
-                self.enable_image_translation_var.set(True)
+            if hasattr(self, 'enable_image_translation_var') and not self.enable_image_translation_var:
+                self.enable_image_translation_var = True
                 self.append_log(f"🖼️ Detected {len(image_files)} image file(s) - automatically enabled image translation")
             
             # Clear glossary for image files
@@ -7414,21 +6647,28 @@ Important rules:
             return None
 
     def toggle_api_visibility(self):
-        show = self.api_key_entry.cget('show')
-        self.api_key_entry.config(show='' if show == '*' else '*')
-        # Track the visibility state
-        self.api_key_visible = (show == '*')  # Will be True when showing, False when hiding
+        if self.api_key_entry.echoMode() == QLineEdit.Password:
+            self.api_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_api_btn.setText("Hide")
+            self.api_key_visible = True
+        else:
+            self.api_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_api_btn.setText("Show")
+            self.api_key_visible = False
     
     def prompt_custom_token_limit(self):
-       val = simpledialog.askinteger(
+       from PySide6.QtWidgets import QInputDialog
+       val, ok = QInputDialog.getInt(
+           self,
            "Set Max Output Token Limit",
            "Enter max output tokens for API output (e.g., 16384, 32768, 65536):",
-           minvalue=1,
-           maxvalue=2000000
+           value=self.max_output_tokens,
+           min=1,
+           max=2000000
        )
-       if val:
+       if ok and val:
            self.max_output_tokens = val
-           self.output_btn.config(text=f"Output Token Limit: {val}")
+           self.output_btn.setText(f"Output Token Limit: {val}")
            self.append_log(f"✅ Output token limit set to {val}")
 
     # Note: open_other_settings method is bound from other_settings.py during __init__
@@ -7451,17 +6691,12 @@ Important rules:
         """Let the user pick a glossary file (JSON or CSV) and remember its path."""
         import json
         import shutil
-        from tkinter import filedialog, messagebox
         
-        path = filedialog.askopenfilename(
-            title="Select glossary file",
-            filetypes=[
-                ("Supported files", "*.json;*.csv;*.txt"),
-                ("JSON files", "*.json"),
-                ("CSV files", "*.csv"),
-                ("Text files", "*.txt"),
-                ("All files", "*.*")
-            ]
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select glossary file",
+            "",
+            "Supported files (*.json *.csv *.txt);;JSON files (*.json);;CSV files (*.csv);;Text files (*.txt);;All files (*.*)"
         )
         if not path:
             return
@@ -7503,13 +6738,16 @@ Important rules:
                         json.loads(fixed_content)
                         
                         # If successful, ask user if they want to save the fixed version
-                        response = messagebox.askyesno(
+                        response = QMessageBox.question(
+                            self,
                             "JSON Auto-Fix Successful",
                             f"The JSON file had errors that were automatically fixed.\n\n"
                             f"Original error: {str(e)}\n\n"
                             f"Do you want to save the fixed version?\n"
-                            f"(A backup of the original will be created)"
+                            f"(A backup of the original will be created)",
+                            QMessageBox.Yes | QMessageBox.No
                         )
+                        response = (response == QMessageBox.Yes)
                         
                         if response:
                             # Save the fixed version
@@ -7531,8 +6769,9 @@ Important rules:
                         # Build detailed error message
                         error_details = self._analyze_json_errors(content, fixed_content, e, e2)
                         
-                        response = messagebox.askyesnocancel(
-                            "JSON Fix Failed",
+                        msgbox = QMessageBox(self)
+                        msgbox.setWindowTitle("JSON Fix Failed")
+                        msgbox.setText(
                             f"The JSON file has errors that couldn't be automatically fixed.\n\n"
                             f"Original error: {str(e)}\n"
                             f"After auto-fix attempt: {str(e2)}\n\n"
@@ -7542,6 +6781,16 @@ Important rules:
                             f"• NO: Try to use the file anyway (may fail)\n"
                             f"• CANCEL: Cancel loading this glossary"
                         )
+                        msgbox.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+                        response = msgbox.exec()
+                        
+                        # Convert QMessageBox response to True/False/None
+                        if response == QMessageBox.Yes:
+                            response = True
+                        elif response == QMessageBox.No:
+                            response = False
+                        else:
+                            response = None
                         
                         if response is True:  # YES - open in editor
                             try:
@@ -7556,7 +6805,8 @@ Important rules:
                                 else:  # linux
                                     subprocess.run(['xdg-open', path])
                                 
-                                messagebox.showinfo(
+                                QMessageBox.information(
+                                    self,
                                     "Manual Edit",
                                     "Please fix the JSON errors in your editor and save the file.\n"
                                     "Then click OK to retry loading the glossary."
@@ -7567,7 +6817,8 @@ Important rules:
                                 return
                                 
                             except Exception as editor_error:
-                                messagebox.showerror(
+                                QMessageBox.critical(
+                                    self,
                                     "Error",
                                     f"Failed to open file in editor: {str(editor_error)}\n\n"
                                     f"Please manually edit the file:\n{path}"
@@ -7583,11 +6834,12 @@ Important rules:
                             return
             
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to read glossary file: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to read glossary file: {str(e)}")
                 return
         
         else:
-            messagebox.showerror(
+            QMessageBox.critical(
+                self,
                 "Error", 
                 f"Unsupported file type: {file_extension}\n"
                 "Please select a JSON, CSV, or TXT file."
@@ -7605,7 +6857,7 @@ Important rules:
         # Save the file extension for later reference
         self.manual_glossary_file_extension = file_extension
         
-        self.append_glossary_var.set(True)
+        self.append_glossary_var = True
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
 
     def _comprehensive_json_fix(self, content):
@@ -7755,49 +7007,49 @@ Important rules:
                 except (ValueError, TypeError): return default
             
             # Basic settings
-            self.config['model'] = self.model_var.get()
-            self.config['active_profile'] = self.profile_var.get()
+            self.config['model'] = self.model_var
+            self.config['active_profile'] = self.profile_var
             self.config['prompt_profiles'] = self.prompt_profiles
-            self.config['contextual'] = self.contextual_var.get()
+            self.config['contextual'] = self.contextual_var
             
             # Validate numeric fields (skip validation if called from manga integration with show_message=False)
             if show_message:
-                delay_val = self.delay_entry.get().strip()
+                delay_val = self.delay_entry.text().strip()
                 if delay_val and not delay_val.replace('.', '', 1).isdigit():
                     from PySide6.QtWidgets import QMessageBox
                     QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for API call delay")
                     return
-            self.config['delay'] = safe_float(self.delay_entry.get().strip(), 2)
+            self.config['delay'] = safe_float(self.delay_entry.text().strip(), 2)
 
             if show_message:
-                thread_delay_val = self.thread_delay_var.get().strip()
+                thread_delay_val = self.thread_delay_var.strip()
                 if not thread_delay_val.replace('.', '', 1).isdigit():
                     from PySide6.QtWidgets import QMessageBox
                     QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Threading Delay")
                     return
-            self.config['thread_submission_delay'] = safe_float(self.thread_delay_var.get().strip(), 0.5)
+            self.config['thread_submission_delay'] = safe_float(self.thread_delay_var.strip(), 0.5)
             
             if show_message:
-                trans_temp_val = self.trans_temp.get().strip()
+                trans_temp_val = self.trans_temp.text().strip()
                 if trans_temp_val:
                     try: float(trans_temp_val)
                     except ValueError:
                         from PySide6.QtWidgets import QMessageBox
                         QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Temperature")
                         return
-            self.config['translation_temperature'] = safe_float(self.trans_temp.get().strip(), 0.3)
+            self.config['translation_temperature'] = safe_float(self.trans_temp.text().strip(), 0.3)
             
             if show_message:
-                trans_history_val = self.trans_history.get().strip()
+                trans_history_val = self.trans_history.text().strip()
                 if trans_history_val and not trans_history_val.isdigit():
                     from PySide6.QtWidgets import QMessageBox
                     QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Translation History Limit")
                     return
-            self.config['translation_history_limit'] = safe_int(self.trans_history.get().strip(), 2)
+            self.config['translation_history_limit'] = safe_int(self.trans_history.text().strip(), 2)
             
             # Add fuzzy matching threshold
             if hasattr(self, 'fuzzy_threshold_var'):
-                fuzzy_val = self.fuzzy_threshold_var.get()
+                fuzzy_val = self.fuzzy_threshold_var
                 if 0.5 <= fuzzy_val <= 1.0:
                     self.config['glossary_fuzzy_threshold'] = fuzzy_val
                 else:
@@ -7805,46 +7057,46 @@ Important rules:
 
             # Add glossary format preference
             if hasattr(self, 'use_legacy_csv_var'):
-                self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var.get()
+                self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var
     
              # Add after saving translation_prompt_text:
             if hasattr(self, 'format_instructions_text'):
                 try:
-                    self.config['glossary_format_instructions'] = self.format_instructions_text.get('1.0', tk.END).strip()
+                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
                 except:
-                    pass 
+                    pass
  
             if hasattr(self, 'azure_api_version_var'):
-                self.config['azure_api_version'] = self.azure_api_version_var.get()
+                self.config['azure_api_version'] = self.azure_api_version_var
     
             # Save all other settings
-            self.config['api_key'] = self.api_key_entry.get()
-            self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
-            self.config['attach_css_to_chapters'] = self.attach_css_to_chapters_var.get()
-            self.config['chapter_range'] = self.chapter_range_entry.get().strip()
-            self.config['use_rolling_summary'] = self.rolling_summary_var.get()
-            self.config['summary_role'] = self.summary_role_var.get()
+            self.config['api_key'] = self.api_key_entry.text()
+            self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var
+            self.config['attach_css_to_chapters'] = self.attach_css_to_chapters_var
+            self.config['chapter_range'] = self.chapter_range_entry.text().strip()
+            self.config['use_rolling_summary'] = self.rolling_summary_var
+            self.config['summary_role'] = self.summary_role_var
             self.config['max_output_tokens'] = self.max_output_tokens
-            self.config['translate_book_title'] = self.translate_book_title_var.get()
+            self.config['translate_book_title'] = self.translate_book_title_var
             self.config['book_title_prompt'] = self.book_title_prompt
-            self.config['append_glossary'] = self.append_glossary_var.get()
-            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
-            self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var.get(), 10)
-            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
-            self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var.get(), 5)
+            self.config['append_glossary'] = self.append_glossary_var
+            self.config['emergency_paragraph_restore'] = self.emergency_restore_var
+            self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var, 10)
+            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var
+            self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var, 5)
             self.config['token_limit_disabled'] = self.token_limit_disabled
-            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var.get(), 2)
-            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var.get(), 50)
-            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var.get(), 30)
-            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var.get(), 50)
-            self.config['enable_image_translation'] = self.enable_image_translation_var.get()
-            self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
-            self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var.get(), 1000)
-            self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var.get(), 1)
-            self.config['batch_translation'] = self.batch_translation_var.get()
-            self.config['batch_size'] = safe_int(self.batch_size_var.get(), 3)
-            self.config['conservative_batching'] = self.conservative_batching_var.get()
-            self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
+            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var, 2)
+            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var, 50)
+            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var, 30)
+            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var, 50)
+            self.config['enable_image_translation'] = self.enable_image_translation_var
+            self.config['process_webnovel_images'] = self.process_webnovel_images_var
+            self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var, 1000)
+            self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var, 1)
+            self.config['batch_translation'] = self.batch_translation_var
+            self.config['batch_size'] = safe_int(self.batch_size_var, 3)
+            self.config['conservative_batching'] = self.conservative_batching_var
+            self.config['translation_history_rolling'] = self.translation_history_rolling_var
 
             # OpenRouter transport/compression toggles with debugging
             if show_message and debug_enabled:  # Only log debug info when debug mode is enabled
@@ -7852,9 +7104,9 @@ Important rules:
                 
             openrouter_env_vars_set = []
             if hasattr(self, 'openrouter_http_only_var'):
-                self.config['openrouter_use_http_only'] = bool(self.openrouter_http_only_var.get())
+                self.config['openrouter_use_http_only'] = bool(self.openrouter_http_only_var)
                 old_val = os.environ.get('OPENROUTER_USE_HTTP_ONLY', '<NOT SET>')
-                new_val = '1' if self.openrouter_http_only_var.get() else '0'
+                new_val = '1' if self.openrouter_http_only_var else '0'
                 os.environ['OPENROUTER_USE_HTTP_ONLY'] = new_val
                 openrouter_env_vars_set.append('OPENROUTER_USE_HTTP_ONLY')
                 if show_message and debug_enabled and old_val != new_val:
@@ -7864,9 +7116,9 @@ Important rules:
                     self.append_log("⚠️ [DEBUG] openrouter_http_only_var not found")
                     
             if hasattr(self, 'openrouter_accept_identity_var'):
-                self.config['openrouter_accept_identity'] = bool(self.openrouter_accept_identity_var.get())
+                self.config['openrouter_accept_identity'] = bool(self.openrouter_accept_identity_var)
                 old_val = os.environ.get('OPENROUTER_ACCEPT_IDENTITY', '<NOT SET>')
-                new_val = '1' if self.openrouter_accept_identity_var.get() else '0'
+                new_val = '1' if self.openrouter_accept_identity_var else '0'
                 os.environ['OPENROUTER_ACCEPT_IDENTITY'] = new_val
                 openrouter_env_vars_set.append('OPENROUTER_ACCEPT_IDENTITY')
                 if show_message and debug_enabled and old_val != new_val:
@@ -7876,9 +7128,9 @@ Important rules:
                     self.append_log("⚠️ [DEBUG] openrouter_accept_identity_var not found")
                     
             if hasattr(self, 'openrouter_preferred_provider_var'):
-                self.config['openrouter_preferred_provider'] = self.openrouter_preferred_provider_var.get()
+                self.config['openrouter_preferred_provider'] = self.openrouter_preferred_provider_var
                 old_val = os.environ.get('OPENROUTER_PREFERRED_PROVIDER', '<NOT SET>')
-                new_val = self.openrouter_preferred_provider_var.get()
+                new_val = self.openrouter_preferred_provider_var
                 os.environ['OPENROUTER_PREFERRED_PROVIDER'] = new_val
                 openrouter_env_vars_set.append('OPENROUTER_PREFERRED_PROVIDER')
                 if show_message and debug_enabled and old_val != new_val:
@@ -7965,44 +7217,44 @@ Important rules:
             except Exception as e:
                 if show_message and debug_enabled:
                     self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
-            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
-            self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
-            self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var.get()
-            self.config['translate_cover_html'] = self.translate_cover_html_var.get()
-            self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
-            self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
-            self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
-            self.config['use_header_as_output'] = self.use_header_as_output_var.get()
-            self.config['enable_decimal_chapters'] = self.enable_decimal_chapters_var.get()
-            self.config['enable_watermark_removal'] = self.enable_watermark_removal_var.get()
-            self.config['save_cleaned_images'] = self.save_cleaned_images_var.get()
-            self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var.get()
-            self.config['compression_factor'] = self.compression_factor_var.get()
+            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
+            self.config['disable_epub_gallery'] = self.disable_epub_gallery_var
+            self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var
+            self.config['translate_cover_html'] = self.translate_cover_html_var
+            self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
+            self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var
+            self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var, 0)
+            self.config['use_header_as_output'] = self.use_header_as_output_var
+            self.config['enable_decimal_chapters'] = self.enable_decimal_chapters_var
+            self.config['enable_watermark_removal'] = self.enable_watermark_removal_var
+            self.config['save_cleaned_images'] = self.save_cleaned_images_var
+            self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var
+            self.config['compression_factor'] = self.compression_factor_var
             self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
-            self.config['force_ncx_only'] = self.force_ncx_only_var.get()
-            self.config['vertex_ai_location'] = self.vertex_location_var.get()
-            self.config['batch_translate_headers'] = self.batch_translate_headers_var.get()
-            self.config['headers_per_batch'] = self.headers_per_batch_var.get()
-            self.config['update_html_headers'] = self.update_html_headers_var.get() 
-            self.config['save_header_translations'] = self.save_header_translations_var.get()
-            self.config['single_api_image_chunks'] = self.single_api_image_chunks_var.get()
-            self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var.get()
-            self.config['thinking_budget'] = int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0
-            self.config['enable_gpt_thinking'] = self.enable_gpt_thinking_var.get()
-            self.config['gpt_reasoning_tokens'] = int(self.gpt_reasoning_tokens_var.get()) if self.gpt_reasoning_tokens_var.get().lstrip('-').isdigit() else 0
-            self.config['gpt_effort'] = self.gpt_effort_var.get()
-            self.config['openai_base_url'] = self.openai_base_url_var.get()
-            self.config['groq_base_url'] = self.groq_base_url_var.get()  # This was missing!
-            self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
-            self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
+            self.config['force_ncx_only'] = self.force_ncx_only_var
+            self.config['vertex_ai_location'] = self.vertex_location_var
+            self.config['batch_translate_headers'] = self.batch_translate_headers_var
+            self.config['headers_per_batch'] = self.headers_per_batch_var
+            self.config['update_html_headers'] = self.update_html_headers_var 
+            self.config['save_header_translations'] = self.save_header_translations_var
+            self.config['single_api_image_chunks'] = self.single_api_image_chunks_var
+            self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var
+            self.config['thinking_budget'] = int(self.thinking_budget_var) if str(self.thinking_budget_var).lstrip('-').isdigit() else 0
+            self.config['enable_gpt_thinking'] = self.enable_gpt_thinking_var
+            self.config['gpt_reasoning_tokens'] = int(self.gpt_reasoning_tokens_var) if str(self.gpt_reasoning_tokens_var).lstrip('-').isdigit() else 0
+            self.config['gpt_effort'] = self.gpt_effort_var
+            self.config['openai_base_url'] = self.openai_base_url_var
+            self.config['groq_base_url'] = self.groq_base_url_var  # This was missing!
+            self.config['fireworks_base_url'] = self.fireworks_base_url_var
+            self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var
             
             # Save additional important missing settings with debugging
             if hasattr(self, 'retain_source_extension_var'):
-                self.config['retain_source_extension'] = self.retain_source_extension_var.get()
+                self.config['retain_source_extension'] = self.retain_source_extension_var
                 # Update environment variable with debugging
                 old_val = os.environ.get('RETAIN_SOURCE_EXTENSION', '<NOT SET>')
-                new_val = '1' if self.retain_source_extension_var.get() else '0'
+                new_val = '1' if self.retain_source_extension_var else '0'
                 os.environ['RETAIN_SOURCE_EXTENSION'] = new_val
                 if show_message and old_val != new_val:
                     self.append_log(f"🔍 [DEBUG] ENV RETAIN_SOURCE_EXTENSION: '{old_val}' → '{new_val}'")
@@ -8011,95 +7263,93 @@ Important rules:
                     self.append_log("⚠️ [DEBUG] retain_source_extension_var not found")
             
             if hasattr(self, 'use_fallback_keys_var'):
-                self.config['use_fallback_keys'] = self.use_fallback_keys_var.get()
+                self.config['use_fallback_keys'] = self.use_fallback_keys_var
             
             if hasattr(self, 'auto_update_check_var'):
-                self.config['auto_update_check'] = self.auto_update_check_var.get()
+                self.config['auto_update_check'] = self.auto_update_check_var
                 
             # Preserve last update check time if it exists
             if hasattr(self, 'update_manager') and self.update_manager:
                 self.config['last_update_check_time'] = self.update_manager._last_check_time
                 
-            # Save window manager safe ratios setting
-            if hasattr(self, 'wm') and hasattr(self.wm, '_force_safe_ratios'):
-                self.config['force_safe_ratios'] = self.wm._force_safe_ratios
+            # Window manager safe ratios setting - not needed in PySide6
                 
             # Save metadata-related ignore settings
             if hasattr(self, 'ignore_header_var'):
-                self.config['ignore_header'] = self.ignore_header_var.get()
+                self.config['ignore_header'] = self.ignore_header_var
                 
             if hasattr(self, 'ignore_title_var'):
-                self.config['ignore_title'] = self.ignore_title_var.get()
-            self.config['disable_chapter_merging'] = self.disable_chapter_merging_var.get()
-            self.config['use_gemini_openai_endpoint'] = self.use_gemini_openai_endpoint_var.get()
-            self.config['gemini_openai_endpoint'] = self.gemini_openai_endpoint_var.get()
+                self.config['ignore_title'] = self.ignore_title_var
+            self.config['disable_chapter_merging'] = self.disable_chapter_merging_var
+            self.config['use_gemini_openai_endpoint'] = self.use_gemini_openai_endpoint_var
+            self.config['gemini_openai_endpoint'] = self.gemini_openai_endpoint_var
             # Save extraction worker settings
-            self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
-            self.config['extraction_workers'] = self.extraction_workers_var.get()
+            self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var
+            self.config['extraction_workers'] = self.extraction_workers_var
             # Save GUI yield setting and set environment variable with debugging
             if hasattr(self, 'enable_gui_yield_var'):
-                self.config['enable_gui_yield'] = self.enable_gui_yield_var.get()
+                self.config['enable_gui_yield'] = self.enable_gui_yield_var
                 old_val = os.environ.get('ENABLE_GUI_YIELD', '<NOT SET>')
-                new_val = '1' if self.enable_gui_yield_var.get() else '0'
+                new_val = '1' if self.enable_gui_yield_var else '0'
                 os.environ['ENABLE_GUI_YIELD'] = new_val
                 if show_message and old_val != new_val:
                     self.append_log(f"🔍 [DEBUG] ENV ENABLE_GUI_YIELD: '{old_val}' → '{new_val}'")
             else:
                 if show_message:
                     self.append_log("⚠️ [DEBUG] enable_gui_yield_var not found")
-            self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
-            self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var.get()
-            self.config['glossary_filter_mode'] = self.glossary_filter_mode_var.get()
-            self.config['image_chunk_overlap'] = safe_float(self.image_chunk_overlap_var.get(), 1.0)
+            self.config['glossary_max_text_size'] = self.glossary_max_text_size_var
+            self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var
+            self.config['glossary_filter_mode'] = self.glossary_filter_mode_var
+            self.config['image_chunk_overlap'] = safe_float(self.image_chunk_overlap_var, 1.0)
 
             # Save HTTP/Network tuning settings (from Other Settings)
             if hasattr(self, 'chunk_timeout_var'):
-                self.config['chunk_timeout'] = safe_int(self.chunk_timeout_var.get(), 900)
+                self.config['chunk_timeout'] = safe_int(self.chunk_timeout_var, 900)
             if hasattr(self, 'enable_http_tuning_var'):
-                self.config['enable_http_tuning'] = self.enable_http_tuning_var.get()
+                self.config['enable_http_tuning'] = self.enable_http_tuning_var
             if hasattr(self, 'connect_timeout_var'):
-                self.config['connect_timeout'] = safe_float(self.connect_timeout_var.get(), 10.0)
+                self.config['connect_timeout'] = safe_float(self.connect_timeout_var, 10.0)
             if hasattr(self, 'read_timeout_var'):
-                self.config['read_timeout'] = safe_float(self.read_timeout_var.get(), 180.0)
+                self.config['read_timeout'] = safe_float(self.read_timeout_var, 180.0)
             if hasattr(self, 'http_pool_connections_var'):
-                self.config['http_pool_connections'] = safe_int(self.http_pool_connections_var.get(), 20)
+                self.config['http_pool_connections'] = safe_int(self.http_pool_connections_var, 20)
             if hasattr(self, 'http_pool_maxsize_var'):
-                self.config['http_pool_maxsize'] = safe_int(self.http_pool_maxsize_var.get(), 50)
+                self.config['http_pool_maxsize'] = safe_int(self.http_pool_maxsize_var, 50)
             if hasattr(self, 'ignore_retry_after_var'):
-                self.config['ignore_retry_after'] = self.ignore_retry_after_var.get()
+                self.config['ignore_retry_after'] = self.ignore_retry_after_var
             if hasattr(self, 'max_retries_var'):
-                self.config['max_retries'] = safe_int(self.max_retries_var.get(), 7)
+                self.config['max_retries'] = safe_int(self.max_retries_var, 7)
             if hasattr(self, 'indefinite_rate_limit_retry_var'):
-                self.config['indefinite_rate_limit_retry'] = self.indefinite_rate_limit_retry_var.get()
+                self.config['indefinite_rate_limit_retry'] = self.indefinite_rate_limit_retry_var
             
             # Save retry settings (from Other Settings)
             if hasattr(self, 'retry_truncated_var'):
-                self.config['retry_truncated'] = self.retry_truncated_var.get()
+                self.config['retry_truncated'] = self.retry_truncated_var
             if hasattr(self, 'max_retry_tokens_var'):
-                self.config['max_retry_tokens'] = safe_int(self.max_retry_tokens_var.get(), 16384)
+                self.config['max_retry_tokens'] = safe_int(self.max_retry_tokens_var, 16384)
             if hasattr(self, 'retry_timeout_var'):
-                self.config['retry_timeout'] = self.retry_timeout_var.get()
+                self.config['retry_timeout'] = self.retry_timeout_var
             if hasattr(self, 'preserve_original_text_var'):
-                self.config['preserve_original_text_on_failure'] = self.preserve_original_text_var.get()
+                self.config['preserve_original_text_on_failure'] = self.preserve_original_text_var
             
             # Save rolling summary settings (from Other Settings)
             if hasattr(self, 'rolling_summary_exchanges_var'):
-                self.config['rolling_summary_exchanges'] = safe_int(self.rolling_summary_exchanges_var.get(), 5)
+                self.config['rolling_summary_exchanges'] = safe_int(self.rolling_summary_exchanges_var, 5)
             if hasattr(self, 'rolling_summary_mode_var'):
-                self.config['rolling_summary_mode'] = self.rolling_summary_mode_var.get()
+                self.config['rolling_summary_mode'] = self.rolling_summary_mode_var
             if hasattr(self, 'rolling_summary_max_entries_var'):
-                self.config['rolling_summary_max_entries'] = safe_int(self.rolling_summary_max_entries_var.get(), 10)
+                self.config['rolling_summary_max_entries'] = safe_int(self.rolling_summary_max_entries_var, 10)
             
             # Save QA/scanning settings (from Other Settings)
             if hasattr(self, 'qa_auto_search_output_var'):
-                self.config['qa_auto_search_output'] = self.qa_auto_search_output_var.get()
+                self.config['qa_auto_search_output'] = self.qa_auto_search_output_var
             if hasattr(self, 'disable_zero_detection_var'):
-                self.config['disable_zero_detection'] = self.disable_zero_detection_var.get()
+                self.config['disable_zero_detection'] = self.disable_zero_detection_var
             if hasattr(self, 'disable_gemini_safety_var'):
-                self.config['disable_gemini_safety'] = self.disable_gemini_safety_var.get()
+                self.config['disable_gemini_safety'] = self.disable_gemini_safety_var
 
             # NEW: Save strip honorifics setting
-            self.config['strip_honorifics'] = self.strip_honorifics_var.get()
+            self.config['strip_honorifics'] = self.strip_honorifics_var
             
             # Save glossary backup settings
             if hasattr(self, 'config') and 'glossary_auto_backup' in self.config:
@@ -8149,26 +7399,26 @@ Important rules:
             # NEW: Save prompts from text widgets if they exist
             if hasattr(self, 'auto_prompt_text'):
                 try:
-                    self.config['auto_glossary_prompt'] = self.auto_prompt_text.get('1.0', tk.END).strip()
+                    self.config['auto_glossary_prompt'] = self.auto_prompt_text.toPlainText().strip()
                 except:
                     pass
             
             if hasattr(self, 'append_prompt_text'):
                 try:
-                    self.config['append_glossary_prompt'] = self.append_prompt_text.get('1.0', tk.END).strip()
+                    self.config['append_glossary_prompt'] = self.append_prompt_text.toPlainText().strip()
                 except:
                     pass
             
             if hasattr(self, 'translation_prompt_text'):
                 try:
-                    self.config['glossary_translation_prompt'] = self.translation_prompt_text.get('1.0', tk.END).strip()
+                    self.config['glossary_translation_prompt'] = self.translation_prompt_text.toPlainText().strip()
                 except:
                     pass
                     
             # Update environment variable when saving with debugging
             old_workers = os.environ.get('EXTRACTION_WORKERS', '<NOT SET>')
-            if self.enable_parallel_extraction_var.get():
-                new_workers = str(self.extraction_workers_var.get())
+            if self.enable_parallel_extraction_var:
+                new_workers = str(self.extraction_workers_var)
                 os.environ["EXTRACTION_WORKERS"] = new_workers
             else:
                 new_workers = "1"
@@ -8182,36 +7432,36 @@ Important rules:
             
             # Save Text Extraction Method (Standard/Enhanced)
             if hasattr(self, 'text_extraction_method_var'):
-                self.config['text_extraction_method'] = self.text_extraction_method_var.get()
+                self.config['text_extraction_method'] = self.text_extraction_method_var
             
             # Save File Filtering Level (Smart/Comprehensive/Full)
             if hasattr(self, 'file_filtering_level_var'):
-                self.config['file_filtering_level'] = self.file_filtering_level_var.get()
+                self.config['file_filtering_level'] = self.file_filtering_level_var
             
             # Save Preserve Markdown Structure setting
             if hasattr(self, 'enhanced_preserve_structure_var'):
-                self.config['enhanced_preserve_structure'] = self.enhanced_preserve_structure_var.get()
+                self.config['enhanced_preserve_structure'] = self.enhanced_preserve_structure_var
             
             # Save Enhanced Filtering setting (for backwards compatibility)
             if hasattr(self, 'enhanced_filtering_var'):
-                self.config['enhanced_filtering'] = self.enhanced_filtering_var.get()
+                self.config['enhanced_filtering'] = self.enhanced_filtering_var
             
             # Save force BeautifulSoup for traditional APIs
             if hasattr(self, 'force_bs_for_traditional_var'):
-                self.config['force_bs_for_traditional'] = self.force_bs_for_traditional_var.get()
+                self.config['force_bs_for_traditional'] = self.force_bs_for_traditional_var
             
             # Update extraction_mode for backwards compatibility with older versions
             if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):
-                if self.text_extraction_method_var.get() == 'enhanced':
+                if self.text_extraction_method_var == 'enhanced':
                     self.config['extraction_mode'] = 'enhanced'
                     # When enhanced mode is selected, the filtering level applies to enhanced mode
-                    self.config['enhanced_filtering'] = self.file_filtering_level_var.get()
+                    self.config['enhanced_filtering'] = self.file_filtering_level_var
                 else:
                     # When standard mode is selected, use the filtering level directly
-                    self.config['extraction_mode'] = self.file_filtering_level_var.get()
+                    self.config['extraction_mode'] = self.file_filtering_level_var
             elif hasattr(self, 'extraction_mode_var'):
                 # Fallback for older UI
-                self.config['extraction_mode'] = self.extraction_mode_var.get()
+                self.config['extraction_mode'] = self.extraction_mode_var
 
             # Save image compression settings if they exist
             # These are saved from the compression dialog, but we ensure defaults here
@@ -8247,26 +7497,26 @@ Important rules:
             
             # Add anti-duplicate parameters
             if hasattr(self, 'enable_anti_duplicate_var'):
-                self.config['enable_anti_duplicate'] = self.enable_anti_duplicate_var.get()
-                self.config['top_p'] = self.top_p_var.get()
-                self.config['top_k'] = self.top_k_var.get()
-                self.config['frequency_penalty'] = self.frequency_penalty_var.get()
-                self.config['presence_penalty'] = self.presence_penalty_var.get()
-                self.config['repetition_penalty'] = self.repetition_penalty_var.get()
-                self.config['candidate_count'] = self.candidate_count_var.get()  
-                self.config['custom_stop_sequences'] = self.custom_stop_sequences_var.get()
-                self.config['logit_bias_enabled'] = self.logit_bias_enabled_var.get()
-                self.config['logit_bias_strength'] = self.logit_bias_strength_var.get()
-                self.config['bias_common_words'] = self.bias_common_words_var.get()
-                self.config['bias_repetitive_phrases'] = self.bias_repetitive_phrases_var.get()
+                self.config['enable_anti_duplicate'] = self.enable_anti_duplicate_var
+                self.config['top_p'] = self.top_p_var
+                self.config['top_k'] = self.top_k_var
+                self.config['frequency_penalty'] = self.frequency_penalty_var
+                self.config['presence_penalty'] = self.presence_penalty_var
+                self.config['repetition_penalty'] = self.repetition_penalty_var
+                self.config['candidate_count'] = self.candidate_count_var  
+                self.config['custom_stop_sequences'] = self.custom_stop_sequences_var
+                self.config['logit_bias_enabled'] = self.logit_bias_enabled_var
+                self.config['logit_bias_strength'] = self.logit_bias_strength_var
+                self.config['bias_common_words'] = self.bias_common_words_var
+                self.config['bias_repetitive_phrases'] = self.bias_repetitive_phrases_var
             
             # Save scanning phase settings
             if hasattr(self, 'scan_phase_enabled_var'):
-                self.config['scan_phase_enabled'] = self.scan_phase_enabled_var.get()
+                self.config['scan_phase_enabled'] = self.scan_phase_enabled_var
             if hasattr(self, 'scan_phase_mode_var'):
-                self.config['scan_phase_mode'] = self.scan_phase_mode_var.get()
+                self.config['scan_phase_mode'] = self.scan_phase_mode_var
 
-            _tl = self.token_limit_entry.get().strip()
+            _tl = self.token_limit_entry.text().strip()
             if _tl.isdigit():
                 self.config['token_limit'] = int(_tl)
             else:
@@ -8590,7 +7840,7 @@ Important rules:
         try:
             workers = 1
             try:
-                workers = int(self.extraction_workers_var.get()) if self.enable_parallel_extraction_var.get() else 1
+                workers = int(self.extraction_workers_var) if self.enable_parallel_extraction_var else 1
             except Exception:
                 workers = 1
             if workers < 1:
@@ -8672,9 +7922,7 @@ if __name__ == "__main__":
             splash_manager.update_status("Loading UI framework...")
             time.sleep(0.08)
         
-        # Import ttkbootstrap while splash is visible
-        import ttkbootstrap as tb
-        from ttkbootstrap.constants import *
+        # PySide6 is already imported at the top of the file
         
         # REAL module loading during splash screen with gradual progression
         if splash_manager:
@@ -8782,23 +8030,23 @@ if __name__ == "__main__":
             splash_manager.close_splash()
         
         # Create main window (modules already loaded)
-        root = tb.Window(themename="darkly")
+        from PySide6.QtWidgets import QApplication
+        import sys
         
-        # CRITICAL: Hide window immediately to prevent white flash
-        root.withdraw()
+        # Check if QApplication already exists
+        qapp = QApplication.instance()
+        if not qapp:
+            qapp = QApplication(sys.argv)
         
         # Initialize the app (modules already available)  
-        app = TranslatorGUI(root)
+        main_window = TranslatorGUI()
         
         # Mark modules as already loaded to skip lazy loading
-        app._modules_loaded = True
-        app._modules_loading = False
+        main_window._modules_loaded = True
+        main_window._modules_loading = False
         
-        # CRITICAL: Let all widgets and theme fully initialize
-        root.update_idletasks()
-        
-        # CRITICAL: Now show the window after everything is ready
-        root.deiconify()
+        # Show the window
+        main_window.show()
         
         print("✅ Ready to use!")
         
@@ -8807,25 +8055,25 @@ if __name__ == "__main__":
             """Handle application shutdown gracefully to avoid GIL issues"""
             try:
                 # Stop any background threads before destroying GUI
-                if hasattr(app, 'stop_all_operations'):
-                    app.stop_all_operations()
+                if hasattr(main_window, 'stop_all_operations'):
+                    main_window.stop_all_operations()
                 
                 # Give threads a moment to stop
                 import time
                 time.sleep(0.1)
                 
-                # Destroy window
-                root.quit()
-                root.destroy()
+                # Close window
+                main_window.close()
             except Exception:
                 # Force exit if cleanup fails
                 import os
                 os._exit(0)
         
         # Set the window close handler
-        root.protocol("WM_DELETE_WINDOW", on_closing)
+        main_window.closeEvent = lambda event: on_closing()
         
         # Add signal handlers for clean shutdown
+        import signal
         def signal_handler(signum, frame):
             """Handle system signals gracefully"""
             print(f"Received signal {signum}, shutting down gracefully...")
@@ -8842,7 +8090,7 @@ if __name__ == "__main__":
         
         # Start main loop with error handling
         try:
-            root.mainloop()
+            sys.exit(qapp.exec())
         except Exception as e:
             print(f"Main loop error: {e}")
         finally:

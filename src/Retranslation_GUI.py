@@ -18,12 +18,8 @@ import zipfile
 import shutil
 import traceback
 
-# Import from translator_gui if available
-try:
-    from translator_gui import WindowManager, UIHelper
-except ImportError:
-    WindowManager = None
-    UIHelper = None
+# WindowManager and UIHelper removed - not needed in PySide6
+# Qt handles window management and UI utilities automatically
 
 
 class RetranslationMixin:
@@ -49,37 +45,22 @@ class RetranslationMixin:
         return int(1920 * width_ratio), int(1080 * height_ratio)
     
     def _show_message(self, msg_type, title, message, parent=None):
-        """Show message using appropriate GUI framework (tkinter or PySide6)"""
-        # Try PySide6 first if parent is provided
-        if parent and not hasattr(self, 'master'):
-            try:
-                if msg_type == 'info':
-                    QMessageBox.information(parent, title, message)
-                elif msg_type == 'warning':
-                    QMessageBox.warning(parent, title, message)
-                elif msg_type == 'error':
-                    QMessageBox.critical(parent, title, message)
-                elif msg_type == 'question':
-                    return QMessageBox.question(parent, title, message, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
-                return True
-            except:
-                pass
-        
-        # Fall back to tkinter
+        """Show message using PySide6 QMessageBox"""
         try:
-            import tkinter.messagebox as tk_messagebox
             if msg_type == 'info':
-                tk_messagebox.showinfo(title, message)
+                QMessageBox.information(parent, title, message)
             elif msg_type == 'warning':
-                tk_messagebox.showwarning(title, message)
+                QMessageBox.warning(parent, title, message)
             elif msg_type == 'error':
-                tk_messagebox.showerror(title, message)
+                QMessageBox.critical(parent, title, message)
             elif msg_type == 'question':
-                return tk_messagebox.askyesno(title, message)
+                return QMessageBox.question(parent, title, message, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
             return True
-        except:
-            # Last resort: print to console
+        except Exception as e:
+            # Fallback to console if dialog fails
             print(f"{title}: {message}")
+            if msg_type == 'question':
+                return False
             return False
  
     def force_retranslation(self):
@@ -99,11 +80,8 @@ class RetranslationMixin:
                 return
         
         # Original logic for single files
-        # Check if it's a tkinter Entry or QLineEdit and use appropriate method
-        if hasattr(self.entry_epub, 'get'):
-            # tkinter Entry widget
-            input_path = self.entry_epub.get()
-        elif hasattr(self.entry_epub, 'text'):
+        # Get input path from QLineEdit widget
+        if hasattr(self.entry_epub, 'text'):
             # PySide6 QLineEdit widget
             input_path = self.entry_epub.text()
         else:
