@@ -7814,6 +7814,17 @@ Important rules:
                 except:
                     pass
 
+            # Wire verbose payload saving to GUI debug mode at save time
+            try:
+                os.environ['DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE'] = '1' if debug_enabled else '0'
+                os.environ['SHOW_DEBUG_BUTTONS'] = '1' if debug_enabled else '0'
+                os.environ['DEBUG_SAVE_REQUEST_PAYLOADS'] = '1'
+                if debug_enabled and show_message:
+                    self.append_log("🔍 [DEBUG] Verbose payload logging enabled (DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE=1)")
+                    self.append_log("🔍 [DEBUG] Definitive payload capture enabled (DEBUG_SAVE_REQUEST_PAYLOADS=1)")
+            except Exception:
+                pass
+
             # Now that UI prompt widgets have been read into config, set glossary env vars
             if show_message and debug_enabled:
                 self.append_log("🔍 [DEBUG] Setting glossary environment variables (post-UI read)...")
@@ -8295,6 +8306,19 @@ Important rules:
         
         if debug_mode:
             self.append_log("🚀 [INIT] Initializing all environment variables from config...")
+        
+        # Wire verbose payload saving to GUI debug mode
+        try:
+            os.environ['DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE'] = '1' if debug_mode else '0'
+            # Also reflect debug mode for the client
+            os.environ['SHOW_DEBUG_BUTTONS'] = '1' if debug_mode else '0'
+            # Ensure capture itself is enabled
+            os.environ['DEBUG_SAVE_REQUEST_PAYLOADS'] = '1'
+            if debug_mode:
+                self.append_log("🔍 [INIT] Verbose payload logging enabled (DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE=1)")
+                self.append_log("🔍 [INIT] Definitive payload capture enabled (DEBUG_SAVE_REQUEST_PAYLOADS=1)")
+        except Exception:
+            pass
         
         try:
             # Initialize glossary-related environment variables

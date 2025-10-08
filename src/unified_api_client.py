@@ -197,6 +197,149 @@ def setup_http_logging():
 # Enable HTTP logging on module import
 setup_http_logging()
 
+# Definitive payload capture helpers (request/response)
+# These dump exactly what we are sending via HTTP paths, with headers redacted.
+
+def _payloads_dir() -> str:
+    try:
+        os.makedirs("Payloads", exist_ok=True)
+    except Exception:
+        pass
+    return "Payloads"
+
+def _redact_headers_for_dump(headers: dict) -> dict:
+    try:
+        if not headers:
+            return {}
+        redacted = {}
+        for k, v in headers.items():
+            lk = str(k).lower()
+            if lk in ("authorization", "x-api-key", "api-key", "proxy-authorization"):
+                redacted[k] = "{{REDACTED}}"
+            else:
+                redacted[k] = v
+        return redacted
+    except Exception:
+        return headers or {}
+
+def _make_request_id(url: str, body_obj) -> str:
+    try:
+        # Create a deterministic id from URL and body length/shape
+        try:
+            import json as _json
+            body_bytes = _json.dumps(body_obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        except Exception:
+            body_bytes = (str(type(body_obj)) + str(len(getattr(body_obj, "content", b""))) ).encode("utf-8")
+        h = hashlib.sha256((url + "|" + str(len(body_bytes))).encode("utf-8")).hexdigest()[:12]
+        return f"req_{h}_{int(time.time())}"
+    except Exception:
+        return f"req_{int(time.time())}"
+
+def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, body, request_id: str = None, out_dir: str = None):
+    try:
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
+            return
+        out_dir = out_dir or _payloads_dir()
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            pass
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        rid = request_id or _make_request_id(url, body)
+
+        # Normalize body to JSON-serializable
+        if isinstance(body, (dict, list, str, int, float)) or body is None:
+            body_repr = body
+        else:
+            try:
+                size = len(body)
+            except Exception:
+                size = None
+            body_repr = {"_non_json_body": True, "type": str(type(body)), "size": size}
+
+        record = {
+            "timestamp_utc": ts,
+            "provider": provider,
+            "method": method,
+            "url": url,
+            "headers": _redact_headers_for_dump(headers or {}),
+            "body": body_repr
+        }
+        path = os.path.join(out_dir, f"{rid}_request.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        # Optional verbose notice
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE", "0") == "1" or os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1":
+            print(f"📝 Saved outgoing request: {path}")
+    except Exception:
+        pass
+
+def _save_incoming_response(provider: str, url: str, status: int, headers: dict, body, request_id: str, out_dir: str = None):
+    try:
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
+            return
+        out_dir = out_dir or _payloads_dir()
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            pass
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+        # Normalize response body to a JSON-friendly representation
+        if isinstance(body, (dict, list)):
+            body_out = body
+        else:
+            text = None
+            try:
+                if isinstance(body, str):
+                    text = body
+                else:
+                    text = body.decode("utf-8", errors="replace") if hasattr(body, "decode") else str(body)
+            except Exception:
+                text = f"<{type(body).__name__}>"
+            if text and len(text) > 100000:
+                text = text[:100000] + "...(truncated)"
+            body_out = text
+
+        record = {
+            "timestamp_utc": ts,
+            "provider": provider,
+            "url": url,
+            "status": status,
+            "headers": {k: v for k, v in (headers or {}).items()},
+            "body": body_out
+        }
+        rid = request_id or _make_request_id(url, body_out)
+        path = os.path.join(out_dir, f"{rid}_response.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE", "0") == "1" or os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1":
+            print(f"📝 Saved incoming response: {path}")
+    except Exception:
+        pass
+
+# Simple HTML/markup sanitizer for log lines
+import re as _re
+import html as _html_mod
+
+def _sanitize_for_log(text: str, limit: int = 400) -> str:
+    try:
+        if not isinstance(text, str):
+            text = str(text)
+        # Remove script/style blocks
+        s = _re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', '', text)
+        # Remove all tags
+        s = _re.sub(r'(?s)<[^>]+>', '', s)
+        # Unescape entities
+        s = _html_mod.unescape(s)
+        # Collapse whitespace
+        s = _re.sub(r'\s+', ' ', s).strip()
+        if limit and len(s) > limit:
+            s = s[:limit] + '…'
+        return s
+    except Exception:
+        return str(text)[:limit] + ('…' if text and len(str(text)) > limit else '')
+
 # Redirect all print() calls in this module to the module logger so GUI can capture them
 # This affects ONLY this module (does not modify global/builtins print)
 # It preserves simple usage of sep and file, and defaults to INFO level
@@ -4715,7 +4858,11 @@ class UnifiedClient:
     
     def _handle_empty_result(self, messages, context, error_info):
         """Handle empty results with context-aware fallbacks"""
-        print(f"Handling empty result for context: {context}, error: {error_info}")
+        try:
+            sanitized = _sanitize_for_log(str(error_info), 300)
+        except Exception:
+            sanitized = str(error_info)[:300]
+        print(f"Handling empty result for context: {context}, error: {sanitized}")
         
         # Log detailed error information for debugging
         if isinstance(error_info, dict):
@@ -6285,6 +6432,12 @@ class UnifiedClient:
             # Toggle to ignore server-provided Retry-After headers
             ignore_retry_after = (os.getenv("ENABLE_HTTP_TUNING", "0") == "1") and (os.getenv("IGNORE_RETRY_AFTER", "0") == "1")
             try:
+                # Definitive payload capture: save outgoing request before sending
+                try:
+                    rid = _make_request_id(url, json)
+                    _save_outgoing_request(provider, method, url, headers, json, request_id=rid, out_dir=self._get_thread_directory())
+                except Exception:
+                    rid = None
                 if use_session:
                     # Reuse pooled session based on the base URL
                     try:
@@ -6300,6 +6453,15 @@ class UnifiedClient:
                     resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
                 else:
                     resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
+                # Save incoming response snapshot regardless of status
+                try:
+                    try:
+                        body = resp.json()
+                    except Exception:
+                        body = resp.text
+                    _save_incoming_response(provider, resp.url if hasattr(resp, 'url') else url, resp.status_code, dict(resp.headers), body, request_id=rid, out_dir=self._get_thread_directory())
+                except Exception:
+                    pass
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
                     print(f"{provider} network error (attempt {attempt + 1}): {e}")
@@ -6331,7 +6493,8 @@ class UnifiedClient:
                                 if detail_msg:
                                     print(f"{provider} 429: {detail_msg} | code: {err_code} | retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
                                 else:
-                                    print(f"{provider} 429: {resp.text[:1200]} | retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
+                                    snippet = _sanitize_for_log(resp.text, 300)
+                                    print(f"{provider} 429: {snippet} | retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
                         except Exception:
                             print(f"{provider} 429 (non-JSON parse): ct={ct} retry-after: {retry_after_val} | remaining: {rl_remaining} reset: {rl_reset} limit: {rl_limit}")
                     else:
@@ -6376,7 +6539,7 @@ class UnifiedClient:
                     continue
                 
                 # If we reach here, indefinite retry is disabled and we've exhausted max_retries
-                raise UnifiedClientError(f"{provider} rate limit: {resp.text}", error_type="rate_limit", http_status=429)
+                raise UnifiedClientError(f"{provider} rate limit: {_sanitize_for_log(resp.text, 300)}", error_type="rate_limit", http_status=429)
 
             # Transient server errors with optional Retry-After
             if status in (500, 502, 503, 504) and attempt < max_retries - 1:
@@ -6400,10 +6563,11 @@ class UnifiedClient:
 
             # Other non-success statuses
             if attempt < max_retries - 1:
-                print(f"{provider} API error: {status} - {resp.text} (attempt {attempt + 1})")
+                snippet = _sanitize_for_log(resp.text, 300)
+                print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
                 time.sleep(api_delay)
                 continue
-            raise UnifiedClientError(f"{provider} API error: {status} - {resp.text}", http_status=status)
+            raise UnifiedClientError(f"{provider} API error: {status} - {_sanitize_for_log(resp.text, 300)}", http_status=status)
 
     def _extract_openai_json(self, json_resp: dict):
         """Extract content, finish_reason, and usage from OpenAI-compatible JSON."""
@@ -7194,11 +7358,39 @@ class UnifiedClient:
                 
                 
                 # Make the API call
+                # Save outgoing SDK request (OpenAI-compatible providers)
+                try:
+                    # Determine base URL for SDK client
+                    sdk_base = str(base_url).rstrip('/') if base_url else 'https://api.openai.com/v1'
+                    sdk_url = f"{sdk_base}/chat/completions"
+                    sdk_headers = {"Authorization": f"Bearer {actual_api_key}", "Content-Type": "application/json"}
+                    if extra_headers:
+                        sdk_headers.update(extra_headers)
+                    _save_outgoing_request(provider + "_sdk", "POST", sdk_url, sdk_headers, {**params, **({"extra_body": extra_body} if extra_body else {})}, out_dir=self._get_thread_directory())
+                except Exception:
+                    pass
+
                 resp = self.openai_client.chat.completions.create(
                     **params,
                     timeout=self.request_timeout,
-                    idempotency_key=self._get_idempotency_key()
+                    idempotency_key=self._get_idempotency_key(),
+                    extra_headers=extra_headers,
+                    extra_body=extra_body or None,
                 )
+
+                # Save incoming SDK response snapshot
+                try:
+                    body = None
+                    if hasattr(resp, 'model_dump_json'):
+                        import json as _json
+                        body = _json.loads(resp.model_dump_json())
+                    elif hasattr(resp, 'to_dict'):
+                        body = resp.to_dict()
+                    else:
+                        body = str(resp)
+                    _save_incoming_response(provider + "_sdk", sdk_url, 200, {}, body, request_id=None, out_dir=self._get_thread_directory())
+                except Exception:
+                    pass
                 
                 # Enhanced response validation with detailed logging
                 if not resp:
@@ -8388,10 +8580,32 @@ class UnifiedClient:
 
                             # Use Idempotency-Key via headers for compatibility
                             idem_key = self._get_idempotency_key()
+                            # Save outgoing SDK request
+                            try:
+                                sdk_headers = {"Authorization": f"Bearer {actual_api_key}", "Content-Type": "application/json", "Idempotency-Key": idem_key}
+                                sdk_url = f"{azure_endpoint.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+                                _save_outgoing_request("azure_sdk", "POST", sdk_url, sdk_headers, params, out_dir=self._get_thread_directory())
+                            except Exception:
+                                pass
+
                             response = client.chat.completions.create(
                                 **params,
                                 extra_headers={"Idempotency-Key": idem_key}
                             )
+
+                            # Save incoming SDK response snapshot
+                            try:
+                                body = None
+                                if hasattr(response, 'model_dump_json'):
+                                    import json as _json
+                                    body = _json.loads(response.model_dump_json())
+                                elif hasattr(response, 'to_dict'):
+                                    body = response.to_dict()
+                                else:
+                                    body = str(response)
+                                _save_incoming_response("azure_sdk", sdk_url, 200, {}, body, request_id=None, out_dir=self._get_thread_directory())
+                            except Exception:
+                                pass
                             
                             # Extract response
                             content = response.choices[0].message.content if response.choices else ""

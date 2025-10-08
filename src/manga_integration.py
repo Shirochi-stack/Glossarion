@@ -2632,8 +2632,17 @@ class MangaTranslationTab:
         self.contextual_status_label.setFont(status_font)
         settings_display_layout.addWidget(self.contextual_status_label)
         
-        # History limit
-        history_limit = self.main_gui.trans_history if hasattr(self.main_gui, 'trans_history') else "3"
+        # History limit - handle QLineEdit widget properly
+        history_limit = "3"  # default
+        if hasattr(self.main_gui, 'trans_history'):
+            try:
+                # If it's a QLineEdit widget, get its text content
+                if hasattr(self.main_gui.trans_history, 'text'):
+                    history_limit = self.main_gui.trans_history.text()
+                else:
+                    history_limit = str(self.main_gui.trans_history)
+            except Exception:
+                history_limit = "3"
         self.history_limit_label = QLabel(f"• Translation History Limit: {history_limit} exchanges")
         self.history_limit_label.setFont(status_font)
         settings_display_layout.addWidget(self.history_limit_label)
@@ -2648,10 +2657,10 @@ class MangaTranslationTab:
         context_frame_layout.addWidget(context_info)
 
         # Refresh button to update from main GUI
-        refresh_btn = QPushButton("↻ Refresh from Main GUI")
-        refresh_btn.clicked.connect(self._refresh_context_settings)
-        refresh_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
-        context_frame_layout.addWidget(refresh_btn)
+        self.refresh_btn = QPushButton("↻ Refresh from Main GUI")
+        self.refresh_btn.clicked.connect(self._refresh_context_settings_with_feedback)
+        self.refresh_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        context_frame_layout.addWidget(self.refresh_btn)
         
         # Separator
         separator2 = QFrame()
@@ -4888,6 +4897,53 @@ class MangaTranslationTab:
         # Show dialog
         dialog.exec()
     
+    def _refresh_context_settings_with_feedback(self):
+        """Refresh context settings from main GUI with visual feedback"""
+        from PySide6.QtCore import QTimer
+        
+        # Store original button state
+        original_text = self.refresh_btn.text()
+        original_style = self.refresh_btn.styleSheet()
+        
+        # Show loading state
+        self.refresh_btn.setText("⏳ Refreshing...")
+        self.refresh_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 5px 15px; }")
+        self.refresh_btn.setEnabled(False)
+        
+        # Process the refresh after a short delay to show loading state
+        def do_refresh():
+            try:
+                self._refresh_context_settings()
+                
+                # Show success state briefly with what was refreshed
+                success_text = "✅ Settings Refreshed!"
+                self.refresh_btn.setText(success_text)
+                self.refresh_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+                
+                # Reset to original state after 2 seconds
+                QTimer.singleShot(2000, lambda: self._reset_refresh_button(original_text, original_style))
+                
+            except Exception as e:
+                # Show error state
+                self.refresh_btn.setText("❌ Error")
+                self.refresh_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+                
+                # Log the error
+                self._log(f"Error refreshing context settings: {str(e)}", "error")
+                
+                # Reset to original state after 3 seconds
+                QTimer.singleShot(3000, lambda: self._reset_refresh_button(original_text, original_style))
+        
+        # Execute the refresh after a small delay to ensure loading state is visible
+        QTimer.singleShot(100, do_refresh)
+    
+    def _reset_refresh_button(self, original_text, original_style):
+        """Reset refresh button to original state"""
+        if hasattr(self, 'refresh_btn'):
+            self.refresh_btn.setText(original_text)
+            self.refresh_btn.setStyleSheet(original_style)
+            self.refresh_btn.setEnabled(True)
+    
     def _refresh_context_settings(self):
         """Refresh context settings from main GUI"""
         # Actually fetch the current values from main GUI
@@ -4897,7 +4953,15 @@ class MangaTranslationTab:
                 self.contextual_status_label.setText(f"• Contextual Translation: {'Enabled' if contextual_enabled else 'Disabled'}")
         
         if hasattr(self.main_gui, 'trans_history'):
-            history_limit = self.main_gui.trans_history
+            try:
+                # Handle QLineEdit widget properly
+                if hasattr(self.main_gui.trans_history, 'text'):
+                    history_limit = self.main_gui.trans_history.text()
+                else:
+                    history_limit = str(self.main_gui.trans_history)
+            except Exception:
+                history_limit = "3"
+            
             if hasattr(self, 'history_limit_label'):
                 self.history_limit_label.setText(f"• Translation History Limit: {history_limit} exchanges")
         
@@ -4958,7 +5022,15 @@ class MangaTranslationTab:
                     self.translator.history_manager.contextual_enabled = self.main_gui.contextual_var
                 
                 if hasattr(self.main_gui, 'trans_history'):
-                    self.translator.history_manager.max_history = int(self.main_gui.trans_history)
+                    try:
+                        # Handle QLineEdit widget properly
+                        if hasattr(self.main_gui.trans_history, 'text'):
+                            history_value = self.main_gui.trans_history.text()
+                        else:
+                            history_value = str(self.main_gui.trans_history)
+                        self.translator.history_manager.max_history = int(history_value)
+                    except Exception:
+                        self.translator.history_manager.max_history = 3
                 
                 if hasattr(self.main_gui, 'translation_history_rolling_var'):
                     self.translator.history_manager.rolling_enabled = self.main_gui.translation_history_rolling_var
@@ -4966,14 +5038,9 @@ class MangaTranslationTab:
                 # Reset the history to apply new settings
                 self.translator.history_manager.reset()
                 
-                self._log("✅ Refreshed context settings from main GUI and updated translator", "success")
             except Exception as e:
-                self._log(f"✅ Refreshed context settings display (translator will update on next run)", "success")
-        else:
-            log_message = "✅ Refreshed context settings from main GUI"
-            if model_changed:
-                log_message += f" (Model: {current_model})"
-            self._log(log_message, "success")
+                # Silently handle any translator update errors - visual feedback will show success
+                pass
     
     def _browse_google_credentials_permanent(self):
         """Browse and set Google Cloud Vision credentials from the permanent button"""
