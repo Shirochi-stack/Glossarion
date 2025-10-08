@@ -240,6 +240,7 @@ class QAScannerMixin:
         qa_settings = self.config.get('qa_scanner_settings', {
             'foreign_char_threshold': 10,
             'excluded_characters': '',
+            'target_language': 'english',
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,
@@ -263,6 +264,7 @@ class QAScannerMixin:
         })
         # Debug: Print current settings
         print(f"[DEBUG] QA Settings: {qa_settings}")
+        print(f"[DEBUG] Target language: {qa_settings.get('target_language', 'NOT SET')}")
         print(f"[DEBUG] Word count check enabled: {qa_settings.get('check_word_count_ratio', False)}")
         
         # Optionally skip mode dialog if a mode override was provided (e.g., scanning phase)

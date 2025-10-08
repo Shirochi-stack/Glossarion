@@ -588,7 +588,22 @@ def is_korean_separator_pattern(text, excluded_chars=None):
     return all(c in excluded_chars or c.isspace() for c in cleaned)
 
 def detect_non_english_content(text, qa_settings=None):
-    """Detect characters not in the target language script, excluding separators"""
+    """Detect content not in the target language.
+    
+    For Latin-based languages (English, Spanish, French, etc.): Uses language detection
+    to identify if the text is in the wrong language.
+    
+    For non-Latin scripts (Korean, Japanese, Chinese, etc.): Checks for characters
+    from scripts not matching the target language.
+    
+    Args:
+        text: The text content to check
+        qa_settings: Dictionary with 'foreign_char_threshold', 'excluded_characters', 
+                    and 'target_language' keys
+    
+    Returns:
+        tuple: (has_issues, list_of_issues)
+    """
     if qa_settings is None:
         qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english'}
     
@@ -605,6 +620,54 @@ def detect_non_english_content(text, qa_settings=None):
     
     issues = []
     filtered_text = filter_dash_lines(text)
+    
+    # LANGUAGE DETECTION FOR LATIN-BASED LANGUAGES
+    # Map language codes to full names
+    lang_code_mapping = {
+        'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German',
+        'pt': 'Portuguese', 'it': 'Italian', 'ru': 'Russian', 'ja': 'Japanese',
+        'ko': 'Korean', 'zh-cn': 'Chinese', 'zh-tw': 'Chinese', 'ar': 'Arabic',
+        'he': 'Hebrew', 'th': 'Thai'
+    }
+    
+    # Latin-based languages that need language detection
+    latin_languages = ['english', 'spanish', 'french', 'german', 'portuguese', 'italian']
+    
+    if target_language in latin_languages and len(filtered_text.strip()) > 50:
+        # Try to detect the actual language of the text
+        try:
+            # Use full text for language detection to catch issues anywhere in file
+            # Set recursion limit temporarily to catch issues
+            import sys
+            old_limit = sys.getrecursionlimit()
+            try:
+                sys.setrecursionlimit(1000)  # Reasonable limit to catch recursion early
+                detected_lang = detect(filtered_text)
+            finally:
+                sys.setrecursionlimit(old_limit)  # Restore original limit
+            
+            detected_name = lang_code_mapping.get(detected_lang, detected_lang.upper())
+            
+            # Map target language to expected code
+            target_code_mapping = {
+                'english': 'en', 'spanish': 'es', 'french': 'fr', 'german': 'de',
+                'portuguese': 'pt', 'italian': 'it'
+            }
+            expected_code = target_code_mapping.get(target_language, 'en')
+            
+            # If detected language doesn't match target
+            if detected_lang != expected_code:
+                # Add language mismatch as an issue
+                issues.append(f"Language_mismatch_detected_{detected_name}_expected_{target_language.capitalize()}")
+                # Return early since we found a language mismatch
+                return len(issues) > 0, issues
+        except (LangDetectException, RecursionError, RuntimeError) as e:
+            # Language detection failed (not enough text, ambiguous, or recursion error)
+            # Fall through to script-based detection
+            if isinstance(e, RecursionError):
+                # Log recursion error but don't crash
+                pass  # Silently continue to script-based detection
+            pass
     
     # Define all script ranges
     all_script_ranges = [
@@ -3951,15 +4014,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Log settings
     log(f"\n📋 QA Settings Status:")
+    log(f"   ✓ Target language: {qa_settings.get('target_language', 'english').upper()}")
+    log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
-    log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}") 
-    log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")  
+    log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")
     
     # Initialize configuration
     custom_settings = None
