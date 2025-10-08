@@ -131,6 +131,7 @@ from datetime import datetime
 import traceback
 import hashlib
 import html
+import builtins as _builtins
 try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
@@ -195,6 +196,40 @@ def setup_http_logging():
 
 # Enable HTTP logging on module import
 setup_http_logging()
+
+# Redirect all print() calls in this module to the module logger so GUI can capture them
+# This affects ONLY this module (does not modify global/builtins print)
+# It preserves simple usage of sep and file, and defaults to INFO level
+
+def _gui_print(*args, **kwargs):
+    try:
+        sep = kwargs.pop('sep', ' ')
+        end = kwargs.pop('end', '\n')  # not used in logging aggregation
+        file = kwargs.pop('file', None)
+        level = kwargs.pop('level', None)
+        # Infer level from file if not explicitly provided
+        if level is None and file is not None:
+            try:
+                name = getattr(file, 'name', '')
+                if name and ('stderr' in name.lower()):
+                    level = logging.ERROR
+            except Exception:
+                level = None
+        if level is None:
+            level = logging.INFO
+        msg = sep.join(str(a) for a in args)
+        # Append end only if it conveys meaning (basic compatibility)
+        if end and end not in ('\n', ''):
+            msg = f"{msg}{end}"
+        logger.log(level, msg)
+    except Exception:
+        try:
+            _builtins.print(*args, **kwargs)
+        except Exception:
+            pass
+
+# Shadow builtins print in this module
+print = _gui_print
 
 # OpenAI SDK
 try:
@@ -5524,9 +5559,8 @@ class UnifiedClient:
         """
         self._cancelled = True
         self._in_cleanup = True  # Set cleanup flag correctly
-        # Show cancellation messages before setting global flag (to avoid circular check)
+        # Show a single cancellation message
         print("🛑 Operation cancelled (timeout or user stop)")
-        print("🛑 API operation cancelled")
         # Set global cancellation to affect all instances
         self.set_global_cancellation(True)
         # Suppress httpx logging when cancelled

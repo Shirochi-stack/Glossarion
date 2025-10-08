@@ -1061,6 +1061,16 @@ Text to analyze:
         
         # Initialize all environment variables after GUI setup but before first use
         self.initialize_environment_variables()
+
+        # Attach logging handlers to forward client logs into the GUI
+        try:
+            self._attach_gui_logging_handlers()
+        except Exception as _e_attach:
+            # Do not fail GUI initialization due to logging handler issues
+            try:
+                self.append_log(f"⚠️ Failed to attach GUI logging handlers: {_e_attach}")
+            except Exception:
+                pass
         
         self.metadata_batch_ui = MetadataBatchTranslatorUI(self)
         
@@ -1104,9 +1114,57 @@ Text to analyze:
                                "Please check the GitHub releases page manually:\n"
                                "https://github.com/Shirochi-stack/Glossarion/releases")
 
-    # Removed old _show_update_loading_and_check method to prevent conflicts
-    # Now using the consolidated update checking system in UpdateManager
+# Removed old _show_update_loading_and_check method to prevent conflicts
+# Now using the consolidated update checking system in UpdateManager
                                
+    # Logging handler to forward client logs into GUI
+    class GuiLogHandler(logging.Handler):
+        def __init__(self, outer, level=logging.INFO):
+            super().__init__(level)
+            self.outer = outer
+        def emit(self, record):
+            try:
+                # Use the raw message without logger name/level prefixes
+                msg = record.getMessage()
+                if hasattr(self.outer, 'append_log_with_api_error_detection'):
+                    self.outer.append_log_with_api_error_detection(msg)
+                else:
+                    self.outer.append_log(msg)
+            except Exception:
+                # Never raise from logging path
+                pass
+
+    def _attach_gui_logging_handlers(self):
+        """Attach logging handlers so library/client logs appear in the GUI log.
+        Safe to call multiple times (won't duplicate handlers).
+        """
+        try:
+            # Build handler
+            handler = TranslatorGUI.GuiLogHandler(self, level=logging.INFO)
+            fmt = logging.Formatter('%(message)s')
+            handler.setFormatter(fmt)
+            
+            # Target relevant loggers
+            target_loggers = [
+                'unified_api_client',
+                'httpx',
+                'requests.packages.urllib3',
+                'openai'
+            ]
+            for name in target_loggers:
+                lg = logging.getLogger(name)
+                # Avoid duplicate GuiLogHandler attachments
+                if not any(isinstance(h, TranslatorGUI.GuiLogHandler) for h in lg.handlers):
+                    lg.addHandler(handler)
+                # Ensure at least INFO level to see retry/backoff notices
+                if lg.level > logging.INFO or lg.level == logging.NOTSET:
+                    lg.setLevel(logging.INFO)
+        except Exception as e:
+            try:
+                self.append_log(f"⚠️ Failed to attach GUI log handlers: {e}")
+            except Exception:
+                pass
+
     def append_log_with_api_error_detection(self, message):
         """Enhanced log appending that detects and highlights API errors"""
         # First append the regular log message
@@ -1141,7 +1199,12 @@ Text to analyze:
             self.append_log("   This might be due to unsupported model settings.")
             
         elif "timeout" in message_lower:
-            # Timeout error
+            # Timeout error — suppress helper hints if a stop was requested
+            try:
+                if getattr(self, 'stop_requested', False):
+                    return
+            except Exception:
+                pass
             self.append_log("⏱️ TIMEOUT ERROR")
             self.append_log("   The API request took too long to respond.")
             self.append_log("   Consider increasing timeout settings or retrying.")
@@ -1551,18 +1614,22 @@ Recent translations to summarize:
             self.frame.setColumnStretch(i, 1 if i in [1, 3] else 0)
         
         # Configure grid row stretches and minimum heights
+        # Make the log row (row 10) greedily consume extra space on window resize
         for r in range(12):
-            self.frame.setRowStretch(r, 1 if r in [9, 10] else 0)
+            # Only the log row should stretch significantly
+            self.frame.setRowStretch(r, 10 if r == 10 else (0 if r != 9 else 1))
             if r == 9:
-                self.frame.setRowMinimumHeight(r, 200)
+                # Keep a modest minimum for the prompt row but do not let it grow too much
+                self.frame.setRowMinimumHeight(r, 180)
             elif r == 10:
-                self.frame.setRowMinimumHeight(r, 150)
+                # Log row minimum; will expand aggressively due to stretch factor
+                self.frame.setRowMinimumHeight(r, 200)
             elif r == 11:
                 # Keep toolbar row at fixed height (no stretch, no minimum to allow widget to control)
                 pass
         
         # Store row stretch defaults for fullscreen toggle
-        self._default_row_stretches = {r: (1 if r in [9, 10] else 0) for r in range(12)}
+        self._default_row_stretches = {r: (10 if r == 10 else (1 if r == 9 else 0)) for r in range(12)}
         
         # Create UI elements using helper methods
         self.create_file_section()
@@ -2202,8 +2269,10 @@ Recent translations to summarize:
         
         # System Prompt Text Edit (row 9, spans 3 columns)
         self.prompt_text = QTextEdit()
-        self.prompt_text.setMinimumHeight(105)  # Reduced by 30% (from 150 to 105)
-        self.prompt_text.setMaximumHeight(200)  # Add max height to prevent it from growing too large
+        self.prompt_text.setMinimumHeight(100)
+        # Cap its vertical growth so the log gets most of the extra space
+        self.prompt_text.setMaximumHeight(220)
+        self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.prompt_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
         
@@ -2245,8 +2314,9 @@ Recent translations to summarize:
         # Log Text Edit (row 10, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
-        self.log_text.setMinimumHeight(350)  # Set to 350 as requested
-        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Let it expand with layout
+        self.log_text.setMinimumHeight(300)
+        # Make sure it greedily expands vertically and horizontally
+        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_text.setAcceptRichText(False)  # Plain text only
         self.frame.addWidget(self.log_text, 10, 0, 1, 5)  # row, col, rowspan, colspan
         
@@ -3330,6 +3400,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._start_autoscroll_delay(100)
         # Show immediate feedback that translation is starting
         self.append_log("🚀 Initializing translation process...")
+        # Reset stop notice dedupe flag at start of a run
+        self._stop_notice_shown = False
         
         # SIMPLIFIED: Skip the wrapper and call run_translation_direct in a thread
         def simple_thread_target():
@@ -3405,7 +3477,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Call the direct function
                 self.append_log("🚀 Starting translation...")
                 translation_completed = self.run_translation_direct()
-                self.append_log("✅ Translation complete")
                 
                 # Post-translation scanning phase
                 # If scanning phase toggle is enabled, launch scanner after translation
@@ -3518,7 +3589,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             for i, file_path in enumerate(self.selected_files):
                 if self.stop_requested:
-                    self.append_log(f"⏹️ Translation stopped by user at file {i+1}/{total_files}")
+                    # Suppress per-file stop spam; summary will be shown later
                     break
                 
                 self.current_file_index = i
@@ -6123,8 +6194,8 @@ Important rules:
         except:
             pass
         
-        self.append_log("❌ Translation stop requested.")
-        self.append_log("⏳ Please wait... stopping after current operation completes.")
+        # Single concise stop message
+        self.append_log("🛑 Stop requested — waiting for current operation to finish")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
         
         if current_file and hasattr(self, 'entry_epub'):
@@ -6265,9 +6336,23 @@ Important rules:
             pass  # Silent failure
     
     def append_log(self, message):
-       """Append message to log with safety checks (fallback to print if GUI is gone)."""
+       """Append message to log with safety checks (fallback to print if GUI is gone).
+       Also suppresses repeated stop/cancel notices once a stop has been requested.
+       """
        def _append():
            try:
+               # Stop-notice suppression: if user has requested stop, allow only one concise notice
+               try:
+                   if getattr(self, 'stop_requested', False):
+                       msg_low = str(message).lower()
+                       stop_keys = ['stop requested', 'stopped by user', 'operation cancelled', 'cancelled', 'stopping after current']
+                       if any(k in msg_low for k in stop_keys):
+                           if getattr(self, '_stop_notice_shown', False):
+                               return
+                           else:
+                               self._stop_notice_shown = True
+               except Exception:
+                   pass
                # Bail out if the widget no longer exists
                if not hasattr(self, 'log_text'):
                    print(message)
@@ -7524,85 +7609,6 @@ Important rules:
             if show_message and debug_enabled and openrouter_env_vars_set:
                 self.append_log(f"🔍 [DEBUG] Set {len(openrouter_env_vars_set)} OpenRouter env vars: {', '.join(openrouter_env_vars_set)}")
             
-            # Set glossary environment variables during save_config
-            if show_message and debug_enabled:
-                self.append_log("🔍 [DEBUG] Setting glossary environment variables...")
-                
-            glossary_env_vars_set = []
-            try:
-                # Normalize glossary prompts in config with safe fallbacks
-                manual_prompt = self.config.get('manual_glossary_prompt') or getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
-                self.config['manual_glossary_prompt'] = manual_prompt
-                auto_prompt = self.config.get('auto_glossary_prompt') or getattr(self, 'auto_glossary_prompt', getattr(self, 'default_auto_glossary_prompt', ''))
-                self.config['auto_glossary_prompt'] = auto_prompt
-                trans_prompt = self.config.get('glossary_translation_prompt') or getattr(self, 'glossary_translation_prompt', '')
-                self.config['glossary_translation_prompt'] = trans_prompt
-                format_instr = self.config.get('glossary_format_instructions') or getattr(self, 'glossary_format_instructions', '')
-                self.config['glossary_format_instructions'] = format_instr
-
-                # Glossary environment variables from normalized config
-                glossary_env_mappings = [
-                    ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
-                    ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
-                    ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
-                    ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
-                    ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
-                    ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
-                    ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
-                    ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv', False) else '0'),
-                    ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 10))),
-                ]
-                
-                for env_key, env_value in glossary_env_mappings:
-                    try:
-                        old_value = os.environ.get(env_key, '<NOT SET>')
-                        os.environ[env_key] = str(env_value) if env_value is not None else ''
-                        new_value = os.environ[env_key]
-                        glossary_env_vars_set.append(env_key)
-                        
-                        if show_message and debug_enabled and old_value != new_value:
-                            self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value[:50]}{'...' if len(str(new_value)) > 50 else ''}'")
-                        elif show_message and debug_enabled:
-                            self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{str(new_value)[:30]}{'...' if len(str(new_value)) > 30 else ''}')")
-                            
-                    except Exception as e:
-                        if show_message and debug_enabled:
-                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
-                
-                # JSON environment variables for glossary
-                try:
-                    custom_entry_types = self.config.get('custom_entry_types') or getattr(self, 'custom_entry_types', None) or {
-                        'character': {'enabled': True, 'has_gender': True},
-                        'term': {'enabled': True, 'has_gender': False}
-                    }
-                    custom_types_json = json.dumps(custom_entry_types)
-                    old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
-                    os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
-                    glossary_env_vars_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
-                    if show_message and debug_enabled and old_types != custom_types_json:
-                        self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
-                except Exception as e:
-                    if show_message and debug_enabled:
-                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
-                
-                try:
-                    custom_glossary_fields = self.config.get('custom_glossary_fields', [])
-                    if custom_glossary_fields:
-                        custom_fields_json = json.dumps(custom_glossary_fields)
-                        os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
-                        glossary_env_vars_set.append('GLOSSARY_CUSTOM_FIELDS')
-                        if show_message and debug_enabled:
-                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
-                except Exception as e:
-                    if show_message and debug_enabled:
-                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
-                        
-                if show_message and debug_enabled and glossary_env_vars_set:
-                    self.append_log(f"🔍 [DEBUG] Set {len(glossary_env_vars_set)} glossary env vars: {', '.join(glossary_env_vars_set)}")
-                    
-            except Exception as e:
-                if show_message and debug_enabled:
-                    self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var
@@ -7800,7 +7806,108 @@ Important rules:
                     self.config['glossary_translation_prompt'] = self.translation_prompt_text.toPlainText().strip()
                 except:
                     pass
-                    
+
+            # If format instructions text widget exists, ensure config is updated
+            if hasattr(self, 'format_instructions_text'):
+                try:
+                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
+                except:
+                    pass
+
+            # Now that UI prompt widgets have been read into config, set glossary env vars
+            if show_message and debug_enabled:
+                self.append_log("🔍 [DEBUG] Setting glossary environment variables (post-UI read)...")
+            glossary_env_vars_set = []
+            try:
+                # Normalize and align glossary prompts across keys with safe fallbacks
+                manual_prompt = (
+                    self.config.get('manual_glossary_prompt') or
+                    self.config.get('append_glossary_prompt') or
+                    (self.append_prompt_text.toPlainText().strip() if hasattr(self, 'append_prompt_text') else None) or
+                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
+                )
+                auto_prompt = (
+                    self.config.get('auto_glossary_prompt') or
+                    (self.auto_prompt_text.toPlainText().strip() if hasattr(self, 'auto_prompt_text') else None) or
+                    getattr(self, 'auto_glossary_prompt', getattr(self, 'default_auto_glossary_prompt', ''))
+                )
+                trans_prompt = (
+                    self.config.get('glossary_translation_prompt') or
+                    (self.translation_prompt_text.toPlainText().strip() if hasattr(self, 'translation_prompt_text') else None) or
+                    getattr(self, 'glossary_translation_prompt', '')
+                )
+                format_instr = (
+                    self.config.get('glossary_format_instructions') or
+                    (self.format_instructions_text.toPlainText().strip() if hasattr(self, 'format_instructions_text') else None) or
+                    getattr(self, 'glossary_format_instructions', '')
+                )
+
+                # Persist normalized values under both legacy and current keys
+                self.config['manual_glossary_prompt'] = manual_prompt or ''
+                self.config['append_glossary_prompt'] = manual_prompt or ''
+                self.config['auto_glossary_prompt'] = auto_prompt or ''
+                self.config['glossary_translation_prompt'] = trans_prompt or ''
+                self.config['glossary_format_instructions'] = format_instr or ''
+
+                glossary_env_mappings = [
+                    ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
+                    ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
+                    ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
+                    ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
+                    ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
+                    ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
+                    ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
+                    ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv', False) else '0'),
+                    ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 10))),
+                ]
+
+                for env_key, env_value in glossary_env_mappings:
+                    try:
+                        old_value = os.environ.get(env_key, '<NOT SET>')
+                        os.environ[env_key] = str(env_value) if env_value is not None else ''
+                        new_value = os.environ[env_key]
+                        glossary_env_vars_set.append(env_key)
+                        if show_message and debug_enabled and old_value != new_value:
+                            preview = str(new_value)
+                            self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{preview[:50]}{'...' if len(preview) > 50 else ''}'")
+                    except Exception as e:
+                        if show_message and debug_enabled:
+                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+
+                # JSON environment variables for glossary
+                try:
+                    custom_entry_types = self.config.get('custom_entry_types') or getattr(self, 'custom_entry_types', None) or {
+                        'character': {'enabled': True, 'has_gender': True},
+                        'term': {'enabled': True, 'has_gender': False}
+                    }
+                    custom_types_json = json.dumps(custom_entry_types)
+                    old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
+                    os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
+                    glossary_env_vars_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
+                    if show_message and debug_enabled and old_types != custom_types_json:
+                        self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                except Exception as e:
+                    if show_message and debug_enabled:
+                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
+
+                try:
+                    custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+                    if custom_glossary_fields:
+                        custom_fields_json = json.dumps(custom_glossary_fields)
+                        os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
+                        glossary_env_vars_set.append('GLOSSARY_CUSTOM_FIELDS')
+                        if show_message and debug_enabled:
+                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                except Exception as e:
+                    if show_message and debug_enabled:
+                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
+
+                if show_message and debug_enabled and glossary_env_vars_set:
+                    self.append_log(f"🔍 [DEBUG] Set {len(glossary_env_vars_set)} glossary env vars: {', '.join(glossary_env_vars_set)}")
+            except Exception as e:
+                if show_message and debug_enabled:
+                    self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
+
             # Update environment variable when saving with debugging
             old_workers = os.environ.get('EXTRACTION_WORKERS', '<NOT SET>')
             if self.enable_parallel_extraction_var:
@@ -7961,6 +8068,7 @@ Important rules:
                 # Check glossary environment variables
                 glossary_vars = [
                     'GLOSSARY_SYSTEM_PROMPT', 'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_CUSTOM_ENTRY_TYPES',
+                    'GLOSSARY_TRANSLATION_PROMPT', 'GLOSSARY_FORMAT_INSTRUCTIONS',
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER', 'GLOSSARY_STRIP_HONORIFICS', 'GLOSSARY_FUZZY_THRESHOLD'
                 ]
                 
@@ -8017,7 +8125,7 @@ Important rules:
             
     def debug_environment_variables(self, show_all=False):
         """Debug and verify all critical environment variables are set correctly.
-        
+
         Args:
             show_all (bool): If True, shows all environment variables. If False, only shows critical ones.
         """

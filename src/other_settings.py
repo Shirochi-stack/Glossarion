@@ -4200,7 +4200,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     def _on_enable_custom_endpoint(checked):
         try:
             self.use_custom_openai_endpoint_var = bool(checked)
-            self.toggle_custom_endpoint_ui()
+            self.toggle_custom_endpoint_ui(user_interaction=True)
         except Exception:
             pass
     enable_cb.toggled.connect(_on_enable_custom_endpoint)
@@ -4475,7 +4475,7 @@ def toggle_gemini_endpoint(self):
     except Exception:
         pass
     
-def toggle_custom_endpoint_ui(self):
+def toggle_custom_endpoint_ui(self, user_interaction=False):
     """Enable/disable the OpenAI base URL entry and detect Azure (Qt version)"""
     try:
         enabled = bool(self.use_custom_openai_endpoint_var)
@@ -4500,14 +4500,18 @@ def toggle_custom_endpoint_ui(self):
                         self.api_key_label.setText("OpenAI/Gemini/... API Key:")
                     except Exception:
                         pass
-            print("✅ Custom OpenAI endpoint enabled")
+            # Only print when user actually interacts with the toggle
+            if user_interaction:
+                print("✅ Custom OpenAI endpoint enabled")
         else:
             if hasattr(self, 'api_key_label'):
                 try:
                     self.api_key_label.setText("OpenAI/Gemini/... API Key:")
                 except Exception:
                     pass
-            print("❌ Custom OpenAI endpoint disabled - using default OpenAI API")
+            # Only print when user actually interacts with the toggle
+            if user_interaction:
+                print("❌ Custom OpenAI endpoint disabled - using default OpenAI API")
     except Exception:
         pass
 
