@@ -1078,24 +1078,28 @@ class UpdateManager(QObject):
         # Set dialog layout
         dialog.setLayout(main_layout)
         
-        # Position dialog relative to reference window if available
-        if reference_widget:
-            # Center the dialog on the reference widget
-            reference_geometry = reference_widget.geometry()
-            dialog_geometry = dialog.frameGeometry()
-            center_point = reference_geometry.center()
-            dialog_geometry.moveCenter(center_point)
-            dialog.move(dialog_geometry.topLeft())
-        else:
-            # Center on screen
-            screen = app.primaryScreen().geometry()
-            dialog.move(
-                (screen.width() - dialog.width()) // 2,
-                (screen.height() - dialog.height()) // 2
-            )
-        
-        # Show dialog - simple and clean
+        # Show dialog first so frame geometry is accurate
         dialog.show()
+        
+        # Position dialog after showing for accurate centering (includes window decorations)
+        def center_dialog():
+            if reference_widget:
+                # Center the dialog on the reference widget
+                reference_geometry = reference_widget.geometry()
+                dialog_frame = dialog.frameGeometry()
+                center_point = reference_geometry.center()
+                dialog_frame.moveCenter(center_point)
+                dialog.move(dialog_frame.topLeft())
+            else:
+                # Center on screen
+                screen_geometry = app.primaryScreen().geometry()
+                dialog_frame = dialog.frameGeometry()
+                screen_center = screen_geometry.center()
+                dialog_frame.moveCenter(screen_center)
+                dialog.move(dialog_frame.topLeft())
+        
+        # Use QTimer to ensure window is fully shown before centering
+        QTimer.singleShot(0, center_dialog)
         
         # Keep reference to prevent garbage collection
         self._update_dialog = dialog
