@@ -69,7 +69,7 @@ class GlossaryManagerMixin:
         # Apply simplified dark mode stylesheet
         global_stylesheet = """
             /* Global dark mode styling */
-            QDialog, QWidget {
+            QDialog {
                 background-color: #2d2d2d;
                 color: white;
             }
@@ -86,7 +86,7 @@ class GlossaryManagerMixin:
             }
             QLabel {
                 color: white;
-                background: none;
+                background-color: transparent;
                 border: none;
             }
             /* Checkbox styling */
@@ -144,7 +144,7 @@ class GlossaryManagerMixin:
             
             /* Input fields styling */
             QLineEdit, QTextEdit {
-                background-color: #2d2d2d;
+                background-color: transparent;
                 color: white;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
@@ -172,15 +172,15 @@ class GlossaryManagerMixin:
             }
             QSlider::handle:horizontal, QSlider::handle:vertical {
                 background: #5a9fd4;
-                border: 1px solid #4a5568;
-                width: 12px;
-                height: 12px;
-                border-radius: 6px;
+                border: 2px solid #3b4f5e;
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
             }
             
             /* ComboBox styling */
             QComboBox {
-                background-color: #2d2d2d;
+                background-color: transparent;
                 color: white;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
@@ -202,7 +202,7 @@ class GlossaryManagerMixin:
             
             /* SpinBox styling */
             QSpinBox, QDoubleSpinBox {
-                background-color: #2d2d2d;
+                background-color: transparent;
                 color: white;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
@@ -216,17 +216,34 @@ class GlossaryManagerMixin:
             
             /* Slider styling */
             QSlider::groove:horizontal {
-                background: #2d2d2d;
+                background: transparent;
                 height: 6px;
                 border-radius: 3px;
+                border: 1px solid #4a5568;
+            }
+            QSlider::groove:vertical {
+                background: transparent;
+                width: 6px;
+                border-radius: 3px;
+                border: 1px solid #4a5568;
             }
             QSlider::handle:horizontal {
                 background: #5a9fd4;
+                border: 2px solid #3b4f5e;
                 width: 14px;
-                margin: -4px 0;
+                height: 14px;
+                margin: -5px 0;  /* center over 6px groove with 2px border */
                 border-radius: 7px;
             }
-            QSlider::handle:horizontal:hover {
+            QSlider::handle:vertical {
+                background: #5a9fd4;
+                border: 2px solid #3b4f5e;
+                width: 14px;
+                height: 14px;
+                margin: 0 -5px;  /* center for vertical groove */
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover, QSlider::handle:vertical:hover {
                 background: #7bb3e0;
             }
             
@@ -261,6 +278,12 @@ class GlossaryManagerMixin:
                 border: 1px solid #4a5568;
                 border-radius: 3px;
             }
+            QListWidget {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+            }
             QListWidget::item:selected {
                 background-color: #5a9fd4;
             }
@@ -270,11 +293,11 @@ class GlossaryManagerMixin:
             
             /* TreeWidget styling */
             QTreeWidget {
-                background-color: #2d2d2d;
+                background-color: transparent;
                 color: white;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
-                alternate-background-color: #252525;
+                alternate-background-color: transparent;
             }
             QTreeWidget::item:selected {
                 background-color: #5a9fd4;
@@ -294,6 +317,11 @@ class GlossaryManagerMixin:
                 border: 1px solid #4a5568;
                 background-color: #1e1e1e;
             }
+            
+            /* ScrollArea styling */
+            QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
             QTabBar::tab {
                 background-color: #252525;
                 color: white;
@@ -311,7 +339,7 @@ class GlossaryManagerMixin:
             
             /* ScrollBar styling */
             QScrollBar:vertical {
-                background: #2d2d2d;
+                background: transparent;
                 width: 12px;
                 margin: 0px;
             }
@@ -324,7 +352,7 @@ class GlossaryManagerMixin:
                 background: #5a9fd4;
             }
             QScrollBar:horizontal {
-                background: #2d2d2d;
+                background: transparent;
                 height: 12px;
                 margin: 0px;
             }
