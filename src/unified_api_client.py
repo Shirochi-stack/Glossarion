@@ -8655,10 +8655,9 @@ class UnifiedClient:
                             raise UnifiedClientError(f"Azure error: {e}")
                 
                 # Not Azure, continue with regular custom endpoint
-                base_url = custom_base_url
                 print(f"🔄 Custom endpoint enabled: Overriding {provider} endpoint")
-                print(f"   Original: {base_url}")
-                print(f"   Override: {custom_base_url}")
+                print(f"   New endpoint: {custom_base_url}")
+                base_url = custom_base_url
                 
                 # Check if it's Azure
                 if '.azure.com' in custom_base_url or '.cognitiveservices' in custom_base_url:
