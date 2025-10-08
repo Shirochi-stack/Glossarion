@@ -566,6 +566,7 @@ class UnifiedClient:
     
     # Class-level shared resources - properly initialized
     _rate_limit_cache = None
+    _rate_limit_cache_lock = threading.RLock()  # MICROSECOND LOCK for cache operations
     _api_key_pool: Optional[APIKeyPool] = None
     _pool_lock = threading.Lock()
     
@@ -1328,8 +1329,9 @@ class UnifiedClient:
                         print(f"[THREAD-{thread_name}] Still waiting... {wait_time - i}s remaining")
                 
                 # Clear expired entries before next attempt
-                if hasattr(self, '_rate_limit_cache') and self._rate_limit_cache:
-                    self._rate_limit_cache.clear_expired()
+                if hasattr(self.__class__, '_rate_limit_cache') and self.__class__._rate_limit_cache:
+                    with self.__class__._rate_limit_cache_lock:
+                        self.__class__._rate_limit_cache.clear_expired()
                 print(f"[THREAD-{thread_name}] 🔄 Cooldown wait: Cache cleared, attempting next key assignment...")
                 time.sleep(0.1)  # Brief pause after cooldown wait for retry stability
             
@@ -1385,8 +1387,11 @@ class UnifiedClient:
                 # Advance index for next call
                 self._api_key_pool.current_index = (current_idx + 1) % len(self._api_key_pool.keys)
                 
-                # Check availability
-                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                # Check availability (use pool's cache since this is fallback mode)
+                is_limited = False
+                if self._api_key_pool and hasattr(self._api_key_pool, '_rate_limit_cache'):
+                    is_limited = self._api_key_pool._rate_limit_cache.is_rate_limited(key_id)
+                if key.is_available() and not is_limited:
                     print(f"[{thread_name}] Assigned {key_id} (fallback)")
                     return (key, current_idx)
             
@@ -1418,7 +1423,11 @@ class UnifiedClient:
             with self.__class__._pool_lock:
                 for i, key in enumerate(self._api_key_pool.keys):
                     key_id = f"Key#{i+1} ({key.model})"
-                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    is_limited = False
+                    with self.__class__._rate_limit_cache_lock:
+                        if self.__class__._rate_limit_cache:
+                            is_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                    if key.is_available() and not is_limited:
                         return (key, i)
         
         print(f"[Thread-{thread_name}] All keys on cooldown. Waiting {wait_time}s...")
@@ -1434,7 +1443,11 @@ class UnifiedClient:
             with self.__class__._pool_lock:
                 for i, key in enumerate(self._api_key_pool.keys):
                     key_id = f"Key#{i+1} ({key.model})"
-                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    is_limited = False
+                    with self.__class__._rate_limit_cache_lock:
+                        if self.__class__._rate_limit_cache:
+                            is_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                    if key.is_available() and not is_limited:
                         print(f"[Thread-{thread_name}] Key became available early: {key_id}")
                         print(f"[Thread-{thread_name}] 🔄 Early key availability: Key ready for immediate use...")
                         time.sleep(0.1)  # Brief pause after early detection for stability
@@ -1449,14 +1462,20 @@ class UnifiedClient:
                 print(f"[Thread-{thread_name}] Still waiting... {remaining}s remaining")
         
         # Clear expired entries from cache
-        self._rate_limit_cache.clear_expired()
+        with self.__class__._rate_limit_cache_lock:
+            if self.__class__._rate_limit_cache:
+                self.__class__._rate_limit_cache.clear_expired()
         
         # Final attempt after wait
         with self.__class__._pool_lock:
             # Try to find an available key
             for i, key in enumerate(self._api_key_pool.keys):
                 key_id = f"Key#{i+1} ({key.model})"
-                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                is_limited = False
+                with self.__class__._rate_limit_cache_lock:
+                    if self.__class__._rate_limit_cache:
+                        is_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                if key.is_available() and not is_limited:
                     return (key, i)
             
             # Still no keys? Return the first enabled one (last resort)
@@ -1522,9 +1541,10 @@ class UnifiedClient:
             
             print(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
             
-            # Add to rate limit cache (this is already thread-safe)
+            # Add to rate limit cache with microsecond lock
             if hasattr(self.__class__, '_rate_limit_cache') and self.__class__._rate_limit_cache:
-                self.__class__._rate_limit_cache.add_rate_limit(current_key_identifier, cooldown)
+                with self.__class__._rate_limit_cache_lock:
+                    self.__class__._rate_limit_cache.add_rate_limit(current_key_identifier, cooldown)
         
         # Clear thread-local state to force new key assignment
         tls.initialized = False
@@ -1576,7 +1596,10 @@ class UnifiedClient:
             if key.enabled:
                 key_id = f"Key#{i+1} ({key.model})"
                 # Check both rate limit cache AND key's own cooling status
-                is_rate_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                is_rate_limited = False
+                with self.__class__._rate_limit_cache_lock:
+                    if self.__class__._rate_limit_cache:
+                        is_rate_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
                 is_cooling = key.is_cooling_down  # Also check the key's own status
                 
                 if not is_rate_limited and not is_cooling:
@@ -1636,9 +1659,11 @@ class UnifiedClient:
                         key_id = f"Key#{key_index+1} ({key.model})"
                         cooldown = getattr(key, 'cooldown', 60)
                         
-                        # Add to rate limit cache (already thread-safe)
+                        # Add to rate limit cache with microsecond lock
                         if hasattr(self.__class__, '_rate_limit_cache'):
-                            self.__class__._rate_limit_cache.add_rate_limit(key_id, cooldown)
+                            with self.__class__._rate_limit_cache_lock:
+                                if self.__class__._rate_limit_cache:
+                                    self.__class__._rate_limit_cache.add_rate_limit(key_id, cooldown)
     
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
@@ -2017,7 +2042,11 @@ class UnifiedClient:
                 continue
             
             # Check if this key is rate limited
-            if not self._rate_limit_cache.is_rate_limited(potential_key_id):
+            is_limited = False
+            with self.__class__._rate_limit_cache_lock:
+                if self.__class__._rate_limit_cache:
+                    is_limited = self.__class__._rate_limit_cache.is_rate_limited(potential_key_id)
+            if not is_limited:
                 # This key is available, use it
                 self._apply_key_change(key_info, old_key_identifier)
                 return True
@@ -2042,7 +2071,9 @@ class UnifiedClient:
                 print(f"[DEBUG] Still waiting... {wait_time - i}s remaining")
         
         # Clear expired entries and try again
-        self._rate_limit_cache.clear_expired()
+        with self.__class__._rate_limit_cache_lock:
+            if self.__class__._rate_limit_cache:
+                self.__class__._rate_limit_cache.clear_expired()
         
         # Try one more time to find an available key
         attempts = 0
@@ -2050,7 +2081,11 @@ class UnifiedClient:
             key_info = self._get_next_available_key()
             if key_info:
                 potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
-                if not self._rate_limit_cache.is_rate_limited(potential_key_id):
+                is_limited = False
+                with self.__class__._rate_limit_cache_lock:
+                    if self.__class__._rate_limit_cache:
+                        is_limited = self.__class__._rate_limit_cache.is_rate_limited(potential_key_id)
+                if not is_limited:
                     self._apply_key_change(key_info, old_key_identifier)
                     return True
             attempts += 1
@@ -2065,7 +2100,7 @@ class UnifiedClient:
         self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
         
         # MICROSECOND LOCK: Atomic update of all key-related variables
-        with self._model_lock:
+        with self._instance_model_lock:
             self.api_key = key_info[0].api_key
             self.model = key_info[0].model
             self.current_key_index = key_info[1]
@@ -2084,11 +2119,7 @@ class UnifiedClient:
             masked_key = self.api_key or "***"
         print(f"[DEBUG] 🔄 Switched from {old_key_identifier} to {self.key_identifier}")
         
-        # Reset clients
-        self.openai_client = None
-        self.gemini_client = None
-        self.mistral_client = None
-        self.cohere_client = None
+        # REMOVED: Duplicate client reset (already done inside lock above at lines 2075-2078)
         
         # Re-setup the client with new key
         self._setup_client()
@@ -2162,14 +2193,15 @@ class UnifiedClient:
         """Generate a STABLE hash for request deduplication - THREAD-SAFE VERSION
         WITH MICROSECOND LOCKING for thread safety."""
         
-        # MICROSECOND LOCK: Ensure atomic hash generation
-        with self._model_lock:
+        # MICROSECOND LOCK: Capture instance variables atomically
+        with self._instance_model_lock:
             # Get thread-specific identifier to prevent cross-thread cache collisions
             thread_id = threading.current_thread().ident
             thread_name = threading.current_thread().name
-            
-            # REMOVED: request_uuid, request_timestamp, request_timestamp_micro
-            # We want STABLE hashes for caching to work!
+            # CRITICAL: Capture all instance vars INSIDE lock to prevent race conditions
+            captured_model = self.model
+            captured_temp = getattr(self, 'temperature', 0.3)
+            captured_max_tokens = getattr(self, 'max_tokens', 8192)
         
         # Create normalized representation (can be done outside lock)
         normalized_messages = []
@@ -2199,29 +2231,27 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # MICROSECOND LOCK: Ensure atomic hash generation
-        with self._model_lock:
-            # Include thread_id but NO request-specific IDs for stable caching
-            hash_data = {
-                'thread_id': thread_id,  # THREAD ISOLATION
-                'thread_name': thread_name,  # Additional context for debugging
-                # REMOVED: request_uuid, request_time, request_time_ns
-                'messages': normalized_messages,
-                'model': self.model,
-                'temperature': getattr(self, 'temperature', 0.3),
-                'max_tokens': getattr(self, 'max_tokens', 8192)
-            }
-            
-            # Debug logging if needed
-            if os.getenv("DEBUG_HASH", "0") == "1":
-                print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
-                print(f"[HASH] Model: {self.model}")
-            
-            # Create stable JSON representation
-            hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
-            
-            # Use SHA256 for better distribution
-            final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
+        # Create hash data using captured values (already protected by lock)
+        hash_data = {
+            'thread_id': thread_id,  # THREAD ISOLATION
+            'thread_name': thread_name,  # Additional context for debugging
+            # REMOVED: request_uuid, request_time, request_time_ns
+            'messages': normalized_messages,
+            'model': captured_model,  # Use captured value
+            'temperature': captured_temp,  # Use captured value
+            'max_tokens': captured_max_tokens  # Use captured value
+        }
+        
+        # Debug logging if needed
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
+            print(f"[HASH] Model: {captured_model}")
+        
+        # Create stable JSON representation
+        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        
+        # Use SHA256 for better distribution
+        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
         if os.getenv("DEBUG_HASH", "0") == "1":
             print(f"[HASH] Generated stable hash: {final_hash[:16]}...")
@@ -2234,14 +2264,15 @@ class UnifiedClient:
         WITH MICROSECOND LOCKING for thread safety.
         """
         
-        # MICROSECOND LOCK: Ensure atomic reading of model/settings
-        with self._model_lock:
+        # MICROSECOND LOCK: Capture instance variables atomically
+        with self._instance_model_lock:
             # Get thread-specific identifier
             thread_id = threading.current_thread().ident
             thread_name = threading.current_thread().name
-            
-            # REMOVED: request_uuid, request_timestamp, request_timestamp_micro
-            # We want STABLE hashes for caching to work!
+            # CRITICAL: Capture all instance vars INSIDE lock
+            captured_model = self.model
+            captured_temp = getattr(self, 'temperature', 0.3)
+            captured_max_tokens = getattr(self, 'max_tokens', 8192)
         
         # Create normalized representation (can be done outside lock)
         normalized_messages = []
@@ -2273,31 +2304,29 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # MICROSECOND LOCK: Ensure atomic hash generation
-        with self._instance_model_lock:
-            # Include context, thread info, but NO request-specific IDs
-            hash_data = {
-                'thread_id': thread_id,  # THREAD ISOLATION
-                'thread_name': thread_name,  # Additional thread context
-                # REMOVED: request_uuid, request_time, request_time_ns
-                'context': context,  # Include context (e.g., 'translation', 'glossary', etc.)
-                'messages': normalized_messages,
-                'model': self.model,
-                'temperature': getattr(self, 'temperature', 0.3),
-                'max_tokens': getattr(self, 'max_tokens', 8192)
-            }
-            
-            # Debug logging if needed
-            if os.getenv("DEBUG_HASH", "0") == "1":
-                print(f"[HASH_CONTEXT] Thread: {thread_name} (ID: {thread_id})")
-                print(f"[HASH_CONTEXT] Context: {context}")
-                print(f"[HASH_CONTEXT] Model: {self.model}")
-            
-            # Create stable JSON representation
-            hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
-            
-            # Use SHA256 for better distribution
-            final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
+        # Create hash data using captured values (already protected by lock)
+        hash_data = {
+            'thread_id': thread_id,  # THREAD ISOLATION
+            'thread_name': thread_name,  # Additional thread context
+            # REMOVED: request_uuid, request_time, request_time_ns
+            'context': context,  # Include context (e.g., 'translation', 'glossary', etc.)
+            'messages': normalized_messages,
+            'model': captured_model,  # Use captured value
+            'temperature': captured_temp,  # Use captured value
+            'max_tokens': captured_max_tokens  # Use captured value
+        }
+        
+        # Debug logging if needed
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH_CONTEXT] Thread: {thread_name} (ID: {thread_id})")
+            print(f"[HASH_CONTEXT] Context: {context}")
+            print(f"[HASH_CONTEXT] Model: {captured_model}")
+        
+        # Create stable JSON representation
+        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        
+        # Use SHA256 for better distribution
+        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
         if os.getenv("DEBUG_HASH", "0") == "1":
             print(f"[HASH_CONTEXT] Generated stable hash: {final_hash[:16]}...")
@@ -2323,10 +2352,14 @@ class UnifiedClient:
         """Generate hash WITH request ID for per-call caching
         WITH MICROSECOND LOCKING for thread safety."""
         
-        # MICROSECOND LOCK: Ensure atomic hash generation
+        # MICROSECOND LOCK: Capture instance variables atomically
         with self._instance_model_lock:
             thread_id = threading.current_thread().ident
             thread_name = threading.current_thread().name
+            # CRITICAL: Capture all instance vars INSIDE lock
+            captured_model = self.model
+            captured_temp = getattr(self, 'temperature', 0.3)
+            captured_max_tokens = getattr(self, 'max_tokens', 8192)
         
         # Create normalized representation
         normalized_messages = []
@@ -2354,25 +2387,24 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # MICROSECOND LOCK: Ensure atomic hash generation
-        with self._instance_model_lock:
-            hash_data = {
-                'thread_id': thread_id,
-                'thread_name': thread_name,
-                'request_id': request_id,  # THIS MAKES EACH send() CALL UNIQUE
-                'messages': normalized_messages,
-                'model': self.model,
-                'temperature': getattr(self, 'temperature', 0.3),
-                'max_tokens': getattr(self, 'max_tokens', 8192)
-            }
-            
-            if os.getenv("DEBUG_HASH", "0") == "1":
-                print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
-                print(f"[HASH] Request ID: {request_id}")  # Debug the request ID
-                print(f"[HASH] Model: {self.model}")
-            
-            hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
-            final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
+        # Create hash data using captured values (already protected by lock)
+        hash_data = {
+            'thread_id': thread_id,
+            'thread_name': thread_name,
+            'request_id': request_id,  # THIS MAKES EACH send() CALL UNIQUE
+            'messages': normalized_messages,
+            'model': captured_model,  # Use captured value
+            'temperature': captured_temp,  # Use captured value
+            'max_tokens': captured_max_tokens  # Use captured value
+        }
+        
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
+            print(f"[HASH] Request ID: {request_id}")  # Debug the request ID
+            print(f"[HASH] Model: {captured_model}")
+        
+        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
         if os.getenv("DEBUG_HASH", "0") == "1":
             print(f"[HASH] Generated hash for request {request_id}: {final_hash[:16]}...")
@@ -2622,8 +2654,11 @@ class UnifiedClient:
             if key.enabled:
                 key_id = f"Key#{i+1} ({key.model})"
                 
-                # Check rate limit cache
-                cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
+                # Check rate limit cache with microsecond lock
+                cache_cooldown = 0
+                with self.__class__._rate_limit_cache_lock:
+                    if self.__class__._rate_limit_cache:
+                        cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
                 if cache_cooldown > 0:
                     min_cooldown = min(min_cooldown, cache_cooldown)
                 
