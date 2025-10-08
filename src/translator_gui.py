@@ -7635,7 +7635,11 @@ Important rules:
         Args:
             show_all (bool): If True, shows all environment variables. If False, only shows critical ones.
         """
-        self.append_log("🔍 [ENV_DEBUG] Starting comprehensive environment variable check...")
+        # Check if debug mode is enabled
+        debug_mode = self.config.get('show_debug_buttons', False)
+        
+        if debug_mode:
+            self.append_log("🔍 [ENV_DEBUG] Starting comprehensive environment variable check...")
         
         # Critical environment variables that should always be set
         critical_env_vars = {
@@ -7691,17 +7695,20 @@ Important rules:
             
             if value is None:
                 missing_critical.append(var_name)
-                self.append_log(f"❌ [ENV_DEBUG] CRITICAL MISSING: {var_name} - {description}")
+                if debug_mode:
+                    self.append_log(f"❌ [ENV_DEBUG] CRITICAL MISSING: {var_name} - {description}")
             elif not value.strip():
                 empty_critical.append(var_name)
-                self.append_log(f"⚠️ [ENV_DEBUG] CRITICAL EMPTY: {var_name} - {description}")
+                if debug_mode:
+                    self.append_log(f"⚠️ [ENV_DEBUG] CRITICAL EMPTY: {var_name} - {description}")
             else:
                 set_critical.append(var_name)
-                value_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
-                self.append_log(f"✅ [ENV_DEBUG] {var_name}: {value_preview}")
+                if debug_mode:
+                    value_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
+                    self.append_log(f"✅ [ENV_DEBUG] {var_name}: {value_preview}")
         
         # Check optional variables if requested or if any are set
-        if show_all:
+        if show_all and debug_mode:
             for var_name, description in optional_env_vars.items():
                 value = os.environ.get(var_name)
                 if value is None:
@@ -7714,28 +7721,35 @@ Important rules:
         
         # Summary
         total_critical = len(critical_env_vars)
-        self.append_log(f"🔍 [ENV_DEBUG] Summary: {len(set_critical)}/{total_critical} critical vars set")
+        if debug_mode:
+            self.append_log(f"🔍 [ENV_DEBUG] Summary: {len(set_critical)}/{total_critical} critical vars set")
         
-        if missing_critical:
+        if missing_critical and debug_mode:
             self.append_log(f"❌ [ENV_DEBUG] {len(missing_critical)} MISSING: {', '.join(missing_critical)}")
             
-        if empty_critical:
+        if empty_critical and debug_mode:
             self.append_log(f"⚠️ [ENV_DEBUG] {len(empty_critical)} EMPTY: {', '.join(empty_critical)}")
             
         # Check for initialization issues
         if missing_critical or empty_critical:
-            self.append_log("❌ [ENV_DEBUG] RECOMMENDATION: Some variables are not initialized!")
-            self.append_log("🔧 [ENV_DEBUG] Try calling self.initialize_environment_variables() on startup")
+            if debug_mode:
+                self.append_log("❌ [ENV_DEBUG] RECOMMENDATION: Some variables are not initialized!")
+                self.append_log("🔧 [ENV_DEBUG] Try calling self.initialize_environment_variables() on startup")
             return False
         else:
-            self.append_log("✅ [ENV_DEBUG] All critical environment variables are properly set")
+            if debug_mode:
+                self.append_log("✅ [ENV_DEBUG] All critical environment variables are properly set")
             return True
     
     def initialize_environment_variables(self):
         """Initialize all environment variables from config on startup.
         Call this method during application initialization to ensure all environment variables are set.
         """
-        self.append_log("🚀 [INIT] Initializing all environment variables from config...")
+        # Check if debug mode is enabled
+        debug_mode = self.config.get('show_debug_buttons', False)
+        
+        if debug_mode:
+            self.append_log("🚀 [INIT] Initializing all environment variables from config...")
         
         try:
             # Initialize glossary-related environment variables
@@ -7789,12 +7803,13 @@ Important rules:
                     os.environ[env_key] = str(env_value) if env_value is not None else ''
                     new_value = os.environ[env_key]
                     
-                    if old_value != new_value:
+                    if old_value != new_value and debug_mode:
                         self.append_log(f"🔍 [INIT] ENV {env_key}: '{old_value}' → '{new_value[:50]}{'...' if len(str(new_value)) > 50 else ''}'")
                     
                     initialized_count += 1
                 except Exception as e:
-                    self.append_log(f"❌ [INIT] Failed to initialize {env_key}: {e}")
+                    if debug_mode:
+                        self.append_log(f"❌ [INIT] Failed to initialize {env_key}: {e}")
             
             # JSON environment variables
             try:
@@ -7802,35 +7817,42 @@ Important rules:
                 if custom_entry_types:
                     custom_types_json = json.dumps(custom_entry_types)
                     os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
-                    self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                    if debug_mode:
+                        self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
                     initialized_count += 1
             except Exception as e:
-                self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
+                if debug_mode:
+                    self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
             
             try:
                 custom_glossary_fields = self.config.get('custom_glossary_fields', [])
                 if custom_glossary_fields:
                     custom_fields_json = json.dumps(custom_glossary_fields)
                     os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
-                    self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                    if debug_mode:
+                        self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
                     initialized_count += 1
             except Exception as e:
-                self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_FIELDS: {e}")
+                if debug_mode:
+                    self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_FIELDS: {e}")
                 
-            self.append_log(f"✅ [INIT] Successfully initialized {initialized_count} environment variables")
+            if debug_mode:
+                self.append_log(f"✅ [INIT] Successfully initialized {initialized_count} environment variables")
             
             # Verify initialization (optional - don't fail if debug method doesn't exist)
             try:
                 return self.debug_environment_variables(show_all=False)
             except AttributeError:
                 # Method doesn't exist (e.g., in test mocks), return True since variables were set
-                self.append_log("✅ [INIT] Environment variables initialized successfully (debug verification skipped)")
+                if debug_mode:
+                    self.append_log("✅ [INIT] Environment variables initialized successfully (debug verification skipped)")
                 return True
             
         except Exception as e:
-            self.append_log(f"❌ [INIT] Environment variable initialization failed: {e}")
-            import traceback
-            self.append_log(f"❌ [INIT] Traceback: {traceback.format_exc()}")
+            if debug_mode:
+                self.append_log(f"❌ [INIT] Environment variable initialization failed: {e}")
+                import traceback
+                self.append_log(f"❌ [INIT] Traceback: {traceback.format_exc()}")
             return False
     
     def _ensure_executor(self):
