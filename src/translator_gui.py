@@ -7554,8 +7554,20 @@ Important rules:
             self.config['process_webnovel_images'] = self.process_webnovel_images_var
             self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var, 1000)
             self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var, 1)
-            self.config['batch_translation'] = self.batch_translation_var
-            self.config['batch_size'] = safe_int(self.batch_size_var, 3)
+            
+            # Save batch translation settings from GUI controls
+            if hasattr(self, 'batch_checkbox'):
+                self.batch_translation_var = self.batch_checkbox.isChecked()
+                self.config['batch_translation'] = self.batch_translation_var
+            else:
+                self.config['batch_translation'] = self.batch_translation_var
+            
+            if hasattr(self, 'batch_size_entry'):
+                self.batch_size_var = self.batch_size_entry.text().strip()
+                self.config['batch_size'] = safe_int(self.batch_size_var, 3)
+            else:
+                self.config['batch_size'] = safe_int(self.batch_size_var, 3)
+            
             self.config['conservative_batching'] = self.conservative_batching_var
             self.config['translation_history_rolling'] = self.translation_history_rolling_var
 
