@@ -31,6 +31,7 @@ def print_env_var_status():
         'GLOSSARY_STRIP_HONORIFICS': 'Strip honorifics flag',
         'GLOSSARY_FUZZY_THRESHOLD': 'Fuzzy matching threshold',
         'GLOSSARY_USE_LEGACY_CSV': 'Legacy CSV format flag',
+        'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': 'Chapter split threshold for large texts',
         'GLOSSARY_MAX_SENTENCES': 'Maximum sentences for glossary processing',
         
         # OpenRouter settings

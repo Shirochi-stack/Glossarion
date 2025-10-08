@@ -3539,9 +3539,13 @@ def build_system_prompt(user_prompt, glossary_path=None):
             if system:
                 system += "\n\n"
             
-            custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
+            custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "").strip()
             if not custom_prompt:
-                custom_prompt = "Character/Term Glossary (use these translations consistently):"
+                raise ValueError(
+                    "APPEND_GLOSSARY_PROMPT environment variable is not set!\n"
+                    "Please configure your glossary append format in:\n"
+                    "Glossary Manager → Automatic Glossary → Glossary Append Format"
+                )
             
             system += f"{custom_prompt}\n{glossary_text}"
             

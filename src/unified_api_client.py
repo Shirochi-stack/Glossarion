@@ -119,6 +119,13 @@ except Exception:
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, List
 import logging
+
+# Enable HTTP request/response logging to files
+try:
+    from http_logger import enable_detailed_http_logging
+    enable_detailed_http_logging()
+except Exception as e:
+    print(f"Warning: Could not enable HTTP logging: {e}")
 import re
 import base64
 import contextlib

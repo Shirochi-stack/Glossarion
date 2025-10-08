@@ -445,6 +445,7 @@ class GlossaryManagerMixin:
                     'glossary_max_titles': ('glossary_max_titles_entry', lambda x: int(x.text())),
                     'glossary_batch_size': ('glossary_batch_size_entry', lambda x: int(x.text())),
                     'glossary_max_text_size': ('glossary_max_text_size_entry', lambda x: int(x.text())),
+                    'glossary_chapter_split_threshold': ('glossary_chapter_split_threshold_entry', lambda x: int(x.text())),
                     'glossary_max_sentences': ('glossary_max_sentences_entry', lambda x: int(x.text())),
                 }
                 
@@ -461,7 +462,7 @@ class GlossaryManagerMixin:
                         failed_settings.append(f"{setting_name} ({str(e)})")
                 
                 if failed_settings and debug_enabled:
-                    self.append_log(f"⚠️ [DEBUG] Failed to save settings: {', '.join(failed_settings)}")
+                    debug_log(f"⚠️ [DEBUG] Failed to save settings: {', '.join(failed_settings)}")
                 
                 # Save additional settings with error handling
                 self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
@@ -469,42 +470,64 @@ class GlossaryManagerMixin:
                 # Honorifics and other settings
                 if hasattr(self, 'strip_honorifics_checkbox'):
                     self.config['strip_honorifics'] = self.strip_honorifics_checkbox.isChecked()
-                    self.append_log(f"🔍 [DEBUG] Saved strip_honorifics: {self.config['strip_honorifics']}")
+                    debug_log(f"🔍 [DEBUG] Saved strip_honorifics: {self.config['strip_honorifics']}")
                 else:
-                    self.append_log("⚠️ [DEBUG] strip_honorifics_checkbox not found")
+                    debug_log("⚠️ [DEBUG] strip_honorifics_checkbox not found")
                     
                 if hasattr(self, 'disable_honorifics_checkbox'):
                     self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_checkbox.isChecked()
-                    self.append_log(f"🔍 [DEBUG] Saved glossary_disable_honorifics_filter: {self.config['glossary_disable_honorifics_filter']}")
+                    debug_log(f"🔍 [DEBUG] Saved glossary_disable_honorifics_filter: {self.config['glossary_disable_honorifics_filter']}")
                 else:
-                    self.append_log("⚠️ [DEBUG] disable_honorifics_checkbox not found")
+                    debug_log("⚠️ [DEBUG] disable_honorifics_checkbox not found")
                 
                 # Save format preference
                 if hasattr(self, 'use_legacy_csv_checkbox'):
                     self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_checkbox.isChecked()
-                    self.append_log(f"🔍 [DEBUG] Saved glossary_use_legacy_csv: {self.config['glossary_use_legacy_csv']}")
+                    debug_log(f"🔍 [DEBUG] Saved glossary_use_legacy_csv: {self.config['glossary_use_legacy_csv']}")
                 else:
-                    self.append_log("⚠️ [DEBUG] use_legacy_csv_checkbox not found")
+                    debug_log("⚠️ [DEBUG] use_legacy_csv_checkbox not found")
+                
+                # Save glossary history rolling (keep recent context)
+                if hasattr(self, 'glossary_history_rolling_checkbox'):
+                    self.config['glossary_history_rolling'] = self.glossary_history_rolling_checkbox.isChecked()
+                    debug_log(f"🔍 [DEBUG] Saved glossary_history_rolling: {self.config['glossary_history_rolling']}")
+                else:
+                    debug_log("⚠️ [DEBUG] glossary_history_rolling_checkbox not found")
                     
                 # Temperature and context limit
                 try:
                     self.config['manual_glossary_temperature'] = float(self.manual_temp_entry.text())
                     self.config['manual_context_limit'] = int(self.manual_context_entry.text())
-                    self.append_log(f"🔍 [DEBUG] Saved temperature: {self.config['manual_glossary_temperature']}, context: {self.config['manual_context_limit']}")
+                    debug_log(f"🔍 [DEBUG] Saved temperature: {self.config['manual_glossary_temperature']}, context: {self.config['manual_context_limit']}")
                 except ValueError as e:
-                    self.append_log(f"❌ [DEBUG] Temperature/context validation failed: {e}")
+                    debug_log(f"❌ [DEBUG] Temperature/context validation failed: {e}")
                     QMessageBox.warning(dialog, "Invalid Input", 
                         "Please enter valid numbers for temperature and context limit")
                     return
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Temperature/context error: {e}")
+                    debug_log(f"❌ [DEBUG] Temperature/context error: {e}")
                 
-                # Fuzzy matching threshold
+                # Fuzzy matching threshold (save from auto slider, sync with manual slider)
                 try:
-                    self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_slider.value() / 100.0
-                    self.append_log(f"🔍 [DEBUG] Saved fuzzy_threshold: {self.config['glossary_fuzzy_threshold']}")
+                    if hasattr(self, 'fuzzy_threshold_slider'):
+                        self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_slider.value() / 100.0
+                    elif hasattr(self, 'manual_fuzzy_slider'):
+                        self.config['glossary_fuzzy_threshold'] = self.manual_fuzzy_slider.value() / 100.0
+                    else:
+                        self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_value
+                    debug_log(f"🔍 [DEBUG] Saved fuzzy_threshold: {self.config['glossary_fuzzy_threshold']}")
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Fuzzy threshold error: {e}")
+                    debug_log(f"❌ [DEBUG] Fuzzy threshold error: {e}")
+                
+                # Save filter mode from radio buttons
+                if hasattr(self, 'glossary_filter_mode_buttons'):
+                    for mode_key, radio_button in self.glossary_filter_mode_buttons.items():
+                        if radio_button.isChecked():
+                            self.config['glossary_filter_mode'] = mode_key
+                            debug_log(f"🔍 [DEBUG] Saved glossary_filter_mode: {mode_key}")
+                            break
+                else:
+                    debug_log("⚠️ [DEBUG] glossary_filter_mode_buttons not found")
                 
                 # Save prompts with validation
                 prompts_to_save = {
@@ -518,12 +541,12 @@ class GlossaryManagerMixin:
                     try:
                         prompt_value = getattr(self, attr_name, '')
                         self.config[config_key] = prompt_value
-                        self.append_log(f"🔍 [DEBUG] Saved {config_key}: {len(prompt_value)} chars")
+                        debug_log(f"🔍 [DEBUG] Saved {config_key}: {len(prompt_value)} chars")
                     except Exception as e:
-                        self.append_log(f"❌ [DEBUG] Failed to save {config_key}: {e}")
+                        debug_log(f"❌ [DEBUG] Failed to save {config_key}: {e}")
                 
                 # Environment variables setup with comprehensive debugging
-                self.append_log("🔍 [DEBUG] Setting environment variables...")
+                debug_log("🔍 [DEBUG] Setting environment variables...")
                 env_vars_to_set = []
                 
                 try:
@@ -531,12 +554,14 @@ class GlossaryManagerMixin:
                     env_mappings = [
                         ('GLOSSARY_SYSTEM_PROMPT', self.manual_glossary_prompt),
                         ('AUTO_GLOSSARY_PROMPT', self.auto_glossary_prompt),
+                        ('APPEND_GLOSSARY_PROMPT', getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')),
                         ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if hasattr(self, 'disable_honorifics_checkbox') and self.disable_honorifics_checkbox.isChecked() else '0'),
                         ('GLOSSARY_STRIP_HONORIFICS', '1' if hasattr(self, 'strip_honorifics_checkbox') and self.strip_honorifics_checkbox.isChecked() else '0'),
                         ('GLOSSARY_FUZZY_THRESHOLD', str(self.fuzzy_threshold_slider.value() / 100.0) if hasattr(self, 'fuzzy_threshold_slider') else '0.90'),
                         ('GLOSSARY_TRANSLATION_PROMPT', getattr(self, 'glossary_translation_prompt', '')),
                         ('GLOSSARY_FORMAT_INSTRUCTIONS', getattr(self, 'glossary_format_instructions', '')),
                         ('GLOSSARY_USE_LEGACY_CSV', '1' if hasattr(self, 'use_legacy_csv_checkbox') and self.use_legacy_csv_checkbox.isChecked() else '0'),
+                        ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(int(self.glossary_chapter_split_threshold_entry.text())) if hasattr(self, 'glossary_chapter_split_threshold_entry') else '0'),
                         ('GLOSSARY_MAX_SENTENCES', str(int(self.glossary_max_sentences_entry.text())) if hasattr(self, 'glossary_max_sentences_entry') else '10'),
                     ]
                     
@@ -548,12 +573,12 @@ class GlossaryManagerMixin:
                             env_vars_to_set.append(env_key)
                             
                             if old_value != new_value:
-                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value[:100]}{'...' if len(str(new_value)) > 100 else ''}'")
+                                debug_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value[:100]}{'...' if len(str(new_value)) > 100 else ''}'")
                             else:
-                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{str(new_value)[:50]}{'...' if len(str(new_value)) > 50 else ''}')") 
+                                debug_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{str(new_value)[:50]}{'...' if len(str(new_value)) > 50 else ''}')") 
                                 
                         except Exception as e:
-                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+                            debug_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
                     
                     # JSON environment variables
                     try:
@@ -561,37 +586,37 @@ class GlossaryManagerMixin:
                         old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
                         os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
                         env_vars_to_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
-                        self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
+                        debug_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
                         if old_types != custom_types_json:
-                            self.append_log(f"🔍 [DEBUG] Custom entry types changed")
+                            debug_log(f"🔍 [DEBUG] Custom entry types changed")
                     except Exception as e:
-                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
+                        debug_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
                     
                     if self.custom_glossary_fields:
                         try:
                             custom_fields_json = json.dumps(self.custom_glossary_fields)
                             os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
                             env_vars_to_set.append('GLOSSARY_CUSTOM_FIELDS')
-                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                            debug_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
                         except Exception as e:
-                            self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
+                            debug_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
                     else:
-                        self.append_log("🔍 [DEBUG] No custom glossary fields to set")
+                        debug_log("🔍 [DEBUG] No custom glossary fields to set")
                 
-                    self.append_log(f"🔍 [DEBUG] Successfully set {len(env_vars_to_set)} environment variables: {', '.join(env_vars_to_set)}")
+                    debug_log(f"🔍 [DEBUG] Successfully set {len(env_vars_to_set)} environment variables: {', '.join(env_vars_to_set)}")
                     
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Environment variable setup failed: {e}")
+                    debug_log(f"❌ [DEBUG] Environment variable setup failed: {e}")
                     import traceback
-                    self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
+                    debug_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
                 
                 # Save config using the main save_config method to ensure encryption
-                self.append_log("🔍 [DEBUG] Calling main save_config method...")
+                debug_log("🔍 [DEBUG] Calling main save_config method...")
                 try:
                     self.save_config(show_message=False)
-                    self.append_log("🔍 [DEBUG] Main save_config completed successfully")
+                    debug_log("🔍 [DEBUG] Main save_config completed successfully")
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
+                    debug_log(f"❌ [DEBUG] Main save_config failed: {e}")
                     raise
                 
                 self.append_log("✅ Glossary settings saved successfully")
@@ -600,27 +625,27 @@ class GlossaryManagerMixin:
                 enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
                 if not enabled_types:
                     QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
-                    self.append_log("⚠️ [DEBUG] No enabled types found!")
+                    debug_log("⚠️ [DEBUG] No enabled types found!")
                 else:
-                    self.append_log(f"📑 Enabled types: {', '.join(enabled_types)}")
+                    debug_log(f"📑 Enabled types: {', '.join(enabled_types)}")
                 
                 # Final environment variable verification
-                self.append_log("🔍 [DEBUG] Final environment variable check:")
+                debug_log("🔍 [DEBUG] Final environment variable check:")
                 critical_vars = ['GLOSSARY_SYSTEM_PROMPT', 'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_CUSTOM_ENTRY_TYPES']
                 for var in critical_vars:
                     value = os.environ.get(var, '<NOT SET>')
                     if value == '<NOT SET>' or not value:
-                        self.append_log(f"❌ [DEBUG] CRITICAL: {var} is not set or empty!")
+                        debug_log(f"❌ [DEBUG] CRITICAL: {var} is not set or empty!")
                     else:
-                        self.append_log(f"✅ [DEBUG] {var}: {len(str(value))} chars")
+                        debug_log(f"✅ [DEBUG] {var}: {len(str(value))} chars")
                 
                 QMessageBox.information(dialog, "Success", "Glossary settings saved!")
                 dialog.accept()
                 
             except Exception as e:
-                self.append_log(f"❌ [DEBUG] Full exception details: {str(e)}")
+                debug_log(f"❌ [DEBUG] Full exception details: {str(e)}")
                 import traceback
-                self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
+                debug_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
                 QMessageBox.critical(dialog, "Error", f"Failed to save settings: {e}")
                 self.append_log(f"❌ Failed to save glossary settings: {e}")
                 
@@ -649,13 +674,11 @@ class GlossaryManagerMixin:
         type_filter_layout = QVBoxLayout(type_filter_frame)
         manual_layout.addWidget(type_filter_frame)
         
-        # Initialize custom entry types if not exists
-        if not hasattr(self, 'custom_entry_types'):
-            # Default types with their enabled status
-            self.custom_entry_types = self.config.get('custom_entry_types', {
-                'character': {'enabled': True, 'has_gender': True},
-                'term': {'enabled': True, 'has_gender': False}
-            })
+        # Always reload custom entry types from config to ensure latest saved state
+        self.custom_entry_types = self.config.get('custom_entry_types', {
+            'character': {'enabled': True, 'has_gender': True},
+            'term': {'enabled': True, 'has_gender': False}
+        })
         
         # Main container with grid for better control
         type_main_grid = QGridLayout()
@@ -904,29 +927,28 @@ class GlossaryManagerMixin:
         slider_layout.setContentsMargins(0, 5, 0, 0)
         duplicate_frame_layout.addWidget(slider_widget)
 
-        # Initialize fuzzy threshold variable
-        if not hasattr(self, 'fuzzy_threshold_value'):
-            self.fuzzy_threshold_value = self.config.get('glossary_fuzzy_threshold', 0.90)
+        # Always reload fuzzy threshold value from config
+        self.fuzzy_threshold_value = self.config.get('glossary_fuzzy_threshold', 0.90)
 
-        # Slider
-        fuzzy_slider = QSlider(Qt.Horizontal)
-        fuzzy_slider.setMinimum(50)  # 0.5 * 100
-        fuzzy_slider.setMaximum(100)  # 1.0 * 100
-        fuzzy_slider.setValue(int(self.fuzzy_threshold_value * 100))
+        # Slider (store as self.manual_fuzzy_slider for syncing)
+        self.manual_fuzzy_slider = QSlider(Qt.Horizontal)
+        self.manual_fuzzy_slider.setMinimum(50)  # 0.5 * 100
+        self.manual_fuzzy_slider.setMaximum(100)  # 1.0 * 100
+        self.manual_fuzzy_slider.setValue(int(self.fuzzy_threshold_value * 100))
         # Use screen ratio: ~30% of screen width
         slider_width = int(self._screen.width() * 0.30)
-        fuzzy_slider.setMinimumWidth(slider_width)
-        self._disable_slider_mousewheel(fuzzy_slider)  # Disable mouse wheel
-        slider_layout.addWidget(fuzzy_slider)
+        self.manual_fuzzy_slider.setMinimumWidth(slider_width)
+        self._disable_slider_mousewheel(self.manual_fuzzy_slider)  # Disable mouse wheel
+        slider_layout.addWidget(self.manual_fuzzy_slider)
 
         # Value label
-        self.fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
-        slider_layout.addWidget(self.fuzzy_value_label)
+        self.manual_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
+        slider_layout.addWidget(self.manual_fuzzy_value_label)
 
         # Description label
-        fuzzy_desc_label = QLabel("")
-        # fuzzy_desc_label.setStyleSheet("color: white; font-size: 9pt; margin-top: 5px;")
-        duplicate_frame_layout.addWidget(fuzzy_desc_label)
+        self.manual_fuzzy_desc_label = QLabel("")
+        # self.manual_fuzzy_desc_label.setStyleSheet("color: white; font-size: 9pt; margin-top: 5px;")
+        duplicate_frame_layout.addWidget(self.manual_fuzzy_desc_label)
 
         # Token-efficient format toggle
         format_frame = QGroupBox("Output Format")
@@ -949,10 +971,10 @@ class GlossaryManagerMixin:
         format_frame_layout.addWidget(label2)
         
         # Update label when slider moves
-        def update_fuzzy_label(value):
+        def update_manual_fuzzy_label(value):
             float_value = value / 100.0
             self.fuzzy_threshold_value = float_value
-            self.fuzzy_value_label.setText(f"{float_value:.2f}")
+            self.manual_fuzzy_value_label.setText(f"{float_value:.2f}")
             
             # Show description
             if float_value >= 0.95:
@@ -966,13 +988,27 @@ class GlossaryManagerMixin:
             else:
                 desc = "Very loose matching (may over-merge)"
             
-            fuzzy_desc_label.setText(desc)
+            self.manual_fuzzy_desc_label.setText(desc)
+            
+            # Sync with auto glossary slider and labels if they exist
+            if hasattr(self, 'fuzzy_threshold_slider'):
+                self.fuzzy_threshold_slider.blockSignals(True)
+                self.fuzzy_threshold_slider.setValue(value)
+                self.fuzzy_threshold_slider.blockSignals(False)
+                
+                # Update auto labels directly without triggering signals
+                if hasattr(self, 'auto_fuzzy_value_label') and hasattr(self, 'auto_fuzzy_desc_label'):
+                    self.auto_fuzzy_value_label.setText(f"{float_value:.2f}")
+                    self.auto_fuzzy_desc_label.setText(desc)
+        
+        # Store update function for cross-tab syncing
+        self.update_manual_fuzzy_label_func = update_manual_fuzzy_label
         
         # Connect slider to update function
-        fuzzy_slider.valueChanged.connect(update_fuzzy_label)
+        self.manual_fuzzy_slider.valueChanged.connect(update_manual_fuzzy_label)
         
         # Initialize description
-        update_fuzzy_label(fuzzy_slider.value())
+        update_manual_fuzzy_label(self.manual_fuzzy_slider.value())
         
         # Prompt section
         prompt_frame = QGroupBox("Extraction Prompt")
@@ -1084,7 +1120,8 @@ Rules:
         # Rolling window checkbox + description
         if not hasattr(self, 'glossary_history_rolling_checkbox'):
             self.glossary_history_rolling_checkbox = self._create_styled_checkbox("Keep recent context instead of reset")
-            self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
+        # Always reload from config
+        self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
         settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 0, 1, 4)
         
         rolling_label = QLabel("When context limit is reached, keep recent chapters instead of clearing all history")
@@ -1164,7 +1201,9 @@ Rules:
         
         # Set default append prompt if not already set
         if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
-            self.append_glossary_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+            # Load from config if available, otherwise use default
+            self.append_glossary_prompt = self.config.get('append_glossary_prompt', 
+                "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         
         self.append_prompt_text.setPlainText(self.append_glossary_prompt)
         
@@ -1228,26 +1267,39 @@ Rules:
         
         # Initialize entry widgets with config values
         if not hasattr(self, 'glossary_min_frequency_entry'):
-            self.glossary_min_frequency_entry = QLineEdit(str(self.config.get('glossary_min_frequency', 2)))
+            self.glossary_min_frequency_entry = QLineEdit()
             self.glossary_min_frequency_entry.setFixedWidth(80)
+        self.glossary_min_frequency_entry.setText(str(self.config.get('glossary_min_frequency', 2)))
+        
         if not hasattr(self, 'glossary_max_names_entry'):
-            self.glossary_max_names_entry = QLineEdit(str(self.config.get('glossary_max_names', 100)))
+            self.glossary_max_names_entry = QLineEdit()
             self.glossary_max_names_entry.setFixedWidth(80)
+        self.glossary_max_names_entry.setText(str(self.config.get('glossary_max_names', 100)))
+        
         if not hasattr(self, 'glossary_max_titles_entry'):
-            self.glossary_max_titles_entry = QLineEdit(str(self.config.get('glossary_max_titles', 50)))
+            self.glossary_max_titles_entry = QLineEdit()
             self.glossary_max_titles_entry.setFixedWidth(80)
+        self.glossary_max_titles_entry.setText(str(self.config.get('glossary_max_titles', 50)))
+        
         if not hasattr(self, 'glossary_batch_size_entry'):
-            self.glossary_batch_size_entry = QLineEdit(str(self.config.get('glossary_batch_size', 10)))
+            self.glossary_batch_size_entry = QLineEdit()
             self.glossary_batch_size_entry.setFixedWidth(80)
+        self.glossary_batch_size_entry.setText(str(self.config.get('glossary_batch_size', 10)))
+        
         if not hasattr(self, 'glossary_max_text_size_entry'):
-            self.glossary_max_text_size_entry = QLineEdit(str(self.config.get('glossary_max_text_size', 0)))
+            self.glossary_max_text_size_entry = QLineEdit()
             self.glossary_max_text_size_entry.setFixedWidth(80)
+        self.glossary_max_text_size_entry.setText(str(self.config.get('glossary_max_text_size', 0)))
+        
         if not hasattr(self, 'glossary_chapter_split_threshold_entry'):
-            self.glossary_chapter_split_threshold_entry = QLineEdit(str(self.config.get('glossary_chapter_split_threshold', 0)))
+            self.glossary_chapter_split_threshold_entry = QLineEdit()
             self.glossary_chapter_split_threshold_entry.setFixedWidth(80)
+        self.glossary_chapter_split_threshold_entry.setText(str(self.config.get('glossary_chapter_split_threshold', 0)))
+        
         if not hasattr(self, 'glossary_max_sentences_entry'):
-            self.glossary_max_sentences_entry = QLineEdit(str(self.config.get('glossary_max_sentences', 200)))
+            self.glossary_max_sentences_entry = QLineEdit()
             self.glossary_max_sentences_entry.setFixedWidth(80)
+        self.glossary_max_sentences_entry.setText(str(self.config.get('glossary_max_sentences', 200)))
         
         # Helper: compact label+field pair in one cell
         def _pair(label_text, field_widget, label_width=180):
@@ -1323,7 +1375,8 @@ Rules:
         extraction_grid.addWidget(QLabel("Strip honorifics:"), 6, 0)
         if not hasattr(self, 'strip_honorifics_checkbox'):
             self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
-            self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
+        # Always reload from config
+        self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
         extraction_grid.addWidget(self.strip_honorifics_checkbox, 6, 1, 1, 3)
         
         # Row 7 - Fuzzy matching threshold (reuse existing value)
@@ -1335,12 +1388,11 @@ Rules:
         auto_fuzzy_layout.setSpacing(8)
         extraction_grid.addWidget(auto_fuzzy_widget, 7, 1, 1, 3)
         
-        # Ensure we have a baseline fuzzy threshold value from config
-        if not hasattr(self, 'fuzzy_threshold_value'):
-            try:
-                self.fuzzy_threshold_value = float(self.config.get('glossary_fuzzy_threshold', 0.90))
-            except Exception:
-                self.fuzzy_threshold_value = 0.90
+        # Always reload fuzzy threshold value from config
+        try:
+            self.fuzzy_threshold_value = float(self.config.get('glossary_fuzzy_threshold', 0.90))
+        except Exception:
+            self.fuzzy_threshold_value = 0.90
         
         # Create slider and expose on self for save handler
         self.fuzzy_threshold_slider = QSlider(Qt.Horizontal)
@@ -1351,19 +1403,19 @@ Rules:
         self._disable_slider_mousewheel(self.fuzzy_threshold_slider)  # Disable mouse wheel
         auto_fuzzy_layout.addWidget(self.fuzzy_threshold_slider)
         
-        auto_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
-        auto_fuzzy_layout.addWidget(auto_fuzzy_value_label)
+        self.auto_fuzzy_value_label = QLabel(f"{self.fuzzy_threshold_value:.2f}")
+        auto_fuzzy_layout.addWidget(self.auto_fuzzy_value_label)
         
-        auto_fuzzy_desc_label = QLabel("")
-        auto_fuzzy_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
-        auto_fuzzy_layout.addWidget(auto_fuzzy_desc_label)
+        self.auto_fuzzy_desc_label = QLabel("")
+        self.auto_fuzzy_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
+        auto_fuzzy_layout.addWidget(self.auto_fuzzy_desc_label)
         auto_fuzzy_layout.addStretch()
         
         # Update function for auto fuzzy slider
         def update_auto_fuzzy_label(value):
             float_value = value / 100.0
             self.fuzzy_threshold_value = float_value
-            auto_fuzzy_value_label.setText(f"{float_value:.2f}")
+            self.auto_fuzzy_value_label.setText(f"{float_value:.2f}")
             
             if float_value >= 0.95:
                 desc = "Exact match only (strict)"
@@ -1376,7 +1428,21 @@ Rules:
             else:
                 desc = "Very loose matching (may over-merge)"
             
-            auto_fuzzy_desc_label.setText(desc)
+            self.auto_fuzzy_desc_label.setText(desc)
+            
+            # Sync with manual glossary slider and labels if they exist
+            if hasattr(self, 'manual_fuzzy_slider'):
+                self.manual_fuzzy_slider.blockSignals(True)
+                self.manual_fuzzy_slider.setValue(value)
+                self.manual_fuzzy_slider.blockSignals(False)
+                
+                # Update manual labels directly without triggering signals
+                if hasattr(self, 'manual_fuzzy_value_label') and hasattr(self, 'manual_fuzzy_desc_label'):
+                    self.manual_fuzzy_value_label.setText(f"{float_value:.2f}")
+                    self.manual_fuzzy_desc_label.setText(desc)
+        
+        # Store update function for cross-tab syncing
+        self.update_auto_fuzzy_label_func = update_auto_fuzzy_label
         
         self.fuzzy_threshold_slider.valueChanged.connect(update_auto_fuzzy_label)
         update_auto_fuzzy_label(self.fuzzy_threshold_slider.value())

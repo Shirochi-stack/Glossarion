@@ -212,6 +212,7 @@ app_files = [
     ('check_epub_directory.py', '.'),
     ('direct_imports.py', '.'),
     ('api_key_encryption.py', '.'), 
+    ('http_logger.py', '.'),
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -287,7 +288,8 @@ app_modules = [
     'manga_integration',   # Manga GUI integration
     'manga_settings_dialog', 
     'update_manager',     
-	'api_key_encryption',
+    'api_key_encryption',
+	'http_logger',
 	'async_api_processor',
 	'metadata_batch_translator',
 	'enhanced_text_extractor.py',

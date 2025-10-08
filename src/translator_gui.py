@@ -1495,8 +1495,9 @@ Recent translations to summarize:
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
         self.api_key_visible = False  # Default to hidden
         
-        if 'glossary_duplicate_key_mode' not in self.config:
-            self.config['glossary_duplicate_key_mode'] = 'fuzzy'
+        # NOTE: glossary_duplicate_key_mode is managed by Glossary Manager GUI
+        # if 'glossary_duplicate_key_mode' not in self.config:
+        #     self.config['glossary_duplicate_key_mode'] = 'fuzzy'
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
@@ -7506,24 +7507,8 @@ Important rules:
                     return
             self.config['translation_history_limit'] = safe_int(self.trans_history.text().strip(), 2)
             
-            # Add fuzzy matching threshold
-            if hasattr(self, 'fuzzy_threshold_var'):
-                fuzzy_val = self.fuzzy_threshold_var
-                if 0.5 <= fuzzy_val <= 1.0:
-                    self.config['glossary_fuzzy_threshold'] = fuzzy_val
-                else:
-                    self.config['glossary_fuzzy_threshold'] = 0.90  # default
-
-            # Add glossary format preference
-            if hasattr(self, 'use_legacy_csv_var'):
-                self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var
-    
-             # Add after saving translation_prompt_text:
-            if hasattr(self, 'format_instructions_text'):
-                try:
-                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
-                except:
-                    pass
+            # NOTE: All glossary-related settings are managed by Glossary Manager GUI only.
+            # Do not save glossary settings here to avoid overwriting user's Glossary Manager settings.
  
             if hasattr(self, 'azure_api_version_var'):
                 self.config['azure_api_version'] = self.azure_api_version_var
@@ -7538,16 +7523,15 @@ Important rules:
             self.config['max_output_tokens'] = self.max_output_tokens
             self.config['translate_book_title'] = self.translate_book_title_var
             self.config['book_title_prompt'] = self.book_title_prompt
-            self.config['append_glossary'] = self.append_glossary_var
+            # NOTE: append_glossary is managed by Glossary Manager GUI
+            # self.config['append_glossary'] = self.append_glossary_var
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var
             self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var, 10)
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var
             self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var, 5)
             self.config['token_limit_disabled'] = self.token_limit_disabled
-            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var, 2)
-            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var, 50)
-            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var, 30)
-            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var, 50)
+            # NOTE: glossary extraction settings (min_frequency, max_names, max_titles, batch_size, max_text_size, chapter_split_threshold)
+            # are managed by Glossary Manager GUI only. Do not save them here to avoid overwriting user's Glossary Manager settings.
             self.config['enable_image_translation'] = self.enable_image_translation_var
             self.config['process_webnovel_images'] = self.process_webnovel_images_var
             self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var, 1000)
@@ -7609,11 +7593,13 @@ Important rules:
             if show_message and debug_enabled and openrouter_env_vars_set:
                 self.append_log(f"🔍 [DEBUG] Set {len(openrouter_env_vars_set)} OpenRouter env vars: {', '.join(openrouter_env_vars_set)}")
             
-            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
+            # NOTE: glossary_history_rolling is managed by Glossary Manager GUI
+            # self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var
             self.config['translate_cover_html'] = self.translate_cover_html_var
-            self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
+            # NOTE: enable_auto_glossary is managed by Glossary Manager GUI
+            # self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var, 0)
             self.config['use_header_as_output'] = self.use_header_as_output_var
@@ -7689,9 +7675,9 @@ Important rules:
             else:
                 if show_message:
                     self.append_log("⚠️ [DEBUG] enable_gui_yield_var not found")
-            self.config['glossary_max_text_size'] = self.glossary_max_text_size_var
-            self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var
-            self.config['glossary_filter_mode'] = self.glossary_filter_mode_var
+            # NOTE: glossary_filter_mode is managed by Glossary Manager GUI only
+            # Do not save it here to avoid overwriting user's Glossary Manager settings
+            # self.config['glossary_max_text_size'] and self.config['glossary_chapter_split_threshold'] already handled above
             self.config['image_chunk_overlap'] = safe_float(self.image_chunk_overlap_var, 1.0)
 
             # Save HTTP/Network tuning settings (from Other Settings)
@@ -7740,17 +7726,11 @@ Important rules:
             if hasattr(self, 'disable_gemini_safety_var'):
                 self.config['disable_gemini_safety'] = self.disable_gemini_safety_var
 
-            # NEW: Save strip honorifics setting
-            self.config['strip_honorifics'] = self.strip_honorifics_var
+            # NOTE: strip_honorifics is managed by Glossary Manager GUI
+            # self.config['strip_honorifics'] = self.strip_honorifics_var
             
-            # Save glossary backup settings
-            if hasattr(self, 'config') and 'glossary_auto_backup' in self.config:
-                # These might be set from the glossary backup dialog
-                pass  # Already in config, don't overwrite
-            else:
-                # Set defaults if not already set
-                self.config.setdefault('glossary_auto_backup', True)
-                self.config.setdefault('glossary_max_backups', 50)
+            # NOTE: glossary backup settings are managed by Glossary Manager GUI
+            # Do not initialize defaults here
                 
             # Save QA Scanner settings if they exist
             if hasattr(self, 'config') and 'qa_scanner_settings' in self.config:
@@ -7788,31 +7768,8 @@ Important rules:
             # Ensure ai_hunter_max_workers has a default value
             self.config['ai_hunter_config'].setdefault('ai_hunter_max_workers', 1)
             
-            # NEW: Save prompts from text widgets if they exist
-            if hasattr(self, 'auto_prompt_text'):
-                try:
-                    self.config['auto_glossary_prompt'] = self.auto_prompt_text.toPlainText().strip()
-                except:
-                    pass
-            
-            if hasattr(self, 'append_prompt_text'):
-                try:
-                    self.config['append_glossary_prompt'] = self.append_prompt_text.toPlainText().strip()
-                except:
-                    pass
-            
-            if hasattr(self, 'translation_prompt_text'):
-                try:
-                    self.config['glossary_translation_prompt'] = self.translation_prompt_text.toPlainText().strip()
-                except:
-                    pass
-
-            # If format instructions text widget exists, ensure config is updated
-            if hasattr(self, 'format_instructions_text'):
-                try:
-                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
-                except:
-                    pass
+            # NOTE: Glossary prompts (auto_glossary_prompt, append_glossary_prompt, translation_prompt, format_instructions)
+            # are managed by Glossary Manager GUI only. Do not save them here.
 
             # Wire verbose payload saving to GUI debug mode at save time
             try:
@@ -7833,9 +7790,13 @@ Important rules:
                 # Normalize and align glossary prompts across keys with safe fallbacks
                 manual_prompt = (
                     self.config.get('manual_glossary_prompt') or
+                    (self.manual_prompt_text.toPlainText().strip() if hasattr(self, 'manual_prompt_text') else None) or
+                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
+                )
+                append_prompt = (
                     self.config.get('append_glossary_prompt') or
                     (self.append_prompt_text.toPlainText().strip() if hasattr(self, 'append_prompt_text') else None) or
-                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
+                    getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
                 )
                 auto_prompt = (
                     self.config.get('auto_glossary_prompt') or
@@ -7853,16 +7814,14 @@ Important rules:
                     getattr(self, 'glossary_format_instructions', '')
                 )
 
-                # Persist normalized values under both legacy and current keys
-                self.config['manual_glossary_prompt'] = manual_prompt or ''
-                self.config['append_glossary_prompt'] = manual_prompt or ''
-                self.config['auto_glossary_prompt'] = auto_prompt or ''
-                self.config['glossary_translation_prompt'] = trans_prompt or ''
-                self.config['glossary_format_instructions'] = format_instr or ''
+                # NOTE: Glossary prompts are managed by Glossary Manager GUI only.
+                # Do not persist them here to avoid overwriting user's settings.
+                # Just use them for environment variables below.
 
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
+                    ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
