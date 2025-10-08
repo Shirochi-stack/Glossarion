@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v5.2.0 - PyInstaller Specification File
+Glossarion Lite v6.0.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v5.2.0'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_Lite v6.0.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -59,7 +59,7 @@ app_files = [
     ('GlossaryManager_GUI.py', '.'),
     ('Retranslation_GUI.py', '.'),
     ('QA_Scanner_GUI.py', '.'),
-    ('Chapter_Extracter.py', '.'),
+    ('Chapter_Extractor.py', '.'),
     ('PatternManager.py', '.'),
     
     # Translation modules
@@ -132,7 +132,7 @@ app_modules = [
     'GlossaryManager_GUI',
     'Retranslation_GUI',
     'QA_Scanner_GUI',
-    'Chapter_Extracter',
+    'Chapter_Extractor',
     'PatternManager',
     'epub_converter',
     'txt_processor',

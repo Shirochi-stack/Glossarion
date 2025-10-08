@@ -478,7 +478,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "5.2.0"
+        __version__ = "6.0.0"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1541,7 +1541,7 @@ Recent translations to summarize:
             self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v5.2.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.0.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -8262,7 +8262,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v5.2.0...")
+    print("🚀 Starting Glossarion v6.0.0...")
     
     # Initialize splash screen
     splash_manager = None

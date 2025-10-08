@@ -34,7 +34,7 @@ class SplashManager:
             self.splash_window = QWidget()
             self.splash_window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
             self.splash_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            self.splash_window.setFixedSize(450, 350)
+            self.splash_window.setFixedSize(450, 370)
             
             # Set dark background with border
             palette = self.splash_window.palette()
@@ -61,7 +61,7 @@ class SplashManager:
             self._load_icon(layout)
             
             # Title
-            title_label = QLabel("Glossarion v5.2.0")
+            title_label = QLabel("Glossarion v6.0.0")
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title_font = QFont("Arial", 20, QFont.Weight.Bold)
             title_label.setFont(title_font)
