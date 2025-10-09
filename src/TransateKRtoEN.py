@@ -6552,12 +6552,8 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⚠️ QA Scanner script not found: {scan_script}")
             else:
                 # Build command based on scan mode
-                if scan_mode == 'custom':
-                    # For custom mode, launch with --interactive flag
-                    cmd = [python_exe, scan_script, out, '--mode', 'custom', '--interactive']
-                else:
-                    # For other modes, run directly with the specified mode
-                    cmd = [python_exe, scan_script, out, '--mode', scan_mode]
+                # All modes run silently without interactive dialogs
+                cmd = [python_exe, scan_script, out, '--mode', scan_mode]
                 
                 print(f"📋 QA Scan command: {' '.join(cmd)}")
                 

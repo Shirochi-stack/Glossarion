@@ -1325,7 +1325,11 @@ class RetranslationMixin:
         btn_refresh = QPushButton("🔄 Refresh")
         btn_refresh.setMinimumHeight(32)
         btn_refresh.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
-        btn_refresh.clicked.connect(lambda: self._refresh_retranslation_data(data))
+        # Check if this is part of a multi-tab dialog and refresh all tabs, otherwise just refresh current
+        if data.get('dialog') and hasattr(data['dialog'], '_tab_data'):
+            btn_refresh.clicked.connect(lambda: self._refresh_all_tabs(data['dialog']._tab_data))
+        else:
+            btn_refresh.clicked.connect(lambda: self._refresh_retranslation_data(data))
         button_layout.addWidget(btn_refresh, 1, 3, 1, 1)
         
         btn_cancel = QPushButton("Cancel")
@@ -1334,6 +1338,29 @@ class RetranslationMixin:
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
 
+    def _refresh_all_tabs(self, tab_data_list):
+        """Refresh all tabs in a multi-file retranslation dialog"""
+        try:
+            print(f"🔄 Refreshing all {len(tab_data_list)} tabs...")
+            
+            refreshed_count = 0
+            for idx, data in enumerate(tab_data_list):
+                if data and data.get('type') != 'image_folder' and data.get('type') != 'individual_images':
+                    # Only refresh EPUB/text tabs
+                    try:
+                        print(f"[DEBUG] Refreshing tab {idx + 1}/{len(tab_data_list)}")
+                        self._refresh_retranslation_data(data)
+                        refreshed_count += 1
+                    except Exception as e:
+                        print(f"[ERROR] Failed to refresh tab {idx + 1}: {e}")
+            
+            print(f"✅ Successfully refreshed {refreshed_count} tab(s)")
+            
+        except Exception as e:
+            print(f"❌ Failed to refresh all tabs: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _refresh_retranslation_data(self, data):
         """Refresh the retranslation dialog data by reloading progress and updating display"""
         try:
@@ -1629,10 +1656,14 @@ class RetranslationMixin:
                 self._multi_file_retranslation_dialog and 
                 hasattr(self, '_multi_file_selection_key') and 
                 self._multi_file_selection_key == selection_key):
-                # Reuse existing dialog - just show it
-                self._multi_file_retranslation_dialog.show()
-                self._multi_file_retranslation_dialog.raise_()
-                self._multi_file_retranslation_dialog.activateWindow()
+                # Reuse existing dialog - refresh all tabs before showing
+                cached_dialog = self._multi_file_retranslation_dialog
+                if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
+                    print(f"[DEBUG] Refreshing all {len(cached_dialog._tab_data)} tabs in cached dialog...")
+                    self._refresh_all_tabs(cached_dialog._tab_data)
+                cached_dialog.show()
+                cached_dialog.raise_()
+                cached_dialog.activateWindow()
                 return
             
             # If there's an existing dialog for a different selection, destroy it first
@@ -1705,6 +1736,9 @@ class RetranslationMixin:
             # Track all tab data
             tab_data = []
             tabs_created = False
+            
+            # Store tab_data reference on the dialog for cross-tab operations
+            dialog._tab_data = tab_data
             
             # Get the global show_special state from the first file that has it cached, or default to False
             global_show_special = False
@@ -1820,6 +1854,18 @@ class RetranslationMixin:
             # Cache the dialog and selection key for reuse
             self._multi_file_retranslation_dialog = dialog
             self._multi_file_selection_key = selection_key
+            
+            # Refresh all tabs before showing the dialog
+            print(f"[DEBUG] Refreshing all {len(tab_data)} tabs on dialog open...")
+            for idx, data in enumerate(tab_data):
+                if data and data.get('type') != 'image_folder' and data.get('type') != 'individual_images':
+                    # Only refresh EPUB/text tabs
+                    try:
+                        print(f"[DEBUG] Refreshing tab {idx + 1}/{len(tab_data)}")
+                        self._refresh_retranslation_data(data)
+                    except Exception as e:
+                        print(f"[ERROR] Failed to refresh tab {idx + 1}: {e}")
+            print(f"[DEBUG] All tabs refreshed successfully")
             
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()

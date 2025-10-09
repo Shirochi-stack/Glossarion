@@ -651,9 +651,8 @@ class QAScannerMixin:
         # End of optional mode dialog
         
         # Show custom settings dialog if custom mode is selected
-
-        # Show custom settings dialog if custom mode is selected
-        if selected_mode_value == "custom":
+        # BUT skip the dialog if non_interactive=True (e.g., post-translation scan)
+        if selected_mode_value == "custom" and not non_interactive:
             # Create custom settings dialog
             custom_dialog = QDialog(self)
             custom_dialog.setWindowTitle("Custom Mode Settings")
