@@ -2689,7 +2689,14 @@ def _create_prompt_management_section(self, parent):
     
     translate_now_btn = QPushButton("Translate Headers Now")
     translate_now_btn.setFixedWidth(210)
-    translate_now_btn.clicked.connect(lambda: self.run_standalone_translate_headers())
+    
+    def _on_translate_now():
+        self.run_standalone_translate_headers()
+        # Close the Other Settings dialog after running
+        if hasattr(self, '_other_settings_dialog') and self._other_settings_dialog:
+            self._other_settings_dialog.close()
+    
+    translate_now_btn.clicked.connect(_on_translate_now)
     translate_now_btn.setStyleSheet(
         "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
         "QPushButton:hover { background-color: #28a745; } "

@@ -24,6 +24,11 @@ try:
 except ImportError:
     UnifiedClient = None
 
+try:
+    from translate_headers_standalone import run_translation as run_standalone_header_translation
+except ImportError:
+    run_standalone_header_translation = None
+
 # Configure stdout for UTF-8
 def configure_utf8_output():
     """Configure stdout for UTF-8 encoding"""
@@ -1024,11 +1029,56 @@ class EPUBCompiler:
             self.log(f"[DEBUG] EPUB_PATH env: {os.getenv('EPUB_PATH', 'NOT SET')}")
             self.log(f"[DEBUG] HTML dir: {self.html_dir}")
             
-            # Extract source headers AND current titles if batch translation is enabled
+            # PRIORITY: Try standalone header translation first
+            standalone_success = False
+            if (hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
+                run_standalone_header_translation is not None):
+                
+                self.log("\n🔄 Attempting standalone header translation (content.opf based)...")
+                try:
+                    # Check if translated_headers.txt already exists
+                    translations_file = os.path.join(self.output_dir, "translated_headers.txt")
+                    
+                    if os.path.exists(translations_file):
+                        self.log("📁 Found existing translated_headers.txt - skipping standalone translation")
+                        standalone_success = True
+                    else:
+                        # Get the source EPUB path from environment
+                        source_epub_path = os.getenv('EPUB_PATH')
+                        
+                        if source_epub_path and os.path.exists(source_epub_path):
+                            self.log(f"📚 Source EPUB: {os.path.basename(source_epub_path)}")
+                            self.log(f"📂 Output HTML dir: {self.html_dir}")
+                            
+                            # Run standalone header translation
+                            result = run_standalone_header_translation(
+                                source_epub_path=source_epub_path,
+                                output_html_dir=self.html_dir,
+                                log_callback=self.log
+                            )
+                            
+                            if result:
+                                self.log("✅ Standalone header translation completed successfully")
+                                standalone_success = True
+                            else:
+                                self.log("⚠️ Standalone header translation returned no result")
+                        else:
+                            self.log(f"⚠️ Source EPUB not found: {source_epub_path}")
+                            
+                except Exception as e:
+                    self.log(f"⚠️ Standalone header translation failed: {e}")
+                    import traceback
+                    self.log(traceback.format_exc())
+            
+            # FALLBACK: Extract source headers AND current titles if batch translation is enabled
+            # Only run if standalone translation was not successful
             source_headers = {}
             current_titles = {}
-            if (hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
+            if (not standalone_success and 
+                hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
                 hasattr(self, 'header_translator') and self.header_translator):
+                
+                self.log("\n🔄 Using fallback header translation method...")
                 
                 # Check if the extraction method exists
                 if hasattr(self, '_extract_source_headers_and_current_titles'):
@@ -1038,9 +1088,10 @@ class EPUBCompiler:
                 else:
                     self.log("⚠️ Missing _extract_source_headers_and_current_titles method!")
             
-            # Batch translate headers if we have source headers
+            # Batch translate headers if we have source headers (fallback only)
             translated_headers = {}
-            if source_headers and hasattr(self, 'header_translator') and self.header_translator:
+            if (not standalone_success and source_headers and 
+                hasattr(self, 'header_translator') and self.header_translator):
                 # Check if translated_headers.txt already exists
                 translations_file = os.path.join(self.output_dir, "translated_headers.txt")
                 
