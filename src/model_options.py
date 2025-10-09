@@ -110,13 +110,15 @@ def get_model_options() -> List[str]:
         # For OR, prevfix with 'or/'
         "or/google/gemini-2.5-pro",
         "or/google/gemini-2.5-flash",
+        "or/google/gemini-2.5-flash-preview-09-2025",
         "or/google/gemini-2.5-flash-lite",
-        "or/openai/gpt-5",
+        "or/openai/gpt-oss-20b:free","or/openai/gpt-5",
         "or/openai/gpt-5-mini",
         "or/openai/gpt-5-nano",
-        "or/openai/chatgpt-4o-latest",   
-        "or/deepseek/deepseek-r1-0528:free", 
-        "or/google/gemma-3-27b-it:free",
+        "or/openai/chatgpt-4o-latest", "or/deepseek/deepseek-chat-v3-0324:free", "or/deepseek/deepseek-r1-distill-llama-70b:free",
+        "or/deepseek/deepseek-r1:free","or/deepseek/deepseek-r1-0528:free", "or/deepseek/deepseek-chat-v3.1:free", "or/deepseek/deepseek-r1-0528-qwen3-8b:free",
+        "or/tngtech/deepseek-r1t2-chimera:free","or/tngtech/deepseek-r1t-chimera:free",
+        "or/google/gemma-3-27b-it:free", "or/google/gemma-3-27b-it",
         
         # For ElectronHub, prefix with 'eh/'
         "eh/claude-sonnet-4-5-20250929", "eh/claude-sonnet-4-5-20250929-thinking",        
@@ -135,7 +137,7 @@ def get_model_options() -> List[str]:
         "eh/grok-4-0709", "eh/grok-3", "eh/grok-3-mini-fast", "eh/grok-3-mini", "eh/grok-3-fast",
         "eh/grok-code-fast-1","eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large", "eh/deepseek-v3-0324:free",
         "eh/deepseek-v3.1:free", "eh/deepseek-v3.1", "eh/deepseek-v3.2-exp:free", "eh/deepseek-v3.2-exp" , "eh/deepseek-v3.2-exp-thinking" ,
-        "eh/gemini-pro", "eh/deepseek-coder-33b",       
+        "eh/gemini-pro", "eh/deepseek-coder-33b", "eh/gemma-3-27b-it",
         
         # Last Resort
         "deepl",  # Will use DeepL API

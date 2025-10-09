@@ -8809,6 +8809,15 @@ class MangaTranslationTab:
             except Exception as e:
                 self._log(f"⚠️ Warning: Failed to reset translator instance: {e}", "warning")
             
+            # Restore print hijack to original
+            try:
+                if hasattr(self, 'translator') and self.translator:
+                    if hasattr(self.translator, 'restore_print'):
+                        self.translator.restore_print()
+                        self._log("✅ Print function restored to original", "debug")
+            except Exception as e:
+                self._log(f"⚠️ Warning: Failed to restore print: {e}", "debug")
+            
             # Reset UI state (PySide6 - must call on main thread)
             try:
                 # Use the existing update_queue to schedule UI reset on main thread
@@ -8908,6 +8917,14 @@ class MangaTranslationTab:
             
             # Update current file display to show stopped
             self._update_current_file("Translation stopped")
+            
+            # Restore print hijack when translation is stopped
+            try:
+                if hasattr(self, 'translator') and self.translator:
+                    if hasattr(self.translator, 'restore_print'):
+                        self.translator.restore_print()
+            except Exception:
+                pass
             
             # Check if cleanup is enabled before shutting down translator on stop
             try:

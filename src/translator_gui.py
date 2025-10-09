@@ -3892,6 +3892,31 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
         try:
+            # Restore print hijack if it was captured by manga translator
+            # This ensures main GUI logs go to main GUI, not manga GUI
+            try:
+                import builtins
+                # Check if print was hijacked by manga translator
+                if hasattr(builtins, '_manga_log_callbacks') and builtins._manga_log_callbacks:
+                    # Restore original print for main GUI
+                    if hasattr(builtins, 'print') and hasattr(builtins.print, '__name__'):
+                        if builtins.print.__name__ == 'manga_print':
+                            # Print is hijacked, restore it
+                            from manga_translator import MangaTranslator
+                            if hasattr(MangaTranslator, '_original_print_backup'):
+                                builtins.print = MangaTranslator._original_print_backup
+                                # Also restore in unified_api_client
+                                try:
+                                    import sys
+                                    import unified_api_client
+                                    uc_module = sys.modules.get('unified_api_client')
+                                    if uc_module:
+                                        uc_module.__dict__['print'] = MangaTranslator._original_print_backup
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+            
             # Check stop at the very beginning
             if self.stop_requested:
                 return False
@@ -5229,6 +5254,31 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly - handles multiple files and different file types"""
         try:
+            # Restore print hijack if it was captured by manga translator
+            # This ensures main GUI logs go to main GUI, not manga GUI
+            try:
+                import builtins
+                # Check if print was hijacked by manga translator
+                if hasattr(builtins, '_manga_log_callbacks') and builtins._manga_log_callbacks:
+                    # Restore original print for main GUI
+                    if hasattr(builtins, 'print') and hasattr(builtins.print, '__name__'):
+                        if builtins.print.__name__ == 'manga_print':
+                            # Print is hijacked, restore it
+                            from manga_translator import MangaTranslator
+                            if hasattr(MangaTranslator, '_original_print_backup'):
+                                builtins.print = MangaTranslator._original_print_backup
+                                # Also restore in unified_api_client
+                                try:
+                                    import sys
+                                    import unified_api_client
+                                    uc_module = sys.modules.get('unified_api_client')
+                                    if uc_module:
+                                        uc_module.__dict__['print'] = MangaTranslator._original_print_backup
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+            
             self.append_log("🔄 Loading glossary modules...")
             if not self._lazy_load_modules():
                 self.append_log("❌ Failed to load glossary modules")

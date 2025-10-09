@@ -1062,15 +1062,35 @@ class MangaTranslator:
         # Replace the built-in print
         builtins.print = gui_print
     
+    def restore_print(self):
+        """Restore original print function to builtins"""
+        try:
+            import builtins
+            import sys
+            
+            # Remove this instance's log callback from the global registry
+            if hasattr(builtins, '_manga_log_callbacks'):
+                builtins._manga_log_callbacks.pop(id(self), None)
+                
+                # If no more manga translators are active, restore original print
+                if not builtins._manga_log_callbacks:
+                    if hasattr(MangaTranslator, '_original_print_backup'):
+                        builtins.print = MangaTranslator._original_print_backup
+                        # Also restore in unified_api_client module
+                        try:
+                            import unified_api_client
+                            uc_module = sys.modules.get('unified_api_client')
+                            if uc_module:
+                                uc_module.__dict__['print'] = MangaTranslator._original_print_backup
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    
     def __del__(self):
         """Restore original print when MangaTranslator is destroyed"""
         # Restore original print function
-        if hasattr(self, '_original_print'):
-            try:
-                import builtins
-                builtins.print = self._original_print
-            except Exception:
-                pass
+        self.restore_print()
         
         # Best-effort shutdown in case caller forgot to call shutdown()
         try:
@@ -6475,7 +6495,11 @@ class MangaTranslator:
                 response_lower = response_text.lower()
                 
                 # Quick check: if response starts with refusal keywords, it's definitely a refusal
-                refusal_starts = ['sorry', 'i cannot', "i can't", 'i apologize', 'i am unable', "i'm unable"]
+                # Be more precise to avoid false positives on manga dialogue
+                refusal_starts = [
+                    'i cannot assist', "i can't assist", 'i apologize, but i cannot',
+                    'as an ai', 'as a language model', "i'm sorry, but i can't assist"
+                ]
                 if any(response_lower.strip().startswith(start) for start in refusal_starts):
                     # Very likely a refusal - raise immediately
                     from unified_api_client import UnifiedClientError
@@ -6508,25 +6532,36 @@ class MangaTranslator:
                     # Skip refusal detection, go straight to regex fallback
                     pass
                 else:
-                    # Check for refusal patterns
+                    # Check for refusal patterns (only for responses > 10 chars)
+                    # Manga text is typically short, refusals are longer explanations
                     # Refusal patterns - both simple strings and regex patterns
                     # Must be strict to avoid false positives on valid translations
                     refusal_patterns = [
                         "i cannot assist",
                         "i can't assist",
+                        "i'm not able to assist",
                         "i cannot help",
                         "i can't help",
+                        "i'm unable to help",
+                        "as an ai",
+                        "as a language model",
+                        "as an ai language model",
                         r"sorry.{0,10}i can't (assist|help|translate)",  # OpenAI specific
                         "i'm unable to translate",
                         "i am unable to translate",
                         "i apologize, but i cannot",
                         "i'm sorry, but i cannot",
-                        "i don't have the ability to",
-                        "this request cannot be",
-                        "unable to process this",
-                        "cannot complete this",
+                        "i'm sorry, but i can't assist",
+                        "i'm sorry, but i cannot assist",
+                        "i don't feel comfortable",
+                        "against my programming",
+                        "against my guidelines",
                         r"against.{0,20}(content )?policy",  # "against policy" or "against content policy"
+                        "violates content policy",
                         "violates.*policy",
+                        "i'm not programmed to",
+                        "cannot provide that kind",
+                        "unable to provide that",
                         r"(can't|cannot).{0,30}(sexual|explicit|inappropriate)",  # "can't translate sexual"
                         "appears to sexualize",
                         "who appear to be",
@@ -6535,18 +6570,20 @@ class MangaTranslator:
                     ]
                     
                     # Check both simple string matching and regex patterns
+                    # Only check if response is longer than typical manga text (> 10 chars)
                     is_refusal = False
-                    for pattern in refusal_patterns:
-                        if '.*' in pattern or r'.{' in pattern:
-                            # It's a regex pattern
-                            if re.search(pattern, response_lower):
-                                is_refusal = True
-                                break
-                        else:
-                            # Simple string match
-                            if pattern in response_lower:
-                                is_refusal = True
-                                break
+                    if len(response_text) > 10:
+                        for pattern in refusal_patterns:
+                            if '.*' in pattern or r'.{' in pattern:
+                                # It's a regex pattern
+                                if re.search(pattern, response_lower):
+                                    is_refusal = True
+                                    break
+                            else:
+                                # Simple string match
+                                if pattern in response_lower:
+                                    is_refusal = True
+                                    break
                     
                     if is_refusal:
                         # Raise UnifiedClientError with prohibited_content type
@@ -6636,14 +6673,28 @@ class MangaTranslator:
             
             # CRITICAL: Check if translation values are actually refusal messages
             # API sometimes returns valid JSON where each "translation" is a refusal
+            # Only check translations > 10 chars (manga text is typically very short)
             if translation_values:
                 # Check first few translations for refusal patterns
                 import re
                 refusal_patterns = [
-                    "i cannot",
-                    "i can't",
-                    r"sorry.{0,5}i can't help",
-                    r"sorry.{0,5}i can't",
+                    "i cannot assist",
+                    "i can't assist",
+                    "i'm not able to assist",
+                    "i cannot help",
+                    "i can't help",
+                    "i'm unable to help",
+                    "as an ai",
+                    "as a language model",
+                    "as an ai language model",
+                    r"sorry.{0,5}i can't (assist|help)",
+                    "i apologize, but i cannot",
+                    "i'm sorry, but i cannot assist",
+                    "i don't feel comfortable",
+                    "against my programming",
+                    "against my guidelines",
+                    "violates content policy",
+                    "i'm not programmed to",
                     "sexually explicit",
                     "content policy",
                     "prohibited content",
@@ -6656,7 +6707,7 @@ class MangaTranslator:
                 refusal_count = 0
                 
                 for sample_val in translation_values[:sample_size]:
-                    if sample_val:
+                    if sample_val and len(sample_val) > 10:  # Only check if longer than typical manga text
                         val_lower = sample_val.lower()
                         for pattern in refusal_patterns:
                             if '.*' in pattern or r'.{' in pattern:
@@ -11164,6 +11215,66 @@ class MangaTranslator:
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
                      batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
         """Process a single manga image through the full pipeline"""
+        # Re-hijack print to ensure manga logs go to manga GUI
+        # This is needed because print may have been restored after previous translation
+        try:
+            import builtins
+            import sys
+            # Re-register this translator's callback if needed
+            if not hasattr(builtins, '_manga_log_callbacks'):
+                builtins._manga_log_callbacks = {}
+            if self.log_callback:
+                builtins._manga_log_callbacks[id(self)] = self.log_callback
+                # Re-apply the custom print if needed
+                if not hasattr(builtins.print, '__name__') or builtins.print.__name__ != 'manga_print':
+                    # Print was restored, need to re-hijack
+                    if hasattr(MangaTranslator, '_original_print_backup'):
+                        # Get the manga_print function from module initialization
+                        # We'll recreate it here to be safe
+                        def manga_print(*args, **kwargs):
+                            """Custom print that redirects to manga log callback (thread-safe)"""
+                            message = ' '.join(str(arg) for arg in args)
+                            callback_found = False
+                            if hasattr(builtins, '_manga_log_callbacks'):
+                                for translator_id, callback in reversed(list(builtins._manga_log_callbacks.items())):
+                                    if callback:
+                                        try:
+                                            level = 'info'
+                                            if '❌' in message or 'ERROR' in message or 'Error' in message:
+                                                level = 'error'
+                                            elif '⚠️' in message or 'WARNING' in message or 'Warning' in message:
+                                                level = 'warning'
+                                            elif '🔍' in message or 'DEBUG' in message:
+                                                level = 'debug'
+                                            elif '✅' in message or '🔑' in message or '📤' in message:
+                                                level = 'info'
+                                            message = message.replace('[DEBUG] ', '')
+                                            callback(message, level)
+                                            callback_found = True
+                                            break
+                                        except Exception:
+                                            continue
+                            if not callback_found:
+                                try:
+                                    if hasattr(MangaTranslator, '_original_print_backup'):
+                                        MangaTranslator._original_print_backup(*args, **kwargs)
+                                    else:
+                                        import sys
+                                        sys.__stdout__.write(str(message) + '\n')
+                                except Exception:
+                                    pass
+                        builtins.print = manga_print
+                        # Also re-inject into unified_api_client
+                        try:
+                            import unified_api_client
+                            uc_module = sys.modules.get('unified_api_client')
+                            if uc_module:
+                                uc_module.__dict__['print'] = manga_print
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        
         # Ensure local references exist for cleanup in finally
         image = None
         inpainted = None
@@ -11808,27 +11919,8 @@ class MangaTranslator:
             self.is_processing = False
             self.cancel_requested = False
             
-            # Remove this instance's log callback from the global registry
-            try:
-                import builtins
-                if hasattr(builtins, '_manga_log_callbacks'):
-                    builtins._manga_log_callbacks.pop(id(self), None)
-                    
-                    # If no more manga translators are active, restore original print
-                    if not builtins._manga_log_callbacks:
-                        if hasattr(MangaTranslator, '_original_print_backup'):
-                            builtins.print = MangaTranslator._original_print_backup
-                            # Also restore in unified_api_client module
-                            try:
-                                import sys
-                                import unified_api_client
-                                uc_module = sys.modules.get('unified_api_client')
-                                if uc_module:
-                                    uc_module.__dict__['print'] = MangaTranslator._original_print_backup
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+            # Restore print to original (delegates to restore_print method)
+            self.restore_print()
             
             self._log("🧹 Internal state and all components cleared", "debug")
             

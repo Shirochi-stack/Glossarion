@@ -2179,11 +2179,8 @@ class TranslationProcessor:
                     
                 if finish_reason == "length" and (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
                     if retry_count < max_retries:
-                        # For truncated responses, ensure we never go below the minimum retry tokens
-                        proposed_limit = self.config.MAX_OUTPUT_TOKENS * 2
-                        
-                        # Always enforce minimum - never retry with tokens below the constraint
-                        new_token_limit = max(proposed_limit, self.config.MAX_RETRY_TOKENS)
+                        # For truncated responses, use the set minimum retry tokens (not double)
+                        new_token_limit = self.config.MAX_RETRY_TOKENS
                         
                         if new_token_limit != self.config.MAX_OUTPUT_TOKENS:
                             retry_needed = True
@@ -2191,13 +2188,9 @@ class TranslationProcessor:
                             old_limit = self.config.MAX_OUTPUT_TOKENS
                             self.config.MAX_OUTPUT_TOKENS = new_token_limit
                             retry_count += 1
-                            
-                            if old_limit < self.config.MAX_RETRY_TOKENS:
-                                print(f"    🔄 TRUNCATION RETRY: Boosting tokens {old_limit} → {new_token_limit} (enforcing minimum: {self.config.MAX_RETRY_TOKENS})")
-                            else:
-                                print(f"    🔄 TRUNCATION RETRY: Doubling tokens {old_limit} → {new_token_limit} (above minimum: {self.config.MAX_RETRY_TOKENS})")
+                            print(f"    🔄 TRUNCATION RETRY: Setting tokens {old_limit} → {new_token_limit} (using configured minimum)")
                         else:
-                            print(f"    ⚠️ TRUNCATION DETECTED: Token adjustment not needed - already at maximum {self.config.MAX_OUTPUT_TOKENS}")
+                            print(f"    ⚠️ TRUNCATION DETECTED: Token adjustment not needed - already at configured limit {self.config.MAX_OUTPUT_TOKENS}")
                     else:
                         print(f"    ⚠️ TRUNCATION DETECTED: Max retries ({max_retries}) reached - accepting truncated response")
                 elif finish_reason == "length" and not (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
@@ -3805,26 +3798,20 @@ def is_qa_failed_response(content):
             return True
     
     # 7. COMMON REFUSAL PATTERNS (AI refusing to generate content)
+    # Be more precise: look for AI refusal patterns, not natural dialogue
     refusal_patterns = [
-        "i cannot",
-        "i can't", 
-        "i'm unable to",
-        "i am unable to",
-        "i apologize, but i cannot",
-        "i'm sorry, but i cannot",
-        "i don't have the ability to",
-        "i'm not able to",
-        "this request cannot be",
-        "unable to process",
-        "cannot complete",
-        "cannot generate",
-        "not available",
-        "service unavailable",
-        "temporarily unavailable"
+        "i cannot assist", "i can't assist", "i'm not able to assist",
+        "i cannot help", "i can't help", "i'm unable to help",
+        "as an ai", "as a language model", "as an ai language model",
+        "i don't feel comfortable", "i apologize, but i cannot",
+        "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
+        "against my programming", "against my guidelines",
+        "violates content policy", "i'm not programmed to",
+        "cannot provide that kind", "unable to provide that",
     ]
     
-    # Only check refusal patterns for relatively short responses (likely to be refusals)
-    if len(content_str) < 500:
+    # Check responses up to 1000 chars (AIs can be verbose when refusing)
+    if len(content_str) < 1000:
         for pattern in refusal_patterns:
             if pattern in content_lower:
                 return True

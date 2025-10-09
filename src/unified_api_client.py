@@ -507,10 +507,32 @@ class UnifiedClient:
         except Exception:
             return 2.0
 
+    def _sanitize_html_for_log(self, text: str, max_length: int = 200) -> str:
+        """Truncate HTML content in logs while preserving normal text"""
+        if not text:
+            return text
+        
+        # Check if text contains HTML tags
+        if '<' in text and '>' in text:
+            import re
+            # Count how many HTML tags are in the text
+            tag_count = len(re.findall(r'<[^>]+>', text))
+            
+            # If it has many tags (3+), it's likely HTML content - truncate it
+            if tag_count > 3:
+                # Just truncate the HTML
+                if len(text) > max_length:
+                    return text[:max_length] + f"... [HTML content truncated, {len(text)} chars total]"
+                return text
+        
+        # Non-HTML text - return as-is, no truncation
+        return text
+    
     def _debug_log(self, message: str) -> None:
         """Print debug logs unless in cleanup/stop state or quiet mode.
         Suppresses noisy logs when the operation is cancelled or in cleanup.
         Honours QUIET_LOGS=1 environment toggle.
+        Sanitizes HTML content to keep logs readable.
         """
         try:
             if getattr(self, '_in_cleanup', False):
@@ -526,10 +548,13 @@ class UnifiedClient:
                     pass
             if os.getenv('QUIET_LOGS', '0') == '1':
                 return
-            print(message)
+            # Sanitize HTML from message before printing
+            sanitized_message = self._sanitize_html_for_log(message)
+            print(sanitized_message)
         except Exception:
             # Best-effort logging; swallow any print failures
             try:
+                # Try to print original message as fallback
                 print(message)
             except Exception:
                 pass
@@ -1064,6 +1089,9 @@ class UnifiedClient:
         # File tracking for duplicate prevention
         self._active_files = set()  # Track files being written
         self._file_lock = RLock()
+        
+        # Image payload directory caching
+        self._image_thread_dir_cache = {}  # {thread_id: directory_path}
         
         # Timeout configuration
         enabled, window = self._get_timeout_config()
@@ -3685,15 +3713,16 @@ class UnifiedClient:
                     retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
                     
                     if retry_truncated_enabled:
-                        print(f"  🔄 RETRY_TRUNCATED enabled - attempting to retry with increased token limit")
+                        print(f"  🔄 RETRY_TRUNCATED enabled - attempting to retry with configured token limit")
                         
-                        # Get the max retry tokens limit
+                        # Get the max retry tokens limit (this is the target, not the minimum)
                         max_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
                         current_max_tokens = max_tokens or 8192
                         
                         if current_max_tokens < max_retry_tokens:
-                            new_max_tokens = min(current_max_tokens * 2, max_retry_tokens)
-                            print(f"  📊 Retrying with increased tokens: {current_max_tokens} → {new_max_tokens}")
+                            # Use the configured limit directly, not double
+                            new_max_tokens = max_retry_tokens
+                            print(f"  📊 Retrying with configured token limit: {current_max_tokens} → {new_max_tokens}")
                             
                             try:
                                 # Recursive call with increased token limit
@@ -5575,14 +5604,22 @@ class UnifiedClient:
         # Determine base directory based on content
         if has_images:
             # Image payloads go to Payloads/image/thread_id/ (skip context folder)
-            # Generate thread directory name (same format as regular payloads)
-            thread_name = threading.current_thread().name
+            # Use cached directory for this thread to ensure payload and safety config go to same folder
             thread_id = threading.current_thread().ident
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
-            unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
             
-            thread_dir = os.path.join("Payloads", "image", unique_id)
-            os.makedirs(thread_dir, exist_ok=True)
+            if thread_id not in self._image_thread_dir_cache:
+                # Generate thread directory name (same format as regular payloads)
+                thread_name = threading.current_thread().name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+                unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
+                
+                thread_dir = os.path.join("Payloads", "image", unique_id)
+                os.makedirs(thread_dir, exist_ok=True)
+                
+                # Cache it for this thread
+                self._image_thread_dir_cache[thread_id] = thread_dir
+            else:
+                thread_dir = self._image_thread_dir_cache[thread_id]
         else:
             # Regular payloads use thread-specific directory
             thread_dir = self._get_thread_directory()
@@ -7913,11 +7950,22 @@ class UnifiedClient:
         # Use image directory if it's an image request, otherwise use normal thread directory
         if has_images:
             # Image payloads go to Payloads/image/thread_id/
-            thread_name = threading.current_thread().name
+            # Use cached directory for this thread to ensure payload and safety config go to same folder
             thread_id = threading.current_thread().ident
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
-            unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
-            thread_dir = os.path.join("Payloads", "image", unique_id)
+            
+            if thread_id not in self._image_thread_dir_cache:
+                # Generate thread directory name (same format as regular payloads)
+                thread_name = threading.current_thread().name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+                unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
+                
+                thread_dir = os.path.join("Payloads", "image", unique_id)
+                os.makedirs(thread_dir, exist_ok=True)
+                
+                # Cache it for this thread
+                self._image_thread_dir_cache[thread_id] = thread_dir
+            else:
+                thread_dir = self._image_thread_dir_cache[thread_id]
         else:
             # Regular payloads use thread-specific directory
             thread_dir = self._get_thread_directory()
