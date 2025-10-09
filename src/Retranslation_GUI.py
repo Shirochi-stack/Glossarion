@@ -1575,7 +1575,7 @@ class RetranslationMixin:
             dialog = QDialog(self)
             dialog.setWindowTitle("Force Retranslation - Multiple Files")
             # Increased height from 18% to 25% for better visibility
-            width, height = self._get_dialog_size(0.25, 0.25)
+            width, height = self._get_dialog_size(0.25, 0.45)
             dialog.resize(width, height)
             
             # Set icon

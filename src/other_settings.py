@@ -5466,7 +5466,20 @@ def save_profile(self):
     self.profile_menu.addItems(list(self.prompt_profiles.keys()))
     self.profile_menu.setCurrentText(name)
     
-    QMessageBox.information(None, "Saved", f"Profile '{name}' saved.")
+    # Show save confirmation with Halgakos icon
+    from PySide6.QtGui import QIcon
+    msg_box = QMessageBox()
+    msg_box.setWindowTitle("Saved")
+    msg_box.setText(f"Profile '{name}' saved.")
+    msg_box.setIcon(QMessageBox.Information)
+    msg_box.setStandardButtons(QMessageBox.Ok)
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            msg_box.setWindowIcon(QIcon(icon_path))
+    except:
+        pass
+    msg_box.exec()
     self.save_profiles()
 
 def delete_profile(self):
@@ -5480,8 +5493,21 @@ def delete_profile(self):
         QMessageBox.critical(None, "Error", f"Profile '{name}' not found.")
         return
     
-    result = QMessageBox.question(None, "Delete", f"Are you sure you want to delete language '{name}'?",
-                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    # Show delete confirmation with Halgakos icon
+    from PySide6.QtGui import QIcon
+    msg_box = QMessageBox()
+    msg_box.setWindowTitle("Delete")
+    msg_box.setText(f"Are you sure you want to delete language '{name}'?")
+    msg_box.setIcon(QMessageBox.Question)
+    msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+    msg_box.setDefaultButton(QMessageBox.No)
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            msg_box.setWindowIcon(QIcon(icon_path))
+    except:
+        pass
+    result = msg_box.exec()
     
     if result == QMessageBox.Yes:
         del self.prompt_profiles[name]
