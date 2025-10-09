@@ -194,8 +194,11 @@ class RetranslationMixin:
                             if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
                                 filename = os.path.basename(href)
                                 
-                                # Skip navigation, toc, and cover files (unless show_special_files is enabled)
-                                is_special = any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.'])
+                                # Skip special files (files without numbers) unless show_special_files is enabled
+                                import re
+                                # Check if filename contains any digits
+                                has_numbers = bool(re.search(r'\d', filename))
+                                is_special = not has_numbers
                                 if not is_special or show_special_files[0]:
                                     manifest_chapters[item_id] = {
                                         'filename': filename,
@@ -271,38 +274,43 @@ class RetranslationMixin:
         for spine_ch in spine_chapters:
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
+            is_special = spine_ch.get('is_special', False)
             
             # Find the actual response file that exists
             base_name = os.path.splitext(filename)[0]
             expected_response = None
             
-            # Handle .htm.html -> .html conversion
-            stripped_base_name = base_name
-            if base_name.endswith('.htm'):
-                stripped_base_name = base_name[:-4]  # Remove .htm suffix
+            # Special files should keep their original filenames (no response_ prefix)
+            if is_special:
+                expected_response = filename
+            else:
+                # Handle .htm.html -> .html conversion
+                stripped_base_name = base_name
+                if base_name.endswith('.htm'):
+                    stripped_base_name = base_name[:-4]  # Remove .htm suffix
 
-            # Look for translated file matching base name, with or without 'response_' and with allowed extensions
-            allowed_exts = ('.html', '.xhtml', '.htm')
-            for file in os.listdir(output_dir):
-                f_low = file.lower()
-                if f_low.endswith(allowed_exts):
-                    name_no_ext = os.path.splitext(file)[0]
-                    core = name_no_ext[9:] if name_no_ext.startswith('response_') else name_no_ext
-                    # Accept matches for:
-                    # - OPF filename without last extension (base_name)
-                    # - Stripped base for .htm cases
-                    # - OPF filename as-is (e.g., 'chapter_02.htm') when the output file is 'chapter_02.htm.xhtml'
-                    if core == base_name or core == stripped_base_name or core == filename:
-                        expected_response = file
-                        break
+                # Look for translated file matching base name, with or without 'response_' and with allowed extensions
+                allowed_exts = ('.html', '.xhtml', '.htm')
+                for file in os.listdir(output_dir):
+                    f_low = file.lower()
+                    if f_low.endswith(allowed_exts):
+                        name_no_ext = os.path.splitext(file)[0]
+                        core = name_no_ext[9:] if name_no_ext.startswith('response_') else name_no_ext
+                        # Accept matches for:
+                        # - OPF filename without last extension (base_name)
+                        # - Stripped base for .htm cases
+                        # - OPF filename as-is (e.g., 'chapter_02.htm') when the output file is 'chapter_02.htm.xhtml'
+                        if core == base_name or core == stripped_base_name or core == filename:
+                            expected_response = file
+                            break
 
-            # Fallback - per mode, prefer OPF filename when retain mode is on
-            if not expected_response:
-                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
-                if retain:
-                    expected_response = filename
-                else:
-                    expected_response = f"response_{stripped_base_name}.html"
+                # Fallback - per mode, prefer OPF filename when retain mode is on
+                if not expected_response:
+                    retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                    if retain:
+                        expected_response = filename
+                    else:
+                        expected_response = f"response_{stripped_base_name}.html"
             
             response_path = os.path.join(output_dir, expected_response)
             
@@ -349,7 +357,13 @@ class RetranslationMixin:
             if matched_info:
                 # We found progress tracking info - use its status
                 spine_ch['status'] = matched_info.get('status', 'unknown')
-                spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                
+                # For special files, always use the original filename (ignore what's in progress JSON)
+                if is_special:
+                    spine_ch['output_file'] = expected_response
+                else:
+                    spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                
                 spine_ch['progress_entry'] = matched_info
                 
                 # Handle null output_file (common for failed/in_progress chapters)
@@ -407,6 +421,19 @@ class RetranslationMixin:
             
             for output_file, entries in files_to_entries.items():
                 chapter_key, chapter_info = entries[0]
+                
+                # Check if this is a special file (files without numbers)
+                original_basename = chapter_info.get("original_basename", "")
+                filename_to_check = original_basename if original_basename else output_file
+                
+                # Check if filename contains any digits
+                import re
+                has_numbers = bool(re.search(r'\d', filename_to_check))
+                is_special = not has_numbers
+                
+                # Skip special files if the toggle is off
+                if is_special and not show_special_files[0]:
+                    continue
                 
                 # Extract chapter number
                 import re
@@ -510,7 +537,7 @@ class RetranslationMixin:
         from PySide6.QtWidgets import QCheckBox
         show_special_files_cb = QCheckBox("Show special files (cover, nav, toc)")
         show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
-        show_special_files_cb.setToolTip("When enabled, shows all files including cover.xhtml, nav.xhtml, toc.xhtml, etc.")
+        show_special_files_cb.setToolTip("When enabled, shows special files (files without chapter numbers like cover, nav, toc, info, message, etc.)")
         
         # Apply blue checkbox stylesheet (matching Other Settings dialog)
         show_special_files_cb.setStyleSheet("""

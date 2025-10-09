@@ -2371,9 +2371,9 @@ Recent translations to summarize:
                 background-color: #218838;
             }
         """)
-        self.run_button.setMinimumWidth(200)
+        self.run_button.setMinimumWidth(160)
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.frame.addWidget(self.run_button, 9, 4, Qt.AlignmentFlag(0))
+        self.frame.addWidget(self.run_button, 9, 4)
     
     def _create_log_section(self):
         """Create log text area"""
