@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QFont, QColor, QTransform
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -20,6 +20,79 @@ import traceback
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
+
+
+class AnimatedRefreshButton(QPushButton):
+    """Custom QPushButton with rotation animation for refresh action"""
+    
+    def __init__(self, text="🔄 Refresh", parent=None):
+        super().__init__(text, parent)
+        self._rotation = 0
+        self._animation = None
+        self._original_text = text
+        self._timer = None
+        self._animation_step = 0
+        
+        # Unicode rotation arrows for smooth animation
+        self._spin_chars = ["🔄", "↻", "⟳", "↺"]
+        
+    def get_rotation(self):
+        return self._rotation
+    
+    def set_rotation(self, angle):
+        self._rotation = angle
+        self.update()  # Trigger repaint
+    
+    # Define rotation as a Qt Property for animation
+    rotation = Property(float, get_rotation, set_rotation)
+    
+    def start_animation(self):
+        """Start the spinning animation"""
+        if self._timer and self._timer.isActive():
+            return  # Already animating
+        
+        # Update stylesheet to show active state
+        current_style = self.styleSheet()
+        if "background-color: #17a2b8" in current_style:
+            self.setStyleSheet(current_style.replace(
+                "background-color: #17a2b8",
+                "background-color: #138496"
+            ))
+        
+        # Start timer-based animation for text rotation
+        self._animation_step = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._update_animation_frame)
+        self._timer.start(120)  # Update every 120ms for smoother/faster spinning
+    
+    def _update_animation_frame(self):
+        """Update animation frame"""
+        self._animation_step = (self._animation_step + 1) % len(self._spin_chars)
+        spin_char = self._spin_chars[self._animation_step]
+        # Replace the emoji in the text
+        new_text = self._original_text.replace("🔄", spin_char)
+        self.setText(new_text)
+    
+    def stop_animation(self):
+        """Stop the spinning animation"""
+        if self._timer:
+            self._timer.stop()
+            self._timer = None
+            self._rotation = 0
+            self._animation_step = 0
+            
+            # Restore original text
+            self.setText(self._original_text)
+            
+            # Restore original stylesheet
+            current_style = self.styleSheet()
+            if "background-color: #138496" in current_style:
+                self.setStyleSheet(current_style.replace(
+                    "background-color: #138496",
+                    "background-color: #17a2b8"
+                ))
+            
+            self.update()
 
 
 class RetranslationMixin:
@@ -1321,15 +1394,52 @@ class RetranslationMixin:
         btn_remove_qa.clicked.connect(remove_qa_failed_mark)
         button_layout.addWidget(btn_remove_qa, 1, 2, 1, 1)
         
-        # Add refresh button
-        btn_refresh = QPushButton("🔄 Refresh")
+        # Add animated refresh button
+        btn_refresh = AnimatedRefreshButton("🔄 Refresh")
         btn_refresh.setMinimumHeight(32)
         btn_refresh.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
-        # Check if this is part of a multi-tab dialog and refresh all tabs, otherwise just refresh current
-        if data.get('dialog') and hasattr(data['dialog'], '_tab_data'):
-            btn_refresh.clicked.connect(lambda: self._refresh_all_tabs(data['dialog']._tab_data))
-        else:
-            btn_refresh.clicked.connect(lambda: self._refresh_retranslation_data(data))
+        
+        # Create refresh handler with animation
+        def animated_refresh():
+            import time
+            btn_refresh.start_animation()
+            btn_refresh.setEnabled(False)
+            
+            # Track start time for minimum animation duration
+            start_time = time.time()
+            min_animation_duration = 0.8  # 800ms minimum
+            
+            # Use QTimer to run refresh after animation starts
+            def do_refresh():
+                try:
+                    # Check if this is part of a multi-tab dialog and refresh all tabs, otherwise just refresh current
+                    if data.get('dialog') and hasattr(data['dialog'], '_tab_data'):
+                        self._refresh_all_tabs(data['dialog']._tab_data)
+                    else:
+                        self._refresh_retranslation_data(data)
+                    
+                    # Calculate remaining time to meet minimum animation duration
+                    elapsed = time.time() - start_time
+                    remaining = max(0, min_animation_duration - elapsed)
+                    
+                    # Schedule animation stop after remaining time
+                    def finish_animation():
+                        btn_refresh.stop_animation()
+                        btn_refresh.setEnabled(True)
+                    
+                    if remaining > 0:
+                        QTimer.singleShot(int(remaining * 1000), finish_animation)
+                    else:
+                        finish_animation()
+                        
+                except Exception as e:
+                    print(f"Error during refresh: {e}")
+                    btn_refresh.stop_animation()
+                    btn_refresh.setEnabled(True)
+            
+            QTimer.singleShot(50, do_refresh)  # Small delay to let animation start
+        
+        btn_refresh.clicked.connect(animated_refresh)
         button_layout.addWidget(btn_refresh, 1, 3, 1, 1)
         
         btn_cancel = QPushButton("Cancel")

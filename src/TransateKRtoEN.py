@@ -6527,48 +6527,6 @@ def main(log_callback=None, stop_callback=None):
             print("❌ EPUB build failed:", e)
 
     print("TRANSLATION_COMPLETE_SIGNAL")
-    
-    # Post-translation scanning phase
-    scan_enabled = os.getenv('SCAN_PHASE_ENABLED', '0') == '1'
-    scan_mode = os.getenv('SCAN_PHASE_MODE', 'quick-scan')
-    
-    if scan_enabled and not is_text_file:
-        print(f"\n🔍 Starting post-translation QA scan ({scan_mode} mode)...")
-        
-        try:
-            # Determine the Python executable
-            if getattr(sys, 'frozen', False):
-                # Running as compiled exe
-                python_exe = sys.executable
-            else:
-                # Running as script
-                python_exe = sys.executable
-            
-            # Path to scan_html_folder.py
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            scan_script = os.path.join(script_dir, 'scan_html_folder.py')
-            
-            if not os.path.exists(scan_script):
-                print(f"⚠️ QA Scanner script not found: {scan_script}")
-            else:
-                # Build command based on scan mode
-                # All modes run silently without interactive dialogs
-                cmd = [python_exe, scan_script, out, '--mode', scan_mode]
-                
-                print(f"📋 QA Scan command: {' '.join(cmd)}")
-                
-                # Run the scanner
-                result = subprocess.run(cmd, cwd=script_dir)
-                
-                if result.returncode == 0:
-                    print("✅ Post-translation QA scan completed successfully")
-                else:
-                    print(f"⚠️ QA scan exited with code {result.returncode}")
-                    
-        except Exception as e:
-            print(f"❌ Error running post-translation QA scan: {e}")
-            import traceback
-            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
