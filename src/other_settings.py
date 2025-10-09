@@ -475,8 +475,13 @@ def open_other_settings(self):
                 except Exception:
                     pass
             self.save_config(show_message=False)
-        except Exception:
-            pass
+            # CRITICAL: Reinitialize environment variables after saving
+            # This ensures TRANSLATE_SPECIAL_FILES and other settings take effect immediately
+            if hasattr(self, 'initialize_environment_variables'):
+                self.initialize_environment_variables()
+                self.append_log("✅ Settings saved and environment variables updated")
+        except Exception as e:
+            self.append_log(f"⚠️ Error saving settings: {e}")
         dialog.close()
 
     save_btn = QPushButton("💾 Save Settings")
@@ -3257,25 +3262,144 @@ def _create_processing_options_section(self, parent):
     cover_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(cover_desc)
     
-    # Translate cover.html
-    translate_cover_cb = self._create_styled_checkbox("Translate cover.html (Skip Override)")
+    # Translate special files (cover, nav, toc, etc.) with Force Re-extraction button
+    special_files_row = QWidget()
+    special_files_h = QHBoxLayout(special_files_row)
+    special_files_h.setContentsMargins(0, 2, 0, 0)
+    
+    translate_special_cb = self._create_styled_checkbox("Translate Special Files (Skip Override)")
     try:
-        translate_cover_cb.setChecked(bool(self.translate_cover_html_var))
+        translate_special_cb.setChecked(bool(self.translate_special_files_var))
     except Exception:
         pass
-    def _on_translate_cover_toggle(checked):
+    def _on_translate_special_toggle(checked):
         try:
-            self.translate_cover_html_var = bool(checked)
+            old_value = self.translate_special_files_var
+            self.translate_special_files_var = bool(checked)
+            # Show helpful message if value changed
+            if old_value != bool(checked):
+                if checked:
+                    self.append_log("✅ Special files override ENABLED - special files will be included in extraction")
+                    self.append_log("🔄 If you already extracted an EPUB, use 'Force Re-extraction' button or re-translate")
+                else:
+                    self.append_log("❌ Special files override DISABLED - special files will be skipped (default behavior)")
         except Exception:
             pass
-    translate_cover_cb.toggled.connect(_on_translate_cover_toggle)
-    translate_cover_cb.setContentsMargins(0, 2, 0, 0)
-    section_v.addWidget(translate_cover_cb)
+    translate_special_cb.toggled.connect(_on_translate_special_toggle)
+    special_files_h.addWidget(translate_special_cb)
     
-    translate_cover_desc = QLabel("Disables cover.html/cover.xhtml skip lopgic.")
-    translate_cover_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    translate_cover_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(translate_cover_desc)
+    # Force Re-extraction button
+    force_reextract_btn = QPushButton("🔄 Force Re-extraction")
+    force_reextract_btn.setFixedWidth(150)
+    force_reextract_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #dc3545; "
+        "  color: white; "
+        "  padding: 4px 8px; "
+        "  font-size: 9pt; "
+        "  font-weight: bold; "
+        "  border-radius: 3px; "
+        "} "
+        "QPushButton:hover { background-color: #c82333; }"
+    )
+    def _force_reextract():
+        try:
+            import glob
+            # Get the current input file if available (same logic as QA Scanner auto-search)
+            input_path = None
+            if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
+                input_path = self.entry_epub.text()
+            
+            if not input_path or not os.path.isfile(input_path):
+                self.append_log("⚠️ No input file selected. Please select an EPUB first.")
+                return
+            
+            # Auto-search for output directory (same as QA Scanner)
+            epub_base = os.path.splitext(os.path.basename(input_path))[0]
+            current_dir = os.getcwd()
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Check the most common locations in order of priority
+            candidates = [
+                os.path.join(current_dir, epub_base),        # current working directory
+                os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
+                os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
+            ]
+            
+            output_dir = None
+            for candidate in candidates:
+                if os.path.isdir(candidate):
+                    # Verify the folder actually contains HTML/XHTML files
+                    try:
+                        files = os.listdir(candidate)
+                        html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                        if html_files:
+                            output_dir = candidate
+                            break
+                    except Exception:
+                        pass
+            
+            if not output_dir:
+                self.append_log(f"ℹ️ No output directory found for: {epub_base}")
+                self.append_log("   Searched in:")
+                for candidate in candidates:
+                    self.append_log(f"     - {candidate}")
+                self.append_log("   Nothing to clean - ready for fresh extraction")
+                return
+            
+            self.append_log(f"📁 Found output directory: {output_dir}")
+            
+            # Delete extraction markers and chapter files to force re-extraction
+            deleted_count = 0
+            
+            # Delete .resources_extracted marker
+            marker_file = os.path.join(output_dir, '.resources_extracted')
+            if os.path.exists(marker_file):
+                os.remove(marker_file)
+                deleted_count += 1
+                self.append_log(f"🗑️ Deleted: .resources_extracted")
+            
+            # Delete all extracted chapter HTML files (but keep responses)
+            for pattern in ['*.xhtml', '*.html', '*.htm']:
+                for file_path in glob.glob(os.path.join(output_dir, pattern)):
+                    filename = os.path.basename(file_path)
+                    # Only delete non-response files (these are the extracted originals)
+                    if not filename.startswith('response_'):
+                        try:
+                            os.remove(file_path)
+                            deleted_count += 1
+                            self.append_log(f"🗑️ Deleted: {filename}")
+                        except Exception as e:
+                            self.append_log(f"⚠️ Could not delete {filename}: {e}")
+            
+            # Delete chapters_full.json and chapters_info.json
+            for info_file in ['chapters_full.json', 'chapters_info.json']:
+                info_path = os.path.join(output_dir, info_file)
+                if os.path.exists(info_path):
+                    os.remove(info_path)
+                    deleted_count += 1
+                    self.append_log(f"🗑️ Deleted: {info_file}")
+            
+            if deleted_count > 0:
+                self.append_log(f"✅ Cleaned {deleted_count} files - ready for re-extraction")
+                self.append_log("🔄 Next translation will re-extract with current settings")
+            else:
+                self.append_log("ℹ️ No extraction files found to clean")
+                
+        except Exception as e:
+            self.append_log(f"❌ Error during cleanup: {e}")
+    
+    force_reextract_btn.clicked.connect(_force_reextract)
+    force_reextract_btn.setToolTip("Delete extraction markers and chapter files to force fresh extraction\nwith current special files settings. Keeps translated responses.")
+    special_files_h.addWidget(force_reextract_btn)
+    special_files_h.addStretch()
+    
+    section_v.addWidget(special_files_row)
+    
+    translate_special_desc = QLabel("Forces translation of special files (cover, nav, toc, message, etc.)\ninstead of skipping them during extraction and compilation.\nUse Force Re-extraction button to clean and re-extract with new settings.")
+    translate_special_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    translate_special_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(translate_special_desc)
     
     # Disable 0-based Chapter Detection
     zero_detect_cb = self._create_styled_checkbox("Disable 0-based Chapter Detection")

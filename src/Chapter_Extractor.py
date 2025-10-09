@@ -667,8 +667,9 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     enhanced_filtering = extraction_mode  # Default fallback
     preserve_structure = True
     
-    # Independent control: translate cover.html when requested
-    translate_cover_html = os.getenv("TRANSLATE_COVER_HTML", "0") == "1"
+    # Special files should NEVER be extracted as chapters - they're metadata/navigation only
+    # The TRANSLATE_SPECIAL_FILES toggle only affects EPUB compilation, not extraction
+    translate_special = False  # Always skip special files during extraction
     
     if extraction_mode == "enhanced":
         print("🚀 Initializing Enhanced extraction mode with html2text...")
@@ -735,36 +736,46 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     ProgressBar.update(idx, total_files, prefix="📂 Scanning files")
             
         if name.lower().endswith(('.xhtml', '.html', '.htm')):
-            # Skip cover files by default unless override is enabled
+            # Skip special files (cover, nav, toc, etc.) by default unless override is enabled
             basename = os.path.basename(name).lower()
-            if basename in ['cover.html', 'cover.xhtml', 'cover.htm'] and not translate_cover_html:
-                print(f"[SKIP] Cover file excluded from all modes: {name}")
+            if basename in ['cover.html', 'cover.xhtml', 'cover.htm'] and not translate_special:
+                print(f"[SKIP] Cover file excluded: {name}")
                 continue
             
             # Apply filtering based on the actual extraction mode (or enhanced_filtering for enhanced mode)
             current_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
             
-            if current_filtering == "smart":
-                # Smart mode: aggressive filtering
-                lower_name = name.lower()
-                if any(skip in lower_name for skip in [
-                    'nav', 'toc', 'contents', 'title', 'index',
-                    'copyright', 'acknowledgment', 'dedication'
-                ]):
-                    continue
-            elif current_filtering == "comprehensive":
-                # Comprehensive mode: moderate filtering
-                skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
-                basename = os.path.basename(name.lower())
-                should_skip = False
-                for skip in skip_keywords:
-                    if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
-                        should_skip = True
-                        break
-                if should_skip:
-                    print(f"[SKIP] Navigation/TOC file: {name}")
-                    continue
-            # else: full mode - no filtering at all (except cover which is filtered above)
+            # Skip special files based on mode and translate_special override
+            if not translate_special:
+                # Only apply special file filtering if override is not enabled
+                if current_filtering == "smart":
+                    # Smart mode: aggressive filtering
+                    lower_name = name.lower()
+                    basename_lower = os.path.basename(name).lower()
+                    # Check if basename (not full path) matches special file patterns
+                    special_patterns = [
+                        'nav.', 'toc.', 'contents.', 'title.', 'index.',
+                        'copyright.', 'acknowledgment.', 'dedication.',
+                        'info.', 'message.', 'notice.'
+                    ]
+                    # Match patterns that are the complete basename (before extension)
+                    if any(basename_lower.startswith(pattern) for pattern in special_patterns):
+                        print(f"[SKIP] Special file excluded: {name}")
+                        continue
+                elif current_filtering == "comprehensive":
+                    # Comprehensive mode: moderate filtering
+                    skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
+                    basename = os.path.basename(name.lower())
+                    should_skip = False
+                    for skip in skip_keywords:
+                        if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
+                            should_skip = True
+                            break
+                    if should_skip:
+                        print(f"[SKIP] Navigation/TOC file: {name}")
+                        continue
+                # else: full mode - no filtering at all
+            # When translate_special is enabled, don't skip any special files
             
             html_files.append(name)
     

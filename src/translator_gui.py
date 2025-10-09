@@ -1505,8 +1505,6 @@ Recent translations to summarize:
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
-            # NEW: Translate cover.html (Skip Override)
-            ('translate_cover_html_var', 'translate_cover_html', False),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
@@ -1523,6 +1521,10 @@ Recent translations to summarize:
         
         for var_name, key, default in bool_vars:
             setattr(self, var_name, create_var(bool, key, default))
+        
+        # Translate special files - with backward compatibility for old translate_cover_html setting
+        self.translate_special_files_var = self.config.get('translate_special_files', 
+                                                           self.config.get('translate_cover_html', False))
         
         # String variables
         str_vars = [
@@ -3288,11 +3290,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         if idref and idref in manifest:
                             spine_order_full.append(manifest[idref])
                 
-                # Now filter out cover and nav/toc files for processing
+                # Now filter out cover and nav/toc files for processing (unless override is enabled)
+                translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                # Backward compatibility
+                translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
+                
                 spine_order = []
                 for item in spine_order_full:
-                    # Skip navigation and cover files
-                    if not any(skip in item.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                    # Skip navigation and cover files unless override is enabled
+                    if translate_special or not any(skip in item.lower() for skip in ['nav.', 'toc.', 'cover.']):
                         spine_order.append(item)
                 
                 self.append_log(f"📋 Found {len(spine_order_full)} items in OPF spine ({len(spine_order)} after filtering)")
@@ -7696,7 +7702,15 @@ Important rules:
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var
             self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var
-            self.config['translate_cover_html'] = self.translate_cover_html_var
+            # Backward compatibility: support both old and new variable names
+            if hasattr(self, 'translate_special_files_var'):
+                self.config['translate_special_files'] = self.translate_special_files_var
+                # Also set the old key for backward compatibility
+                self.config['translate_cover_html'] = self.translate_special_files_var
+            elif hasattr(self, 'translate_cover_html_var'):
+                # Fallback to old variable if new one doesn't exist
+                self.config['translate_cover_html'] = self.translate_cover_html_var
+                self.config['translate_special_files'] = self.translate_cover_html_var
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var, 0)
@@ -8564,7 +8578,10 @@ Important rules:
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
                 ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', False) else '0'),
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
-                ('TRANSLATE_COVER_HTML', '1' if getattr(self, 'translate_cover_html_var', False) else '0'),
+                # New: Translate special files (cover, nav, toc, message, etc.)
+                ('TRANSLATE_SPECIAL_FILES', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
+                # Backward compatibility: Also set the old TRANSLATE_COVER_HTML for any legacy code
+                ('TRANSLATE_COVER_HTML', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
                 ('DISABLE_ZERO_DETECTION', '1' if getattr(self, 'disable_zero_detection_var', True) else '0'),
                 ('DUPLICATE_DETECTION_MODE', getattr(self, 'duplicate_detection_mode_var', 'basic')),
                 ('ENABLE_DECIMAL_CHAPTERS', '1' if getattr(self, 'enable_decimal_chapters_var', False) else '0'),

@@ -5176,6 +5176,15 @@ def main(log_callback=None, stop_callback=None):
         # Ensure minimum
         available_tokens = max(available_tokens, 1000)
         
+        # Debug output for first chapter
+        if os.getenv('DEBUG_CHUNK_SPLITTING', '0') == '1' and idx == 0:
+            print(f"\n[CHUNK CALC DEBUG] Configuration:")
+            print(f"  MAX_OUTPUT_TOKENS: {max_output_tokens:,}")
+            print(f"  safety_margin_output: {safety_margin_output:,}")
+            print(f"  COMPRESSION_FACTOR: {compression_factor}")
+            print(f"  Calculated available_tokens: {available_tokens:,}")
+            print(f"  Formula: ({max_output_tokens:,} - {safety_margin_output:,}) / {compression_factor} = {available_tokens:,}\n")
+        
         #print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
         
         # For mixed content chapters, calculate on clean text

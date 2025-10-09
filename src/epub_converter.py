@@ -1856,15 +1856,23 @@ class EPUBCompiler:
             
             spine = root.find('.//opf:spine', ns)
             if spine is not None:
-                # Build dynamic skip list; allow cover when TRANSLATE_COVER_HTML is enabled
-                skip_list = ['nav', 'toc', 'contents']
-                if os.environ.get('TRANSLATE_COVER_HTML', '0') != '1':
-                    skip_list.append('cover')
+                # Build dynamic skip list based on TRANSLATE_SPECIAL_FILES toggle
+                translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                # Backward compatibility: also check old TRANSLATE_COVER_HTML
+                translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
+                
+                if translate_special:
+                    # When override is enabled, don't skip any special files
+                    skip_list = []
+                else:
+                    # Default behavior: skip all special files
+                    skip_list = ['nav', 'toc', 'contents', 'cover']
+                
                 for itemref in spine.findall('opf:itemref', ns):
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
                         filename = manifest[idref]
-                        # Skip navigation documents; optionally skip cover
+                        # Skip special files unless override is enabled
                         if not any(skip in filename.lower() for skip in skip_list):
                             filename_to_order[filename] = chapter_num
                             self.log(f"  Chapter {chapter_num}: {filename}")
@@ -1985,9 +1993,13 @@ class EPUBCompiler:
                     final_order.extend(sorted(unmapped_files))
                     # Mark non-response unmapped files as auxiliary (omit from TOC)
                     aux = {f for f in unmapped_files if not f.startswith('response_')}
-                    # If skipping override is enabled, do NOT treat cover.html as auxiliary
-                    if os.environ.get('TRANSLATE_COVER_HTML', '0') == '1':
-                        aux = {f for f in aux if os.path.splitext(os.path.basename(f))[0].lower() not in ['cover']}
+                    # If special files override is enabled, do NOT treat special files as auxiliary
+                    translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                    # Backward compatibility
+                    translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
+                    if translate_special:
+                        # Don't exclude any special files when override is enabled
+                        aux = set()
                     self.auxiliary_html_files = aux
                 else:
                     self.auxiliary_html_files = set()
@@ -2032,9 +2044,13 @@ class EPUBCompiler:
             aux_files = sorted([f for f in html_files if not f.startswith('response_')])
             if aux_files:
                 aux_set = set(aux_files)
-                # If skipping override is enabled, ensure cover.html is not marked auxiliary
-                if os.environ.get('TRANSLATE_COVER_HTML', '0') == '1':
-                    aux_set = {f for f in aux_set if os.path.splitext(os.path.basename(f))[0].lower() != 'cover'}
+                # If special files override is enabled, don't mark special files as auxiliary
+                translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                # Backward compatibility
+                translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
+                if translate_special:
+                    # Don't exclude any files when override is enabled
+                    aux_set = set()
                 self.auxiliary_html_files = aux_set
                 self.log(f"[DEBUG] Appending {len(aux_set)} auxiliary HTML file(s) (not in TOC): {list(aux_set)[:5]}")
             else:
