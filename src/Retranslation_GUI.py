@@ -639,6 +639,13 @@ class RetranslationMixin:
         show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
         show_special_files_cb.setToolTip("When enabled, shows special files (files without chapter numbers like cover, nav, toc, info, message, etc.)")
         
+        # Register this checkbox and checkmark with parent dialog for cross-tab syncing
+        if parent_dialog and not hasattr(parent_dialog, '_all_toggle_checkboxes'):
+            parent_dialog._all_toggle_checkboxes = []
+            parent_dialog._all_checkmark_labels = []
+        if parent_dialog:
+            parent_dialog._all_toggle_checkboxes.append(show_special_files_cb)
+        
         # Apply blue checkbox stylesheet (matching Other Settings dialog)
         show_special_files_cb.setStyleSheet("""
             QCheckBox {
@@ -711,6 +718,10 @@ class RetranslationMixin:
         
         QTimer.singleShot(0, safe_init)
         
+        # Register checkmark for cross-tab syncing
+        if parent_dialog:
+            parent_dialog._all_checkmark_labels.append(checkmark)
+        
         title_layout.addWidget(show_special_files_cb)
         
         container_layout.addWidget(title_row)
@@ -721,15 +732,43 @@ class RetranslationMixin:
             # Update the state variable
             show_special_files[0] = show_special_files_cb.isChecked()
             
-            # For tabs, clear and rebuild the content in place
-            if tab_frame:
-                # Store the state persistently
-                file_key = os.path.abspath(file_path)
+            # For tabs in multi-file dialog, update ALL tabs and all cached states
+            if tab_frame and parent_dialog:
+                # Store the state persistently for ALL files in this multi-file dialog
                 if not hasattr(self, '_retranslation_dialog_cache'):
                     self._retranslation_dialog_cache = {}
-                if file_key not in self._retranslation_dialog_cache:
-                    self._retranslation_dialog_cache[file_key] = {}
-                self._retranslation_dialog_cache[file_key]['show_special_files_state'] = show_special_files[0]
+                
+                # Update cache for all files in the current selection
+                if hasattr(parent_dialog, '_epub_files_in_dialog'):
+                    for f_path in parent_dialog._epub_files_in_dialog:
+                        f_key = os.path.abspath(f_path)
+                        if f_key not in self._retranslation_dialog_cache:
+                            self._retranslation_dialog_cache[f_key] = {}
+                        self._retranslation_dialog_cache[f_key]['show_special_files_state'] = show_special_files[0]
+                
+                # Find and update ALL toggle checkboxes and checkmarks in ALL tabs
+                if hasattr(parent_dialog, '_all_toggle_checkboxes'):
+                    for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
+                        if other_checkbox != show_special_files_cb:
+                            # Temporarily disconnect to avoid recursive updates
+                            try:
+                                other_checkbox.stateChanged.disconnect()
+                            except:
+                                pass
+                            other_checkbox.setChecked(show_special_files[0])
+                            # Update the corresponding checkmark visual
+                            if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
+                                try:
+                                    other_checkmark = parent_dialog._all_checkmark_labels[idx]
+                                    if show_special_files[0]:
+                                        other_checkmark.setGeometry(2, 1, 14, 14)
+                                        other_checkmark.show()
+                                    else:
+                                        other_checkmark.hide()
+                                except:
+                                    pass
+                            # Reconnect (the handler will be in that tab's scope)
+                            # We don't reconnect here as each checkbox has its own handler
                 
                 # Clear the tab frame's layout
                 for i in reversed(range(container_layout.count())):
@@ -1574,6 +1613,8 @@ class RetranslationMixin:
             # Create main dialog
             dialog = QDialog(self)
             dialog.setWindowTitle("Force Retranslation - Multiple Files")
+            # Store the list of EPUBs in the dialog for cross-tab state updates
+            dialog._epub_files_in_dialog = epub_files + text_files
             # Increased height from 18% to 25% for better visibility
             width, height = self._get_dialog_size(0.25, 0.45)
             dialog.resize(width, height)
@@ -1600,13 +1641,49 @@ class RetranslationMixin:
             summary_label.setFont(summary_font)
             dialog_layout.addWidget(summary_label)
             
-            # Create tab widget
+            # Create tab widget with custom styling
             notebook = QTabWidget()
+            notebook.setStyleSheet("""
+                QTabWidget::pane {
+                    border: 2px solid #5a9fd4;
+                    border-radius: 4px;
+                    background-color: #2d2d2d;
+                }
+                QTabBar::tab {
+                    background-color: #3a3a3a;
+                    color: white;
+                    padding: 8px 16px;
+                    margin-right: 2px;
+                    border: 1px solid #5a9fd4;
+                    border-bottom: none;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                    font-weight: bold;
+                    font-size: 11pt;
+                }
+                QTabBar::tab:selected {
+                    background-color: #5a9fd4;
+                    color: white;
+                }
+                QTabBar::tab:hover {
+                    background-color: #4a8fc4;
+                }
+            """)
             dialog_layout.addWidget(notebook)
             
             # Track all tab data
             tab_data = []
             tabs_created = False
+            
+            # Get the global show_special state from the first file that has it cached, or default to False
+            global_show_special = False
+            for file_path in epub_files + text_files:
+                file_key = os.path.abspath(file_path)
+                if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
+                    cached_data = self._retranslation_dialog_cache[file_key]
+                    if cached_data and 'show_special_files_state' in cached_data:
+                        global_show_special = cached_data['show_special_files_state']
+                        break  # Use the first one we find
             
             # Create tabs for EPUB/text files using shared logic
             for file_path in epub_files + text_files:
@@ -1626,20 +1703,12 @@ class RetranslationMixin:
                 tab_layout = QVBoxLayout(tab_frame)
                 tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
                 
-                # Get persisted state for this file
-                file_key = os.path.abspath(file_path)
-                show_special = False
-                if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
-                    cached_data = self._retranslation_dialog_cache[file_key]
-                    if cached_data:
-                        show_special = cached_data.get('show_special_files_state', False)
-                
-                # Use shared logic to populate the tab
+                # Use shared logic to populate the tab with global state
                 tab_result = self._force_retranslation_epub_or_text(
                     file_path, 
                     parent_dialog=dialog, 
                     tab_frame=tab_frame,
-                    show_special_files_state=show_special
+                    show_special_files_state=global_show_special
                 )
                 
                 # Only add the tab if content was successfully created
