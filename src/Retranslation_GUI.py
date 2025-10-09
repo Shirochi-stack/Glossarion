@@ -98,10 +98,10 @@ class RetranslationMixin:
             return
         
         # For EPUB/text files, use the shared logic
-        self._force_retranslation_epub_or_text(input_path)
+        self._force_retranslation_epub_or_text(input_path, show_special_files_state=False)
 
 
-    def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None):
+    def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None, show_special_files_state=False):
         """
         Shared logic for force retranslation of EPUB/text files with OPF support
         Can be used standalone or embedded in a tab
@@ -110,6 +110,7 @@ class RetranslationMixin:
             file_path: Path to the EPUB/text file
             parent_dialog: If provided, won't create its own dialog
             tab_frame: If provided, will render into this frame instead of creating dialog
+            show_special_files_state: Initial state for showing special files toggle
         
         Returns:
             dict: Contains all the UI elements and data for external access
@@ -135,6 +136,9 @@ class RetranslationMixin:
         # =====================================================
         # PARSE CONTENT.OPF FOR CHAPTER MANIFEST
         # =====================================================
+        
+        # State variable for special files toggle (will be set later by checkbox)
+        show_special_files = [show_special_files_state]  # Use list to allow modification in nested function
         
         spine_chapters = []
         opf_chapter_order = {}
@@ -190,12 +194,14 @@ class RetranslationMixin:
                             if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
                                 filename = os.path.basename(href)
                                 
-                                # Skip navigation, toc, and cover files
-                                if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                # Skip navigation, toc, and cover files (unless show_special_files is enabled)
+                                is_special = any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.'])
+                                if not is_special or show_special_files[0]:
                                     manifest_chapters[item_id] = {
                                         'filename': filename,
                                         'href': href,
-                                        'media_type': media_type
+                                        'media_type': media_type,
+                                        'is_special': is_special
                                     }
                         
                         # Get spine order - the reading order
@@ -207,9 +213,10 @@ class RetranslationMixin:
                                 if idref and idref in manifest_chapters:
                                     chapter_info = manifest_chapters[idref]
                                     filename = chapter_info['filename']
+                                    is_special = chapter_info.get('is_special', False)
                                     
-                                    # Skip navigation, toc, and cover files
-                                    if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                    # Skip navigation, toc, and cover files (unless show_special_files is enabled)
+                                    if not is_special or show_special_files[0]:
                                         # Extract chapter number from filename
                                         import re
                                         matches = re.findall(r'(\d+)', filename)
@@ -224,7 +231,8 @@ class RetranslationMixin:
                                             'position': len(spine_chapters),
                                             'file_chapter_num': file_chapter_num,
                                             'status': 'unknown',  # Will be updated
-                                            'output_file': None    # Will be updated
+                                            'output_file': None,    # Will be updated
+                                            'is_special': is_special
                                         })
                                         
                                         # Store the order for later use
@@ -482,13 +490,44 @@ class RetranslationMixin:
                 container_layout = container.layout()
             dialog = parent_dialog
         
-        # Title
+        # Title and toggle row
+        title_row = QWidget()
+        title_layout = QHBoxLayout(title_row)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        
         title_text = "Chapters from content.opf (in reading order):" if spine_chapters else "Select chapters to retranslate:"
         title_label = QLabel(title_text)
         title_font = QFont('Arial', 12 if not tab_frame else 11)
         title_font.setBold(True)
         title_label.setFont(title_font)
-        container_layout.addWidget(title_label)
+        title_layout.addWidget(title_label)
+        
+        title_layout.addStretch()
+        
+        # Add toggle for showing special files
+        from PySide6.QtWidgets import QCheckBox
+        show_special_files_cb = QCheckBox("Show special files (cover, nav, toc)")
+        show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
+        show_special_files_cb.setToolTip("When enabled, shows all files including cover.xhtml, nav.xhtml, toc.xhtml, etc.")
+        title_layout.addWidget(show_special_files_cb)
+        
+        container_layout.addWidget(title_row)
+        
+        # Function to handle toggle change - will be defined after UI is created
+        def on_toggle_special_files(state):
+            """Rebuild the chapter list when the special files toggle is changed"""
+            # Update the state variable
+            show_special_files[0] = show_special_files_cb.isChecked()
+            
+            # Close current dialog and reopen with new settings
+            if dialog:
+                dialog.close()
+            
+            # Reopen the dialog with updated toggle state
+            self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
+        
+        # Connect the checkbox to the handler
+        show_special_files_cb.stateChanged.connect(on_toggle_special_files)
         
         # Statistics if OPF is available
         if spine_chapters:
@@ -804,7 +843,7 @@ class RetranslationMixin:
                             print(f"Failed to delete {output_path}: {e}")
                     
                     # Reset status for any completed, completed_empty, or qa_failed chapters
-                    if ch_info['status'] in ['completed', 'completed_empty', 'qa_failed']:
+                    if ch_info['status'] in ['completed', 'completed_empty', 'completed_image_only', 'qa_failed']:
                         target_output_file = ch_info['output_file']
                         chapter_key = None
                         
