@@ -504,7 +504,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "6.0.1"
+        __version__ = "6.0.2"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -788,6 +788,7 @@ Text to analyze:
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
         self.ignore_title_var = self.config.get('ignore_title', False)
+        self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
         
         # Retain exact source extension and disable 'response_' prefix
@@ -1604,7 +1605,7 @@ Recent translations to summarize:
             self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v6.0.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.0.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -3469,6 +3470,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
                 os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
+                os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
                 
                 # Call the direct function
                 self.append_log("🚀 Starting translation...")
@@ -8720,7 +8722,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.0.1...")
+    print("🚀 Starting Glossarion v6.0.2...")
     
     # Initialize splash screen
     splash_manager = None

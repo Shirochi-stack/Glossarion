@@ -306,6 +306,9 @@ def translate_headers_standalone(
     """
     Standalone function to translate chapter headers with exact OPF-based matching
     
+    Uses IDENTICAL translation and HTML update method as the pipeline's BatchHeaderTranslator.
+    The ONLY difference is the content.opf-based chapter matching instead of fuzzy matching.
+    
     Args:
         epub_path: Path to source EPUB file
         output_dir: Directory containing translated HTML files
@@ -325,26 +328,26 @@ def translate_headers_standalone(
             print(message)
     
     log("=" * 80)
-    log("Starting Standalone Header Translation")
+    log("Starting Standalone Header Translation (Content.OPF Based)")
     log("=" * 80)
     
-    # Step 1: Extract source chapters with OPF mapping
-    log("\nStep 1: Extracting source chapter titles from EPUB...")
+    # Step 1: Extract source chapters with OPF mapping (UNIQUE TO STANDALONE)
+    log("\nStep 1: Extracting source chapter titles from EPUB (strict OPF spine order)...")
     source_mapping, spine_order = extract_source_chapters_with_opf_mapping(epub_path, log_callback)
     
     if not source_mapping:
         log("ERROR: No source chapters found!")
         return {}
     
-    # Step 2: Match output files to source chapters (EXACT matching only)
-    log("\nStep 2: Matching output files to source chapters...")
+    # Step 2: Match output files to source chapters - EXACT matching only (UNIQUE TO STANDALONE)
+    log("\nStep 2: Matching output files to source chapters (exact name match)...")
     matches = match_output_to_source_chapters(output_dir, source_mapping, spine_order, log_callback)
     
     if not matches:
         log("ERROR: No matching chapters found!")
         return {}
     
-    # Step 3: Prepare headers for translation
+    # Step 3: Prepare headers for translation (SAME AS PIPELINE)
     log("\nStep 3: Preparing headers for translation...")
     headers_to_translate = {}
     current_titles_map = {}
@@ -358,21 +361,25 @@ def translate_headers_standalone(
     
     log(f"Prepared {len(headers_to_translate)} headers for translation")
     
-    # Step 4: Translate using BatchHeaderTranslator
-    log("\nStep 4: Translating headers...")
+    # Step 4: Translate using BatchHeaderTranslator - IDENTICAL TO PIPELINE
+    log("\nStep 4: Translating headers using pipeline's BatchHeaderTranslator...")
+    log("(This ensures 1:1 compatibility with pipeline translation)")
     
     from metadata_batch_translator import BatchHeaderTranslator
     
+    # Create translator with same config as pipeline
     translator = BatchHeaderTranslator(api_client, config or {})
     
+    # Call translate_and_save_headers - IDENTICAL TO PIPELINE
+    # This method uses the EXACT same translation prompts, HTML update logic, and file saving
     translated_headers = translator.translate_and_save_headers(
         html_dir=output_dir,
         headers_dict=headers_to_translate,
         batch_size=config.get('headers_per_batch', 350) if config else 350,
         output_dir=output_dir,
-        update_html=update_html,
-        save_to_file=save_to_file,
-        current_titles=current_titles_map
+        update_html=update_html,  # Uses _update_html_headers_exact - same as pipeline
+        save_to_file=save_to_file,  # Saves to translated_headers.txt - same as pipeline
+        current_titles=current_titles_map  # Enables exact title replacement
     )
     
     # Step 5: Map back to output filenames
@@ -386,9 +393,85 @@ def translate_headers_standalone(
     
     log("\n" + "=" * 80)
     log(f"Translation complete! Translated {len(result)} chapter headers")
+    log("Uses IDENTICAL method as pipeline (regex-based, preserves formatting)")
     log("=" * 80)
     
     return result
+
+
+def run_translation(
+    source_epub_path: str,
+    output_html_dir: str,
+    log_callback=None
+) -> Dict[str, str]:
+    """
+    Pipeline wrapper for standalone header translation
+    
+    This function is called by the EPUB compilation pipeline.
+    It initializes the API client from environment variables and runs the translation.
+    
+    Args:
+        source_epub_path: Path to the source EPUB file
+        output_html_dir: Directory containing translated HTML files
+        log_callback: Optional callback for logging
+        
+    Returns:
+        Dict mapping output filename to translated title
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    try:
+        # Initialize API client from environment variables
+        from unified_api_client import UnifiedClient
+        
+        model = os.getenv('MODEL')
+        api_key = os.getenv('API_KEY')
+        
+        if not model or not api_key:
+            log("⚠️ Missing MODEL or API_KEY environment variables")
+            return {}
+        
+        log(f"🔧 Initializing API client with model: {model}")
+        api_client = UnifiedClient(api_key=api_key, model=model, output_dir=output_html_dir)
+        
+        # Get configuration from environment variables
+        config = {
+            'headers_per_batch': int(os.getenv('HEADERS_PER_BATCH', '350')),
+            'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
+            'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
+        }
+        
+        # Get options from environment
+        update_html = os.getenv('UPDATE_HTML_HEADERS', '1') == '1'
+        save_to_file = os.getenv('SAVE_HEADER_TRANSLATIONS', '1') == '1'
+        
+        log(f"📋 Config: batch_size={config['headers_per_batch']}, update_html={update_html}, save_to_file={save_to_file}")
+        
+        # Run the translation
+        result = translate_headers_standalone(
+            epub_path=source_epub_path,
+            output_dir=output_html_dir,
+            api_client=api_client,
+            config=config,
+            update_html=update_html,
+            save_to_file=save_to_file,
+            log_callback=log_callback
+        )
+        
+        return result
+        
+    except ImportError as e:
+        log(f"⚠️ Failed to import UnifiedClient: {e}")
+        return {}
+    except Exception as e:
+        log(f"❌ Error in run_translation: {e}")
+        import traceback
+        log(traceback.format_exc())
+        return {}
 
 
 def run_translate_headers_gui(gui_instance):

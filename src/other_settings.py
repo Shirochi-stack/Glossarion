@@ -2678,6 +2678,26 @@ def _create_prompt_management_section(self, parent):
             pass
     ignore_title_cb.toggled.connect(_on_ignore_title_toggle)
     ignore_h.addWidget(ignore_title_cb)
+    
+    ignore_h.addSpacing(15)
+    
+    # Add fallback option with warning icon
+    use_fallback_cb = self._create_styled_checkbox("⚠️ Use Sorted Fallback")
+    try:
+        use_fallback_cb.setChecked(bool(getattr(self, 'use_sorted_fallback_var', False)))
+    except Exception:
+        pass
+    def _on_use_fallback_toggle(checked):
+        try:
+            self.use_sorted_fallback_var = bool(checked)
+        except Exception:
+            pass
+    use_fallback_cb.toggled.connect(_on_use_fallback_toggle)
+    use_fallback_cb.setToolTip(
+        "If standalone OPF-based matching fails, fall back to sorted index matching.\n"
+        "⚠️ Less accurate - may mismatch chapters if file order differs from OPF spine."
+    )
+    ignore_h.addWidget(use_fallback_cb)
     ignore_h.addStretch()
     
     section_v.addWidget(ignore_row)
@@ -2691,10 +2711,34 @@ def _create_prompt_management_section(self, parent):
     translate_now_btn.setFixedWidth(210)
     
     def _on_translate_now():
-        self.run_standalone_translate_headers()
-        # Close the Other Settings dialog after running
-        if hasattr(self, '_other_settings_dialog') and self._other_settings_dialog:
-            self._other_settings_dialog.close()
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtGui import QIcon
+        
+        # Get icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        
+        # Show confirmation dialog
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setWindowTitle("Translate Headers")
+        msg_box.setText("Start standalone header translation?")
+        msg_box.setInformativeText(
+            "This will translate chapter headers using content.opf-based exact matching."
+        )
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+        msg_box.setWindowIcon(icon)
+        
+        result = msg_box.exec()
+        
+        if result == QMessageBox.Yes:
+            # Close the Other Settings dialog
+            if hasattr(self, '_other_settings_dialog') and self._other_settings_dialog:
+                self._other_settings_dialog.close()
+            
+            # Run translation in background thread
+            self.run_standalone_translate_headers()
     
     translate_now_btn.clicked.connect(_on_translate_now)
     translate_now_btn.setStyleSheet(
@@ -2749,6 +2793,7 @@ def _create_prompt_management_section(self, parent):
         save_cb.setEnabled(checked)
         ignore_header_cb.setEnabled(checked)
         ignore_title_cb.setEnabled(checked)
+        use_fallback_cb.setEnabled(checked)
         delete_btn.setEnabled(checked)
         translate_now_btn.setEnabled(checked)
     
@@ -2765,6 +2810,7 @@ def _create_prompt_management_section(self, parent):
         "• ON: Extract all headers → Translate in batch → Update files\n"
         "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)\n"
         "• Ignore title: Skip <title> tag (prevents re-translation of document titles)\n"
+        "• Use Sorted Fallback: If OPF-based matching fails, use sorted index (less accurate)\n"
         "• Delete button: Removes translated_headers.txt files for all selected EPUBs"
     )
     header_desc.setStyleSheet("color: gray; font-size: 10pt;")
@@ -4785,10 +4831,11 @@ def test_api_connections(self):
     
 
 def run_standalone_translate_headers(self):
-    """Run standalone header translation using the new module"""
+    """Run standalone header translation in a background thread"""
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtGui import QIcon
     import traceback
+    import threading
     
     # Get icon path
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
@@ -4819,33 +4866,47 @@ def run_standalone_translate_headers(self):
             msg_box.exec()
             return
         
-        # Initialize API client with current settings
-        from unified_api_client import UnifiedClient
-        api_client = UnifiedClient(model=model, api_key=api_key)
+        # Log that translation is starting
+        self.append_log("🌐 Starting standalone header translation in background...")
         
-        # Temporarily set it on self so the standalone module can use it
-        original_client = getattr(self, 'api_client', None)
-        self.api_client = api_client
+        # Define the thread function
+        def translation_thread():
+            try:
+                # Initialize API client with current settings
+                from unified_api_client import UnifiedClient
+                api_client = UnifiedClient(model=model, api_key=api_key)
+                
+                # Temporarily set it on self so the standalone module can use it
+                original_client = getattr(self, 'api_client', None)
+                self.api_client = api_client
+                
+                try:
+                    # Import and run the translation GUI
+                    from translate_headers_standalone import run_translate_headers_gui
+                    run_translate_headers_gui(self)
+                finally:
+                    # Restore original client
+                    if original_client is not None:
+                        self.api_client = original_client
+                    elif hasattr(self, 'api_client'):
+                        delattr(self, 'api_client')
+                
+            except Exception as e:
+                error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
+                self.append_log(f"❌ {error_msg}")
         
-        try:
-            # Import and run the translation GUI
-            from translate_headers_standalone import run_translate_headers_gui
-            run_translate_headers_gui(self)
-        finally:
-            # Restore original client
-            if original_client is not None:
-                self.api_client = original_client
-            elif hasattr(self, 'api_client'):
-                delattr(self, 'api_client')
+        # Start the thread
+        thread = threading.Thread(target=translation_thread, daemon=True, name="HeaderTranslationThread")
+        thread.start()
         
     except Exception as e:
-        error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
+        error_msg = f"Failed to start standalone header translation: {e}\n\n{traceback.format_exc()}"
         self.append_log(f"❌ {error_msg}")
         
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setWindowTitle("Error")
-        msg_box.setText(f"Failed to run standalone header translation: {e}")
+        msg_box.setText(f"Failed to start standalone header translation: {e}")
         msg_box.setDetailedText(traceback.format_exc())
         msg_box.setWindowIcon(icon)
         msg_box.exec()

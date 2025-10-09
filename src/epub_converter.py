@@ -1071,10 +1071,12 @@ class EPUBCompiler:
                     self.log(traceback.format_exc())
             
             # FALLBACK: Extract source headers AND current titles if batch translation is enabled
-            # Only run if standalone translation was not successful
+            # Only run if standalone translation was not successful AND fallback is enabled
             source_headers = {}
             current_titles = {}
-            if (not standalone_success and 
+            use_fallback = os.getenv('USE_SORTED_FALLBACK', '0') == '1'
+            
+            if (not standalone_success and use_fallback and
                 hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
                 hasattr(self, 'header_translator') and self.header_translator):
                 
@@ -1145,8 +1147,12 @@ class EPUBCompiler:
                         import traceback
                         self.log(traceback.format_exc())
                         # Continue with compilation even if translation fails
+            elif not standalone_success and not use_fallback:
+                # Standalone failed but fallback is disabled
+                self.log("⚠️ Standalone header translation failed and sorted fallback is disabled")
+                self.log("   Enable 'Use Sorted Fallback' in Other Settings if needed")
             else:
-                if not source_headers:
+                if not standalone_success and not source_headers:
                     self.log("⚠️ No source headers found, skipping batch translation")
                 elif not hasattr(self, 'header_translator'):
                     self.log("⚠️ No header translator available")
