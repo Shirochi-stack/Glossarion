@@ -4327,19 +4327,25 @@ class UnifiedClient:
                             continue
                         
                         # Check for refusal patterns (content moderation)
-                        # Only flag as refusal if it's a short response starting with refusal language
-                        if content and len(content) < 500:  # Only check short responses
+                        # Be more precise: look for AI refusal patterns, not natural dialogue
+                        if content and len(content) < 1000:  # Check responses up to 1000 chars (AIs can be verbose)
                             content_lower = content.lower().strip()
-                            # Check if response starts with common refusal patterns
-                            refusal_starts = [
-                                "i can't", "i cannot", "i'm not able", "i am not able",
-                                "i'm unable", "i am unable", "i'm sorry, but i can't", 
-                                "i apologize, but i cannot", "i don't feel comfortable",
-                                "i cannot assist", "i can't assist", "as an ai, i",
-                                "as a language model, i"
+                            # Only flag as refusal if it contains explicit AI meta-language or assistance refusal
+                            # Avoid false positives with natural dialogue (e.g., manga: "I can't do this!")
+                            refusal_patterns = [
+                                "i cannot assist", "i can't assist", "i'm not able to assist",
+                                "i cannot help", "i can't help", "i'm unable to help",
+                                "as an ai", "as a language model", "as an ai language model",
+                                "i don't feel comfortable", "i apologize, but i cannot",
+                                "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
+                                "against my programming", "against my guidelines",
+                                "violates content policy", "i'm not programmed to",
+                                "cannot provide that kind", "unable to provide that",
                             ]
-                            if any(content_lower.startswith(pattern) for pattern in refusal_starts):
-                                print(f"[{label} {idx+1}] ❌ Refusal pattern detected: {content[:100]}")
+                            # Check if response CONTAINS these patterns (not just starts with)
+                            # This catches AI refusals while avoiding false positives from character dialogue
+                            if any(pattern in content_lower for pattern in refusal_patterns):
+                                print(f"[{label} {idx+1}] ❌ AI refusal pattern detected: {content[:100]}")
                                 continue
                         
                         # Check if content is valid - accept any non-empty content (symbols, single chars, etc. are valid)
@@ -5362,7 +5368,7 @@ class UnifiedClient:
         try:
             response_str = str(response)
             if len(response_str) > 100 and len(response_str) < 100000:  # Reasonable size
-                print(f"   🔍 Response string representation: {response_str[:500]}...")
+                print(f"   🔍 Response string representation: {response_str[:2000]}...")
         except:
             pass
         
