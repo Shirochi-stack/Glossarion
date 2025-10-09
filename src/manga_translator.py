@@ -6543,6 +6543,8 @@ class MangaTranslator:
                         "i cannot help",
                         "i can't help",
                         "i'm unable to help",
+                        "i'm afraid i cannot help with that",
+                        "designed to ensure appropriate use",
                         "as an ai",
                         "as a language model",
                         "as an ai language model",

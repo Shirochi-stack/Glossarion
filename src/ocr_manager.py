@@ -549,6 +549,8 @@ class CustomAPIProvider(OCRProvider):
                 "I can't extract", "I cannot extract",
                 "I'm sorry", "I am sorry",
                 "I'm unable", "I am unable",
+                "I'm afraid I cannot help with that",
+                "designed to ensure appropriate use",
                 "cannot process images",
                 "I can't help with that",
                 "cannot view images",

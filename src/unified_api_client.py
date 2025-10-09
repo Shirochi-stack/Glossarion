@@ -4370,6 +4370,7 @@ class UnifiedClient:
                             refusal_patterns = [
                                 "i cannot assist", "i can't assist", "i'm not able to assist",
                                 "i cannot help", "i can't help", "i'm unable to help",
+                                "i'm afraid i cannot help with that", "designed to ensure appropriate use",
                                 "as an ai", "as a language model", "as an ai language model",
                                 "i don't feel comfortable", "i apologize, but i cannot",
                                 "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
