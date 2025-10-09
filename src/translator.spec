@@ -181,15 +181,6 @@ app_modules = [
 
 # GUI Framework
 gui_modules = [
-    # Tkinter core
-    'tkinter',
-    'tkinter.filedialog',
-    'tkinter.messagebox',
-    'tkinter.scrolledtext',
-    'tkinter.simpledialog',
-    'tkinter.ttk',
-    '_tkinter',
-    
     # TTKBootstrap
     'ttkbootstrap',
     'ttkbootstrap.constants',
@@ -978,6 +969,11 @@ excludes = [
     # ============================================================================
     'PyQt5', 'PyQt6', 'PySide2',
     'wx', 'kivy', 'pygame',
+    
+    # ============================================================================
+    # TKINTER (No longer used)
+    # ============================================================================
+    'tkinter', 'tkinter.*', '_tkinter',
     
     # ============================================================================
     # WEB FRAMEWORKS

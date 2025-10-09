@@ -6569,6 +6569,10 @@ class MangaTranslator:
                         "prohibited content",
                         "content blocked",
                         "i cannot assist with this request",
+                        "that's not within my capabilities to appropriately assist with",
+                        "is there something different i can help you with",
+                        "careful ethical considerations",
+                        "i could help you with a different question or task",
                     ]
                     
                     # Check both simple string matching and regex patterns
@@ -6701,6 +6705,10 @@ class MangaTranslator:
                     "content policy",
                     "prohibited content",
                     "i cannot assist with this request",
+                    "that's not within my capabilities to appropriately assist with",
+                    "is there something different i can help you with",
+                    "careful ethical considerations",
+                    "i could help you with a different question or task",
                 ]
                 
                 # Sample first 3 translations (or all if fewer)
