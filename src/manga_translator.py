@@ -6566,9 +6566,9 @@ class MangaTranslator:
                         "unable to provide that",
                         r"(can't|cannot).{0,30}(sexual|explicit|inappropriate)",  # "can't translate sexual"
                         "appears to sexualize",
-                        "who appear to be",
                         "prohibited content",
                         "content blocked",
+                        "i cannot assist with this request",
                     ]
                     
                     # Check both simple string matching and regex patterns
@@ -6700,8 +6700,7 @@ class MangaTranslator:
                     "sexually explicit",
                     "content policy",
                     "prohibited content",
-                    "appears to be",
-                    "who appear to be",
+                    "i cannot assist with this request",
                 ]
                 
                 # Sample first 3 translations (or all if fewer)

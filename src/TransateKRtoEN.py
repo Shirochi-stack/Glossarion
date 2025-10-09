@@ -3809,6 +3809,7 @@ def is_qa_failed_response(content):
         "against my programming", "against my guidelines",
         "violates content policy", "i'm not programmed to",
         "cannot provide that kind", "unable to provide that",
+        "i cannot assist with this request",
     ]
     
     # Check responses up to 1000 chars (AIs can be verbose when refusing)
@@ -5156,6 +5157,9 @@ def main(log_callback=None, stop_callback=None):
     total_chunks_needed = 0
     chunks_per_chapter = {}
     chapters_to_process = 0
+    
+    # Check if special files translation is disabled
+    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
     # When setting actual chapter numbers (in the main function)
     for idx, c in enumerate(chapters):
@@ -5190,6 +5194,15 @@ def main(log_callback=None, stop_callback=None):
         
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
+        
+        # Skip special files (chapter 0) if translation is disabled
+        if not translate_special and raw_num == 0:
+            # Track skipped special files
+            if not hasattr(config, '_skipped_special_files'):
+                config._skipped_special_files = []
+            config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
+            chunks_per_chapter[idx] = 0
+            continue
 
         if start is not None:
             if not (start <= c['actual_chapter_num'] <= end):
@@ -5265,6 +5278,14 @@ def main(log_callback=None, stop_callback=None):
         else:
             print(f"   Range: {min(skipped)} to {max(skipped)}")
     
+    # Print special files skip summary
+    if hasattr(config, '_skipped_special_files') and config._skipped_special_files:
+        skipped = config._skipped_special_files
+        print(f"📊 Skipped {len(skipped)} special file(s) (TRANSLATE_SPECIAL_FILES is disabled)")
+        if len(skipped) <= 5:
+            for file in skipped:
+                print(f"   • {file}")
+    
     terminology = "Sections" if is_text_file else "Chapters"
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
     print(f"📚 {terminology} to process: {chapters_to_process}")
@@ -5331,6 +5352,11 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c['num']  # Preserve the decimal for text files only
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
+            
+            # Skip special files (chapter 0) if translation is disabled
+            raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
+            if not translate_special and raw_num == 0:
+                continue
             
             # Skip chapters outside the range
             if start is not None and not (start <= actual_num <= end):
@@ -5639,6 +5665,11 @@ def main(log_callback=None, stop_callback=None):
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+            
+            # Skip special files (chapter 0) if translation is disabled
+            raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
+            if not translate_special and raw_num == 0:
+                continue
             
             if start is not None and not (start <= actual_num <= end):
                 # Skip silently (already summarized in earlier pass)

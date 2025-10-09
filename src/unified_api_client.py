@@ -4377,6 +4377,7 @@ class UnifiedClient:
                                 "against my programming", "against my guidelines",
                                 "violates content policy", "i'm not programmed to",
                                 "cannot provide that kind", "unable to provide that",
+                                "i cannot assist with this request",
                             ]
                             # Check if response CONTAINS these patterns (not just starts with)
                             # This catches AI refusals while avoiding false positives from character dialogue
