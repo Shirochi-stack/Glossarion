@@ -508,7 +508,7 @@ class UnifiedClient:
             return 2.0
 
     def _sanitize_html_for_log(self, text: str, max_length: int = 200) -> str:
-        """Truncate HTML content in logs while preserving normal text"""
+        """Send HTML content directly to CMD console, bypassing GUI logger"""
         if not text:
             return text
         
@@ -518,12 +518,18 @@ class UnifiedClient:
             # Count how many HTML tags are in the text
             tag_count = len(re.findall(r'<[^>]+>', text))
             
-            # If it has many tags (3+), it's likely HTML content - truncate it
+            # If it has many tags (3+), it's likely HTML content - send to CMD directly
             if tag_count > 3:
-                # Just truncate the HTML
-                if len(text) > max_length:
-                    return text[:max_length] + f"... [HTML content truncated, {len(text)} chars total]"
-                return text
+                # Send full HTML directly to CMD console, bypassing GUI logger
+                try:
+                    import sys
+                    _builtins.print(f"\n{'='*80}\n[HTML Content - CMD Only]\n{'='*80}", file=sys.stderr)
+                    _builtins.print(text, file=sys.stderr)
+                    _builtins.print(f"{'='*80}\n", file=sys.stderr)
+                except Exception:
+                    pass
+                # Return truncated version for GUI to keep it clean
+                return f"[HTML content sent to CMD console, {len(text)} chars total]"
         
         # Non-HTML text - return as-is, no truncation
         return text

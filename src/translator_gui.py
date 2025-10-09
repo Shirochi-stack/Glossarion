@@ -2351,7 +2351,7 @@ Recent translations to summarize:
         # Other Settings button (row 7, column 4)
         other_settings_btn = QPushButton("⚙️  Other Setting")
         other_settings_btn.clicked.connect(self.open_other_settings)
-        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")  # info-outline
+        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding-top: 8px; padding-bottom: 12px;")  # info-outline
         other_settings_btn.setMinimumWidth(120)
         self.frame.addWidget(other_settings_btn, 7, 4)
         
