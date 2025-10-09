@@ -482,6 +482,102 @@ class MangaTranslator:
         self.log_callback = log_callback
         self.main_gui = main_gui
         
+        # Initialize batch_mode early so _log can check it
+        try:
+            self.batch_mode = os.getenv('BATCH_TRANSLATION', '0') == '1'
+        except Exception:
+            self.batch_mode = False
+        
+        # CRITICAL: Redirect print() to our log callback BEFORE any heavy operations
+        # This ensures UnifiedClient's print statements go to manga log, not main GUI log
+        import builtins
+        import sys
+        self._original_print = builtins.print
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        
+        # Store the callback in thread-local storage accessible by all threads
+        import threading
+        if not hasattr(builtins, '_manga_log_callbacks'):
+            builtins._manga_log_callbacks = {}
+        builtins._manga_log_callbacks[id(self)] = log_callback
+        
+        # Create a custom print function that routes to our log callback
+        # This function is installed GLOBALLY so it works in all threads
+        def manga_print(*args, **kwargs):
+            """Custom print that redirects to manga log callback (thread-safe)"""
+            # Convert args to string
+            message = ' '.join(str(arg) for arg in args)
+            
+            # Try to find an active manga log callback
+            callback_found = False
+            if hasattr(builtins, '_manga_log_callbacks'):
+                # Try to use the most recently created callback (last in dict)
+                # This works because dict maintains insertion order in Python 3.7+
+                for translator_id, callback in reversed(list(builtins._manga_log_callbacks.items())):
+                    if callback:
+                        try:
+                            # Determine log level from message content
+                            level = 'info'
+                            if '❌' in message or 'ERROR' in message or 'Error' in message:
+                                level = 'error'
+                            elif '⚠️' in message or 'WARNING' in message or 'Warning' in message:
+                                level = 'warning'
+                            elif '🔍' in message or 'DEBUG' in message:
+                                level = 'debug'
+                            elif '✅' in message or '🔑' in message or '📤' in message:
+                                level = 'info'
+                            
+                            # Clean up DEBUG prefixes
+                            message = message.replace('[DEBUG] ', '')
+                            
+                            callback(message, level)
+                            callback_found = True
+                            break
+                        except Exception:
+                            # If callback fails, try next one
+                            continue
+            
+            # Fallback to original print if no callback worked
+            if not callback_found:
+                try:
+                    # Try to get original print from the first manga translator instance
+                    if hasattr(MangaTranslator, '_original_print_backup'):
+                        MangaTranslator._original_print_backup(*args, **kwargs)
+                    else:
+                        # Ultimate fallback - use __builtins__
+                        import sys
+                        sys.__stdout__.write(str(message) + '\n')
+                except Exception:
+                    pass
+        
+        # Store original print as class variable for fallback (only once)
+        if not hasattr(MangaTranslator, '_original_print_backup'):
+            MangaTranslator._original_print_backup = builtins.print
+        
+        # Replace built-in print GLOBALLY (affects all threads)
+        builtins.print = manga_print
+        
+        # CRITICAL: Also patch the UnifiedClient module's print directly
+        # Python may cache the print function in the module namespace
+        try:
+            import unified_api_client
+            import sys
+            
+            # Get the module object
+            uc_module = sys.modules.get('unified_api_client')
+            if uc_module:
+                # Inject our custom print into the module's globals
+                # This ensures any code in that module using 'print' will use ours
+                uc_module.__dict__['print'] = manga_print
+                self._log("✅ Injected manga_print into unified_api_client module namespace", "debug")
+            
+            # Also try to patch any existing print references
+            if hasattr(unified_api_client, 'print'):
+                unified_api_client.print = manga_print
+        except Exception as e:
+            self._log(f"⚠️ Warning: Could not patch unified_api_client print: {e}", "debug")
+        
         # Set up stdout capture to redirect prints to GUI
         self._setup_stdout_capture()
         
@@ -491,6 +587,39 @@ class MangaTranslator:
             self.client.log_callback = log_callback
         elif hasattr(self.client, 'set_log_callback'):
             self.client.set_log_callback(log_callback)
+        
+        # CRITICAL: Monkey-patch the UnifiedClient's _debug_log method to use our callback
+        # This ensures API logs from threads route to manga GUI instead of main GUI
+        if hasattr(self.client, '_debug_log'):
+            original_debug_log = self.client._debug_log
+            def patched_debug_log(message: str):
+                """Patched debug log that routes to manga callback"""
+                if log_callback:
+                    try:
+                        # Determine log level from message
+                        level = 'info'
+                        if '❌' in message or 'ERROR' in message or 'Error' in message:
+                            level = 'error'
+                        elif '⚠️' in message or 'WARNING' in message or 'Warning' in message:
+                            level = 'warning'
+                        elif '🔍' in message or 'DEBUG' in message or '[DEBUG]' in message:
+                            level = 'debug'
+                        elif '✅' in message or '🔑' in message or '📤' in message:
+                            level = 'info'
+                        
+                        # Clean up DEBUG prefixes
+                        message = message.replace('[DEBUG] ', '')
+                        
+                        log_callback(message, level)
+                    except Exception:
+                        # Fallback to original if callback fails
+                        original_debug_log(message)
+                else:
+                    original_debug_log(message)
+            
+            # Replace the method
+            self.client._debug_log = patched_debug_log
+            self._log("✅ Patched UnifiedClient debug logs to route to manga GUI", "debug")
         self.ocr_config = ocr_config
         self.main_gui = main_gui
         self.log_callback = log_callback
@@ -498,9 +627,16 @@ class MangaTranslator:
         self.manga_settings = self.config.get('manga_settings', {})
         # Concise logging flag from Advanced settings
         try:
-            self.concise_logs = bool(self.manga_settings.get('advanced', {}).get('concise_logs', True))
-        except Exception:
-            self.concise_logs = True
+            # Default to False so logs are verbose by default (user must opt-in to concise mode)
+            concise_value = self.manga_settings.get('advanced', {}).get('concise_logs', False)
+            self.concise_logs = bool(concise_value)
+            # DIRECT PRINT to bypass all filtering for debugging
+            print(f"[MANGA_TRANSLATOR INIT] concise_logs setting from config: {concise_value}")
+            print(f"[MANGA_TRANSLATOR INIT] self.concise_logs = {self.concise_logs}")
+        except Exception as e:
+            self.concise_logs = False
+            print(f"[MANGA_TRANSLATOR INIT] Exception reading concise_logs: {e}")
+            print(f"[MANGA_TRANSLATOR INIT] Defaulting self.concise_logs = False")
 
         # Ensure all GUI environment variables are set
         self._sync_environment_variables()
@@ -530,13 +666,7 @@ class MangaTranslator:
         self.cancel_requested = False
         self.stop_flag = None  # Initialize stop_flag attribute
 
-        # Initialize batch mode attributes (API parallelism) from environment, not GUI local toggles
-        # BATCH_TRANSLATION controls whether UnifiedClient allows concurrent API calls across threads.
-        try:
-            self.batch_mode = os.getenv('BATCH_TRANSLATION', '0') == '1'
-        except Exception:
-            self.batch_mode = False
-        
+        # Initialize batch size from environment (batch_mode was already initialized earlier)
         # OCR ROI cache - PER IMAGE ONLY (cleared aggressively to prevent text leakage)
         # CRITICAL: This cache MUST be cleared before every new image to prevent text contamination
         # THREAD-SAFE: Each translator instance has its own cache (safe for parallel panel translation)
@@ -934,9 +1064,14 @@ class MangaTranslator:
     
     def __del__(self):
         """Restore original print when MangaTranslator is destroyed"""
+        # Restore original print function
         if hasattr(self, '_original_print'):
-            import builtins
-            builtins.print = self._original_print
+            try:
+                import builtins
+                builtins.print = self._original_print
+            except Exception:
+                pass
+        
         # Best-effort shutdown in case caller forgot to call shutdown()
         try:
             self.shutdown()
@@ -1755,11 +1890,8 @@ class MangaTranslator:
             rtdetr_detections = None
             
             if detector_type == 'rtdetr_onnx':
-                if not self.batch_mode:
-                    self._log("🤖 Using RTEDR_onnx for bubble detection", "info")
-                if self.batch_mode and getattr(bd, 'rtdetr_onnx_loaded', False):
-                    pass
-                elif not getattr(bd, 'rtdetr_onnx_loaded', False):
+                self._log("🤖 Using RTEDR_onnx for bubble detection", "info")
+                if not getattr(bd, 'rtdetr_onnx_loaded', False):
                     self._log("📥 Loading RTEDR_onnx model...", "info")
                     if not bd.load_rtdetr_onnx_model():
                         self._log("⚠️ Failed to load RTEDR_onnx, falling back to traditional merging", "warning")
@@ -1780,12 +1912,11 @@ class MangaTranslator:
                 detect_empty = ocr_settings.get('detect_empty_bubbles', True)
                 detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
                 detect_free_text = ocr_settings.get('detect_free_text', True)
-                if not self.batch_mode:
-                    self._log(f"📋 RTEDR_onnx class filters:", "info")
-                    self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
-                    self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
-                    self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
-                    self._log(f"🎯 RTEDR_onnx confidence threshold: {rtdetr_confidence:.2f}", "info")
+                self._log(f"📋 RTEDR_onnx class filters:", "info")
+                self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                self._log(f"🎯 RTEDR_onnx confidence threshold: {rtdetr_confidence:.2f}", "info")
                 rtdetr_detections = bd.detect_with_rtdetr_onnx(
                     image_path=image_path,
                     confidence=rtdetr_confidence,
@@ -1804,15 +1935,9 @@ class MangaTranslator:
                 self._log(f"   {len(rtdetr_detections.get('text_bubbles', []))} text bubbles", "info")
                 self._log(f"   {len(rtdetr_detections.get('text_free', []))} free text regions", "info")
             elif detector_type == 'rtdetr':
-                # BATCH OPTIMIZATION: Less verbose logging
-                if not self.batch_mode:
-                    self._log("🤖 Using RT-DETR for bubble detection", "info")
+                self._log("🤖 Using RT-DETR for bubble detection", "info")
                 
-                # BATCH OPTIMIZATION: Don't reload if already loaded
-                if self.batch_mode and bd.rtdetr_loaded:
-                    # Model already loaded, skip the loading step entirely
-                    pass
-                elif not bd.rtdetr_loaded:
+                if not bd.rtdetr_loaded:
                     self._log("📥 Loading RT-DETR model...", "info")
                     if not bd.load_rtdetr_model():
                         self._log("⚠️ Failed to load RT-DETR, falling back to traditional merging", "warning")
@@ -1836,13 +1961,11 @@ class MangaTranslator:
                 detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
                 detect_free_text = ocr_settings.get('detect_free_text', True)
                 
-                # BATCH OPTIMIZATION: Reduce logging
-                if not self.batch_mode:
-                    self._log(f"📋 RT-DETR class filters:", "info")
-                    self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
-                    self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
-                    self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
-                    self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
+                self._log(f"📋 RT-DETR class filters:", "info")
+                self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
+                self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
+                self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
+                self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
 
                 # Get FULL RT-DETR detections (not just bubbles)
                 rtdetr_detections = bd.detect_with_rtdetr(
@@ -2184,60 +2307,50 @@ class MangaTranslator:
                 return
             
         # Concise pipeline logs: keep only high-level messages and errors/warnings
+        # Exclude all debug messages (blue text) in concise mode
         if getattr(self, 'concise_logs', False):
+            # Always suppress debug messages in concise mode
+            if level == "debug":
+                return
+            # Keep errors and warnings
             if level in ("error", "warning"):
                 pass
             else:
-                keep_prefixes = (
-                    # Pipeline boundaries and IO
-                    "📷 STARTING", "📁 Input", "📁 Output",
-                    # Step markers
-                    "📍 [STEP",
-                    # Step 1 essentials
-                    "🔍 Detecting text regions",  # start of detection on file
-                    "📄 Detected",                # format detected
-                    "Using OCR provider:",       # provider line
-                    "Using Azure Read API",      # azure-specific run mode
-                    "⚠️ Converting image to PNG", # azure PNG compatibility
-                    "🤖 Using AI bubble detection", # BD merge mode
-                    "🤖 Using RTEDR_onnx",         # selected BD
-                    "✅ Detected",                # detected N regions after merging
-                    # Detectors/inpainter readiness
-                    "🤖 Using bubble detector", "🎨 Using local inpainter",
-                    # Step 2: key actions
-                    "🔀 Running",  # Running translation and inpainting concurrently
-                    "📄 Using FULL PAGE CONTEXT",  # Explicit mode notice
-                    "📄 Full page context mode",   # Alternate phrasing
-                    "📄 Full page context translation",  # Start/summary
-                    "🎭 Creating text mask", "📊 Mask breakdown", "📏 Applying",
-                    "🎨 Inpainting", "🧽 Using local inpainting",
-                    # Detection and summary
-                    "📊 Bubble detection complete", "✅ Detection complete",
-                    # Mapping/translation summary
-                    "📊 Mapping", "📊 Full page context translation complete",
-                    # Rendering
-                    "✍️ Rendering", "✅ ENHANCED text rendering complete",
-                    # Output and final summary
-                    "💾 Saved output", "✅ TRANSLATION PIPELINE COMPLETE",
-                    "📊 Translation Summary", "✅ Successful", "❌ Failed",
-                    # Cleanup
-                    "🔑 Auto cleanup", "🔑 Translator instance preserved"
-                )
-                _msg = message.lstrip() if isinstance(message, str) else message
-                if not any(_msg.startswith(p) for p in keep_prefixes):
-                    return
+                _msg = message.lstrip() if isinstance(message, str) else str(message)
+                
+                # Always allow API-related logs (these should always be visible)
+                api_indicators = [
+                    '[Thread-', 'Thread-Thread',  # Thread logs from API calls
+                    '🔑',  # Key emoji
+                    'HTTP Request:', 'Sending request', 'API call',
+                    'Using Key#', 'Temperature:', 'Max tokens:',
+                    'Waiting', 'waiting', 'before next API',
+                    'staggered', 'staggering', 'queuing',
+                    'marked', 'rotation', 'error',
+                    'thinking', 'Thinking',  # Thinking tokens
+                    'fallback', 'Fallback', 'main', 'refusal', 'Refusal',
+                    'Extracting text', 'Got text from',
+                    'openai client', 'Gemini', 'gemini', 'Safety',
+                ]
+                is_api_log = any(indicator in _msg for indicator in api_indicators)
+                
+                if not is_api_log:
+                    # For non-API logs, check if it starts with an emoji
+                    # Emojis are in Unicode ranges: U+1F300-U+1F9FF, U+2600-U+26FF, U+2700-U+27BF
+                    if _msg:
+                        first_char = _msg[0]
+                        # Check if first character is an emoji
+                        is_emoji = (
+                            '\U0001F300' <= first_char <= '\U0001F9FF' or  # Emoticons, symbols, misc
+                            '\u2600' <= first_char <= '\u26FF' or          # Misc symbols
+                            '\u2700' <= first_char <= '\u27BF' or          # Dingbats
+                            first_char in '✅❌⚠ℹ✍❤⭐⭕⬇⬆'  # Common emojis
+                        )
+                        if not is_emoji:
+                            return
         
-        # In batch mode, only log important messages
-        if self.batch_mode:
-            # Skip verbose/debug messages in batch mode
-            if level == "debug" or "DEBUG:" in message:
-                return
-            # Skip repetitive messages
-            if any(skip in message for skip in [
-                "Using vertex-based", "Using", "Applying", "Font size", 
-                "Region", "Found text", "Style:"
-            ]):
-                return
+        # REMOVED: Batch mode log filtering was conflicting with concise logs toggle
+        # Users can control verbosity via the concise logs toggle instead
         
         # Send to GUI if available
         if self.log_callback:
@@ -3445,6 +3558,22 @@ class MangaTranslator:
                 
                 self._log("   Using Azure Image Analysis API for OCR")
                 
+                # Get language from settings (same as Google uses)
+                language_hints = ocr_settings.get('language_hints', ['ja'])
+                azure_language = language_hints[0] if language_hints else 'ja'
+                
+                # Map language codes to Azure-supported values
+                language_map = {
+                    'ja': 'ja',
+                    'ko': 'ko',
+                    'zh': 'zh-Hans',  # Simplified Chinese
+                    'zh-TW': 'zh-Hant',  # Traditional Chinese
+                    'en': 'en'
+                }
+                azure_language = language_map.get(azure_language, 'ja')
+                
+                self._log(f"   🌐 Azure language: {azure_language}")
+                
                 # Retry logic for rate limiting
                 max_retries = self.main_gui.config.get('max_retries', 7)
                 retry_delay = 60  # 60 seconds for rate limits
@@ -3459,10 +3588,12 @@ class MangaTranslator:
                         if getattr(self, 'vision_client', None) is None:
                             raise RuntimeError("Azure Computer Vision client is not initialized. Check your key/endpoint and azure-ai-vision-imageanalysis installation.")
                         
-                        # Call synchronous analyze API
+                        # Call synchronous analyze API with language and model_version
                         result = self.vision_client.analyze(
                             image_data=processed_image_data,
-                            visual_features=[VisualFeatures.READ]
+                            visual_features=[VisualFeatures.READ],
+                            language=azure_language,
+                            model_version='latest'
                         )
                         # Success! Break out of retry loop
                         break
@@ -6844,22 +6975,14 @@ class MangaTranslator:
         # DO NOT remove \u25A0-\u25FF anymore - those are geometric shapes Meiryo can render!
         # This includes: ■ □ ▲ △ ▼ ▽ ○ ● etc.
         
-        # Extra cube-like CJK glyphs commonly misrendered in non-CJK fonts
-        # Keep this list but understand these are specific problematic characters
-        cube_likes = [
-            '口',  # U+53E3 - CJK mouth radical (renders as box)
-            '囗',  # U+56D7 - CJK enclosure
-            '日',  # U+65E5 - CJK sun/day (often boxy in wrong fonts)
-            '曰',  # U+66F0 - CJK say
-            '田',  # U+7530 - CJK field
-            '回',  # U+56DE - CJK return
-            'ロ',  # U+30ED - Katakana RO
-            'ﾛ',  # U+FF9B - Halfwidth Katakana RO
-            'ㅁ',  # U+3141 - Hangul MIEUM
-            '丨',  # U+4E28 - CJK radical
-        ]
-        for s in cube_likes:
-            text = text.replace(s, '')
+        # IMPORTANT: DO NOT REMOVE VALID CJK CHARACTERS!
+        # With Meiryo mixed font, all these characters render correctly:
+        # - Katakana: ロ (RO), カ (KA), etc.
+        # - Hangul: ㅁ (MIEUM), ㄱ (GIYEOK), etc.
+        # - Common Kanji: 口 (mouth), 日 (sun/day), 田 (field), 回 (return), etc.
+        # 
+        # Only remove the Unicode replacement character if it somehow got through
+        # All other CJK characters should be preserved for proper Meiryo rendering
         
         # If line is mostly ASCII, strip any remaining single CJK ideographs that stand alone
         # BUT: Preserve CJK punctuation marks (U+3000-U+303F) as they're valid in mixed content
@@ -8464,21 +8587,52 @@ class MangaTranslator:
         # These characters render better with Japanese fonts like Meiryo
         code_point = ord(ch)
         
-        # CJK Unicode ranges:
+        # CJK Unicode ranges (Japanese, Korean, Chinese):
+        # === Japanese ===
         # U+3000-U+303F: CJK Symbols and Punctuation (includes 　, 、, 。, ・)
-        # U+3040-U+309F: Hiragana
-        # U+30A0-U+30FF: Katakana (includes ・)
+        # U+3040-U+309F: Hiragana (あいうえお)
+        # U+30A0-U+30FF: Katakana (アイウエオ, includes ・)
+        # 
+        # === Korean ===
+        # U+1100-U+11FF: Hangul Jamo (initial/medial/final consonants and vowels)
+        # U+3130-U+318F: Hangul Compatibility Jamo (ㄱ, ㄴ, ㅁ, etc.)
+        # U+A960-U+A97F: Hangul Jamo Extended-A
+        # U+AC00-U+D7AF: Hangul Syllables (완성형 한글 - precomposed syllables)
+        # U+D7B0-U+D7FF: Hangul Jamo Extended-B
+        # 
+        # === Chinese (Simplified & Traditional) ===
+        # U+2E80-U+2EFF: CJK Radicals Supplement
+        # U+2F00-U+2FDF: Kangxi Radicals
         # U+3400-U+4DBF: CJK Unified Ideographs Extension A
-        # U+4E00-U+9FFF: CJK Unified Ideographs
+        # U+4E00-U+9FFF: CJK Unified Ideographs (main block - most common Chinese characters)
         # U+F900-U+FAFF: CJK Compatibility Ideographs
+        # U+20000-U+2A6DF: CJK Extension B (rare characters)
+        # U+2A700-U+2B73F: CJK Extension C
+        # U+2B740-U+2B81F: CJK Extension D
+        # U+2B820-U+2CEAF: CJK Extension E
+        # U+2CEB0-U+2EBEF: CJK Extension F
+        # 
+        # === Common ===
         # U+FF00-U+FFEF: Halfwidth and Fullwidth Forms
-        if (0x3000 <= code_point <= 0x303F or   # CJK Symbols and Punctuation
+        if (0x2E80 <= code_point <= 0x2EFF or   # CJK Radicals Supplement
+            0x2F00 <= code_point <= 0x2FDF or   # Kangxi Radicals
+            0x3000 <= code_point <= 0x303F or   # CJK Symbols and Punctuation
             0x3040 <= code_point <= 0x309F or   # Hiragana
             0x30A0 <= code_point <= 0x30FF or   # Katakana
+            0x3130 <= code_point <= 0x318F or   # Hangul Compatibility Jamo
             0x3400 <= code_point <= 0x4DBF or   # CJK Extension A
             0x4E00 <= code_point <= 0x9FFF or   # CJK Unified Ideographs
+            0xA960 <= code_point <= 0xA97F or   # Hangul Jamo Extended-A
+            0xAC00 <= code_point <= 0xD7AF or   # Hangul Syllables
+            0xD7B0 <= code_point <= 0xD7FF or   # Hangul Jamo Extended-B
             0xF900 <= code_point <= 0xFAFF or   # CJK Compatibility
-            0xFF00 <= code_point <= 0xFFEF):    # Fullwidth Forms
+            0xFF00 <= code_point <= 0xFFEF or   # Fullwidth Forms
+            0x1100 <= code_point <= 0x11FF or   # Hangul Jamo
+            0x20000 <= code_point <= 0x2A6DF or # CJK Extension B
+            0x2A700 <= code_point <= 0x2B73F or # CJK Extension C
+            0x2B740 <= code_point <= 0x2B81F or # CJK Extension D
+            0x2B820 <= code_point <= 0x2CEAF or # CJK Extension E
+            0x2CEB0 <= code_point <= 0x2EBEF):  # CJK Extension F
             return True
         
         # Symbol categories that should use Meiryo:
@@ -8557,6 +8711,17 @@ class MangaTranslator:
                                     shadow_enabled: bool, shadow_color_rgba, shadow_off):
         cur_x = x
         i = 0
+        
+        # Debug: Track which characters use Meiryo font
+        if emote_font and not getattr(self, 'concise_logs', False):
+            meiryo_chars = [ch for ch in line if self._is_emote_char(ch)]
+            if meiryo_chars:
+                meiryo_str = ''.join(meiryo_chars)
+                meiryo_codes = ', '.join([f'{ch}(U+{ord(ch):04X})' for ch in meiryo_chars[:5]])
+                if len(meiryo_chars) > 5:
+                    meiryo_codes += '...'
+                self._log(f"  🔤 Mixed font: '{meiryo_str}' using Meiryo [{meiryo_codes}]", "debug")
+        
         while i < len(line):
             ch = line[i]
             if ch in ('\ufe0f', '\ufe0e'):
@@ -11642,6 +11807,28 @@ class MangaTranslator:
             # Clear processing flags
             self.is_processing = False
             self.cancel_requested = False
+            
+            # Remove this instance's log callback from the global registry
+            try:
+                import builtins
+                if hasattr(builtins, '_manga_log_callbacks'):
+                    builtins._manga_log_callbacks.pop(id(self), None)
+                    
+                    # If no more manga translators are active, restore original print
+                    if not builtins._manga_log_callbacks:
+                        if hasattr(MangaTranslator, '_original_print_backup'):
+                            builtins.print = MangaTranslator._original_print_backup
+                            # Also restore in unified_api_client module
+                            try:
+                                import sys
+                                import unified_api_client
+                                uc_module = sys.modules.get('unified_api_client')
+                                if uc_module:
+                                    uc_module.__dict__['print'] = MangaTranslator._original_print_backup
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             
             self._log("🧹 Internal state and all components cleared", "debug")
             

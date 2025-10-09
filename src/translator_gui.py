@@ -8715,6 +8715,8 @@ Important rules:
             'MANGA_PANEL_MAX_WORKERS': 'Maximum concurrent panels',
             'MANGA_DEBUG_MODE': 'Manga debug mode',
             'MANGA_SAVE_INTERMEDIATE': 'Save intermediate debug images',
+            'MANGA_CONCISE_LOGS': 'Concise pipeline logs (suppress verbose steps)',
+            'MANGA_SKIP_INPAINTING': 'Skip inpainting step (show detected bubbles only)',
         }
         
         # Check critical variables
@@ -8914,6 +8916,8 @@ Important rules:
                 ('MANGA_PANEL_MAX_WORKERS', str(manga_adv.get('panel_max_workers', 2))),
                 ('MANGA_DEBUG_MODE', '1' if manga_adv.get('debug_mode', False) else '0'),
                 ('MANGA_SAVE_INTERMEDIATE', '1' if manga_adv.get('save_intermediate', False) else '0'),
+                ('MANGA_CONCISE_LOGS', '1' if manga_adv.get('concise_logs', True) else '0'),
+                ('MANGA_SKIP_INPAINTING', '1' if manga_adv.get('skip_inpainting', False) else '0'),
             ]
 
             # Combine all environment variable mappings

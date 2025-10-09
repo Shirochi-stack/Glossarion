@@ -5556,10 +5556,30 @@ class UnifiedClient:
         return payload_name, response_name
     
     def _save_payload(self, messages, filename, retry_reason=None):
-        """Save request payload for debugging with retry reason tracking"""
+        """Save request payload for debugging with retry reason tracking
         
-        # Get stable thread directory
-        thread_dir = self._get_thread_directory()
+        Automatically organizes:
+        - Image payloads to Payloads/image/ folder
+        - Safety configs to Payloads/safety_configs/ folder
+        """
+        
+        # Check if this payload contains images
+        has_images = self._payload_has_images(messages)
+        
+        # Determine base directory based on content
+        if has_images:
+            # Image payloads go to Payloads/image/thread_id/ (skip context folder)
+            # Generate thread directory name (same format as regular payloads)
+            thread_name = threading.current_thread().name
+            thread_id = threading.current_thread().ident
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+            unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
+            
+            thread_dir = os.path.join("Payloads", "image", unique_id)
+            os.makedirs(thread_dir, exist_ok=True)
+        else:
+            # Regular payloads use thread-specific directory
+            thread_dir = self._get_thread_directory()
         
         # Generate request hash for the filename (to make it unique)
         request_hash = self._get_request_hash(messages)
@@ -5587,6 +5607,14 @@ class UnifiedClient:
                 # Extract chapter info for better tracking
                 chapter_info = self._extract_chapter_info(messages)
                 
+                # Extract safety/moderation config if present
+                safety_config = self._extract_safety_config()
+                if safety_config:
+                    # Always place safety config next to the payload file
+                    # Use thread_dir (which was set at the beginning based on has_images)
+                    logger.debug(f"[{thread_name}] Saving safety config: unique_filename={unique_filename}, thread_dir={thread_dir}, has_images={has_images}")
+                    self._save_safety_config(safety_config, unique_filename, thread_dir)
+                
                 # Include debug info with retry reason
                 debug_info = {
                     'system_prompt_present': any(msg.get('role') == 'system' for msg in messages),
@@ -5598,8 +5626,10 @@ class UnifiedClient:
                     'chapter_info': chapter_info,
                     'timestamp': datetime.now().isoformat(),
                     'key_identifier': self.key_identifier,
-                    'retry_reason': retry_reason,  # Track why this payload was saved
-                    'is_retry': retry_reason is not None
+                    'retry_reason': retry_reason,
+                    'is_retry': retry_reason is not None,
+                    'has_images': has_images,
+                    'payload_location': thread_dir
                 }
                 
                 for msg in messages:
@@ -5607,7 +5637,7 @@ class UnifiedClient:
                         debug_info['system_prompt_length'] = len(msg.get('content', ''))
                         break
                 
-                # Write the payload
+                # Write the payload (keep original messages with base64)
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump({
                         'model': getattr(self, 'model', None),
@@ -5623,12 +5653,131 @@ class UnifiedClient:
                         } if retry_reason else None
                     }, f, indent=2, ensure_ascii=False)
                 
-                logger.debug(f"[{thread_name}] Saved payload to: {filepath} (reason: {retry_reason or 'initial'})")
+                if has_images:
+                    logger.debug(f"[{thread_name}] Saved IMAGE payload to: {filepath}")
+                else:
+                    logger.debug(f"[{thread_name}] Saved payload to: {filepath} (reason: {retry_reason or 'initial'})")
                 
         except Exception as e:
             print(f"Failed to save payload: {e}")
 
 
+    def _payload_has_images(self, messages) -> bool:
+        """Check if a payload contains base64 image data
+        
+        Args:
+            messages: Message list to check
+            
+        Returns:
+            True if messages contain base64 images
+        """
+        try:
+            for msg in messages:
+                content = msg.get('content')
+                
+                # Direct string content with data:image
+                if isinstance(content, str) and content.strip().startswith('data:image/'):
+                    return True
+                
+                # Handle array content (multi-part messages)
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        
+                        # OpenAI-style: {'type': 'image_url', 'image_url': {'url': 'data:image/...;base64,AAA'}}
+                        if part.get('type') == 'image_url':
+                            image_url = part.get('image_url', {}).get('url', '')
+                            if isinstance(image_url, str) and (image_url.startswith('data:') or 'base64,' in image_url):
+                                return True
+                        
+                        # Gemini-style: {'inline_data': {'mime_type': 'image/jpeg', 'data': '...'}}
+                        inline_data = part.get('inline_data') if isinstance(part, dict) else None
+                        if isinstance(inline_data, dict) and inline_data.get('data'):
+                            return True
+                        
+                        # Anthropic-style: {'type': 'image', 'source': {'type': 'base64', 'data': '...'}}
+                        if part.get('type') == 'image':
+                            source = part.get('source', {})
+                            if isinstance(source, dict) and source.get('type') == 'base64' and source.get('data'):
+                                return True
+                        
+                        # Alternative: {'image': {'base64': '...'}}
+                        image_obj = part.get('image')
+                        if isinstance(image_obj, dict) and (image_obj.get('base64') or image_obj.get('data')):
+                            return True
+            return False
+        except Exception:
+            return False
+    
+    def _extract_safety_config(self) -> dict:
+        """Extract current safety/moderation configuration
+        
+        Returns:
+            Dictionary of safety settings or None
+        """
+        try:
+            safety_config = {}
+            
+            # Check Gemini safety settings
+            if hasattr(self, 'client_type') and self.client_type == 'gemini':
+                disable_safety = os.getenv('DISABLE_GEMINI_SAFETY', '0') == '1'
+                safety_config['gemini'] = {
+                    'safety_disabled': disable_safety,
+                    'harm_category_settings': 'BLOCK_NONE' if disable_safety else 'DEFAULT'
+                }
+            
+            # Check OpenRouter safe mode
+            if hasattr(self, 'base_url') and 'openrouter' in str(self.base_url).lower():
+                disable_safety = os.getenv('DISABLE_GEMINI_SAFETY', '0') == '1'
+                safety_config['openrouter'] = {
+                    'safe_mode': not disable_safety
+                }
+            
+            # Check Poe safe mode
+            if hasattr(self, 'model') and self.model and self.model.startswith('poe/'):
+                disable_safety = os.getenv('DISABLE_GEMINI_SAFETY', '0') == '1'
+                safety_config['poe'] = {
+                    'safe_mode': not disable_safety
+                }
+            
+            # Add timestamp and model info
+            if safety_config:
+                safety_config['timestamp'] = datetime.now().isoformat()
+                safety_config['model'] = getattr(self, 'model', 'unknown')
+                safety_config['provider'] = getattr(self, 'client_type', 'unknown')
+                return safety_config
+            
+            return None
+            
+        except Exception as e:
+            print(f"Failed to extract safety config: {e}")
+            return None
+    
+    def _save_safety_config(self, config: dict, payload_filename: str, target_dir: str):
+        """Save safety/moderation config in same folder as payload
+        
+        Args:
+            config: Safety configuration dictionary
+            payload_filename: Parent payload filename (for reference)
+            target_dir: Directory where the payload is saved
+        """
+        try:
+            # Save in the same directory as the payload
+            # Generate config filename based on payload
+            base_name = os.path.splitext(payload_filename)[0]
+            config_filename = f"{base_name}_safety.json"
+            config_path = os.path.join(target_dir, config_filename)
+            
+            # Save config
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+            logger.debug(f"Saved safety config to: {config_path}")
+            
+        except Exception as e:
+            print(f"Failed to save safety config: {e}")
+    
     def _save_response(self, content: str, filename: str):
         """Save API response with enhanced thread safety and deduplication"""
         if not content or not os.getenv("SAVE_PAYLOAD", "1") == "1":
@@ -7752,8 +7901,21 @@ class UnifiedClient:
         import re
         response_name = re.sub(r'[<>:\"/\\|?*]', '_', str(response_name))
         
-        # Reuse the same payload directory as other saves
-        thread_dir = self._get_thread_directory()
+        # Check if this is an image request by inspecting config_data
+        has_images = "IMAGE" in config_data.get('type', '')
+        
+        # Use image directory if it's an image request, otherwise use normal thread directory
+        if has_images:
+            # Image payloads go to Payloads/image/thread_id/
+            thread_name = threading.current_thread().name
+            thread_id = threading.current_thread().ident
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+            unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
+            thread_dir = os.path.join("Payloads", "image", unique_id)
+        else:
+            # Regular payloads use thread-specific directory
+            thread_dir = self._get_thread_directory()
+        
         os.makedirs(thread_dir, exist_ok=True)
         
         # Create unique filename with timestamp

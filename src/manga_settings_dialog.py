@@ -1471,12 +1471,14 @@ class MangaSettingsDialog(QDialog):
         kernel_layout.addWidget(self.kernel_size_label)
         
         self.kernel_size_spinbox = QSpinBox()
-        self.kernel_size_spinbox.setRange(3, 15)
-        self.kernel_size_spinbox.setSingleStep(2)  # Only odd numbers
-        self.kernel_size_spinbox.setValue(self.settings.get('dilation_kernel_size', 5))
+        self.kernel_size_spinbox.setRange(0, 15)  # Allow 0 to disable dilation
+        self.kernel_size_spinbox.setSingleStep(2)  # Only odd numbers (except 0)
+        kernel_value = self.settings.get('dilation_kernel_size', 5)
+        print(f"[KERNEL_DEBUG] Loading kernel_size from settings: {kernel_value}")
+        self.kernel_size_spinbox.setValue(kernel_value)
         kernel_layout.addWidget(self.kernel_size_spinbox)
         
-        self.kernel_size_unit_label = QLabel("pixels (dilation kernel size, must be odd)")
+        self.kernel_size_unit_label = QLabel("pixels (0=disable, or odd number for kernel size)")
         kernel_layout.addWidget(self.kernel_size_unit_label)
         kernel_layout.addStretch()
         
@@ -4236,7 +4238,9 @@ class MangaSettingsDialog(QDialog):
             
             # Save all dilation settings
             self.settings['mask_dilation'] = self.mask_dilation_spinbox.value()
-            self.settings['dilation_kernel_size'] = self.kernel_size_spinbox.value()
+            kernel_value = self.kernel_size_spinbox.value()
+            print(f"[KERNEL_DEBUG] Saving kernel_size to settings: {kernel_value}")
+            self.settings['dilation_kernel_size'] = kernel_value
             self.settings['use_all_iterations'] = self.use_all_iterations_checkbox.isChecked()
             self.settings['all_iterations'] = self.all_iterations_spinbox.value()
             self.settings['text_bubble_dilation_iterations'] = self.text_bubble_iter_spinbox.value()
@@ -4252,6 +4256,7 @@ class MangaSettingsDialog(QDialog):
             self.settings['advanced']['format_detection'] = bool(self.format_detection_checkbox.isChecked())
             self.settings['advanced']['webtoon_mode'] = self.webtoon_mode_combo.currentText()
             self.settings['advanced']['debug_mode'] = bool(self.debug_mode_checkbox.isChecked())
+            self.settings['advanced']['concise_logs'] = bool(self.concise_logs_checkbox.isChecked())
             self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate_checkbox.isChecked())
             self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing_checkbox.isChecked())
             self.settings['advanced']['max_workers'] = self.max_workers_spinbox.value()
