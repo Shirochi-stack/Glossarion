@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property
-from PySide6.QtGui import QFont, QColor, QTransform
+from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -23,18 +23,39 @@ import traceback
 
 
 class AnimatedRefreshButton(QPushButton):
-    """Custom QPushButton with rotation animation for refresh action"""
+    """Custom QPushButton with rotation animation for refresh action using Halgakos.ico"""
     
-    def __init__(self, text="🔄 Refresh", parent=None):
+    def __init__(self, text="Refresh", parent=None):
         super().__init__(text, parent)
         self._rotation = 0
         self._animation = None
         self._original_text = text
         self._timer = None
         self._animation_step = 0
+        self._original_icon = None
         
-        # Unicode rotation arrows for smooth animation
-        self._spin_chars = ["🔄", "↻", "⟳", "↺"]
+        # Try to load Halgakos.ico
+        try:
+            # Get base directory
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                self._original_icon = QIcon(ico_path)
+                self.setIcon(self._original_icon)
+                self.setIconSize(self.iconSize() * 1.2)  # Make icon slightly larger
+                
+                # Add padding between icon and text
+                from PySide6.QtWidgets import QStyleOptionButton, QStyle
+                from PySide6.QtCore import QSize
+                # Set spacing between icon and text (in pixels)
+                style = self.style()
+                if style:
+                    # Get current spacing and add extra padding
+                    current_spacing = style.pixelMetric(QStyle.PM_ButtonIconSpacing)
+                    # We can't directly set spacing, so we'll use stylesheet margin instead
+                    pass  # Will handle in stylesheet below
+        except Exception as e:
+            print(f"Could not load Halgakos.ico for refresh button: {e}")
         
     def get_rotation(self):
         return self._rotation
@@ -59,19 +80,25 @@ class AnimatedRefreshButton(QPushButton):
                 "background-color: #138496"
             ))
         
-        # Start timer-based animation for text rotation
+        # Start timer-based animation for icon rotation
         self._animation_step = 0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._update_animation_frame)
-        self._timer.start(120)  # Update every 120ms for smoother/faster spinning
+        self._timer.start(50)  # Update every 50ms for smooth rotation
     
     def _update_animation_frame(self):
-        """Update animation frame"""
-        self._animation_step = (self._animation_step + 1) % len(self._spin_chars)
-        spin_char = self._spin_chars[self._animation_step]
-        # Replace the emoji in the text
-        new_text = self._original_text.replace("🔄", spin_char)
-        self.setText(new_text)
+        """Update animation frame by rotating the icon"""
+        if self._original_icon:
+            # Increment rotation angle (30 degrees per frame for smooth spinning)
+            self._rotation = (self._rotation + 30) % 360
+            
+            # Create a rotated version of the icon
+            pixmap = self._original_icon.pixmap(self.iconSize())
+            transform = QTransform().rotate(self._rotation)
+            rotated_pixmap = pixmap.transformed(transform, Qt.SmoothTransformation)
+            
+            # Set the rotated icon
+            self.setIcon(QIcon(rotated_pixmap))
     
     def stop_animation(self):
         """Stop the spinning animation"""
@@ -81,8 +108,9 @@ class AnimatedRefreshButton(QPushButton):
             self._rotation = 0
             self._animation_step = 0
             
-            # Restore original text
-            self.setText(self._original_text)
+            # Restore original icon (unrotated)
+            if self._original_icon:
+                self.setIcon(self._original_icon)
             
             # Restore original stylesheet
             current_style = self.styleSheet()
@@ -1395,9 +1423,17 @@ class RetranslationMixin:
         button_layout.addWidget(btn_remove_qa, 1, 2, 1, 1)
         
         # Add animated refresh button
-        btn_refresh = AnimatedRefreshButton("🔄 Refresh")
+        btn_refresh = AnimatedRefreshButton("  Refresh")  # Double space for icon padding
         btn_refresh.setMinimumHeight(32)
-        btn_refresh.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
+        btn_refresh.setStyleSheet(
+            "QPushButton { "
+            "background-color: #17a2b8; "
+            "color: white; "
+            "padding: 6px 16px; "
+            "font-weight: bold; "
+            "font-size: 10pt; "
+            "}"
+        )
         
         # Create refresh handler with animation
         def animated_refresh():

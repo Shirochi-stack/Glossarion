@@ -8,6 +8,7 @@ import io, json, logging, math, os, shutil, sys, threading, time, re, concurrent
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
+import platform
 
 # PySide6 imports (replacing Tkinter)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
@@ -145,11 +146,72 @@ def _setup_file_logging():
         # Export for helper modules (e.g., memory_usage_reporter)
         os.environ["GLOSSARION_LOG_DIR"] = logs_dir
 
-        # Rotating log handler
+        # Rotating log handler - use custom Windows-safe version
         log_file = os.path.join(logs_dir, "run.log")
-        handler = RotatingFileHandler(
-            log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
-        )
+        
+        # On Windows, use a safer handler that doesn't fail on rotation errors
+        if platform.system() == 'Windows':
+            import glob
+            
+            class WindowsSafeRotatingFileHandler(RotatingFileHandler):
+                """Windows-safe rotating file handler that gracefully handles file locking."""
+                
+                def doRollover(self):
+                    """Override doRollover to handle Windows permission errors gracefully."""
+                    if self.stream:
+                        self.stream.close()
+                        self.stream = None
+                    
+                    try:
+                        # Try standard rotation
+                        # Rotate existing backup files
+                        for i in range(self.backupCount - 1, 0, -1):
+                            sfn = self.rotation_filename("%s.%d" % (self.baseFilename, i))
+                            dfn = self.rotation_filename("%s.%d" % (self.baseFilename, i + 1))
+                            if os.path.exists(sfn):
+                                if os.path.exists(dfn):
+                                    try:
+                                        os.remove(dfn)
+                                    except (OSError, PermissionError):
+                                        pass  # Ignore if locked
+                                try:
+                                    os.rename(sfn, dfn)
+                                except (OSError, PermissionError):
+                                    pass  # Ignore if locked
+                        
+                        # Rotate current file
+                        dfn = self.rotation_filename(self.baseFilename + ".1")
+                        if os.path.exists(dfn):
+                            try:
+                                os.remove(dfn)
+                            except (OSError, PermissionError):
+                                pass  # Ignore if locked
+                        
+                        try:
+                            if os.path.exists(self.baseFilename):
+                                os.rename(self.baseFilename, dfn)
+                        except (OSError, PermissionError):
+                            # If we can't rotate, just truncate the current file
+                            try:
+                                with open(self.baseFilename, 'w') as f:
+                                    f.write('')
+                            except Exception:
+                                pass
+                    except Exception:
+                        # If anything fails, continue logging to the current file
+                        pass
+                    
+                    # Open new log file
+                    if not self.stream:
+                        self.stream = self._open()
+            
+            handler = WindowsSafeRotatingFileHandler(
+                log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8", delay=False
+            )
+        else:
+            handler = RotatingFileHandler(
+                log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+            )
         formatter = logging.Formatter(
             fmt="%(asctime)s %(levelname)s [%(process)d:%(threadName)s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
@@ -157,9 +219,25 @@ def _setup_file_logging():
         handler.setFormatter(formatter)
 
         root_logger = logging.getLogger()
-        # Avoid duplicate handlers on reload
-        if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
-            root_logger.addHandler(handler)
+        
+        # Close and remove any existing RotatingFileHandler to avoid file locks
+        handlers_to_remove = []
+        for h in root_logger.handlers:
+            if isinstance(h, RotatingFileHandler):
+                handlers_to_remove.append(h)
+        
+        for h in handlers_to_remove:
+            try:
+                h.close()
+            except Exception:
+                pass
+            try:
+                root_logger.removeHandler(h)
+            except Exception:
+                pass
+        
+        # Add the new handler
+        root_logger.addHandler(handler)
         root_logger.setLevel(logging.INFO)
 
         # Suppress verbose Azure SDK HTTP logging
@@ -3065,11 +3143,84 @@ If you see multiple p-b cookies, use the one with the longest value."""
         btn_layout.setContentsMargins(0, 5, 0, 5)
         btn_layout.setSpacing(2)
         
-        self.qa_button = QPushButton("QA Scan")
+        # QA Scan button with mini icon
+        from PySide6.QtGui import QPixmap, QIcon
+        self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(80)  # Prevent size changes
+        self.qa_button.setMinimumWidth(120)  # Wider button
         self.qa_button.setMinimumHeight(40)  # Increased button height
         self.qa_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
+        
+        # Create horizontal layout for button content
+        qa_btn_widget = QWidget()
+        qa_btn_layout = QHBoxLayout(qa_btn_widget)
+        qa_btn_layout.setContentsMargins(0, 0, 0, 0)
+        qa_btn_layout.setSpacing(3)  # Minimal spacing between icon and text
+        qa_btn_layout.setAlignment(Qt.AlignCenter)  # Center the contents
+        
+        # Mini icon for QA button
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        
+        # Reuse the RotatableLabel class (already defined in _create_prompt_section)
+        class RotatableLabel(QLabel):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._rotation = 0
+                self._original_pixmap = None
+            
+            def set_rotation(self, angle):
+                self._rotation = angle
+                if self._original_pixmap:
+                    transform = QTransform()
+                    transform.rotate(angle)
+                    rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                    self.setPixmap(rotated)
+            
+            def get_rotation(self):
+                return self._rotation
+            
+            rotation = Property(float, get_rotation, set_rotation)
+            
+            def set_original_pixmap(self, pixmap):
+                self._original_pixmap = pixmap
+                self.setPixmap(pixmap)
+        
+        self.qa_button_icon = RotatableLabel()
+        self.qa_button_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            available_sizes = icon.availableSizes()
+            if available_sizes:
+                largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
+                pixmap = icon.pixmap(largest_size)
+            else:
+                pixmap = QPixmap(icon_path)
+            scaled_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.qa_button_icon.set_original_pixmap(scaled_pixmap)
+        self.qa_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
+        self.qa_button_icon.setAlignment(Qt.AlignCenter)
+        
+        # Create animations for QA button icon
+        self.qa_icon_spin_animation = QPropertyAnimation(self.qa_button_icon, b"rotation")
+        self.qa_icon_spin_animation.setDuration(900)
+        self.qa_icon_spin_animation.setStartValue(0)
+        self.qa_icon_spin_animation.setEndValue(360)
+        self.qa_icon_spin_animation.setLoopCount(-1)
+        self.qa_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+        
+        self.qa_icon_stop_animation = QPropertyAnimation(self.qa_button_icon, b"rotation")
+        self.qa_icon_stop_animation.setDuration(800)
+        self.qa_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # Button text label
+        self.qa_text_label = QLabel("QA Scan")  # Store as instance variable
+        self.qa_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
+        self.qa_text_label.setAlignment(Qt.AlignCenter)
+        
+        qa_btn_layout.addWidget(self.qa_button_icon)
+        qa_btn_layout.addWidget(self.qa_text_label)
+        self.qa_button.setLayout(qa_btn_layout)
+        
         self.qa_button.setStyleSheet("""
             QPushButton {
                 background-color: #e67e22;
@@ -3116,24 +3267,109 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Create buttons
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
-            btn = QPushButton(lbl)
+            # Special handling for Extract Glossary - don't set text yet, we'll add it with icon
+            if lbl == "Extract Glossary":
+                btn = QPushButton()
+            else:
+                btn = QPushButton(lbl)
+            
             # Special-case Save Config for inline feedback
             if lbl == "Save Config":
                 self.save_config_button = btn
                 btn.clicked.connect(self._on_save_config_clicked)
                 btn.setToolTip("Save all settings to config.json")
-            else:
+            elif lbl != "Extract Glossary":  # Don't connect yet for Extract Glossary
                 btn.clicked.connect(cmd)
+            
             btn.setMinimumHeight(40)  # Increased button height for all toolbar buttons
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
+            
+            # Set maximum width for Import/Export Profile buttons to make them narrower
+            if lbl in ["Import Profiles", "Export Profiles"]:
+                btn.setMaximumWidth(130)  # Constrain width for these buttons
+            
             color = style_colors.get(style, "#95a5a6")
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
             btn_layout.addWidget(btn)
             
             if lbl == "Extract Glossary":
+                # Create Extract Glossary button with mini icon
+                glossary_btn_widget = QWidget()
+                glossary_btn_layout = QHBoxLayout(glossary_btn_widget)
+                glossary_btn_layout.setContentsMargins(0, 0, 0, 0)
+                glossary_btn_layout.setSpacing(3)  # Minimal spacing between icon and text
+                glossary_btn_layout.setAlignment(Qt.AlignCenter)  # Center the contents
+                
+                # Mini icon for Glossary button
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+                
+                # Reuse RotatableLabel class
+                class RotatableLabel(QLabel):
+                    def __init__(self, parent=None):
+                        super().__init__(parent)
+                        self._rotation = 0
+                        self._original_pixmap = None
+                    
+                    def set_rotation(self, angle):
+                        self._rotation = angle
+                        if self._original_pixmap:
+                            transform = QTransform()
+                            transform.rotate(angle)
+                            rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                            self.setPixmap(rotated)
+                    
+                    def get_rotation(self):
+                        return self._rotation
+                    
+                    rotation = Property(float, get_rotation, set_rotation)
+                    
+                    def set_original_pixmap(self, pixmap):
+                        self._original_pixmap = pixmap
+                        self.setPixmap(pixmap)
+                
+                self.glossary_button_icon = RotatableLabel()
+                self.glossary_button_icon.setStyleSheet("background-color: transparent;")
+                if os.path.exists(icon_path):
+                    from PySide6.QtGui import QIcon, QPixmap
+                    icon = QIcon(icon_path)
+                    available_sizes = icon.availableSizes()
+                    if available_sizes:
+                        largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
+                        pixmap = icon.pixmap(largest_size)
+                    else:
+                        pixmap = QPixmap(icon_path)
+                    scaled_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.glossary_button_icon.set_original_pixmap(scaled_pixmap)
+                self.glossary_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
+                self.glossary_button_icon.setAlignment(Qt.AlignCenter)
+                
+                # Create animations for Glossary button icon
+                self.glossary_icon_spin_animation = QPropertyAnimation(self.glossary_button_icon, b"rotation")
+                self.glossary_icon_spin_animation.setDuration(900)
+                self.glossary_icon_spin_animation.setStartValue(0)
+                self.glossary_icon_spin_animation.setEndValue(360)
+                self.glossary_icon_spin_animation.setLoopCount(-1)
+                self.glossary_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+                
+                self.glossary_icon_stop_animation = QPropertyAnimation(self.glossary_button_icon, b"rotation")
+                self.glossary_icon_stop_animation.setDuration(800)
+                self.glossary_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+                
+                # Button text label
+                self.glossary_text_label = QLabel("Extract Glossary")  # Store as instance variable
+                self.glossary_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
+                self.glossary_text_label.setAlignment(Qt.AlignCenter)
+                
+                glossary_btn_layout.addWidget(self.glossary_button_icon)
+                glossary_btn_layout.addWidget(self.glossary_text_label)
+                btn.setLayout(glossary_btn_layout)
+                
+                # Now connect the command after layout is set
+                btn.clicked.connect(cmd)
+                
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(120)  # Prevent size changes
+                btn.setMinimumWidth(150)  # Wider button
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -6229,7 +6465,9 @@ Important rules:
                pass
            
            if glossary_running:
-               self.glossary_button.setText("Stop Glossary")
+               # Update text label instead of button text
+               if hasattr(self, 'glossary_text_label'):
+                   self.glossary_text_label.setText("Stop Glossary")
                self.glossary_button.setStyleSheet("""
                    QPushButton {
                        background-color: #dc3545;
@@ -6239,8 +6477,14 @@ Important rules:
                """)
                self.glossary_button.clicked.connect(self.stop_glossary_extraction)
                self.glossary_button.setEnabled(True)
+               # Start spinning animation for glossary icon
+               if hasattr(self, 'glossary_icon_spin_animation') and hasattr(self, 'glossary_button_icon'):
+                   if self.glossary_icon_spin_animation.state() != QPropertyAnimation.Running:
+                       self.glossary_icon_spin_animation.start()
            else:
-               self.glossary_button.setText("Extract Glossary")
+               # Update text label instead of button text
+               if hasattr(self, 'glossary_text_label'):
+                   self.glossary_text_label.setText("Extract Glossary")
                self.glossary_button.setStyleSheet("""
                    QPushButton {
                        background-color: #e67e22;
@@ -6255,6 +6499,21 @@ Important rules:
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
                self.glossary_button.setEnabled(glossary_main and not any_process_running)
+               # Stop spinning animation gracefully for glossary icon
+               if hasattr(self, 'glossary_icon_spin_animation') and hasattr(self, 'glossary_button_icon') and hasattr(self, 'glossary_icon_stop_animation'):
+                   if self.glossary_icon_spin_animation.state() == QPropertyAnimation.Running:
+                       self.glossary_icon_spin_animation.stop()
+                       current_rotation = self.glossary_button_icon.get_rotation()
+                       current_rotation = current_rotation % 360
+                       if current_rotation > 180:
+                           target_rotation = 360
+                       else:
+                           target_rotation = 0
+                       self.glossary_icon_stop_animation.setStartValue(current_rotation)
+                       self.glossary_icon_stop_animation.setEndValue(target_rotation)
+                       self.glossary_icon_stop_animation.start()
+                   elif self.glossary_icon_stop_animation.state() != QPropertyAnimation.Running:
+                       self.glossary_button_icon.set_rotation(0)
     
        # EPUB button
        if hasattr(self, 'epub_button'):
@@ -6282,7 +6541,9 @@ Important rules:
                pass
            
            if qa_running:
-               self.qa_button.setText("Stop Scan")
+               # Update text label instead of button text
+               if hasattr(self, 'qa_text_label'):
+                   self.qa_text_label.setText("Stop Scan")
                self.qa_button.setStyleSheet("""
                    QPushButton {
                        background-color: #dc3545;
@@ -6292,8 +6553,14 @@ Important rules:
                """)
                self.qa_button.clicked.connect(self.stop_qa_scan)
                self.qa_button.setEnabled(True)
+               # Start spinning animation for QA icon
+               if hasattr(self, 'qa_icon_spin_animation') and hasattr(self, 'qa_button_icon'):
+                   if self.qa_icon_spin_animation.state() != QPropertyAnimation.Running:
+                       self.qa_icon_spin_animation.start()
            else:
-               self.qa_button.setText("QA Scan")
+               # Update text label instead of button text
+               if hasattr(self, 'qa_text_label'):
+                   self.qa_text_label.setText("QA Scan")
                self.qa_button.setStyleSheet("""
                    QPushButton {
                        background-color: #e67e22;
@@ -6308,6 +6575,21 @@ Important rules:
                """)
                self.qa_button.clicked.connect(self.run_qa_scan)
                self.qa_button.setEnabled(scan_html_folder and not any_process_running)
+               # Stop spinning animation gracefully for QA icon
+               if hasattr(self, 'qa_icon_spin_animation') and hasattr(self, 'qa_button_icon') and hasattr(self, 'qa_icon_stop_animation'):
+                   if self.qa_icon_spin_animation.state() == QPropertyAnimation.Running:
+                       self.qa_icon_spin_animation.stop()
+                       current_rotation = self.qa_button_icon.get_rotation()
+                       current_rotation = current_rotation % 360
+                       if current_rotation > 180:
+                           target_rotation = 360
+                       else:
+                           target_rotation = 0
+                       self.qa_icon_stop_animation.setStartValue(current_rotation)
+                       self.qa_icon_stop_animation.setEndValue(target_rotation)
+                       self.qa_icon_stop_animation.start()
+                   elif self.qa_icon_stop_animation.state() != QPropertyAnimation.Running:
+                       self.qa_button_icon.set_rotation(0)
 
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
@@ -6389,7 +6671,9 @@ Important rules:
        # Disable button immediately to prevent multiple clicks
        if hasattr(self, 'glossary_button'):
            self.glossary_button.setEnabled(False)
-           self.glossary_button.setText("Stopping...")
+           # Update text label instead of button text
+           if hasattr(self, 'glossary_text_label'):
+               self.glossary_text_label.setText("Stopping...")
            self.glossary_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
        
        self.stop_requested = True
@@ -6424,7 +6708,9 @@ Important rules:
         # Disable button immediately to prevent multiple clicks
         if hasattr(self, 'qa_button'):
             self.qa_button.setEnabled(False)
-            self.qa_button.setText("Stopping...")
+            # Update text label instead of button text
+            if hasattr(self, 'qa_text_label'):
+                self.qa_text_label.setText("Stopping...")
             self.qa_button.setStyleSheet("background-color: #6c757d; color: white; padding: 6px;")
         
         self.stop_requested = True

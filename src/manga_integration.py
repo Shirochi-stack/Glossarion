@@ -15,9 +15,9 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QGroupBox, QListWidget, QComboBox, QLineEdit, QCheckBox,
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
-                               QDialog, QButtonGroup, QApplication)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent
-from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent
+                               QDialog, QButtonGroup, QApplication, QSizePolicy)
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform
 from typing import List, Dict, Optional, Any
 from queue import Queue
 import logging
@@ -3892,12 +3892,105 @@ class MangaTranslationTab:
         control_layout.setContentsMargins(10, 15, 10, 10)
         control_layout.setSpacing(15)
         
-        self.start_button = QPushButton("▶ Start Translation")
+        # Create start button with spinning icon
+        self.start_button = QPushButton()
         self.start_button.clicked.connect(self._toggle_translation)
         self.start_button.setEnabled(is_ready)
         self.start_button.setMinimumHeight(90)  # Minimum height when space is constrained
         # Set size policy to expand vertically to fill available space
         self.start_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        # Create button content with icon and text (horizontal layout)
+        button_container = QWidget()
+        button_layout = QHBoxLayout(button_container)  # Changed to horizontal
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(15)  # Space between icon and text
+        button_layout.setAlignment(Qt.AlignCenter)
+        
+        # Icon path
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
+        # Rotatable label class for animation
+        class RotatableLabel(QLabel):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._rotation = 0
+                self._original_pixmap = None
+            
+            def set_rotation(self, angle):
+                self._rotation = angle
+                if self._original_pixmap:
+                    transform = QTransform()
+                    transform.rotate(angle)
+                    rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                    self.setPixmap(rotated)
+            
+            def get_rotation(self):
+                return self._rotation
+            
+            rotation = Property(float, get_rotation, set_rotation)
+            
+            def set_original_pixmap(self, pixmap):
+                self._original_pixmap = pixmap
+                self.setPixmap(pixmap)
+        
+        # Icon container
+        icon_container = QWidget()
+        icon_container.setFixedSize(100, 100)  # Increased size
+        icon_container.setStyleSheet("background-color: transparent;")
+        icon_layout = QVBoxLayout(icon_container)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        icon_layout.setAlignment(Qt.AlignCenter)
+        
+        self.start_button_icon = RotatableLabel(icon_container)
+        self.start_button_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            available_sizes = icon.availableSizes()
+            if available_sizes:
+                largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
+                pixmap = icon.pixmap(largest_size)
+            else:
+                pixmap = QPixmap(icon_path)
+            scaled_pixmap = pixmap.scaled(90, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # Increased size
+            self.start_button_icon.set_original_pixmap(scaled_pixmap)
+        self.start_button_icon.setAlignment(Qt.AlignCenter)
+        icon_layout.addWidget(self.start_button_icon)
+        
+        button_layout.addWidget(icon_container)
+        
+        # Create animations
+        self.start_icon_spin_animation = QPropertyAnimation(self.start_button_icon, b"rotation")
+        self.start_icon_spin_animation.setDuration(2400)  # Even slower for smoother feel (2.4 seconds per rotation)
+        self.start_icon_spin_animation.setStartValue(0)
+        self.start_icon_spin_animation.setEndValue(360)
+        self.start_icon_spin_animation.setLoopCount(-1)
+        self.start_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+        
+        # Create a dedicated timer to keep animation smooth during heavy logging
+        self._animation_refresh_timer = QTimer()
+        self._animation_refresh_timer.setInterval(8)  # ~125fps for ultra-smooth animation
+        # Process events on each tick to ensure animation frames are rendered
+        def _refresh_animation():
+            try:
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+            except:
+                pass
+        self._animation_refresh_timer.timeout.connect(_refresh_animation)
+        
+        self.start_icon_stop_animation = QPropertyAnimation(self.start_button_icon, b"rotation")
+        self.start_icon_stop_animation.setDuration(800)
+        self.start_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # Text label
+        self.start_button_text = QLabel("▶ Start Translation")
+        self.start_button_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # Left-aligned vertically centered
+        self.start_button_text.setStyleSheet("color: white; font-size: 14pt; font-weight: bold; background-color: transparent;")
+        button_layout.addWidget(self.start_button_text)
+        
+        self.start_button.setLayout(button_layout)
+        
         self.start_button.setStyleSheet(
             "QPushButton { "
             "  background-color: #28a745; "
@@ -6844,6 +6937,14 @@ class MangaTranslationTab:
                                 self.file_listbox.setEnabled(False)
                         except Exception:
                             pass
+                    elif state == 'translation_complete':
+                        try:
+                            # Reset UI to ready state when translation completes
+                            self._reset_ui_state()
+                        except Exception as e:
+                            import traceback
+                            print(f"Error resetting UI state: {e}")
+                            print(traceback.format_exc())
                 
                 elif update[0] == 'call_method':
                     # Call a method on the main thread
@@ -6936,7 +7037,9 @@ class MangaTranslationTab:
         # Immediately update button to Stop state (red)
         try:
             if hasattr(self, 'start_button') and self.start_button:
-                self.start_button.setText("⏹ Stop Translation")
+                # Update text label instead of button text
+                if hasattr(self, 'start_button_text'):
+                    self.start_button_text.setText("⏹ Stop Translation")
                 self.start_button.setStyleSheet(
                     "QPushButton { "
                     "  background-color: #dc3545; "
@@ -6953,6 +7056,20 @@ class MangaTranslationTab:
                     "}"
                 )
                 self.start_button.setEnabled(True)
+                # Force immediate GUI update
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+                # Start spinning animation after 6 second delay
+                if hasattr(self, 'start_icon_spin_animation') and hasattr(self, 'start_button_icon'):
+                    if self.start_icon_spin_animation.state() != QPropertyAnimation.Running:
+                        def start_spinning():
+                            if hasattr(self, 'start_icon_spin_animation') and self.is_running:
+                                self.start_icon_spin_animation.start()
+                                # Start refresh timer to keep animation smooth
+                                if hasattr(self, '_animation_refresh_timer'):
+                                    self._animation_refresh_timer.start()
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(6000, start_spinning)  # 6 second delay
         except Exception:
             pass
         
@@ -8692,20 +8809,40 @@ class MangaTranslationTab:
             except Exception as e:
                 self._log(f"⚠️ Warning: Failed to reset translator instance: {e}", "warning")
             
-            # Reset UI state (PySide6 - call directly)
+            # Reset UI state (PySide6 - must call on main thread)
             try:
-                self._reset_ui_state()
+                # Use the existing update_queue to schedule UI reset on main thread
+                # This queue is processed by the main thread's timer
+                self.update_queue.put(('ui_state', 'translation_complete'))
             except Exception as e:
                 self._log(f"Error resetting UI: {e}", "warning")
     
     def _stop_translation(self):
         """Stop the translation process"""
         if self.is_running:
-            # Immediately update button to show "Stopping..." state (gray, disabled)
+            # Set local stop flag first for immediate response
+            self.stop_flag.set()
+            
+            # Save current scroll position before updating button
+            saved_scroll_pos = None
+            try:
+                if hasattr(self, 'scroll_area') and self.scroll_area:
+                    scrollbar = self.scroll_area.verticalScrollBar()
+                    if scrollbar:
+                        saved_scroll_pos = scrollbar.value()
+            except Exception:
+                pass
+            
+            # Update button to show "Stopping..." state (gray, disabled) - do this quickly
             try:
                 if hasattr(self, 'start_button') and self.start_button:
+                    # Clear focus from button to prevent scroll
+                    self.start_button.clearFocus()
+                    
                     self.start_button.setEnabled(False)
-                    self.start_button.setText("Stopping...")
+                    # Update text label instead of button text
+                    if hasattr(self, 'start_button_text'):
+                        self.start_button_text.setText("Stopping...")
                     self.start_button.setStyleSheet(
                         "QPushButton { "
                         "  background-color: #6c757d; "
@@ -8720,11 +8857,20 @@ class MangaTranslationTab:
                         "  color: white; "
                         "}"
                     )
+                    # Force immediate GUI update
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents()
             except Exception:
                 pass
             
-            # Set local stop flag
-            self.stop_flag.set()
+            # Restore scroll position after button update
+            try:
+                if saved_scroll_pos is not None and hasattr(self, 'scroll_area') and self.scroll_area:
+                    scrollbar = self.scroll_area.verticalScrollBar()
+                    if scrollbar:
+                        scrollbar.setValue(saved_scroll_pos)
+            except Exception:
+                pass
             
             # Set global cancellation flags for coordinated stopping
             self.set_global_cancellation(True)
@@ -8775,36 +8921,24 @@ class MangaTranslationTab:
             except Exception as e:
                 self._log(f"⚠️ Failed to start shutdown: {e}", "warning")
             
-            # Immediately reset UI state to re-enable start button
-            self._reset_ui_state()
             self._log("\n⏹️ Translation stopped by user", "warning")
             
-            # Scroll to bottom to show the stop message
+            # Schedule UI reset after a longer delay to keep "Stopping..." visible
+            # The finally block in _run_translation_worker will also call _reset_ui_state,
+            # but this fallback ensures UI doesn't get stuck in stopping state
             try:
-                from PySide6.QtGui import QTextCursor
                 from PySide6.QtCore import QTimer
-                
-                def scroll_to_bottom():
-                    try:
-                        if hasattr(self, 'log_text') and self.log_text:
-                            self.log_text.moveCursor(QTextCursor.End)
-                            self.log_text.ensureCursorVisible()
-                            # Also scroll the parent scroll area if it exists
-                            if hasattr(self, 'scroll_area') and self.scroll_area:
-                                scrollbar = self.scroll_area.verticalScrollBar()
-                                if scrollbar:
-                                    scrollbar.setValue(scrollbar.maximum())
-                    except Exception:
-                        pass
-                
-                # Schedule scroll with a small delay to ensure the stop message is rendered
-                QTimer.singleShot(50, scroll_to_bottom)
-                QTimer.singleShot(150, scroll_to_bottom)  # Second attempt to be sure
+                # Wait 2 seconds for cleanup to allow "Stopping..." to be visible longer
+                QTimer.singleShot(2000, self._reset_ui_state)
             except Exception:
                 pass
     
     def _reset_ui_state(self):
         """Reset UI to ready state - with widget existence checks (PySide6)"""
+        # Check if the dialog still exists first (PySide6)
+        if not hasattr(self, 'dialog') or not self.dialog:
+            return
+        
         # Restore stdio redirection if active
         self._redirect_stderr(False)
         self._redirect_stdout(False)
@@ -8814,16 +8948,14 @@ class MangaTranslationTab:
         except Exception:
             pass
         try:
-            # Check if the dialog still exists (PySide6)
-            if not hasattr(self, 'dialog') or not self.dialog:
-                return
-                
             # Reset running flag
             self.is_running = False
             
             # Reset start button to original Start state (green)
             if hasattr(self, 'start_button') and self.start_button:
-                self.start_button.setText("▶ Start Translation")
+                # Update text label instead of button text
+                if hasattr(self, 'start_button_text'):
+                    self.start_button_text.setText("▶ Start Translation")
                 self.start_button.setStyleSheet(
                     "QPushButton { "
                     "  background-color: #28a745; "
@@ -8840,6 +8972,32 @@ class MangaTranslationTab:
                     "}"
                 )
                 self.start_button.setEnabled(True)
+                # Stop spinning animation gracefully immediately (no delay)
+                if hasattr(self, 'start_icon_spin_animation') and hasattr(self, 'start_button_icon') and hasattr(self, 'start_icon_stop_animation'):
+                    def stop_spinning():
+                        if not hasattr(self, 'start_icon_spin_animation'):
+                            return
+                        if self.start_icon_spin_animation.state() == QPropertyAnimation.Running:
+                            self.start_icon_spin_animation.stop()
+                            # Stop refresh timer
+                            if hasattr(self, '_animation_refresh_timer'):
+                                self._animation_refresh_timer.stop()
+                            current_rotation = self.start_button_icon.get_rotation()
+                            current_rotation = current_rotation % 360
+                            if current_rotation > 180:
+                                target_rotation = 360
+                            else:
+                                target_rotation = 0
+                            self.start_icon_stop_animation.setStartValue(current_rotation)
+                            self.start_icon_stop_animation.setEndValue(target_rotation)
+                            self.start_icon_stop_animation.start()
+                        elif self.start_icon_stop_animation.state() != QPropertyAnimation.Running:
+                            self.start_button_icon.set_rotation(0)
+                            # Ensure refresh timer is stopped
+                            if hasattr(self, '_animation_refresh_timer'):
+                                self._animation_refresh_timer.stop()
+                    # Call immediately when button turns green
+                    stop_spinning()
             
             # Re-enable file modification - check if listbox exists (PySide6)
             if hasattr(self, 'file_listbox') and self.file_listbox:
