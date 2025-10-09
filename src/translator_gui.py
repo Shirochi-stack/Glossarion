@@ -2330,7 +2330,8 @@ Recent translations to summarize:
         button_layout.setContentsMargins(0, 8, 0, 0)
         button_layout.setSpacing(2)  # Minimal spacing between icon and text
         
-        # Icon label with rotation support
+        # Icon label with rotation support - wrapped in its own container
+        # This allows the icon to rotate independently without affecting the label
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         
         # Create a custom label that supports rotation
@@ -2360,7 +2361,16 @@ Recent translations to summarize:
                 self._original_pixmap = pixmap
                 self.setPixmap(pixmap)
         
-        self.run_button_icon = RotatableLabel()
+        # Create icon container to isolate rotation effect
+        icon_container = QWidget()
+        icon_container.setFixedSize(90, 90)  # Fixed size to prevent layout shift during rotation
+        icon_container.setStyleSheet("background-color: transparent;")  # Transparent background
+        icon_layout = QVBoxLayout(icon_container)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        icon_layout.setAlignment(Qt.AlignCenter)
+        
+        self.run_button_icon = RotatableLabel(icon_container)
+        self.run_button_icon.setStyleSheet("background-color: transparent;")  # Transparent background for icon label
         if os.path.exists(icon_path):
             # Load the icon at the highest available resolution
             from PySide6.QtGui import QImage
@@ -2377,11 +2387,14 @@ Recent translations to summarize:
             scaled_pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.run_button_icon.set_original_pixmap(scaled_pixmap)
         self.run_button_icon.setAlignment(Qt.AlignCenter)
-        button_layout.addWidget(self.run_button_icon)
+        icon_layout.addWidget(self.run_button_icon)
+        
+        # Add icon container to button layout
+        button_layout.addWidget(icon_container, alignment=Qt.AlignCenter)
         
         # Create rotation animation (but don't start it yet)
         self.icon_spin_animation = QPropertyAnimation(self.run_button_icon, b"rotation")
-        self.icon_spin_animation.setDuration(1200)  # 1.2 seconds per rotation (faster)
+        self.icon_spin_animation.setDuration(900)  # 0.9 seconds per rotation (faster)
         self.icon_spin_animation.setStartValue(0)
         self.icon_spin_animation.setEndValue(360)
         self.icon_spin_animation.setLoopCount(-1)  # Infinite loop
@@ -2392,7 +2405,7 @@ Recent translations to summarize:
         self.icon_stop_animation.setDuration(800)  # Deceleration time
         self.icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)  # Smooth deceleration
         
-        # Text label
+        # Text label - separate from icon, won't be affected by rotation
         self.run_button_text = QLabel("Run Translation")
         self.run_button_text.setAlignment(Qt.AlignCenter)
         self.run_button_text.setStyleSheet("color: white; font-size: 14pt; font-weight: bold;")
