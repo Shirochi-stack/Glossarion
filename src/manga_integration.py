@@ -8909,17 +8909,30 @@ class MangaTranslationTab:
             # Update current file display to show stopped
             self._update_current_file("Translation stopped")
             
-            # Kick off immediate resource shutdown to free RAM
+            # Check if cleanup is enabled before shutting down translator on stop
             try:
-                tr = getattr(self, 'translator', None)
-                if tr and hasattr(tr, 'shutdown'):
-                    import threading
-                    threading.Thread(target=tr.shutdown, name="MangaTranslatorShutdown", daemon=True).start()
-                    self._log("🧹 Initiated translator resource shutdown", "info")
-                    # Important: clear the stale translator reference so the next Start creates a fresh instance
-                    self.translator = None
+                # Check user's cleanup preference
+                auto_cleanup_enabled = False
+                try:
+                    advanced_settings = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                    auto_cleanup_enabled = advanced_settings.get('auto_cleanup_models', False)
+                except Exception:
+                    pass
+                
+                if auto_cleanup_enabled:
+                    # User wants cleanup - shutdown translator to free RAM
+                    tr = getattr(self, 'translator', None)
+                    if tr and hasattr(tr, 'shutdown'):
+                        import threading
+                        threading.Thread(target=tr.shutdown, name="MangaTranslatorShutdown", daemon=True).start()
+                        self._log("🧹 Initiated translator resource shutdown", "info")
+                        # Important: clear the stale translator reference so the next Start creates a fresh instance
+                        self.translator = None
+                else:
+                    # User wants to keep models loaded - just log that we're preserving them
+                    self._log("🔑 Models preserved in RAM (cleanup disabled)", "info")
             except Exception as e:
-                self._log(f"⚠️ Failed to start shutdown: {e}", "warning")
+                self._log(f"⚠️ Failed to check cleanup settings: {e}", "warning")
             
             self._log("\n⏹️ Translation stopped by user", "warning")
             

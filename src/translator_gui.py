@@ -8705,6 +8705,16 @@ Important rules:
             'MANGA_RAPIDOCR_DETECTION_MODE': 'RapidOCR detection mode',
             'MANGA_FULL_PAGE_CONTEXT_PROMPT_LEN': 'Length of full page context prompt',
             'MANGA_OCR_PROMPT_LEN': 'Length of OCR system prompt',
+            # Manga Advanced Settings (Memory Management)
+            'MANGA_AUTO_CLEANUP_MODELS': 'Auto cleanup models after translation',
+            'MANGA_UNLOAD_MODELS_AFTER_TRANSLATION': 'Unload models after translation (reset instance)',
+            'MANGA_USE_SINGLETON_MODELS': 'Use singleton model instances',
+            'MANGA_PARALLEL_PROCESSING': 'Enable parallel processing',
+            'MANGA_MAX_WORKERS': 'Maximum worker threads',
+            'MANGA_PARALLEL_PANEL_TRANSLATION': 'Enable parallel panel translation',
+            'MANGA_PANEL_MAX_WORKERS': 'Maximum concurrent panels',
+            'MANGA_DEBUG_MODE': 'Manga debug mode',
+            'MANGA_SAVE_INTERMEDIATE': 'Save intermediate debug images',
         }
         
         # Check critical variables
@@ -8891,10 +8901,25 @@ Important rules:
                 ('MANGA_FULL_PAGE_CONTEXT_PROMPT_LEN', str(len(self.config.get('manga_full_page_context_prompt', '') or ''))),
                 ('MANGA_OCR_PROMPT_LEN', str(len(self.config.get('manga_ocr_prompt', '') or ''))),
             ]
+            
+            # Add Manga Advanced Settings (Memory Management)
+            manga_adv = ms.get('advanced', {}) if isinstance(ms.get('advanced', {}), dict) else {}
+            manga_advanced_env_mappings = [
+                ('MANGA_AUTO_CLEANUP_MODELS', '1' if manga_adv.get('auto_cleanup_models', False) else '0'),
+                ('MANGA_UNLOAD_MODELS_AFTER_TRANSLATION', '1' if manga_adv.get('unload_models_after_translation', False) else '0'),
+                ('MANGA_USE_SINGLETON_MODELS', '1' if manga_adv.get('use_singleton_models', True) else '0'),
+                ('MANGA_PARALLEL_PROCESSING', '1' if manga_adv.get('parallel_processing', False) else '0'),
+                ('MANGA_MAX_WORKERS', str(manga_adv.get('max_workers', 4))),
+                ('MANGA_PARALLEL_PANEL_TRANSLATION', '1' if manga_adv.get('parallel_panel_translation', False) else '0'),
+                ('MANGA_PANEL_MAX_WORKERS', str(manga_adv.get('panel_max_workers', 2))),
+                ('MANGA_DEBUG_MODE', '1' if manga_adv.get('debug_mode', False) else '0'),
+                ('MANGA_SAVE_INTERMEDIATE', '1' if manga_adv.get('save_intermediate', False) else '0'),
+            ]
 
             # Combine all environment variable mappings
             env_mappings.extend(qa_env_mappings)
             env_mappings.extend(manga_env_mappings)
+            env_mappings.extend(manga_advanced_env_mappings)
 
             # Add additional environment variables converted from legacy Tkinter to PySide6 attributes
             try:
