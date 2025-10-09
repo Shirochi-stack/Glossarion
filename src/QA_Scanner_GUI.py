@@ -1538,6 +1538,37 @@ class QAScannerMixin:
             QPushButton:hover {
                 background-color: #505050;
             }
+            QComboBox {
+                background-color: #404040;
+                color: white;
+                border: 1px solid #555;
+                padding: 5px;
+                padding-right: 25px;
+            }
+            QComboBox:hover {
+                background-color: #505050;
+                border: 1px solid #777;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 30px;
+                border-left: 1px solid #555;
+            }
+            QComboBox::down-arrow {
+                image: url(Halgakos.ico);
+                width: 16px;
+                height: 16px;
+            }
+            QComboBox:on {
+                border: 1px solid #888;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #404040;
+                color: white;
+                border: 1px solid #555;
+                selection-background-color: #505050;
+            }
         """)
         
         # Main layout

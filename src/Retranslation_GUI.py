@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QColor
 import xml.etree.ElementTree as ET
 import zipfile
@@ -509,6 +509,79 @@ class RetranslationMixin:
         show_special_files_cb = QCheckBox("Show special files (cover, nav, toc)")
         show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
         show_special_files_cb.setToolTip("When enabled, shows all files including cover.xhtml, nav.xhtml, toc.xhtml, etc.")
+        
+        # Apply blue checkbox stylesheet (matching Other Settings dialog)
+        show_special_files_cb.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #5a9fd4;
+                border-radius: 2px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #5a9fd4;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
+            }
+            QCheckBox:disabled {
+                color: #666666;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #3a3a3a;
+            }
+        """)
+        
+        # Create checkmark overlay for the check symbol
+        checkmark = QLabel("✓", show_special_files_cb)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_checkmark():
+            try:
+                if checkmark:
+                    checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+        
+        def update_checkmark():
+            try:
+                if show_special_files_cb and checkmark:
+                    if show_special_files_cb.isChecked():
+                        position_checkmark()
+                        checkmark.show()
+                    else:
+                        checkmark.hide()
+            except RuntimeError:
+                pass
+        
+        show_special_files_cb.stateChanged.connect(update_checkmark)
+        
+        def safe_init():
+            try:
+                position_checkmark()
+                update_checkmark()
+            except RuntimeError:
+                pass
+        
+        QTimer.singleShot(0, safe_init)
+        
         title_layout.addWidget(show_special_files_cb)
         
         container_layout.addWidget(title_row)
