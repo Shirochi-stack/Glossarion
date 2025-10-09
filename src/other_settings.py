@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 
 # Local imports - these will be available through the TranslatorGUI instance
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -60,7 +61,7 @@ def setup_other_settings_methods(gui_instance):
         'configure_rolling_summary_prompts', 'toggle_thinking_budget', 
         'toggle_gpt_reasoning_controls', 'open_other_settings',
         'open_multi_api_key_manager', 'show_ai_hunter_settings',
-        'delete_translated_headers_file', 'validate_epub_structure_gui',
+        'delete_translated_headers_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
         'on_extraction_method_change', 'on_extraction_mode_change',
         # Toggle methods
         'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
@@ -2674,20 +2675,56 @@ def _create_prompt_management_section(self, parent):
             pass
     ignore_title_cb.toggled.connect(_on_ignore_title_toggle)
     ignore_h.addWidget(ignore_title_cb)
+    ignore_h.addStretch()
     
-    ignore_h.addSpacing(20)
+    section_v.addWidget(ignore_row)
+    
+    # Buttons row (below ignore options)
+    buttons_row = QWidget()
+    buttons_h = QHBoxLayout(buttons_row)
+    buttons_h.setContentsMargins(20, 5, 0, 0)
+    
+    translate_now_btn = QPushButton("Translate Headers Now")
+    translate_now_btn.setFixedWidth(210)
+    translate_now_btn.clicked.connect(lambda: self.run_standalone_translate_headers())
+    translate_now_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #28a745; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+    )
+    # Set icon
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(icon_path):
+        translate_now_btn.setIcon(QIcon(icon_path))
+    buttons_h.addWidget(translate_now_btn)
+    
+    buttons_h.addSpacing(10)
     
     delete_btn = QPushButton("🗑️Delete Header Files")
     delete_btn.setFixedWidth(210)
     delete_btn.clicked.connect(lambda: self.delete_translated_headers_file())
     delete_btn.setStyleSheet(
-        "QPushButton { background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
-        "QPushButton:hover { background-color: #c82333; }"
+        "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #dc3545; } "
+        "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
     )
-    ignore_h.addWidget(delete_btn)
-    ignore_h.addStretch()
+    # Set icon
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    if os.path.exists(icon_path):
+        delete_btn.setIcon(QIcon(icon_path))
+    buttons_h.addWidget(delete_btn)
+    buttons_h.addStretch()
     
-    section_v.addWidget(ignore_row)
+    section_v.addWidget(buttons_row)
+    
+    # Description for the buttons
+    button_desc = QLabel(
+        "Standalone mode: Translates chapter headers using exact content.opf mapping.\n"
+        "Only translates chapters with matching names (ignores 'response_' prefix and extensions)."
+    )
+    button_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    button_desc.setContentsMargins(20, 2, 0, 10)
+    section_v.addWidget(button_desc)
     
     # Toggle function for enabling/disabling controls
     def _toggle_header_controls(checked):
@@ -2703,6 +2740,7 @@ def _create_prompt_management_section(self, parent):
         ignore_header_cb.setEnabled(checked)
         ignore_title_cb.setEnabled(checked)
         delete_btn.setEnabled(checked)
+        translate_now_btn.setEnabled(checked)
     
     batch_toggle_cb.toggled.connect(_toggle_header_controls)
     
@@ -4736,9 +4774,26 @@ def test_api_connections(self):
         QMessageBox.warning(None, "Test Results", result_message)
     
 
+def run_standalone_translate_headers(self):
+    """Run standalone header translation using the new module"""
+    try:
+        from translate_headers_standalone import run_translate_headers_gui
+        run_translate_headers_gui(self)
+    except Exception as e:
+        from PySide6.QtWidgets import QMessageBox
+        import traceback
+        error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
+        self.append_log(f"❌ {error_msg}")
+        QMessageBox.critical(None, "Error", error_msg)
+
 def delete_translated_headers_file(self):
     """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
     from PySide6.QtWidgets import QMessageBox
+    
+    # Get icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    
     try:
         # Get all selected EPUB files using the same logic as QA scanner
         epub_files_to_process = []
@@ -4767,7 +4822,12 @@ def delete_translated_headers_file(self):
                 epub_files_to_process = [epub_path]
         
         if not epub_files_to_process:
-            QMessageBox.critical(None, "Error", "No EPUB file(s) selected. Please select EPUB file(s) first.")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("No EPUB file(s) selected. Please select EPUB file(s) first.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
             return
         
         # Process each EPUB file to find and delete translated_headers.txt
@@ -4827,7 +4887,12 @@ def delete_translated_headers_file(self):
         
         # Show summary and get user confirmation
         if not files_found and not files_not_found and not errors:
-            QMessageBox.information(None, "No Files", "No EPUB files were processed.")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Files")
+            msg_box.setText("No EPUB files were processed.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
             return
         
         summary_text = f"Summary for {len(epub_files_to_process)} EPUB file(s):\n\n"
@@ -4854,9 +4919,14 @@ def delete_translated_headers_file(self):
             summary_text += "This will allow headers to be re-translated on the next run."
             
             # Confirm deletion
-            result = QMessageBox.question(None, "Confirm Deletion", summary_text, 
-                                         QMessageBox.Yes | QMessageBox.No, 
-                                         QMessageBox.No)
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Confirm Deletion")
+            msg_box.setText(summary_text)
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.No)
+            msg_box.setWindowIcon(icon)
+            result = msg_box.exec()
             
             if result == QMessageBox.Yes:
                 # Delete the files
@@ -4875,16 +4945,36 @@ def delete_translated_headers_file(self):
                     success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
                     if errors:
                         success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."
-                    QMessageBox.information(None, "Success", success_msg)
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Information)
+                    msg_box.setWindowTitle("Success")
+                    msg_box.setText(success_msg)
+                    msg_box.setWindowIcon(icon)
+                    msg_box.exec()
                 else:
-                    QMessageBox.critical(None, "Error", "No files were successfully deleted.")
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Critical)
+                    msg_box.setWindowTitle("Error")
+                    msg_box.setText("No files were successfully deleted.")
+                    msg_box.setWindowIcon(icon)
+                    msg_box.exec()
         else:
             # No files to delete
-            QMessageBox.information(None, "No Files to Delete", summary_text)
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("No Files to Delete")
+            msg_box.setText(summary_text)
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
         
     except Exception as e:
         self.append_log(f"❌ Error deleting translated_headers.txt: {e}")
-        QMessageBox.critical(None, "Error", f"Failed to delete file: {e}")
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Failed to delete file: {e}")
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
 
 def validate_epub_structure_gui(self):
     """GUI wrapper for EPUB structure validation"""

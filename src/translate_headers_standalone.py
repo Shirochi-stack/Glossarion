@@ -1,0 +1,497 @@
+"""
+Standalone Chapter Header Translation Module
+Translates chapter headers using strict content.opf-based mapping
+
+This module can be used independently to translate chapter headers in HTML files
+by matching them to source EPUB chapters using content.opf spine order.
+"""
+
+import os
+import re
+import json
+import zipfile
+import xml.etree.ElementTree as ET
+from typing import Dict, Tuple, Optional, List
+from bs4 import BeautifulSoup
+
+
+def normalize_filename(filename: str, remove_prefix: bool = True) -> str:
+    """
+    Normalize filename by removing extension and optionally the response_ prefix
+    
+    Args:
+        filename: The filename to normalize
+        remove_prefix: Whether to remove the response_ prefix
+        
+    Returns:
+        Normalized filename without extension and prefix
+    """
+    # Remove extension
+    name_no_ext = os.path.splitext(filename)[0]
+    
+    # Remove response_ prefix if requested
+    if remove_prefix and name_no_ext.startswith('response_'):
+        name_no_ext = name_no_ext[9:]  # Remove 'response_'
+    
+    return name_no_ext
+
+
+def extract_source_chapters_with_opf_mapping(
+    epub_path: str, 
+    log_callback=None
+) -> Tuple[Dict[str, str], List[str]]:
+    """
+    Extract source chapter titles from EPUB using strict OPF spine ordering
+    
+    Args:
+        epub_path: Path to the source EPUB file
+        log_callback: Optional callback for logging
+        
+    Returns:
+        Tuple of (chapter_mapping, spine_order) where:
+        - chapter_mapping: Maps normalized source filename to title
+        - spine_order: List of source filenames in spine order
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    chapter_mapping = {}
+    spine_order = []
+    
+    if not os.path.exists(epub_path):
+        log(f"⚠️ Source EPUB not found: {epub_path}")
+        return chapter_mapping, spine_order
+    
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find and parse OPF file
+            opf_content = None
+            opf_path = None
+            
+            for name in zf.namelist():
+                if name.endswith('.opf'):
+                    opf_path = name
+                    opf_content = zf.read(name)
+                    log(f"📋 Found OPF file: {name}")
+                    break
+            
+            if not opf_content:
+                try:
+                    container = zf.read('META-INF/container.xml')
+                    tree = ET.fromstring(container)
+                    rootfile = tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                    if rootfile is not None:
+                        opf_path = rootfile.get('full-path')
+                        if opf_path:
+                            opf_content = zf.read(opf_path)
+                            log(f"📋 Found OPF via container.xml: {opf_path}")
+                except:
+                    pass
+            
+            # Parse OPF to get spine order
+            if opf_content:
+                try:
+                    root = ET.fromstring(opf_content)
+                    
+                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if root.tag.startswith('{'):
+                        default_ns = root.tag[1:root.tag.index('}')]
+                        ns = {'opf': default_ns}
+                    
+                    # Get manifest to map IDs to files
+                    manifest = {}
+                    opf_dir = os.path.dirname(opf_path) if opf_path else ''
+                    
+                    for item in root.findall('.//opf:manifest/opf:item', ns):
+                        item_id = item.get('id')
+                        href = item.get('href')
+                        media_type = item.get('media-type', '')
+                        
+                        if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                            if opf_dir:
+                                full_path = os.path.join(opf_dir, href).replace('\\', '/')
+                            else:
+                                full_path = href
+                            manifest[item_id] = full_path
+                    
+                    # Get spine order - filter out nav/toc/cover
+                    spine = root.find('.//opf:spine', ns)
+                    if spine is not None:
+                        skip_keywords = ['nav', 'toc', 'contents', 'cover']
+                        for itemref in spine.findall('opf:itemref', ns):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest:
+                                file_path = manifest[idref]
+                                basename = os.path.basename(file_path).lower()
+                                
+                                # Skip navigation/toc files
+                                if not any(skip in basename for skip in skip_keywords):
+                                    spine_order.append(file_path)
+                    
+                    log(f"📋 Found {len(spine_order)} content chapters in OPF spine order")
+                    
+                except Exception as e:
+                    log(f"⚠️ Error parsing OPF: {e}")
+                    spine_order = []
+            
+            # Use spine order if available, otherwise alphabetical
+            if spine_order:
+                epub_html_files = spine_order
+                log("✅ Using STRICT OPF spine order for source headers")
+            else:
+                # Fallback: alphabetical order
+                skip_keywords = ['nav', 'toc', 'contents', 'cover']
+                epub_html_files = sorted([
+                    f for f in zf.namelist() 
+                    if f.endswith(('.html', '.xhtml', '.htm')) 
+                    and not f.startswith('__MACOSX')
+                    and not any(skip in os.path.basename(f).lower() for skip in skip_keywords)
+                ])
+                log("⚠️ No OPF spine found, using alphabetical order")
+            
+            log(f"📚 Processing {len(epub_html_files)} content files from source EPUB")
+            
+            # Extract titles from source EPUB files (in order)
+            for idx, content_file in enumerate(epub_html_files):
+                try:
+                    html_content = zf.read(content_file).decode('utf-8', errors='ignore')
+                    
+                    if not html_content:
+                        continue
+                    
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    title = None
+                    for tag_name in ['h1', 'h2', 'h3', 'title']:
+                        tag = soup.find(tag_name)
+                        if tag:
+                            text = tag.get_text().strip()
+                            if text:
+                                title = text
+                                break
+                    
+                    if not title:
+                        p = soup.find('p')
+                        if p:
+                            text = p.get_text().strip()
+                            if text and len(text) < 100:
+                                title = text
+                    
+                    if title:
+                        # Store by normalized filename
+                        normalized = normalize_filename(os.path.basename(content_file), remove_prefix=False)
+                        chapter_mapping[normalized] = title
+                        if idx < 5:
+                            log(f"  Source[{idx}] ({os.path.basename(content_file)}): {title}")
+                    
+                except Exception as e:
+                    log(f"  ⚠️ Error reading source chapter {idx}: {e}")
+                    continue
+            
+            log(f"📚 Extracted {len(chapter_mapping)} titles from source EPUB")
+    
+    except Exception as e:
+        log(f"❌ Error extracting source chapters: {e}")
+        import traceback
+        log(traceback.format_exc())
+    
+    return chapter_mapping, spine_order
+
+
+def match_output_to_source_chapters(
+    output_dir: str,
+    source_mapping: Dict[str, str],
+    spine_order: List[str],
+    log_callback=None
+) -> Dict[str, Tuple[str, str, str]]:
+    """
+    Match output HTML files to source chapters using EXACT name matching
+    
+    Args:
+        output_dir: Directory containing translated HTML files
+        source_mapping: Mapping of normalized source filename to title
+        spine_order: List of source filenames in spine order
+        log_callback: Optional callback for logging
+        
+    Returns:
+        Dict mapping output_filename to (source_title, current_title, output_filename)
+        Only includes chapters where exact match is found
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    matches = {}
+    
+    # Get all HTML files from output directory
+    html_extensions = ('.html', '.xhtml', '.htm')
+    output_files = sorted([
+        f for f in os.listdir(output_dir) 
+        if f.lower().endswith(html_extensions)
+    ])
+    
+    log(f"📁 Found {len(output_files)} HTML files in output directory")
+    log(f"📚 Have {len(source_mapping)} source chapters to match")
+    
+    # Create normalized source mapping for matching
+    normalized_source = {}
+    for source_file, title in source_mapping.items():
+        normalized = normalize_filename(source_file, remove_prefix=False)
+        normalized_source[normalized] = (source_file, title)
+    
+    matched_count = 0
+    skipped_count = 0
+    
+    for output_file in output_files:
+        # Normalize output filename (remove response_ prefix and extension)
+        normalized_output = normalize_filename(output_file, remove_prefix=True)
+        
+        # Check for EXACT match in source (ignoring response_ prefix)
+        if normalized_output in normalized_source:
+            source_file, source_title = normalized_source[normalized_output]
+            
+            # Read current title from output file
+            try:
+                output_path = os.path.join(output_dir, output_file)
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                current_title = None
+                for tag_name in ['h1', 'h2', 'h3', 'title']:
+                    tag = soup.find(tag_name)
+                    if tag:
+                        text = tag.get_text().strip()
+                        if text:
+                            current_title = text
+                            break
+                
+                if not current_title:
+                    current_title = f"Chapter {normalized_output}"
+                
+                matches[output_file] = (source_title, current_title, output_file)
+                matched_count += 1
+                
+                if matched_count <= 5:
+                    log(f"  ✓ Matched: {output_file} → {source_file}")
+                    log(f"    Source: '{source_title}'")
+                    log(f"    Current: '{current_title}'")
+                
+            except Exception as e:
+                log(f"  ⚠️ Error reading {output_file}: {e}")
+        else:
+            skipped_count += 1
+            if skipped_count <= 3:
+                log(f"  ⊘ Skipped (no exact match): {output_file}")
+    
+    log(f"\n📊 Matching results:")
+    log(f"  ✓ Matched: {matched_count} chapters")
+    log(f"  ⊘ Skipped: {skipped_count} chapters (no exact match)")
+    
+    return matches
+
+
+def translate_headers_standalone(
+    epub_path: str,
+    output_dir: str,
+    api_client,
+    config: dict = None,
+    update_html: bool = True,
+    save_to_file: bool = True,
+    log_callback=None
+) -> Dict[str, str]:
+    """
+    Standalone function to translate chapter headers with exact OPF-based matching
+    
+    Args:
+        epub_path: Path to source EPUB file
+        output_dir: Directory containing translated HTML files
+        api_client: UnifiedClient instance for translation
+        config: Optional config dict with translation settings
+        update_html: Whether to update HTML files with translations
+        save_to_file: Whether to save translations to file
+        log_callback: Optional callback for logging
+        
+    Returns:
+        Dict mapping output filename to translated title
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    log("=" * 80)
+    log("🌐 Starting Standalone Header Translation")
+    log("=" * 80)
+    
+    # Step 1: Extract source chapters with OPF mapping
+    log("\n📖 Step 1: Extracting source chapter titles from EPUB...")
+    source_mapping, spine_order = extract_source_chapters_with_opf_mapping(epub_path, log_callback)
+    
+    if not source_mapping:
+        log("❌ No source chapters found!")
+        return {}
+    
+    # Step 2: Match output files to source chapters (EXACT matching only)
+    log("\n🔗 Step 2: Matching output files to source chapters...")
+    matches = match_output_to_source_chapters(output_dir, source_mapping, spine_order, log_callback)
+    
+    if not matches:
+        log("❌ No matching chapters found!")
+        return {}
+    
+    # Step 3: Prepare headers for translation
+    log("\n📝 Step 3: Preparing headers for translation...")
+    headers_to_translate = {}
+    current_titles_map = {}
+    
+    for idx, (output_file, (source_title, current_title, _)) in enumerate(matches.items(), 1):
+        headers_to_translate[idx] = source_title
+        current_titles_map[idx] = {
+            'title': current_title,
+            'filename': output_file
+        }
+    
+    log(f"📚 Prepared {len(headers_to_translate)} headers for translation")
+    
+    # Step 4: Translate using BatchHeaderTranslator
+    log("\n🌐 Step 4: Translating headers...")
+    
+    from metadata_batch_translator import BatchHeaderTranslator
+    
+    translator = BatchHeaderTranslator(api_client, config or {})
+    
+    translated_headers = translator.translate_and_save_headers(
+        html_dir=output_dir,
+        headers_dict=headers_to_translate,
+        batch_size=config.get('headers_per_batch', 350) if config else 350,
+        output_dir=output_dir,
+        update_html=update_html,
+        save_to_file=save_to_file,
+        current_titles=current_titles_map
+    )
+    
+    # Step 5: Map back to output filenames
+    log("\n📊 Step 5: Mapping translations to output files...")
+    result = {}
+    for idx, translated_title in translated_headers.items():
+        if idx in current_titles_map:
+            output_file = current_titles_map[idx]['filename']
+            result[output_file] = translated_title
+            log(f"  ✓ {output_file}: {translated_title}")
+    
+    log("\n" + "=" * 80)
+    log(f"✅ Translation complete! Translated {len(result)} chapter headers")
+    log("=" * 80)
+    
+    return result
+
+
+def run_translate_headers_gui(gui_instance):
+    """
+    GUI wrapper for standalone header translation
+    
+    Args:
+        gui_instance: The GUI instance (translator_gui or other_settings)
+    """
+    from PySide6.QtWidgets import QMessageBox
+    
+    try:
+        # Get EPUB path
+        epub_path = gui_instance.get_current_epub_path()
+        if not epub_path or not os.path.exists(epub_path):
+            QMessageBox.critical(
+                None, 
+                "Error", 
+                "No EPUB file selected or file does not exist."
+            )
+            return
+        
+        # Get output directory
+        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+        output_dir = os.path.join(os.path.dirname(epub_path), epub_base)
+        
+        # Check multiple possible locations
+        if not os.path.exists(output_dir):
+            current_dir = os.getcwd()
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            candidates = [
+                os.path.join(current_dir, epub_base),
+                os.path.join(script_dir, epub_base),
+                os.path.join(current_dir, 'src', epub_base),
+            ]
+            
+            for candidate in candidates:
+                if os.path.isdir(candidate):
+                    output_dir = candidate
+                    break
+        
+        if not os.path.exists(output_dir):
+            QMessageBox.critical(
+                None, 
+                "Error", 
+                f"Output directory not found: {output_dir}\n\n"
+                "Please extract the EPUB first."
+            )
+            return
+        
+        # Get API client
+        if not hasattr(gui_instance, 'api_client') or not gui_instance.api_client:
+            QMessageBox.critical(
+                None, 
+                "Error", 
+                "API client not initialized. Please check your API settings."
+            )
+            return
+        
+        # Get config from GUI
+        config = {
+            'headers_per_batch': int(getattr(gui_instance, 'headers_per_batch_var', 350)),
+            'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
+            'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
+        }
+        
+        # Get options
+        update_html = getattr(gui_instance, 'update_html_headers_var', True)
+        save_to_file = getattr(gui_instance, 'save_header_translations_var', True)
+        
+        gui_instance.append_log("🌐 Starting standalone header translation...")
+        
+        # Run translation
+        result = translate_headers_standalone(
+            epub_path=epub_path,
+            output_dir=output_dir,
+            api_client=gui_instance.api_client,
+            config=config,
+            update_html=update_html,
+            save_to_file=save_to_file,
+            log_callback=gui_instance.append_log
+        )
+        
+        if result:
+            QMessageBox.information(
+                None,
+                "Success",
+                f"Successfully translated {len(result)} chapter headers!\n\n"
+                f"Output directory: {output_dir}"
+            )
+        else:
+            QMessageBox.warning(
+                None,
+                "No Results",
+                "No chapters were translated. Please check the logs."
+            )
+    
+    except Exception as e:
+        import traceback
+        error_msg = f"Error during header translation: {e}\n\n{traceback.format_exc()}"
+        gui_instance.append_log(f"❌ {error_msg}")
+        QMessageBox.critical(None, "Error", error_msg)
