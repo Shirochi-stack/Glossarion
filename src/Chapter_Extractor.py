@@ -667,9 +667,14 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     enhanced_filtering = extraction_mode  # Default fallback
     preserve_structure = True
     
-    # Special files should NEVER be extracted as chapters - they're metadata/navigation only
-    # The TRANSLATE_SPECIAL_FILES toggle only affects EPUB compilation, not extraction
-    translate_special = False  # Always skip special files during extraction
+    # Check if user wants to translate special files (info.xhtml, message.xhtml, etc.)
+    # By default, skip them as they're typically metadata/navigation
+    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+    
+    if translate_special:
+        print("📝 Special files translation is ENABLED (info.xhtml, message.xhtml, etc.)")
+    else:
+        print("📝 Special files translation is DISABLED - skipping navigation/metadata files")
     
     if extraction_mode == "enhanced":
         print("🚀 Initializing Enhanced extraction mode with html2text...")
@@ -736,47 +741,18 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     ProgressBar.update(idx, total_files, prefix="📂 Scanning files")
             
         if name.lower().endswith(('.xhtml', '.html', '.htm')):
-            # Skip special files (cover, nav, toc, etc.) by default unless override is enabled
             basename = os.path.basename(name).lower()
-            if basename in ['cover.html', 'cover.xhtml', 'cover.htm'] and not translate_special:
-                print(f"[SKIP] Cover file excluded: {name}")
-                continue
             
-            # Apply filtering based on the actual extraction mode (or enhanced_filtering for enhanced mode)
-            current_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+            # Skip cover files unless special file translation is enabled
+            if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
+                if not translate_special:
+                    print(f"[SKIP] Cover file excluded: {name}")
+                    continue
+                else:
+                    print(f"[INCLUDE] Cover file included (special files enabled): {name}")
             
-            # Skip special files based on mode and translate_special override
-            if not translate_special:
-                # Only apply special file filtering if override is not enabled
-                if current_filtering == "smart":
-                    # Smart mode: aggressive filtering
-                    lower_name = name.lower()
-                    basename_lower = os.path.basename(name).lower()
-                    # Check if basename (not full path) matches special file patterns
-                    special_patterns = [
-                        'nav.', 'toc.', 'contents.', 'title.', 'index.',
-                        'copyright.', 'acknowledgment.', 'dedication.',
-                        'info.', 'message.', 'notice.'
-                    ]
-                    # Match patterns that are the complete basename (before extension)
-                    if any(basename_lower.startswith(pattern) for pattern in special_patterns):
-                        print(f"[SKIP] Special file excluded: {name}")
-                        continue
-                elif current_filtering == "comprehensive":
-                    # Comprehensive mode: moderate filtering
-                    skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
-                    basename = os.path.basename(name.lower())
-                    should_skip = False
-                    for skip in skip_keywords:
-                        if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
-                            should_skip = True
-                            break
-                    if should_skip:
-                        print(f"[SKIP] Navigation/TOC file: {name}")
-                        continue
-                # else: full mode - no filtering at all
-            # When translate_special is enabled, don't skip any special files
-            
+            # All filtering is now controlled by TRANSLATE_SPECIAL_FILES toggle and extraction mode
+            # No hardcoded special file patterns
             html_files.append(name)
     
     # Finish progress bar if we were using it

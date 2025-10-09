@@ -33,8 +33,8 @@ test_content += "<h1>Test Chapter 4</h1>\n"
 # Create paragraphs that add up to roughly 32,523 tokens
 # Each repetition of the lorem text is ~14 tokens
 # Target: 32,523 tokens, so we need about 2,323 repetitions
-num_paragraphs = 361
-reps_per_para = 10  # Roughly 140 tokens per paragraph, so 361 * 90 = 32,490 tokens
+num_paragraphs = 295
+reps_per_para = 10  # Roughly 110 tokens per paragraph, so 295 * 110 = 32,450 tokens
 for i in range(num_paragraphs):
     test_content += f"<p>This is paragraph {i+1}. " + ("Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * reps_per_para) + "</p>\n"
 test_content += "</body>"

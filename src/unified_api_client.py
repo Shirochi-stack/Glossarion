@@ -4338,15 +4338,18 @@ class UnifiedClient:
                             continue
                         
                         # Check for refusal patterns (content moderation)
-                        if content:
+                        # Only flag as refusal if it's a short response starting with refusal language
+                        if content and len(content) < 500:  # Only check short responses
                             content_lower = content.lower().strip()
-                            refusal_patterns = [
+                            # Check if response starts with common refusal patterns
+                            refusal_starts = [
                                 "i can't", "i cannot", "i'm not able", "i am not able",
-                                "i'm unable", "i am unable", "as an ai", "as a language model",
-                                "i don't feel comfortable", "i cannot assist", "i can't assist",
-                                "i'm sorry, but i can't", "i apologize, but i cannot"
+                                "i'm unable", "i am unable", "i'm sorry, but i can't", 
+                                "i apologize, but i cannot", "i don't feel comfortable",
+                                "i cannot assist", "i can't assist", "as an ai, i",
+                                "as a language model, i"
                             ]
-                            if any(pattern in content_lower for pattern in refusal_patterns):
+                            if any(content_lower.startswith(pattern) for pattern in refusal_starts):
                                 print(f"[{label} {idx+1}] ❌ Refusal pattern detected: {content[:100]}")
                                 continue
                         

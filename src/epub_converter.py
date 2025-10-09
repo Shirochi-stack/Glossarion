@@ -1862,18 +1862,20 @@ class EPUBCompiler:
                 translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                 
                 if translate_special:
-                    # When override is enabled, don't skip any special files
+                    # When override is enabled, include ALL files in chapter ordering
                     skip_list = []
+                    self.log("  📝 Special files mode ENABLED - including all files in TOC")
                 else:
-                    # Default behavior: skip all special files
+                    # Default behavior: skip navigation/metadata files
                     skip_list = ['nav', 'toc', 'contents', 'cover']
+                    self.log("  📝 Special files mode DISABLED - excluding navigation files")
                 
                 for itemref in spine.findall('opf:itemref', ns):
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
                         filename = manifest[idref]
                         # Skip special files unless override is enabled
-                        if not any(skip in filename.lower() for skip in skip_list):
+                        if not skip_list or not any(skip in filename.lower() for skip in skip_list):
                             filename_to_order[filename] = chapter_num
                             self.log(f"  Chapter {chapter_num}: {filename}")
                             chapter_num += 1

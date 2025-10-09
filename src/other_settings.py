@@ -88,7 +88,8 @@ def setup_other_settings_methods(gui_instance):
         'configure_translation_chunk_prompt', 'configure_image_chunk_prompt',
         'configure_image_compression',
         # Helper methods for styling
-        '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel'
+        '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel',
+        '_add_combobox_arrow'
     ]
     
     # Bind each method to the GUI instance
@@ -164,6 +165,43 @@ def _disable_combobox_mousewheel(self, combobox):
 def _disable_spinbox_mousewheel(self, spinbox):
     """Disable mousewheel scrolling on a spinbox (PySide6)"""
     spinbox.wheelEvent = lambda event: None
+
+def _add_combobox_arrow(self, combobox):
+    """Add a unicode arrow overlay to a combobox"""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QLabel
+    from PySide6.QtCore import Qt
+    
+    arrow_label = QLabel("▼", combobox)
+    arrow_label.setStyleSheet("""
+        QLabel {
+            color: white;
+            background: transparent;
+            font-size: 10pt;
+            border: none;
+        }
+    """)
+    arrow_label.setAlignment(Qt.AlignCenter)
+    arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+    
+    def position_arrow():
+        try:
+            if arrow_label and combobox:
+                width = combobox.width()
+                height = combobox.height()
+                arrow_label.setGeometry(width - 20, (height - 16) // 2, 20, 16)
+        except RuntimeError:
+            pass
+    
+    # Position arrow when combobox is resized
+    original_resize = combobox.resizeEvent
+    def new_resize(event):
+        original_resize(event)
+        position_arrow()
+    combobox.resizeEvent = new_resize
+    
+    # Initial position
+    QTimer.singleShot(0, position_arrow)
 
 def configure_rolling_summary_prompts(self):
     """Configure rolling summary prompts (PySide6)"""
@@ -590,6 +628,16 @@ def _create_context_management_section(self, parent):
     role_combo = QComboBox()
     role_combo.addItems(["user", "system"])
     role_combo.setFixedWidth(90)
+    # Add custom styling with unicode arrow
+    role_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(role_combo)
     self._disable_combobox_mousewheel(role_combo)
     try:
         role_combo.setCurrentText(self.summary_role_var)
@@ -610,6 +658,16 @@ def _create_context_management_section(self, parent):
     mode_combo = QComboBox()
     mode_combo.addItems(["append", "replace"])
     mode_combo.setFixedWidth(90)
+    # Add custom styling with unicode arrow
+    mode_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(mode_combo)
     self._disable_combobox_mousewheel(mode_combo)
     try:
         mode_combo.setCurrentText(self.rolling_summary_mode_var)
@@ -825,6 +883,16 @@ def _create_response_handling_section(self, parent):
     self.gpt_effort_combo = QComboBox()
     self.gpt_effort_combo.addItems(["low", "medium", "high"])
     self.gpt_effort_combo.setFixedWidth(90)
+    # Add custom styling with unicode arrow
+    self.gpt_effort_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(self.gpt_effort_combo)
     self._disable_combobox_mousewheel(self.gpt_effort_combo)
     try:
         effort_val = self.gpt_effort_var
@@ -3508,6 +3576,16 @@ def _create_processing_options_section(self, parent):
     scan_combo = QComboBox()
     scan_combo.addItems(["quick-scan", "aggressive", "ai-hunter", "custom"])
     scan_combo.setFixedWidth(120)
+    # Add custom styling with unicode arrow
+    scan_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(scan_combo)
     self._disable_combobox_mousewheel(scan_combo)
     try:
         mode_val = self.scan_phase_mode_var
@@ -3664,6 +3742,16 @@ def _create_processing_options_section(self, parent):
     provider_combo.setEditable(True)
     provider_combo.addItems(provider_options)
     provider_combo.setFixedWidth(160)  # Reduced for more compact layout
+    # Add custom styling with unicode arrow
+    provider_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(provider_combo)
     self._disable_combobox_mousewheel(provider_combo)
     try:
         idx = provider_combo.findText(self.openrouter_preferred_provider_var)
@@ -4478,6 +4566,16 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.azure_version_combo = QComboBox()
     self.azure_version_combo.addItems(versions)
     self.azure_version_combo.setFixedWidth(200)
+    # Add custom styling with unicode arrow
+    self.azure_version_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(self.azure_version_combo)
     self._disable_combobox_mousewheel(self.azure_version_combo)
     try:
         idx = self.azure_version_combo.findText(self.azure_api_version_var)
