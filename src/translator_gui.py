@@ -4034,10 +4034,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.image_progress_manager.update(image_path, content_hash, status="cancelled")
                 return False
             
-            # Initialize API client
+            # Initialize API client with output_dir to enable multi-key mode from environment
             try:
                 from unified_api_client import UnifiedClient
-                client = UnifiedClient(model=model, api_key=api_key)
+                # Pass output_dir to enable environment-based multi-key initialization
+                client = UnifiedClient(model=model, api_key=api_key, output_dir=output_dir)
                 
                 # Set stop flag if the client supports it
                 if hasattr(client, 'set_stop_flag'):

@@ -4602,6 +4602,9 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.more_fields_button.clicked.connect(lambda: self.toggle_more_endpoints())
     section_v.addWidget(self.more_fields_button)
     
+    # Add spacing after Show More Fields button to prevent accidental clicks
+    section_v.addSpacing(15)
+    
     # Container for additional fields (initially hidden)
     self.additional_endpoints_frame = QWidget()
     additional_v = QVBoxLayout(self.additional_endpoints_frame)

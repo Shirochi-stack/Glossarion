@@ -3515,6 +3515,10 @@ class UnifiedClient:
 
         for attempt in range(internal_retries):
             try:
+                # For image requests, prepare messages with embedded image BEFORE validation
+                if image_data:
+                    messages = self._prepare_image_messages(messages, image_data)
+                
                 # Validate request
                 valid, error_msg = self._validate_request(messages, max_tokens)
                 if not valid:
@@ -3524,10 +3528,6 @@ class UnifiedClient:
                 
                 # Apply reinforcement
                 messages = self._apply_pure_reinforcement(messages)
-                
-                # For image requests, prepare messages with embedded image
-                if image_data:
-                    messages = self._prepare_image_messages(messages, image_data)
                 
                 # Get file names - now unique per request AND attempt
                 payload_name, response_name = self._get_file_names(messages, context=self.context)
@@ -4654,7 +4654,18 @@ class UnifiedClient:
                 embedded_messages.append(msg)
         
         if not any(m.get('role') == 'user' for m in embedded_messages):
-            embedded_messages.append({"role": "user", "content": [image_part]})
+            # Vision APIs require text content with images, not just image alone
+            # Extract instruction from system message if available, otherwise use generic prompt
+            user_text = "."
+            for msg in messages:
+                if msg.get('role') == 'system' and msg.get('content'):
+                    # Use the system prompt as the user instruction
+                    user_text = msg['content']
+                    break
+            embedded_messages.append({"role": "user", "content": [
+                {"type": "text", "text": user_text},
+                image_part
+            ]})
         
         return embedded_messages
     
@@ -4802,14 +4813,25 @@ class UnifiedClient:
         if not messages:
             return False, "Empty messages list"
         
-        # Check message content isn't empty - FIX: Add None checks
+        # Check message content isn't empty - FIX: Add None checks AND handle list content for images
         total_chars = 0
+        has_image = False
         for msg in messages:
             if msg is not None and msg.get('role') == 'user':
                 content = msg.get('content', '')
                 if content is not None:
-                    total_chars += len(str(content))
-        if total_chars == 0:
+                    # Handle list content (for image messages)
+                    if isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict):
+                                if part.get('type') == 'text':
+                                    total_chars += len(str(part.get('text', '')))
+                                elif part.get('type') == 'image_url':
+                                    has_image = True
+                                    total_chars += 100  # Count images as having content
+                    else:
+                        total_chars += len(str(content))
+        if total_chars == 0 and not has_image:
             return False, "Empty request content"
         
         # Handle None max_tokens - read from environment

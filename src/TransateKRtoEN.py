@@ -949,16 +949,71 @@ class ProgressManager:
         
         return prog
     
+    def _get_chapter_key(self, actual_num, output_file=None, chapter_obj=None, content_hash=None):
+        """Generate consistent chapter key, handling collisions with composite keys.
+        
+        Returns the key that should be used for this chapter in the progress dict.
+        """
+        chapter_key = str(actual_num)
+        
+        # Determine the output filename
+        if output_file:
+            filename = output_file
+        elif chapter_obj:
+            from TransateKRtoEN import FileUtilities
+            filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
+        else:
+            # No way to determine filename, use simple key
+            return chapter_key
+        
+        # SPECIAL FILES FIX: Check if there's an in-progress entry with matching content_hash
+        # This allows us to update the same entry when completing a special file
+        if content_hash and chapter_key in self.prog["chapters"]:
+            existing_info = self.prog["chapters"][chapter_key]
+            existing_hash = existing_info.get("content_hash")
+            existing_file = existing_info.get("output_file")
+            
+            # If hashes match and it's in-progress (no output file yet), keep using simple key
+            if existing_hash == content_hash and not existing_file:
+                return chapter_key
+        
+        # Check if simple key exists and matches this file
+        if chapter_key in self.prog["chapters"]:
+            existing_info = self.prog["chapters"][chapter_key]
+            existing_file = existing_info.get("output_file")
+            
+            # If the existing entry is for the same file, use simple key
+            if existing_file == filename:
+                return chapter_key
+            
+            # Different file with same chapter number - use composite key
+            file_basename = os.path.splitext(os.path.basename(filename))[0]
+            file_basename = file_basename.replace("response_", "")
+            composite_key = f"{actual_num}_{file_basename}"
+            return composite_key
+        
+        # Check if composite key already exists for this file
+        file_basename = os.path.splitext(os.path.basename(filename))[0]
+        file_basename = file_basename.replace("response_", "")
+        composite_key = f"{actual_num}_{file_basename}"
+        
+        if composite_key in self.prog["chapters"]:
+            return composite_key
+        
+        # No existing entry - use simple key for new entries
+        return chapter_key
+    
     def save(self):
         """Save progress to file"""
         try:
             self.prog["completed_list"] = []
             for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
+                    actual_num = chapter_info.get("actual_num", 0)
                     self.prog["completed_list"].append({
-                        "num": chapter_info.get("chapter_num", 0),
-                        "idx": chapter_info.get("chapter_idx", 0),
-                        "title": f"Chapter {chapter_info.get('chapter_num', 0)}",
+                        "num": actual_num,
+                        "idx": 0,  # idx is not used anymore
+                        "title": f"Chapter {actual_num}",
                         "file": chapter_info.get("output_file", ""),
                         "key": chapter_key
                     })
@@ -982,10 +1037,14 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None):
         """Update progress for a chapter"""
-        # CHANGE THIS LINE - Use actual_num instead of idx
-        chapter_key = str(actual_num)  # WAS: chapter_key = str(idx)
+        # Use helper method to get consistent key
+        chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
+        
+        # Log if we're using a composite key
+        if "_" in chapter_key and chapter_key != str(actual_num):
+            print(f"📌 Using composite key for chapter {actual_num}: {chapter_key}")
         
         chapter_info = {
             "actual_num": actual_num,
@@ -1018,7 +1077,8 @@ class ProgressManager:
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, chapter_obj=None):
         """Check if a chapter needs translation"""
         
-        chapter_key = str(actual_num)
+        # Use helper method to get consistent key
+        chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
@@ -2695,7 +2755,7 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         name_without_ext = os.path.splitext(filename)[0].lower()
         
         # Check for special keywords OR no numbers present
-        special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav']
+        special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
         has_special_keyword = any(name in filename_lower for name in special_keywords)
         has_no_numbers = not re.search(r'\d', name_without_ext)
         
@@ -2707,7 +2767,7 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     
     # Priority 2: Check if this looks like a special file (even without OPF)
     name_without_ext = os.path.splitext(filename)[0].lower()
-    special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface']
+    special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
     has_special_keyword = any(name in name_without_ext for name in special_keywords)
     has_no_numbers = not re.search(r'\d', name_without_ext)
     
@@ -5300,7 +5360,7 @@ def main(log_callback=None, stop_callback=None):
                     needs_translation = True
                     skip_reason = None
                     # Update status to file_missing
-                    progress_manager.update(idx, actual_num, content_hash, None, status="file_missing")
+                    progress_manager.update(idx, actual_num, content_hash, None, status="file_missing", chapter_obj=c)
                     progress_manager.save()
                     
             if not needs_translation:
@@ -5333,7 +5393,7 @@ def main(log_callback=None, stop_callback=None):
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
                 continue
@@ -5607,8 +5667,8 @@ def main(log_callback=None, stop_callback=None):
                     needs_translation = True
                     skip_reason = None
                     # Update status to file_missing
-                    progress_manager.update(idx, actual_num, content_hash, None, status="file_missing")
-                    progress_manager.save() 
+                    progress_manager.update(idx, actual_num, content_hash, None, status="file_missing", chapter_obj=c)
+                    progress_manager.save()
             if not needs_translation:
                 # Track skips for summary (already printed in batch mode section above)
                 if not hasattr(config, '_sequential_skipped_chapters'):
@@ -5657,7 +5717,7 @@ def main(log_callback=None, stop_callback=None):
                     f.write(c["body"])
                 
                 # Update progress tracking
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
                 
@@ -5756,7 +5816,7 @@ def main(log_callback=None, stop_callback=None):
                     f.write(translated_html)
                 
                 print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
-                progress_manager.update(idx, actual_num, content_hash, fname, status=status)
+                progress_manager.update(idx, actual_num, content_hash, fname, status=status, chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
                 continue
@@ -5823,7 +5883,7 @@ def main(log_callback=None, stop_callback=None):
                         c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress")
+                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress", chapter_obj=c)
                 progress_manager.save()
 
                 # Apply ignore filtering to the content before chunk splitting
@@ -6264,7 +6324,7 @@ def main(log_callback=None, stop_callback=None):
             else:
                 chapter_status = "completed"
 
-            progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status)
+            progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c)
             progress_manager.save()
             
             # After completing this chapter, produce a rolling summary and store it for the NEXT chapter

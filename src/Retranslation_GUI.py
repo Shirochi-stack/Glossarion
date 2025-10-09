@@ -25,6 +25,20 @@ import traceback
 class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
     
+    def _clear_layout(self, layout):
+        """Safely clear all items from a layout"""
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            if item:
+                widget = item.widget()
+                if widget:
+                    widget.setParent(None)
+                    widget.deleteLater()
+                elif item.layout():
+                    self._clear_layout(item.layout())
+    
     def _get_dialog_size(self, width_ratio=0.5, height_ratio=0.5):
         """Calculate dialog size as a ratio of screen size (default 50% width, 50% height)"""
         try:
@@ -45,17 +59,45 @@ class RetranslationMixin:
         return int(1920 * width_ratio), int(1080 * height_ratio)
     
     def _show_message(self, msg_type, title, message, parent=None):
-        """Show message using PySide6 QMessageBox"""
+        """Show message using PySide6 QMessageBox with Halgakos icon"""
         try:
+            # Create message box
+            msg_box = QMessageBox(parent)
+            msg_box.setWindowTitle(title)
+            msg_box.setText(message)
+            
+            # Set icon based on message type
             if msg_type == 'info':
-                QMessageBox.information(parent, title, message)
+                msg_box.setIcon(QMessageBox.Information)
             elif msg_type == 'warning':
-                QMessageBox.warning(parent, title, message)
+                msg_box.setIcon(QMessageBox.Warning)
             elif msg_type == 'error':
-                QMessageBox.critical(parent, title, message)
+                msg_box.setIcon(QMessageBox.Critical)
             elif msg_type == 'question':
-                return QMessageBox.question(parent, title, message, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
-            return True
+                msg_box.setIcon(QMessageBox.Question)
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            
+            # Try to set Halgakos window icon
+            try:
+                from PySide6.QtGui import QIcon
+                if hasattr(self, 'base_dir'):
+                    base_dir = self.base_dir
+                else:
+                    import sys
+                    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    msg_box.setWindowIcon(QIcon(ico_path))
+            except:
+                pass
+            
+            # Show message box
+            if msg_type == 'question':
+                return msg_box.exec() == QMessageBox.Yes
+            else:
+                msg_box.exec()
+                return True
+                
         except Exception as e:
             # Fallback to console if dialog fails
             print(f"{title}: {message}")
@@ -94,11 +136,33 @@ class RetranslationMixin:
         # Check if it's an image file
         image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
         if input_path.lower().endswith(image_extensions):
-            self._force_retranslation_single_image(input_path)
+            # For single image, pass the image file path itself
+            self._force_retranslation_images_folder(input_path)
             return
         
+        # Check if dialog already exists for this file and is just hidden
+        file_key = os.path.abspath(input_path)
+        if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
+            # Reuse existing dialog - just show it and refresh data
+            cached_data = self._retranslation_dialog_cache[file_key]
+            if cached_data and cached_data.get('dialog'):
+                dialog = cached_data['dialog']
+                # Refresh the data before showing
+                self._refresh_retranslation_data(cached_data)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+        
         # For EPUB/text files, use the shared logic
-        self._force_retranslation_epub_or_text(input_path, show_special_files_state=False)
+        # Get current toggle state if it exists
+        show_special = False
+        if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
+            cached_data = self._retranslation_dialog_cache[file_key]
+            if cached_data:
+                show_special = cached_data.get('show_special_files_state', False)
+        
+        self._force_retranslation_epub_or_text(input_path, show_special_files_state=show_special)
 
 
     def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None, show_special_files_state=False):
@@ -225,6 +289,9 @@ class RetranslationMixin:
                                         matches = re.findall(r'(\d+)', filename)
                                         if matches:
                                             file_chapter_num = int(matches[-1])
+                                        elif is_special:
+                                            # Special files without numbers should be chapter 0
+                                            file_chapter_num = 0
                                         else:
                                             file_chapter_num = len(spine_chapters)
                                         
@@ -280,9 +347,19 @@ class RetranslationMixin:
             base_name = os.path.splitext(filename)[0]
             expected_response = None
             
-            # Special files should keep their original filenames (no response_ prefix)
+            # Special files need to check what actually exists on disk
             if is_special:
-                expected_response = filename
+                # Check for response_ prefix version
+                response_with_prefix = f"response_{base_name}.html"
+                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                
+                if retain:
+                    expected_response = filename
+                elif os.path.exists(os.path.join(output_dir, response_with_prefix)):
+                    expected_response = response_with_prefix
+                else:
+                    # Fallback to original filename
+                    expected_response = filename
             else:
                 # Handle .htm.html -> .html conversion
                 stripped_base_name = base_name
@@ -339,16 +416,39 @@ class RetranslationMixin:
                         break
             
             # Method 4: CRUCIAL - Match by chapter number (actual_num vs file_chapter_num)
+            # Also check composite keys for special files (e.g., "0_message", "0_TOC")
             if not matched_info:
-                for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                    actual_num = chapter_info.get('actual_num')
-                    # Also check 'chapter_num' as fallback
-                    if actual_num is None:
-                        actual_num = chapter_info.get('chapter_num')
-                    
-                    if actual_num is not None and actual_num == chapter_num:
+                # First try simple chapter number key
+                simple_key = str(chapter_num)
+                if simple_key in prog.get("chapters", {}):
+                    chapter_info = prog["chapters"][simple_key]
+                    # Verify the output file matches
+                    if chapter_info.get('output_file') == expected_response:
                         matched_info = chapter_info
-                        break
+                
+                # If not found, check for composite key (chapter_num + filename)
+                if not matched_info and is_special:
+                    # For special files, try composite key format: "{chapter_num}_{filename_without_extension}"
+                    base_name = os.path.splitext(filename)[0]
+                    # Remove "response_" prefix if present in the filename
+                    if base_name.startswith("response_"):
+                        base_name = base_name[9:]
+                    composite_key = f"{chapter_num}_{base_name}"
+                    
+                    if composite_key in prog.get("chapters", {}):
+                        matched_info = prog["chapters"][composite_key]
+                
+                # Fallback: iterate through all entries matching chapter number
+                if not matched_info:
+                    for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                        actual_num = chapter_info.get('actual_num')
+                        # Also check 'chapter_num' as fallback
+                        if actual_num is None:
+                            actual_num = chapter_info.get('chapter_num')
+                        
+                        if actual_num is not None and actual_num == chapter_num:
+                            matched_info = chapter_info
+                            break
             
             # Determine if translation file exists
             file_exists = os.path.exists(response_path)
@@ -490,8 +590,8 @@ class RetranslationMixin:
             dialog.setWindowTitle("Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation")
             # Make it stay on top so it doesn't hide behind main GUI
             dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
-            # Use 26% width, 36% height for 1920x1080
-            width, height = self._get_dialog_size(0.26, 0.36)
+            # Use 38% width, 36% height for 1920x1080
+            width, height = self._get_dialog_size(0.38, 0.36)
             dialog.resize(width, height)
             
             # Set icon
@@ -621,12 +721,74 @@ class RetranslationMixin:
             # Update the state variable
             show_special_files[0] = show_special_files_cb.isChecked()
             
-            # Close current dialog and reopen with new settings
-            if dialog:
-                dialog.close()
+            # For tabs, clear and rebuild the content in place
+            if tab_frame:
+                # Store the state persistently
+                file_key = os.path.abspath(file_path)
+                if not hasattr(self, '_retranslation_dialog_cache'):
+                    self._retranslation_dialog_cache = {}
+                if file_key not in self._retranslation_dialog_cache:
+                    self._retranslation_dialog_cache[file_key] = {}
+                self._retranslation_dialog_cache[file_key]['show_special_files_state'] = show_special_files[0]
+                
+                # Clear the tab frame's layout
+                for i in reversed(range(container_layout.count())):
+                    widget = container_layout.itemAt(i).widget()
+                    if widget:
+                        widget.setParent(None)
+                        widget.deleteLater()
+                
+                # Rebuild the tab content with new toggle state
+                self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
+                return
             
-            # Reopen the dialog with updated toggle state
-            self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
+            # For standalone dialogs - refresh in place like tabs
+            # Store the state persistently
+            file_key = os.path.abspath(file_path)
+            if not hasattr(self, '_retranslation_dialog_cache'):
+                self._retranslation_dialog_cache = {}
+            if file_key not in self._retranslation_dialog_cache:
+                self._retranslation_dialog_cache[file_key] = {}
+            self._retranslation_dialog_cache[file_key]['show_special_files_state'] = show_special_files[0]
+            
+            # Refresh in place - clear and rebuild container content
+            if dialog and not parent_dialog and container:
+                # Temporarily disconnect the checkbox to prevent recursion
+                show_special_files_cb.stateChanged.disconnect()
+                
+                # Store dialog position and size
+                dialog_pos = dialog.pos()
+                dialog_size = dialog.size()
+                
+                # Clear all widgets from the container
+                while container_layout.count():
+                    item = container_layout.takeAt(0)
+                    if item:
+                        widget = item.widget()
+                        if widget:
+                            widget.setParent(None)
+                            widget.deleteLater()
+                        elif item.layout():
+                            # Handle nested layouts
+                            self._clear_layout(item.layout())
+                
+                # Remove from cache to force rebuild
+                if file_key in self._retranslation_dialog_cache:
+                    del self._retranslation_dialog_cache[file_key]
+                
+                # Now we need to rebuild the content by calling the function with the existing container
+                # The trick is to pass the container as if it's a tab_frame
+                self._force_retranslation_epub_or_text(
+                    file_path, 
+                    parent_dialog=dialog,  # Pass as parent 
+                    tab_frame=container,   # Use container as tab frame to rebuild in place
+                    show_special_files_state=show_special_files[0]
+                )
+                
+                # Restore dialog position and size
+                dialog.move(dialog_pos)
+                dialog.resize(dialog_size)
+                return
         
         # Connect the checkbox to the handler
         show_special_files_cb.stateChanged.connect(on_toggle_special_files)
@@ -683,12 +845,12 @@ class RetranslationMixin:
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
         listbox_font = QFont('Courier', 10)  # Fixed-width font for better alignment
         listbox.setFont(listbox_font)
-        # Use 21% of screen width (half of original ~42% for 1920px screen)
-        min_width, _ = self._get_dialog_size(0.21, 0)
+        # Use 36% of screen width
+        min_width, _ = self._get_dialog_size(0.36, 0)
         listbox.setMinimumWidth(min_width)
         main_layout.addWidget(listbox)
         
-        # Populate listbox
+        # Populate listbox with dynamic column widths
         status_icons = {
             'completed': '✅',
             'failed': '❌',
@@ -709,6 +871,21 @@ class RetranslationMixin:
             'unknown': 'Unknown'
         }
         
+        # Calculate maximum widths for dynamic column sizing
+        max_original_len = 0
+        max_output_len = 0
+        
+        for info in chapter_display_info:
+            if 'opf_position' in info:
+                original_file = info.get('original_filename', '')
+                output_file = info['output_file']
+                max_original_len = max(max_original_len, len(original_file))
+                max_output_len = max(max_output_len, len(output_file))
+        
+        # Set minimum widths to prevent too narrow columns
+        max_original_len = max(max_original_len, 20)
+        max_output_len = max(max_output_len, 25)
+        
         for info in chapter_display_info:
             chapter_num = info['num']
             status = info['status']
@@ -718,15 +895,15 @@ class RetranslationMixin:
             
             # Format display with OPF info if available
             if 'opf_position' in info:
-                # OPF-based display
+                # OPF-based display with dynamic widths
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1  # 1-based for display
                 
                 # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
                 # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
@@ -777,28 +954,31 @@ class RetranslationMixin:
             'listbox': listbox,
             'selection_count_label': selection_count_label,
             'dialog': dialog,
-            'container': container
+            'container': container,
+            'show_special_files_state': show_special_files[0],  # Store current toggle state
+            'show_special_files_cb': show_special_files_cb  # Store checkbox reference
         }
         
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
             self._add_retranslation_buttons_opf(result)
+            
+            # Override close event to hide instead of destroy
+            def closeEvent(event):
+                event.ignore()  # Ignore the close event
+                dialog.hide()   # Just hide the dialog
+            
+            dialog.closeEvent = closeEvent
+            
+            # Cache the dialog for reuse
+            if not hasattr(self, '_retranslation_dialog_cache'):
+                self._retranslation_dialog_cache = {}
+            
+            file_key = os.path.abspath(file_path)
+            self._retranslation_dialog_cache[file_key] = result
+            
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()
-            # Store reference to prevent garbage collection
-            if not hasattr(self, '_retranslation_dialogs'):
-                self._retranslation_dialogs = []
-            self._retranslation_dialogs.append(dialog)
-            
-            # Clean up reference when dialog is closed
-            def on_dialog_close():
-                try:
-                    if hasattr(self, '_retranslation_dialogs') and dialog in self._retranslation_dialogs:
-                        self._retranslation_dialogs.remove(dialog)
-                except:
-                    pass
-            
-            dialog.finished.connect(on_dialog_close)
         elif not parent_dialog or tab_frame:
             # Embedded in tab - just add buttons
             self._add_retranslation_buttons_opf(result)
@@ -962,6 +1142,7 @@ class RetranslationMixin:
                     if ch_info['status'] in ['completed', 'completed_empty', 'completed_image_only', 'qa_failed']:
                         target_output_file = ch_info['output_file']
                         chapter_key = None
+                        old_status = ch_info['status']  # Define old_status before using it
                         
                         # Search through all chapters to find the one with matching output_file
                         for key, ch_data in data['prog']["chapters"].items():
@@ -971,7 +1152,6 @@ class RetranslationMixin:
                         
                         # Update the chapter status if we found the key
                         if chapter_key and chapter_key in data['prog']["chapters"]:
-                            old_status = ch_info['status']
                             print(f"Resetting {old_status} status to pending for chapter key {chapter_key} (output file: {target_output_file})")
                             
                             # Reset status to pending for retranslation
@@ -1029,49 +1209,58 @@ class RetranslationMixin:
         
         # Add buttons - First row
         btn_select_all = QPushButton("Select All")
-        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_select_all.setMinimumHeight(32)
+        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_select_all.clicked.connect(select_all)
         button_layout.addWidget(btn_select_all, 0, 0)
         
         btn_clear = QPushButton("Clear")
-        btn_clear.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_clear.setMinimumHeight(32)
+        btn_clear.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_clear.clicked.connect(clear_selection)
         button_layout.addWidget(btn_clear, 0, 1)
         
         btn_select_completed = QPushButton("Select Completed")
-        btn_select_completed.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_select_completed.setMinimumHeight(32)
+        btn_select_completed.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_select_completed.clicked.connect(lambda: select_status('completed'))
         button_layout.addWidget(btn_select_completed, 0, 2)
         
         btn_select_missing = QPushButton("Select Missing")
-        btn_select_missing.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_select_missing.setMinimumHeight(32)
+        btn_select_missing.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_select_missing.clicked.connect(lambda: select_status('missing'))
         button_layout.addWidget(btn_select_missing, 0, 3)
         
         btn_select_failed = QPushButton("Select Failed")
-        btn_select_failed.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_select_failed.setMinimumHeight(32)
+        btn_select_failed.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_select_failed.clicked.connect(lambda: select_status('failed'))
         button_layout.addWidget(btn_select_failed, 0, 4)
         
         # Second row
         btn_retranslate = QPushButton("Retranslate Selected")
-        btn_retranslate.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_retranslate.setMinimumHeight(32)
+        btn_retranslate.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_retranslate.clicked.connect(retranslate_selected)
         button_layout.addWidget(btn_retranslate, 1, 0, 1, 2)
         
         btn_remove_qa = QPushButton("Remove QA Failed Mark")
-        btn_remove_qa.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_remove_qa.setMinimumHeight(32)
+        btn_remove_qa.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_remove_qa.clicked.connect(remove_qa_failed_mark)
         button_layout.addWidget(btn_remove_qa, 1, 2, 1, 1)
         
         # Add refresh button
         btn_refresh = QPushButton("🔄 Refresh")
-        btn_refresh.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_refresh.setMinimumHeight(32)
+        btn_refresh.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_refresh.clicked.connect(lambda: self._refresh_retranslation_data(data))
         button_layout.addWidget(btn_refresh, 1, 3, 1, 1)
         
         btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_cancel.setMinimumHeight(32)
+        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
 
@@ -1079,6 +1268,9 @@ class RetranslationMixin:
         """Refresh the retranslation dialog data by reloading progress and updating display"""
         try:
             print("🔄 Refreshing retranslation data...")
+            
+            # Save current selections to restore after refresh
+            selected_indices = [data['listbox'].row(item) for item in data['listbox'].selectedItems()]
             
             # Reload progress file
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
@@ -1093,9 +1285,19 @@ class RetranslationMixin:
             # Update statistics if available
             self._update_statistics_display(data)
             
-            # Clear selections
-            data['listbox'].clearSelection()
-            data['selection_count_label'].setText("Selected: 0")
+            # Restore selections
+            if selected_indices:
+                for idx in selected_indices:
+                    if idx < data['listbox'].count():
+                        data['listbox'].item(idx).setSelected(True)
+                # Update selection count
+                if 'selection_count_label' in data and data['selection_count_label']:
+                    data['selection_count_label'].setText(f"Selected: {len(selected_indices)}")
+            else:
+                # Clear selections if there were none
+                data['listbox'].clearSelection()
+                if 'selection_count_label' in data and data['selection_count_label']:
+                    data['selection_count_label'].setText("Selected: 0")
             
             print("✅ Retranslation data refreshed successfully")
             
@@ -1119,16 +1321,21 @@ class RetranslationMixin:
                 if chapter_info.get('output_file') == output_file:
                     matched_info = chapter_info
                     break
-                # Also try matching by chapter number as fallback
-                if not matched_info:
+            
+            # If no match by output_file, try matching by chapter number
+            if not matched_info:
+                for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
                     actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
                     if actual_num is not None and actual_num == info['num']:
                         matched_info = chapter_info
                         break
             
-            # Update status based on current state
+            # Update status based on current state from progress file
             if matched_info:
                 new_status = matched_info.get('status', 'unknown')
+                # Handle completed_empty as completed for display
+                if new_status == 'completed_empty':
+                    new_status = 'completed'
                 # Verify file actually exists for completed status
                 if new_status == 'completed' and not os.path.exists(output_path):
                     new_status = 'file_missing'
@@ -1167,6 +1374,21 @@ class RetranslationMixin:
             'unknown': 'Unknown'
         }
         
+        # Calculate maximum widths for dynamic column sizing
+        max_original_len = 0
+        max_output_len = 0
+        
+        for info in data['chapter_display_info']:
+            if 'opf_position' in info:
+                original_file = info.get('original_filename', '')
+                output_file = info['output_file']
+                max_original_len = max(max_original_len, len(original_file))
+                max_output_len = max(max_output_len, len(output_file))
+        
+        # Set minimum widths to prevent too narrow columns
+        max_original_len = max(max_original_len, 20)
+        max_output_len = max(max_output_len, 25)
+        
         # Rebuild listbox items
         for info in data['chapter_display_info']:
             chapter_num = info['num']
@@ -1177,15 +1399,15 @@ class RetranslationMixin:
             
             # Format display with OPF info if available
             if 'opf_position' in info:
-                # OPF-based display
+                # OPF-based display with dynamic widths
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1  # 1-based for display
                 
                 # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
                 # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
@@ -1270,157 +1492,239 @@ class RetranslationMixin:
 
     def _force_retranslation_multiple_files(self):
         """Handle force retranslation when multiple files are selected - now uses shared logic"""
-        
-        # First, check if all selected files are images from the same folder
-        # This handles the case where folder selection results in individual file selections
-        if len(self.selected_files) > 1:
-            all_images = True
-            parent_dirs = set()
+        try:
+            print(f"[DEBUG] _force_retranslation_multiple_files called with {len(self.selected_files)} files")
+            
+            # First, check if all selected files are images from the same folder
+            # This handles the case where folder selection results in individual file selections
+            if len(self.selected_files) > 1:
+                all_images = True
+                parent_dirs = set()
+                
+                image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+                
+                for file_path in self.selected_files:
+                    if os.path.isfile(file_path) and file_path.lower().endswith(image_extensions):
+                        parent_dirs.add(os.path.dirname(file_path))
+                    else:
+                        all_images = False
+                        break
+                
+                # If all files are images from the same directory, treat it as a folder selection
+                if all_images and len(parent_dirs) == 1:
+                    folder_path = parent_dirs.pop()
+                    print(f"[DEBUG] Detected {len(self.selected_files)} images from same folder: {folder_path}")
+                    print(f"[DEBUG] Treating as folder selection")
+                    self._force_retranslation_images_folder(folder_path)
+                    return
+            
+            # Otherwise, continue with normal categorization
+            epub_files = []
+            text_files = []
+            image_files = []
+            folders = []
             
             image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
             
             for file_path in self.selected_files:
-                if os.path.isfile(file_path) and file_path.lower().endswith(image_extensions):
-                    parent_dirs.add(os.path.dirname(file_path))
-                else:
-                    all_images = False
-                    break
+                if os.path.isdir(file_path):
+                    folders.append(file_path)
+                elif file_path.lower().endswith('.epub'):
+                    epub_files.append(file_path)
+                elif file_path.lower().endswith('.txt'):
+                    text_files.append(file_path)
+                elif file_path.lower().endswith(image_extensions):
+                    image_files.append(file_path)
             
-            # If all files are images from the same directory, treat it as a folder selection
-            if all_images and len(parent_dirs) == 1:
-                folder_path = parent_dirs.pop()
-                print(f"[DEBUG] Detected {len(self.selected_files)} images from same folder: {folder_path}")
-                print(f"[DEBUG] Treating as folder selection")
-                self._force_retranslation_images_folder(folder_path)
+            # Build summary
+            summary_parts = []
+            if epub_files:
+                summary_parts.append(f"{len(epub_files)} EPUB file(s)")
+            if text_files:
+                summary_parts.append(f"{len(text_files)} text file(s)")
+            if image_files:
+                summary_parts.append(f"{len(image_files)} image file(s)")
+            if folders:
+                summary_parts.append(f"{len(folders)} folder(s)")
+            
+            if not summary_parts:
+                QMessageBox.information(self, "Info", "No valid files selected.")
+                return
+            
+            # Create a unique key for the current selection
+            selection_key = tuple(sorted(self.selected_files))
+            
+            # Check if we already have a cached dialog for this exact selection
+            if (hasattr(self, '_multi_file_retranslation_dialog') and 
+                self._multi_file_retranslation_dialog and 
+                hasattr(self, '_multi_file_selection_key') and 
+                self._multi_file_selection_key == selection_key):
+                # Reuse existing dialog - just show it
+                self._multi_file_retranslation_dialog.show()
+                self._multi_file_retranslation_dialog.raise_()
+                self._multi_file_retranslation_dialog.activateWindow()
+                return
+            
+            # If there's an existing dialog for a different selection, destroy it first
+            if hasattr(self, '_multi_file_retranslation_dialog') and self._multi_file_retranslation_dialog:
+                self._multi_file_retranslation_dialog.close()
+                self._multi_file_retranslation_dialog.deleteLater()
+                self._multi_file_retranslation_dialog = None
+            
+            # Create main dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Force Retranslation - Multiple Files")
+            # Increased height from 18% to 25% for better visibility
+            width, height = self._get_dialog_size(0.25, 0.25)
+            dialog.resize(width, height)
+            
+            # Set icon
+            try:
+                from PySide6.QtGui import QIcon
+                if hasattr(self, 'base_dir'):
+                    base_dir = self.base_dir
+                else:
+                    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    dialog.setWindowIcon(QIcon(ico_path))
+            except Exception as e:
+                print(f"Failed to load icon: {e}")
+            
+            dialog_layout = QVBoxLayout(dialog)
+            
+            # Summary label
+            summary_label = QLabel(f"Selected: {', '.join(summary_parts)}")
+            summary_font = QFont('Arial', 12)
+            summary_font.setBold(True)
+            summary_label.setFont(summary_font)
+            dialog_layout.addWidget(summary_label)
+            
+            # Create tab widget
+            notebook = QTabWidget()
+            dialog_layout.addWidget(notebook)
+            
+            # Track all tab data
+            tab_data = []
+            tabs_created = False
+            
+            # Create tabs for EPUB/text files using shared logic
+            for file_path in epub_files + text_files:
+                file_base = os.path.splitext(os.path.basename(file_path))[0]
+                
+                # Quick check if output exists
+                if not os.path.exists(file_base):
+                    continue
+                
+                # Create tab
+                tab_frame = QWidget()
+                tab_layout = QVBoxLayout(tab_frame)
+                tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
+                notebook.addTab(tab_frame, tab_name)
+                tabs_created = True
+                
+                # Get persisted state for this file
+                file_key = os.path.abspath(file_path)
+                show_special = False
+                if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
+                    cached_data = self._retranslation_dialog_cache[file_key]
+                    if cached_data:
+                        show_special = cached_data.get('show_special_files_state', False)
+                
+                # Use shared logic to populate the tab
+                tab_result = self._force_retranslation_epub_or_text(
+                    file_path, 
+                    parent_dialog=dialog, 
+                    tab_frame=tab_frame,
+                    show_special_files_state=show_special
+                )
+                
+                if tab_result:
+                    tab_data.append(tab_result)
+            
+            # Create tabs for image folders (keeping existing logic for now)
+            for folder_path in folders:
+                folder_result = self._create_image_folder_tab(
+                    folder_path, 
+                    notebook, 
+                    dialog
+                )
+                if folder_result:
+                    tab_data.append(folder_result)
+                    tabs_created = True
+            
+            # If only individual image files selected and no tabs created yet
+            if image_files and not tabs_created:
+                # Create a single tab for all individual images
+                image_tab_result = self._create_individual_images_tab(
+                    image_files,
+                    notebook,
+                    dialog
+                )
+                if image_tab_result:
+                    tab_data.append(image_tab_result)
+                    tabs_created = True
+            
+            # If no tabs were created from folders, try scanning folders for individual images
+            if not tabs_created and folders:
+                # Scan folders for individual image files
+                scanned_images = []
+                for folder_path in folders:
+                    if os.path.isdir(folder_path):
+                        try:
+                            for file in os.listdir(folder_path):
+                                file_path = os.path.join(folder_path, file)
+                                if os.path.isfile(file_path) and file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                                    scanned_images.append(file_path)
+                        except:
+                            pass
+                
+                # If we found images, create a tab for them
+                if scanned_images:
+                    image_tab_result = self._create_individual_images_tab(
+                        scanned_images,
+                        notebook,
+                        dialog
+                    )
+                    if image_tab_result:
+                        tab_data.append(image_tab_result)
+                        tabs_created = True
+            
+            # If still no tabs were created, show error
+            if not tabs_created:
+                QMessageBox.information(self, "Info", 
+                    "No translation output found for any of the selected files.\n\n"
+                    "Make sure the output folders exist in your script directory.")
+                dialog.close()
                 return
         
-        # Otherwise, continue with normal categorization
-        epub_files = []
-        text_files = []
-        image_files = []
-        folders = []
-        
-        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
-        
-        for file_path in self.selected_files:
-            if os.path.isdir(file_path):
-                folders.append(file_path)
-            elif file_path.lower().endswith('.epub'):
-                epub_files.append(file_path)
-            elif file_path.lower().endswith('.txt'):
-                text_files.append(file_path)
-            elif file_path.lower().endswith(image_extensions):
-                image_files.append(file_path)
-        
-        # Build summary
-        summary_parts = []
-        if epub_files:
-            summary_parts.append(f"{len(epub_files)} EPUB file(s)")
-        if text_files:
-            summary_parts.append(f"{len(text_files)} text file(s)")
-        if image_files:
-            summary_parts.append(f"{len(image_files)} image file(s)")
-        if folders:
-            summary_parts.append(f"{len(folders)} folder(s)")
-        
-        if not summary_parts:
-            QMessageBox.information(self, "Info", "No valid files selected.")
-            return
-        
-        # Create main dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Force Retranslation - Multiple Files")
-        # Use 25% width, 18% height (half of original ~49% width, 36% height for 1920x1080)
-        width, height = self._get_dialog_size(0.25, 0.18)
-        dialog.resize(width, height)
-        dialog_layout = QVBoxLayout(dialog)
-        
-        # Summary label
-        summary_label = QLabel(f"Selected: {', '.join(summary_parts)}")
-        summary_font = QFont('Arial', 12)
-        summary_font.setBold(True)
-        summary_label.setFont(summary_font)
-        dialog_layout.addWidget(summary_label)
-        
-        # Create tab widget
-        notebook = QTabWidget()
-        dialog_layout.addWidget(notebook)
-        
-        # Track all tab data
-        tab_data = []
-        tabs_created = False
-        
-        # Create tabs for EPUB/text files using shared logic
-        for file_path in epub_files + text_files:
-            file_base = os.path.splitext(os.path.basename(file_path))[0]
+            # Add unified button bar that works across all tabs
+            self._add_multi_file_buttons(dialog, notebook, tab_data)
             
-            # Quick check if output exists
-            if not os.path.exists(file_base):
-                continue
+            # Override close event to minimize instead of destroy
+            def closeEvent(event):
+                event.ignore()  # Ignore the close event
+                dialog.hide()   # Just hide (minimize) the dialog
             
-            # Create tab
-            tab_frame = QWidget()
-            tab_layout = QVBoxLayout(tab_frame)
-            tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
-            notebook.addTab(tab_frame, tab_name)
-            tabs_created = True
+            dialog.closeEvent = closeEvent
             
-            # Use shared logic to populate the tab
-            tab_result = self._force_retranslation_epub_or_text(
-                file_path, 
-                parent_dialog=dialog, 
-                tab_frame=tab_frame
-            )
+            # Cache the dialog and selection key for reuse
+            self._multi_file_retranslation_dialog = dialog
+            self._multi_file_selection_key = selection_key
             
-            if tab_result:
-                tab_data.append(tab_result)
-        
-        # Create tabs for image folders (keeping existing logic for now)
-        for folder_path in folders:
-            folder_result = self._create_image_folder_tab(
-                folder_path, 
-                notebook, 
-                dialog
-            )
-            if folder_result:
-                tab_data.append(folder_result)
-                tabs_created = True
-        
-        # If only individual image files selected and no tabs created yet
-        if image_files and not tabs_created:
-            # Create a single tab for all individual images
-            image_tab_result = self._create_individual_images_tab(
-                image_files,
-                notebook,
-                dialog
-            )
-            if image_tab_result:
-                tab_data.append(image_tab_result)
-                tabs_created = True
-        
-        # If no tabs were created, show error
-        if not tabs_created:
-            QMessageBox.information(self, "Info", 
-                "No translation output found for any of the selected files.\n\n"
-                "Make sure the output folders exist in your script directory.")
-            dialog.close()
-            return
-        
-        # Add unified button bar that works across all tabs
-        self._add_multi_file_buttons(dialog, notebook, tab_data)
+            # Show the dialog (non-modal to allow interaction with other windows)
+            dialog.show()
+            
+        except Exception as e:
+            print(f"[ERROR] _force_retranslation_multiple_files failed: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to open retranslation dialog:\n{str(e)}")
 
     def _add_multi_file_buttons(self, dialog, notebook, tab_data):
-        """Add a simple cancel button at the bottom of the dialog"""
-        button_frame = QWidget()
-        button_layout = QHBoxLayout(button_frame)
-        button_layout.addStretch()
-        
-        btn_close = QPushButton("Close All")
-        btn_close.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
-        btn_close.clicked.connect(dialog.close)
-        button_layout.addWidget(btn_close)
-        
-        dialog.layout().addWidget(button_frame)
+        """Placeholder for future multi-file button functionality"""
+        # No buttons needed - dialog has standard close button
+        pass
               
     def _create_individual_images_tab(self, image_files, notebook, parent_dialog):
         """Create a tab for individual image files"""
@@ -1535,6 +1839,7 @@ class RetranslationMixin:
         tab_layout.addWidget(listbox)
         
         # Find files
+        file_info = []
         
         # Add HTML files
         for file in os.listdir(output_dir):
@@ -1592,14 +1897,31 @@ class RetranslationMixin:
 
     def _force_retranslation_images_folder(self, folder_path):
         """Handle force retranslation for image folders"""
-        folder_name = os.path.basename(folder_path)
+        # If folder_path is actually a file (single image), get its directory
+        if os.path.isfile(folder_path):
+            # Single image file - use basename without extension
+            folder_name = os.path.splitext(os.path.basename(folder_path))[0]
+        else:
+            # Folder - use folder name as-is
+            folder_name = os.path.basename(folder_path)
+        
+        # Check if we already have a cached dialog for this folder
+        folder_key = os.path.abspath(folder_path)
+        if hasattr(self, '_image_retranslation_dialog_cache') and folder_key in self._image_retranslation_dialog_cache:
+            cached_dialog = self._image_retranslation_dialog_cache[folder_key]
+            if cached_dialog:
+                # Reuse existing dialog - just show it
+                cached_dialog.show()
+                cached_dialog.raise_()
+                cached_dialog.activateWindow()
+                return
         
         # Look for output folder in the SCRIPT'S directory, not relative to the selected folder
         script_dir = os.getcwd()  # Current working directory where the script is running
         
         # Check multiple possible output folder patterns IN THE SCRIPT DIRECTORY
         possible_output_dirs = [
-            os.path.join(script_dir, folder_name),  # Script dir + folder name
+            os.path.join(script_dir, folder_name),  # Script dir + folder name (without extension)
             os.path.join(script_dir, f"{folder_name}_translated"),  # Script dir + folder_translated
             folder_name,  # Just the folder name in current directory
             f"{folder_name}_translated",  # folder_translated in current directory
@@ -1671,10 +1993,15 @@ class RetranslationMixin:
                 has_progress_tracking = False
         
         # Also scan directory for any HTML files not in progress
+        # Only include translated image files (response_*.html pattern)
         try:
             for file in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, file)
-                if os.path.isfile(file_path) and file.endswith('.html') and file not in html_files:
+                # Only include files matching response_NNN_*.html pattern
+                if (os.path.isfile(file_path) and 
+                    file.endswith('.html') and 
+                    file not in html_files and
+                    re.match(r'response_\d+_', file)):
                     html_files.append(file)
                     print(f"Found untracked HTML file: {file}")
         except Exception as e:
@@ -1701,21 +2028,24 @@ class RetranslationMixin:
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Force Retranslation - Images")
-        # Use 21% width, 15% height (half of original ~42% width, 30% height for 1920x1080)
-        width, height = self._get_dialog_size(0.21, 0.15)
+        # Decreased width to 18%, increased height to 25% for better vertical space
+        width, height = self._get_dialog_size(0.18, 0.25)
         dialog.resize(width, height)
-        dialog_layout = QVBoxLayout(dialog)
         
-        # Add instructions with more detail
-        instruction_text = f"Output folder: {output_dir}\n"
-        instruction_text += f"Found {len(html_files)} translated images and {len(image_files)} cover images"
-        if has_progress_tracking:
-            instruction_text += " (with progress tracking)"
-        instruction_label = QLabel(instruction_text)
-        instruction_font = QFont('Arial', 11)
-        instruction_label.setFont(instruction_font)
-        instruction_label.setAlignment(Qt.AlignLeft)
-        dialog_layout.addWidget(instruction_label)
+        # Set icon
+        try:
+            from PySide6.QtGui import QIcon
+            if hasattr(self, 'base_dir'):
+                base_dir = self.base_dir
+            else:
+                base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                dialog.setWindowIcon(QIcon(ico_path))
+        except Exception as e:
+            print(f"Failed to load icon: {e}")
+        
+        dialog_layout = QVBoxLayout(dialog)
         
         # Create listbox (QListWidget has built-in scrolling)
         listbox = QListWidget()
@@ -1851,21 +2181,35 @@ class RetranslationMixin:
                         # Try to find the original image with common extensions
                         original_found = False
                         
+                        # Look for the source image in multiple locations
+                        search_paths = [
+                            folder_path,  # Original folder path
+                            os.path.dirname(folder_path),  # Parent of folder path
+                            os.getcwd(),  # Script directory
+                        ]
+                        
                         for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
-                            # Check in the parent folder (where source images are)
-                            possible_source = os.path.join(folder_path, base_name + ext)
-                            if os.path.exists(possible_source):
-                                # Copy to images folder
-                                dest_path = os.path.join(images_dir, base_name + ext)
-                                if not os.path.exists(dest_path):
-                                    import shutil
-                                    shutil.copy2(possible_source, dest_path)
-                                    print(f"Copied {base_name + ext} to images folder")
-                                original_found = True
+                            for search_path in search_paths:
+                                if not search_path or not os.path.exists(search_path):
+                                    continue
+                                    
+                                # Check in the search path
+                                possible_source = os.path.join(search_path, base_name + ext)
+                                if os.path.exists(possible_source) and os.path.isfile(possible_source):
+                                    # Copy to images folder
+                                    dest_path = os.path.join(images_dir, base_name + ext)
+                                    if not os.path.exists(dest_path):
+                                        import shutil
+                                        shutil.copy2(possible_source, dest_path)
+                                        print(f"Copied {base_name + ext} from {possible_source} to images folder")
+                                    original_found = True
+                                    break
+                            if original_found:
                                 break
                         
                         if not original_found:
-                            print(f"Warning: Could not find original image for {html_file}")
+                            print(f"Warning: Could not find original image for {html_file} in: {search_paths}")
+                            # Even if source not found, we can still delete the HTML and mark it
                     
                     # Delete the HTML translation file
                     if os.path.exists(item['path']):
@@ -1981,32 +2325,49 @@ class RetranslationMixin:
         # Add buttons in grid layout (similar to EPUB/text retranslation)
         # Row 0: Selection buttons
         btn_select_all = QPushButton("Select All")
-        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+        btn_select_all.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_select_all.clicked.connect(select_all)
         button_layout.addWidget(btn_select_all, 0, 0)
         
         btn_clear_selection = QPushButton("Clear Selection")
-        btn_clear_selection.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_clear_selection.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_clear_selection.clicked.connect(clear_selection)
         button_layout.addWidget(btn_clear_selection, 0, 1)
         
         btn_select_translated = QPushButton("Select Translated")
-        btn_select_translated.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        btn_select_translated.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_select_translated.clicked.connect(select_translated)
         button_layout.addWidget(btn_select_translated, 0, 2)
         
         btn_mark_skipped = QPushButton("Mark as Skipped")
-        btn_mark_skipped.setStyleSheet("QPushButton { background-color: #ffc107; color: white; padding: 5px 15px; }")
+        btn_mark_skipped.setStyleSheet("QPushButton { background-color: #e0a800; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_mark_skipped.clicked.connect(mark_as_skipped)
         button_layout.addWidget(btn_mark_skipped, 0, 3)
         
         # Row 1: Action buttons
         btn_delete = QPushButton("Delete Selected")
-        btn_delete.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; }")
+        btn_delete.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_delete.clicked.connect(retranslate_selected)
         button_layout.addWidget(btn_delete, 1, 0, 1, 2)
         
         btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_cancel.clicked.connect(dialog.close)
         button_layout.addWidget(btn_cancel, 1, 2, 1, 2)
+        
+        # Override close event to hide instead of destroy
+        def closeEvent(event):
+            event.ignore()  # Ignore the close event
+            dialog.hide()   # Just hide the dialog
+        
+        dialog.closeEvent = closeEvent
+        
+        # Cache the dialog for reuse
+        if not hasattr(self, '_image_retranslation_dialog_cache'):
+            self._image_retranslation_dialog_cache = {}
+        
+        folder_key = os.path.abspath(folder_path)
+        self._image_retranslation_dialog_cache[folder_key] = dialog
+        
+        # Show the dialog (non-modal to allow interaction with other windows)
+        dialog.show()

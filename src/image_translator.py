@@ -2059,10 +2059,12 @@ class ImageTranslator:
                         {"role": "assistant", "content": ctx["assistant"]}
                     ])
         
-        # Add current chunk (this already exists)
+        # Add current chunk with mandatory text prompt
+        # API requires non-empty text content when sending images
+        user_content = context if context and context.strip() else "Please translate the text in this image."
         messages.append({
             "role": "user", 
-            "content": context if context else ""
+            "content": user_content
         })
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
