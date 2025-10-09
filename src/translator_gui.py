@@ -14,9 +14,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
                                 QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                 QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
-                                QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent
-from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat
+                                QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
 
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback
@@ -2330,9 +2330,37 @@ Recent translations to summarize:
         button_layout.setContentsMargins(0, 8, 0, 0)
         button_layout.setSpacing(2)  # Minimal spacing between icon and text
         
-        # Icon label
+        # Icon label with rotation support
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        self.run_button_icon = QLabel()
+        
+        # Create a custom label that supports rotation
+        class RotatableLabel(QLabel):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._rotation = 0
+                self._original_pixmap = None
+            
+            def set_rotation(self, angle):
+                self._rotation = angle
+                if self._original_pixmap:
+                    # Create transformation
+                    transform = QTransform()
+                    transform.rotate(angle)
+                    # Apply rotation to pixmap
+                    rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                    self.setPixmap(rotated)
+            
+            def get_rotation(self):
+                return self._rotation
+            
+            # Define rotation as a Qt Property for animation
+            rotation = Property(float, get_rotation, set_rotation)
+            
+            def set_original_pixmap(self, pixmap):
+                self._original_pixmap = pixmap
+                self.setPixmap(pixmap)
+        
+        self.run_button_icon = RotatableLabel()
         if os.path.exists(icon_path):
             # Load the icon at the highest available resolution
             from PySide6.QtGui import QImage
@@ -2347,9 +2375,22 @@ Recent translations to summarize:
             
             # Scale with high-quality transformation
             scaled_pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.run_button_icon.setPixmap(scaled_pixmap)
+            self.run_button_icon.set_original_pixmap(scaled_pixmap)
         self.run_button_icon.setAlignment(Qt.AlignCenter)
         button_layout.addWidget(self.run_button_icon)
+        
+        # Create rotation animation (but don't start it yet)
+        self.icon_spin_animation = QPropertyAnimation(self.run_button_icon, b"rotation")
+        self.icon_spin_animation.setDuration(1200)  # 1.2 seconds per rotation (faster)
+        self.icon_spin_animation.setStartValue(0)
+        self.icon_spin_animation.setEndValue(360)
+        self.icon_spin_animation.setLoopCount(-1)  # Infinite loop
+        self.icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+        
+        # Create a smooth stop animation for graceful deceleration
+        self.icon_stop_animation = QPropertyAnimation(self.run_button_icon, b"rotation")
+        self.icon_stop_animation.setDuration(800)  # Deceleration time
+        self.icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)  # Smooth deceleration
         
         # Text label
         self.run_button_text = QLabel("Run Translation")
@@ -6117,6 +6158,10 @@ Important rules:
            """)
            self.run_button.clicked.connect(self.stop_translation)
            self.run_button.setEnabled(True)
+           # Start spinning animation
+           if hasattr(self, 'icon_spin_animation') and hasattr(self, 'run_button_icon'):
+               if self.icon_spin_animation.state() != QPropertyAnimation.Running:
+                   self.icon_spin_animation.start()
        else:
            if hasattr(self, 'run_button_text'):
                self.run_button_text.setText("Run Translation")
@@ -6134,6 +6179,34 @@ Important rules:
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
            self.run_button.setEnabled(translation_main and not any_process_running)
+           # Stop spinning animation gracefully with deceleration
+           if hasattr(self, 'icon_spin_animation') and hasattr(self, 'run_button_icon') and hasattr(self, 'icon_stop_animation'):
+               if self.icon_spin_animation.state() == QPropertyAnimation.Running:
+                   # Stop the infinite spin animation
+                   self.icon_spin_animation.stop()
+                   
+                   # Get current rotation angle
+                   current_rotation = self.run_button_icon.get_rotation()
+                   
+                   # Calculate the shortest path to 0 degrees
+                   # Normalize to 0-360 range
+                   current_rotation = current_rotation % 360
+                   
+                   # Determine if we should go forward or backward to reach 0
+                   if current_rotation > 180:
+                       # Go forward (e.g., 270 -> 360 -> 0)
+                       target_rotation = 360
+                   else:
+                       # Go backward (e.g., 90 -> 0)
+                       target_rotation = 0
+                   
+                   # Set up smooth deceleration animation
+                   self.icon_stop_animation.setStartValue(current_rotation)
+                   self.icon_stop_animation.setEndValue(target_rotation)
+                   self.icon_stop_animation.start()
+               elif self.icon_stop_animation.state() != QPropertyAnimation.Running:
+                   # If no animation is running, just reset to 0
+                   self.run_button_icon.set_rotation(0)
        
        # Glossary button
        if hasattr(self, 'glossary_button'):
