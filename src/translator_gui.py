@@ -1875,7 +1875,10 @@ Recent translations to summarize:
         self.gcloud_button.clicked.connect(self.select_google_credentials)
         self.gcloud_button.setMinimumWidth(100)
         self.gcloud_button.setEnabled(False)
-        self.gcloud_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")  # secondary
+        # Store both enabled and disabled styles
+        self.gcloud_button_enabled_style = "background-color: #007bff; color: white; font-weight: bold;"  # primary blue
+        self.gcloud_button_disabled_style = "background-color: #3a3a3a; color: #888888; font-weight: bold;"  # dark gray
+        self.gcloud_button.setStyleSheet(self.gcloud_button_disabled_style)
         self.frame.addWidget(self.gcloud_button, 2, 4)
         
         # Vertex AI Location text entry
@@ -1887,10 +1890,12 @@ Recent translations to summarize:
         # Hide by default
         self.vertex_location_entry.hide()
         
-        # Status label for credentials
+        # Status label for credentials - positioned BELOW the vertex location entry (row 4, column 4)
         self.gcloud_status_label = QLabel("")
         self.gcloud_status_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
-        self.frame.addWidget(self.gcloud_status_label, 2, 1, 1, 3, Qt.AlignLeft)
+        self.gcloud_status_label.setWordWrap(True)  # Allow text wrapping
+        self.gcloud_status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.frame.addWidget(self.gcloud_status_label, 4, 4, Qt.AlignLeft)
         
         # Optional: Add checkbox for enhanced functionality
         options_frame = QWidget()
@@ -1954,18 +1959,19 @@ Recent translations to summarize:
         # Get the current model value (from dropdown or manually typed)
         model = self.model_var
         
-        # Show Google Cloud Credentials button for Vertex AI models AND Google Translate
+        # Show Google Cloud Credentials button for Vertex AI models AND Google Translate (paid)
         needs_google_creds = False
         
         if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
             needs_google_creds = True
             self.vertex_location_entry.show()  # Show location selector for Vertex
-        elif model == 'google-translate':
+        elif model.lower() == 'google-translate':  # Exact match for paid Google Translate (not google-translate-free)
             needs_google_creds = True
             self.vertex_location_entry.hide()  # Hide location selector for Google Translate
         
         if needs_google_creds:
             self.gcloud_button.setEnabled(True)
+            self.gcloud_button.setStyleSheet(self.gcloud_button_enabled_style)  # Apply enabled style
             
             # Check if credentials are already loaded
             if self.config.get('google_cloud_credentials'):
@@ -1978,7 +1984,7 @@ Recent translations to summarize:
                             
                             # Different status messages for different services
                             if model == 'google-translate':
-                                status_text = f"✓ Google Translate ready (Project: {project_id})"
+                                status_text = f"✓ Google Translate ready\n(Project: {project_id})"
                             else:
                                 status_text = f"✓ Credentials: {os.path.basename(creds_path)} (Project: {project_id})"
                             
@@ -2002,6 +2008,7 @@ Recent translations to summarize:
         else:
             # Not a Google service, hide everything
             self.gcloud_button.setEnabled(False)
+            self.gcloud_button.setStyleSheet(self.gcloud_button_disabled_style)  # Apply disabled style
             self.vertex_location_entry.hide()
             self.gcloud_status_label.setText("")
 
@@ -2010,6 +2017,9 @@ Recent translations to summarize:
         """Handle model combobox text changes"""
         # Update the model_var to the current text
         self.model_var = text
+        
+        # Re-check model requirements (GCloud, POE, etc.)
+        self.on_model_change()
         
         # Check for POE model
         if hasattr(self, '_check_poe_model'):
@@ -2351,7 +2361,7 @@ Recent translations to summarize:
         # Other Settings button (row 7, column 4)
         other_settings_btn = QPushButton("⚙️  Other Setting")
         other_settings_btn.clicked.connect(self.open_other_settings)
-        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding-top: 8px; padding-bottom: 12px;")  # info-outline
+        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; font-size: 11pt; padding-top: 8px; padding-bottom: 12px;")  # info-outline
         other_settings_btn.setMinimumWidth(120)
         self.frame.addWidget(other_settings_btn, 7, 4)
         
