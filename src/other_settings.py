@@ -512,6 +512,9 @@ def open_other_settings(self):
 
     main_layout.addLayout(btns)
 
+    # Store reference for later closing
+    self._other_settings_dialog = dialog
+    
     dialog.show()
     
     # Auto-fit width to content after showing
@@ -4776,15 +4779,69 @@ def test_api_connections(self):
 
 def run_standalone_translate_headers(self):
     """Run standalone header translation using the new module"""
+    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QIcon
+    import traceback
+    
+    # Get icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+    
     try:
-        from translate_headers_standalone import run_translate_headers_gui
-        run_translate_headers_gui(self)
+        # Get API key and model from GUI fields
+        api_key = self.api_key_entry.text().strip() if hasattr(self, 'api_key_entry') else ""
+        model = self.model_var.strip() if hasattr(self, 'model_var') else ""
+        
+        if not api_key:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("API key not configured.")
+            msg_box.setInformativeText("Please enter your API key in the main window before using this feature.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
+            return
+        
+        if not model:
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText("Model not selected.")
+            msg_box.setInformativeText("Please select a model in the main window before using this feature.")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
+            return
+        
+        # Initialize API client with current settings
+        from unified_api_client import UnifiedClient
+        api_client = UnifiedClient(model=model, api_key=api_key)
+        
+        # Temporarily set it on self so the standalone module can use it
+        original_client = getattr(self, 'api_client', None)
+        self.api_client = api_client
+        
+        try:
+            # Import and run the translation GUI
+            from translate_headers_standalone import run_translate_headers_gui
+            run_translate_headers_gui(self)
+        finally:
+            # Restore original client
+            if original_client is not None:
+                self.api_client = original_client
+            elif hasattr(self, 'api_client'):
+                delattr(self, 'api_client')
+        
     except Exception as e:
-        from PySide6.QtWidgets import QMessageBox
-        import traceback
         error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
         self.append_log(f"❌ {error_msg}")
-        QMessageBox.critical(None, "Error", error_msg)
+        
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(f"Failed to run standalone header translation: {e}")
+        msg_box.setDetailedText(traceback.format_exc())
+        msg_box.setWindowIcon(icon)
+        msg_box.exec()
 
 def delete_translated_headers_file(self):
     """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""

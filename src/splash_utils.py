@@ -168,6 +168,7 @@ class SplashManager:
         """Load the Halgakos.ico icon"""
         try:
             import os
+            from PySide6.QtGui import QIcon
             
             if getattr(sys, 'frozen', False):
                 # Running as .exe
@@ -179,12 +180,31 @@ class SplashManager:
             ico_path = os.path.join(base_dir, 'Halgakos.ico')
             
             if os.path.isfile(ico_path):
-                # Load icon with Qt
-                pixmap = QPixmap(ico_path)
+                # Load icon with Qt and get the highest resolution available
+                icon = QIcon(ico_path)
+                available_sizes = icon.availableSizes()
+                
+                if available_sizes:
+                    # Get the largest available size from the ICO file
+                    largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
+                    print(f"📐 Loading icon at native size: {largest_size.width()}x{largest_size.height()}")
+                    
+                    # Get pixmap at the largest native size
+                    pixmap = icon.pixmap(largest_size)
+                    
+                    # Only scale if the native size is larger than 128x128
+                    # This preserves quality by using native resolution when possible
+                    if largest_size.width() > 128 or largest_size.height() > 128:
+                        pixmap = pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, 
+                                              Qt.TransformationMode.SmoothTransformation)
+                else:
+                    # Fallback to direct load
+                    pixmap = QPixmap(ico_path)
+                    if pixmap.width() > 128 or pixmap.height() > 128:
+                        pixmap = pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, 
+                                              Qt.TransformationMode.SmoothTransformation)
+                
                 if not pixmap.isNull():
-                    # Scale to 128x128 with smooth transformation
-                    pixmap = pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, 
-                                          Qt.TransformationMode.SmoothTransformation)
                     icon_label = QLabel()
                     icon_label.setPixmap(pixmap)
                     icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -193,6 +213,8 @@ class SplashManager:
                     return
         except Exception as e:
             print(f"⚠️ Could not load icon: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Fallback emoji if icon loading fails
         icon_label = QLabel("📚")

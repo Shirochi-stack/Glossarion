@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
                                 QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                 QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
-                                QSizePolicy, QSplitter, QProgressBar, QStyle)
+                                QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent
 from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat
 
@@ -2244,23 +2244,65 @@ Recent translations to summarize:
         self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
         
         # Run Translation button (row 9, column 4) - Fill the space
-        self.run_button = QPushButton("Run Translation")
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QIcon, QPixmap
+        
+        # Create a custom button widget with icon above text
+        self.run_button = QPushButton()
         self.run_button.clicked.connect(self.run_translation_thread)
+        
+        # Create a container widget for custom layout
+        button_container = QWidget()
+        button_layout = QVBoxLayout(button_container)
+        button_layout.setContentsMargins(0, 8, 0, 0)
+        button_layout.setSpacing(2)  # Minimal spacing between icon and text
+        
+        # Icon label
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.run_button_icon = QLabel()
+        if os.path.exists(icon_path):
+            # Load the icon at the highest available resolution
+            from PySide6.QtGui import QImage
+            icon = QIcon(icon_path)
+            # Get the largest available size from the icon
+            available_sizes = icon.availableSizes()
+            if available_sizes:
+                largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
+                pixmap = icon.pixmap(largest_size)
+            else:
+                pixmap = QPixmap(icon_path)
+            
+            # Scale with high-quality transformation
+            scaled_pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.run_button_icon.setPixmap(scaled_pixmap)
+        self.run_button_icon.setAlignment(Qt.AlignCenter)
+        button_layout.addWidget(self.run_button_icon)
+        
+        # Text label
+        self.run_button_text = QLabel("Run Translation")
+        self.run_button_text.setAlignment(Qt.AlignCenter)
+        self.run_button_text.setStyleSheet("color: white; font-size: 14pt; font-weight: bold;")
+        button_layout.addWidget(self.run_button_text)
+        button_layout.addStretch()
+        
+        # Set the container as the button's layout
+        self.run_button.setLayout(button_layout)
+        
         self.run_button.setStyleSheet("""
             QPushButton {
                 background-color: #28a745;
-                color: white;
-                font-size: 14pt;
-                font-weight: bold;
+                border: none;
             }
             QPushButton:disabled {
                 background-color: #555555;
-                color: #888888;
+            }
+            QPushButton:hover {
+                background-color: #218838;
             }
         """)
         self.run_button.setMinimumWidth(150)
-        self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Fill available space
-        self.frame.addWidget(self.run_button, 9, 4, Qt.AlignmentFlag(0))  # No alignment = fill
+        self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.frame.addWidget(self.run_button, 9, 4, Qt.AlignmentFlag(0))
     
     def _create_log_section(self):
         """Create log text area"""
@@ -5983,29 +6025,32 @@ Important rules:
            pass
        
        if translation_running:
-           self.run_button.setText("Stop Translation")
+           if hasattr(self, 'run_button_text'):
+               self.run_button_text.setText("Stop Translation")
            self.run_button.setStyleSheet("""
                QPushButton {
                    background-color: #dc3545;
-                   color: white;
-                   font-size: 14pt;
-                   font-weight: bold;
+                   border: none;
+               }
+               QPushButton:hover {
+                   background-color: #c82333;
                }
            """)
            self.run_button.clicked.connect(self.stop_translation)
            self.run_button.setEnabled(True)
        else:
-           self.run_button.setText("Run Translation")
+           if hasattr(self, 'run_button_text'):
+               self.run_button_text.setText("Run Translation")
            self.run_button.setStyleSheet("""
                QPushButton {
                    background-color: #28a745;
-                   color: white;
-                   font-size: 14pt;
-                   font-weight: bold;
+                   border: none;
                }
                QPushButton:disabled {
                    background-color: #555555;
-                   color: #888888;
+               }
+               QPushButton:hover {
+                   background-color: #218838;
                }
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
@@ -6106,8 +6151,9 @@ Important rules:
         # Disable button immediately to prevent multiple clicks
         if hasattr(self, 'run_button'):
             self.run_button.setEnabled(False)
-            self.run_button.setText("Stopping...")
-            self.run_button.setStyleSheet("background-color: #6c757d; color: white; font-size: 14pt; font-weight: bold;")
+            if hasattr(self, 'run_button_text'):
+                self.run_button_text.setText("Stopping...")
+            self.run_button.setStyleSheet("QPushButton { background-color: #6c757d; border: none; }")
         
         # Set environment variable to suppress multi-key logging
         os.environ['TRANSLATION_CANCELLED'] = '1'

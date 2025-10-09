@@ -15,25 +15,17 @@ from typing import Dict, Tuple, Optional, List
 from bs4 import BeautifulSoup
 
 
-def normalize_filename(filename: str, remove_prefix: bool = True) -> str:
+def get_basename_without_ext(filename: str) -> str:
     """
-    Normalize filename by removing extension and optionally the response_ prefix
+    Get filename without extension
     
     Args:
-        filename: The filename to normalize
-        remove_prefix: Whether to remove the response_ prefix
+        filename: The filename
         
     Returns:
-        Normalized filename without extension and prefix
+        Filename without extension
     """
-    # Remove extension
-    name_no_ext = os.path.splitext(filename)[0]
-    
-    # Remove response_ prefix if requested
-    if remove_prefix and name_no_ext.startswith('response_'):
-        name_no_ext = name_no_ext[9:]  # Remove 'response_'
-    
-    return name_no_ext
+    return os.path.splitext(filename)[0]
 
 
 def extract_source_chapters_with_opf_mapping(
@@ -181,9 +173,9 @@ def extract_source_chapters_with_opf_mapping(
                                 title = text
                     
                     if title:
-                        # Store by normalized filename
-                        normalized = normalize_filename(os.path.basename(content_file), remove_prefix=False)
-                        chapter_mapping[normalized] = title
+                        # Store by basename without extension
+                        basename_no_ext = get_basename_without_ext(os.path.basename(content_file))
+                        chapter_mapping[basename_no_ext] = title
                         if idx < 5:
                             log(f"  Source[{idx}] ({os.path.basename(content_file)}): {title}")
                     
@@ -208,17 +200,17 @@ def match_output_to_source_chapters(
     log_callback=None
 ) -> Dict[str, Tuple[str, str, str]]:
     """
-    Match output HTML files to source chapters using EXACT name matching
+    Match output HTML files to source chapters by checking if source basename appears in output filename
     
     Args:
         output_dir: Directory containing translated HTML files
-        source_mapping: Mapping of normalized source filename to title
+        source_mapping: Mapping of source basename (no ext) to title
         spine_order: List of source filenames in spine order
         log_callback: Optional callback for logging
         
     Returns:
         Dict mapping output_filename to (source_title, current_title, output_filename)
-        Only includes chapters where exact match is found
+        Only includes chapters where source basename is found in output filename
     """
     def log(message):
         if log_callback:
@@ -238,61 +230,66 @@ def match_output_to_source_chapters(
     log(f"📁 Found {len(output_files)} HTML files in output directory")
     log(f"📚 Have {len(source_mapping)} source chapters to match")
     
-    # Create normalized source mapping for matching
-    normalized_source = {}
-    for source_file, title in source_mapping.items():
-        normalized = normalize_filename(source_file, remove_prefix=False)
-        normalized_source[normalized] = (source_file, title)
+    if not output_files:
+        log("⚠️ No HTML files found in output directory!")
+        return matches
     
     matched_count = 0
     skipped_count = 0
     
     for output_file in output_files:
-        # Normalize output filename (remove response_ prefix and extension)
-        normalized_output = normalize_filename(output_file, remove_prefix=True)
+        # Get output filename without extension
+        output_no_ext = get_basename_without_ext(output_file)
         
-        # Check for EXACT match in source (ignoring response_ prefix)
-        if normalized_output in normalized_source:
-            source_file, source_title = normalized_source[normalized_output]
-            
-            # Read current title from output file
-            try:
-                output_path = os.path.join(output_dir, output_file)
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                soup = BeautifulSoup(content, 'html.parser')
-                
-                current_title = None
-                for tag_name in ['h1', 'h2', 'h3', 'title']:
-                    tag = soup.find(tag_name)
-                    if tag:
-                        text = tag.get_text().strip()
-                        if text:
-                            current_title = text
-                            break
-                
-                if not current_title:
-                    current_title = f"Chapter {normalized_output}"
-                
-                matches[output_file] = (source_title, current_title, output_file)
-                matched_count += 1
-                
-                if matched_count <= 5:
-                    log(f"  ✓ Matched: {output_file} → {source_file}")
-                    log(f"    Source: '{source_title}'")
-                    log(f"    Current: '{current_title}'")
-                
-            except Exception as e:
-                log(f"  ⚠️ Error reading {output_file}: {e}")
-        else:
+        # Try to match with each source chapter
+        matched = False
+        for source_basename, source_title in source_mapping.items():
+            # Check if source basename appears in output filename (handles response_ prefix)
+            if source_basename in output_no_ext:
+                # Read current title from output file
+                try:
+                    output_path = os.path.join(output_dir, output_file)
+                    with open(output_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                    current_title = None
+                    for tag_name in ['h1', 'h2', 'h3', 'title']:
+                        tag = soup.find(tag_name)
+                        if tag:
+                            text = tag.get_text().strip()
+                            if text:
+                                current_title = text
+                                break
+                    
+                    if not current_title:
+                        current_title = f"Chapter {source_basename}"
+                    
+                    matches[output_file] = (source_title, current_title, output_file)
+                    matched_count += 1
+                    matched = True
+                    
+                    if matched_count <= 5:
+                        log(f"  ✓ Matched: {output_file}")
+                        log(f"    Contains source: '{source_basename}'")
+                        log(f"    Source title: '{source_title}'")
+                        log(f"    Current title: '{current_title}'")
+                    
+                    break  # Found a match, stop checking other sources
+                    
+                except Exception as e:
+                    log(f"  ⚠️ Error reading {output_file}: {e}")
+                    break
+        
+        if not matched:
             skipped_count += 1
             if skipped_count <= 3:
-                log(f"  ⊘ Skipped (no exact match): {output_file}")
+                log(f"  ⊝ Skipped (no match): {output_file}")
     
     log(f"\n📊 Matching results:")
     log(f"  ✓ Matched: {matched_count} chapters")
-    log(f"  ⊘ Skipped: {skipped_count} chapters (no exact match)")
+    log(f"  ⊝ Skipped: {skipped_count} chapters (no match)")
     
     return matches
 
@@ -328,27 +325,27 @@ def translate_headers_standalone(
             print(message)
     
     log("=" * 80)
-    log("🌐 Starting Standalone Header Translation")
+    log("Starting Standalone Header Translation")
     log("=" * 80)
     
     # Step 1: Extract source chapters with OPF mapping
-    log("\n📖 Step 1: Extracting source chapter titles from EPUB...")
+    log("\nStep 1: Extracting source chapter titles from EPUB...")
     source_mapping, spine_order = extract_source_chapters_with_opf_mapping(epub_path, log_callback)
     
     if not source_mapping:
-        log("❌ No source chapters found!")
+        log("ERROR: No source chapters found!")
         return {}
     
     # Step 2: Match output files to source chapters (EXACT matching only)
-    log("\n🔗 Step 2: Matching output files to source chapters...")
+    log("\nStep 2: Matching output files to source chapters...")
     matches = match_output_to_source_chapters(output_dir, source_mapping, spine_order, log_callback)
     
     if not matches:
-        log("❌ No matching chapters found!")
+        log("ERROR: No matching chapters found!")
         return {}
     
     # Step 3: Prepare headers for translation
-    log("\n📝 Step 3: Preparing headers for translation...")
+    log("\nStep 3: Preparing headers for translation...")
     headers_to_translate = {}
     current_titles_map = {}
     
@@ -359,10 +356,10 @@ def translate_headers_standalone(
             'filename': output_file
         }
     
-    log(f"📚 Prepared {len(headers_to_translate)} headers for translation")
+    log(f"Prepared {len(headers_to_translate)} headers for translation")
     
     # Step 4: Translate using BatchHeaderTranslator
-    log("\n🌐 Step 4: Translating headers...")
+    log("\nStep 4: Translating headers...")
     
     from metadata_batch_translator import BatchHeaderTranslator
     
@@ -379,16 +376,16 @@ def translate_headers_standalone(
     )
     
     # Step 5: Map back to output filenames
-    log("\n📊 Step 5: Mapping translations to output files...")
+    log("\nStep 5: Mapping translations to output files...")
     result = {}
     for idx, translated_title in translated_headers.items():
         if idx in current_titles_map:
             output_file = current_titles_map[idx]['filename']
             result[output_file] = translated_title
-            log(f"  ✓ {output_file}: {translated_title}")
+            log(f"  {output_file}: {translated_title}")
     
     log("\n" + "=" * 80)
-    log(f"✅ Translation complete! Translated {len(result)} chapter headers")
+    log(f"Translation complete! Translated {len(result)} chapter headers")
     log("=" * 80)
     
     return result
@@ -416,31 +413,46 @@ def run_translate_headers_gui(gui_instance):
         
         # Get output directory
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-        output_dir = os.path.join(os.path.dirname(epub_path), epub_base)
+        current_dir = os.getcwd()
+        script_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Check multiple possible locations
-        if not os.path.exists(output_dir):
-            current_dir = os.getcwd()
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            candidates = [
-                os.path.join(current_dir, epub_base),
-                os.path.join(script_dir, epub_base),
-                os.path.join(current_dir, 'src', epub_base),
-            ]
-            
-            for candidate in candidates:
-                if os.path.isdir(candidate):
-                    output_dir = candidate
-                    break
+        # Try multiple locations
+        candidates = [
+            os.path.join(os.path.dirname(epub_path), epub_base),  # Same dir as EPUB
+            os.path.join(current_dir, epub_base),                 # Current working dir
+            os.path.join(script_dir, epub_base),                  # Script dir
+            os.path.join(script_dir, '..', epub_base),            # Parent of script dir
+        ]
         
-        if not os.path.exists(output_dir):
-            QMessageBox.critical(
-                None, 
-                "Error", 
-                f"Output directory not found: {output_dir}\n\n"
-                "Please extract the EPUB first."
+        output_dir = None
+        
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                # Verify it actually has HTML files
+                try:
+                    files = os.listdir(candidate)
+                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                    if html_files:
+                        output_dir = candidate
+                        break
+                except Exception:
+                    continue
+        
+        if not output_dir or not os.path.exists(output_dir):
+            from PySide6.QtGui import QIcon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Critical)
+            msg_box.setWindowTitle("Error")
+            msg_box.setText(f"Output directory not found for: {epub_base}")
+            msg_box.setInformativeText(
+                "Please extract the EPUB first.\n\n"
+                "The tool checked these locations:\n" + "\n".join([f"  - {c}" for c in candidates[:3]])
             )
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
             return
         
         # Get API client
@@ -477,12 +489,17 @@ def run_translate_headers_gui(gui_instance):
         )
         
         if result:
-            QMessageBox.information(
-                None,
-                "Success",
-                f"Successfully translated {len(result)} chapter headers!\n\n"
-                f"Output directory: {output_dir}"
-            )
+            from PySide6.QtGui import QIcon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("Success")
+            msg_box.setText(f"Successfully translated {len(result)} chapter headers!")
+            msg_box.setInformativeText(f"Output directory: {output_dir}")
+            msg_box.setWindowIcon(icon)
+            msg_box.exec()
         else:
             QMessageBox.warning(
                 None,
