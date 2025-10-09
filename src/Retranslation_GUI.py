@@ -1612,16 +1612,19 @@ class RetranslationMixin:
             for file_path in epub_files + text_files:
                 file_base = os.path.splitext(os.path.basename(file_path))[0]
                 
+                print(f"[DEBUG] Checking EPUB/text: {file_base}")
+                
                 # Quick check if output exists
                 if not os.path.exists(file_base):
+                    print(f"[DEBUG] Skipping {file_base} - output folder doesn't exist")
                     continue
+                
+                print(f"[DEBUG] Creating tab for {file_base}")
                 
                 # Create tab
                 tab_frame = QWidget()
                 tab_layout = QVBoxLayout(tab_frame)
                 tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
-                notebook.addTab(tab_frame, tab_name)
-                tabs_created = True
                 
                 # Get persisted state for this file
                 file_key = os.path.abspath(file_path)
@@ -1639,8 +1642,14 @@ class RetranslationMixin:
                     show_special_files_state=show_special
                 )
                 
+                # Only add the tab if content was successfully created
                 if tab_result:
+                    notebook.addTab(tab_frame, tab_name)
                     tab_data.append(tab_result)
+                    tabs_created = True
+                    print(f"[DEBUG] Successfully created tab for {file_base}")
+                else:
+                    print(f"[DEBUG] Failed to create content for {file_base}")
             
             # Create tabs for image folders (keeping existing logic for now)
             for folder_path in folders:
