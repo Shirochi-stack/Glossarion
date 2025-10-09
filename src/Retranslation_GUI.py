@@ -1344,30 +1344,73 @@ class RetranslationMixin:
             print(f"🔄 Refreshing all {len(tab_data_list)} tabs...")
             
             refreshed_count = 0
+            skipped_count = 0
             for idx, data in enumerate(tab_data_list):
                 if data and data.get('type') != 'image_folder' and data.get('type') != 'individual_images':
                     # Only refresh EPUB/text tabs
                     try:
+                        # Check if widgets are still valid before attempting refresh
+                        if not self._is_data_valid(data):
+                            print(f"[DEBUG] Skipping tab {idx + 1}/{len(tab_data_list)} - widgets deleted")
+                            skipped_count += 1
+                            continue
+                        
                         print(f"[DEBUG] Refreshing tab {idx + 1}/{len(tab_data_list)}")
                         self._refresh_retranslation_data(data)
                         refreshed_count += 1
+                    except RuntimeError as e:
+                        # Widget was deleted
+                        print(f"[WARN] Skipping tab {idx + 1} - widget deleted: {e}")
+                        skipped_count += 1
                     except Exception as e:
                         print(f"[ERROR] Failed to refresh tab {idx + 1}: {e}")
             
-            print(f"✅ Successfully refreshed {refreshed_count} tab(s)")
+            if skipped_count > 0:
+                print(f"✅ Successfully refreshed {refreshed_count} tab(s), skipped {skipped_count} deleted tab(s)")
+            else:
+                print(f"✅ Successfully refreshed {refreshed_count} tab(s)")
             
         except Exception as e:
             print(f"❌ Failed to refresh all tabs: {e}")
             import traceback
             traceback.print_exc()
     
+    def _is_data_valid(self, data):
+        """Check if the data structure has valid (non-deleted) widgets"""
+        try:
+            if not data:
+                return False
+            
+            # Check if listbox exists and is still valid
+            listbox = data.get('listbox')
+            if not listbox:
+                return False
+            
+            # Try to access a simple property to check if widget is still alive
+            # This will raise RuntimeError if the C++ object was deleted
+            listbox.count()
+            return True
+            
+        except (RuntimeError, AttributeError):
+            return False
+    
     def _refresh_retranslation_data(self, data):
         """Refresh the retranslation dialog data by reloading progress and updating display"""
         try:
+            # First check if widgets are still valid
+            if not self._is_data_valid(data):
+                print("⚠️ Cannot refresh - widgets have been deleted")
+                return
+            
             print("🔄 Refreshing retranslation data...")
             
             # Save current selections to restore after refresh
-            selected_indices = [data['listbox'].row(item) for item in data['listbox'].selectedItems()]
+            selected_indices = []
+            try:
+                selected_indices = [data['listbox'].row(item) for item in data['listbox'].selectedItems()]
+            except RuntimeError:
+                print("⚠️ Could not save selection state - widget was deleted")
+                return
             
             # Reload progress file
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
@@ -1383,27 +1426,36 @@ class RetranslationMixin:
             self._update_statistics_display(data)
             
             # Restore selections
-            if selected_indices:
-                for idx in selected_indices:
-                    if idx < data['listbox'].count():
-                        data['listbox'].item(idx).setSelected(True)
-                # Update selection count
-                if 'selection_count_label' in data and data['selection_count_label']:
-                    data['selection_count_label'].setText(f"Selected: {len(selected_indices)}")
-            else:
-                # Clear selections if there were none
-                data['listbox'].clearSelection()
-                if 'selection_count_label' in data and data['selection_count_label']:
-                    data['selection_count_label'].setText("Selected: 0")
+            try:
+                if selected_indices:
+                    for idx in selected_indices:
+                        if idx < data['listbox'].count():
+                            data['listbox'].item(idx).setSelected(True)
+                    # Update selection count
+                    if 'selection_count_label' in data and data['selection_count_label']:
+                        data['selection_count_label'].setText(f"Selected: {len(selected_indices)}")
+                else:
+                    # Clear selections if there were none
+                    data['listbox'].clearSelection()
+                    if 'selection_count_label' in data and data['selection_count_label']:
+                        data['selection_count_label'].setText("Selected: 0")
+            except RuntimeError:
+                print("⚠️ Could not restore selection state - widget was deleted during refresh")
             
             print("✅ Retranslation data refreshed successfully")
             
+        except RuntimeError as e:
+            print(f"❌ Failed to refresh data - widget deleted: {e}")
         except Exception as e:
             print(f"❌ Failed to refresh data: {e}")
             import traceback
             traceback.print_exc()
-            QMessageBox.warning(data.get('dialog', self), "Refresh Failed", 
-                              f"Failed to refresh data: {str(e)}")
+            try:
+                QMessageBox.warning(data.get('dialog', self), "Refresh Failed", 
+                                  f"Failed to refresh data: {str(e)}")
+            except (RuntimeError, AttributeError):
+                # Dialog was also deleted, just print to console
+                print(f"[WARN] Could not show error dialog - dialog was deleted")
     
     def _update_chapter_status_info(self, data):
         """Update chapter status information after refresh"""
@@ -1856,16 +1908,11 @@ class RetranslationMixin:
             self._multi_file_selection_key = selection_key
             
             # Refresh all tabs before showing the dialog
-            print(f"[DEBUG] Refreshing all {len(tab_data)} tabs on dialog open...")
-            for idx, data in enumerate(tab_data):
-                if data and data.get('type') != 'image_folder' and data.get('type') != 'individual_images':
-                    # Only refresh EPUB/text tabs
-                    try:
-                        print(f"[DEBUG] Refreshing tab {idx + 1}/{len(tab_data)}")
-                        self._refresh_retranslation_data(data)
-                    except Exception as e:
-                        print(f"[ERROR] Failed to refresh tab {idx + 1}: {e}")
-            print(f"[DEBUG] All tabs refreshed successfully")
+            if tab_data:
+                print(f"[DEBUG] Refreshing all {len(tab_data)} tabs on dialog open...")
+                self._refresh_all_tabs(tab_data)
+            else:
+                print(f"[WARN] No tab data to refresh on dialog open")
             
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()
