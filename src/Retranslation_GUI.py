@@ -766,32 +766,39 @@ class RetranslationMixin:
                 # Find and update ALL toggle checkboxes and checkmarks in ALL tabs
                 if hasattr(parent_dialog, '_all_toggle_checkboxes'):
                     for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
-                        if other_checkbox != show_special_files_cb:
-                            try:
-                                # Check if the widget still exists before trying to use it
-                                if other_checkbox and not other_checkbox.isHidden() is None:
-                                    # Temporarily disconnect to avoid recursive updates
+                        if other_checkbox is None or other_checkbox == show_special_files_cb:
+                            continue
+                        
+                        try:
+                            # Try to check if widget is valid by calling a simple method
+                            other_checkbox.isChecked()
+                            
+                            # Widget is valid, update it
+                            # Block signals to avoid triggering its handler
+                            other_checkbox.blockSignals(True)
+                            other_checkbox.setChecked(show_special_files[0])
+                            other_checkbox.blockSignals(False)
+                            
+                            # Update the corresponding checkmark visual
+                            if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
+                                other_checkmark = parent_dialog._all_checkmark_labels[idx]
+                                if other_checkmark is not None:
                                     try:
-                                        other_checkbox.stateChanged.disconnect()
-                                    except:
-                                        pass
-                                    other_checkbox.setChecked(show_special_files[0])
-                                    # Update the corresponding checkmark visual
-                                    if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
-                                        try:
-                                            other_checkmark = parent_dialog._all_checkmark_labels[idx]
-                                            if other_checkmark and not other_checkmark.isHidden() is None:
-                                                if show_special_files[0]:
-                                                    other_checkmark.setGeometry(2, 1, 14, 14)
-                                                    other_checkmark.show()
-                                                else:
-                                                    other_checkmark.hide()
-                                        except RuntimeError:
-                                            # Widget was deleted
-                                            pass
-                            except RuntimeError:
-                                # Widget was deleted, skip it
-                                pass
+                                        # Check if checkmark is valid
+                                        other_checkmark.isVisible()
+                                        
+                                        # Update checkmark visibility
+                                        if show_special_files[0]:
+                                            other_checkmark.setGeometry(2, 1, 14, 14)
+                                            other_checkmark.show()
+                                        else:
+                                            other_checkmark.hide()
+                                    except RuntimeError:
+                                        # Checkmark was deleted
+                                        parent_dialog._all_checkmark_labels[idx] = None
+                        except (RuntimeError, AttributeError):
+                            # Widget was deleted or invalid
+                            parent_dialog._all_toggle_checkboxes[idx] = None
                 
                 # Clear the tab frame's layout
                 for i in reversed(range(container_layout.count())):
