@@ -461,6 +461,8 @@ class RetranslationMixin:
             # Create standalone PySide6 dialog
             dialog = QDialog()
             dialog.setWindowTitle("Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation")
+            # Make it stay on top so it doesn't hide behind main GUI
+            dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
             # Use 26% width, 36% height for 1920x1080
             width, height = self._get_dialog_size(0.26, 0.36)
             dialog.resize(width, height)
@@ -754,8 +756,22 @@ class RetranslationMixin:
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
             self._add_retranslation_buttons_opf(result)
-            # Show the dialog
-            dialog.exec()
+            # Show the dialog (non-modal to allow interaction with other windows)
+            dialog.show()
+            # Store reference to prevent garbage collection
+            if not hasattr(self, '_retranslation_dialogs'):
+                self._retranslation_dialogs = []
+            self._retranslation_dialogs.append(dialog)
+            
+            # Clean up reference when dialog is closed
+            def on_dialog_close():
+                try:
+                    if hasattr(self, '_retranslation_dialogs') and dialog in self._retranslation_dialogs:
+                        self._retranslation_dialogs.remove(dialog)
+                except:
+                    pass
+            
+            dialog.finished.connect(on_dialog_close)
         elif not parent_dialog or tab_frame:
             # Embedded in tab - just add buttons
             self._add_retranslation_buttons_opf(result)

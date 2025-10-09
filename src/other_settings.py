@@ -311,7 +311,8 @@ def open_other_settings(self):
     from PySide6.QtWidgets import QApplication
     
     # Create dialog with proper window attributes
-    dialog = QDialog()
+    # Pass self as parent so it stays in front of main GUI but allows other dialogs on top
+    dialog = QDialog(self)
     dialog.setWindowTitle("Other Settings")
     
     # CRITICAL: Set window attribute to allow maximize
