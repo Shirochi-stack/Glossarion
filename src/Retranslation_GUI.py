@@ -43,17 +43,6 @@ class AnimatedRefreshButton(QPushButton):
                 self._original_icon = QIcon(ico_path)
                 self.setIcon(self._original_icon)
                 self.setIconSize(self.iconSize() * 1.2)  # Make icon slightly larger
-                
-                # Add padding between icon and text
-                from PySide6.QtWidgets import QStyleOptionButton, QStyle
-                from PySide6.QtCore import QSize
-                # Set spacing between icon and text (in pixels)
-                style = self.style()
-                if style:
-                    # Get current spacing and add extra padding
-                    current_spacing = style.pixelMetric(QStyle.PM_ButtonIconSpacing)
-                    # We can't directly set spacing, so we'll use stylesheet margin instead
-                    pass  # Will handle in stylesheet below
         except Exception as e:
             print(f"Could not load Halgakos.ico for refresh button: {e}")
         
@@ -1548,7 +1537,7 @@ class RetranslationMixin:
                 print("⚠️ Cannot refresh - widgets have been deleted")
                 return
             
-            print("🔄 Refreshing retranslation data...")
+            # print("🔄 Refreshing retranslation data...")
             
             # Save current selections to restore after refresh
             selected_indices = []
@@ -1588,7 +1577,7 @@ class RetranslationMixin:
             except RuntimeError:
                 print("⚠️ Could not restore selection state - widget was deleted during refresh")
             
-            print("✅ Retranslation data refreshed successfully")
+            # print("✅ Retranslation data refreshed successfully")
             
         except RuntimeError as e:
             print(f"❌ Failed to refresh data - widget deleted: {e}")
