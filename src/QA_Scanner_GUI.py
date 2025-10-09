@@ -274,8 +274,8 @@ class QAScannerMixin:
             screen = QApplication.primaryScreen().geometry()
             screen_width = screen.width()
             screen_height = screen.height()
-            dialog_width = int(screen_width * 0.60)  # 60% of screen width (increased for better layout)
-            dialog_height = int(screen_height * 0.55)  # 55% of screen height for better content fit
+            dialog_width = int(screen_width * 0.45)  # 50% of screen width
+            dialog_height = int(screen_height * 0.43)  # 45% of screen height
             
             mode_dialog = QDialog(self)
             mode_dialog.setWindowTitle("Select QA Scanner Mode")
@@ -314,9 +314,9 @@ class QAScannerMixin:
         
         if selected_mode_value is None:
             # Set minimum size to prevent dialog from being too small (using ratios)
-            # 40% width, 40% height for better content fit
-            min_width = int(screen_width * 0.40)
-            min_height = int(screen_height * 0.40)
+            # 35% width, 35% height for better content fit
+            min_width = int(screen_width * 0.35)
+            min_height = int(screen_height * 0.35)
             mode_dialog.setMinimumSize(min_width, min_height)
             
             # Variables
@@ -329,27 +329,27 @@ class QAScannerMixin:
             # Content widget with padding
             content_widget = QWidget()
             content_layout = QVBoxLayout(content_widget)
-            content_layout.setContentsMargins(30, 20, 30, 20)
+            content_layout.setContentsMargins(15, 10, 15, 10)
             main_layout.addWidget(content_widget)
             
             # Title with subtitle
             title_label = QLabel("Select Detection Mode")
-            title_label.setFont(QFont("Arial", 28, QFont.Bold))
+            title_label.setFont(QFont("Arial", 20, QFont.Bold))
             title_label.setStyleSheet("color: #f0f0f0;")
             title_label.setAlignment(Qt.AlignCenter)
             content_layout.addWidget(title_label)
             
             subtitle_label = QLabel("Choose how sensitive the duplicate detection should be")
-            subtitle_label.setFont(QFont("Arial", 16))
+            subtitle_label.setFont(QFont("Arial", 11))
             subtitle_label.setStyleSheet("color: #d0d0d0;")
             subtitle_label.setAlignment(Qt.AlignCenter)
             content_layout.addWidget(subtitle_label)
-            content_layout.addSpacing(15)
+            content_layout.addSpacing(8)
             
             # Mode cards container
             modes_widget = QWidget()
             modes_layout = QGridLayout(modes_widget)
-            modes_layout.setSpacing(10)
+            modes_layout.setSpacing(8)
             content_layout.addWidget(modes_widget)
                     
             mode_data = [
@@ -456,46 +456,104 @@ class QAScannerMixin:
                 
                 # Content layout
                 card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(15, 15, 15, 15)
+                card_layout.setContentsMargins(10, 10, 10, 5)
                 
-                # Emoji
-                emoji_label = QLabel(mi["emoji"])
-                emoji_label.setFont(QFont("Arial", 48))
-                emoji_label.setAlignment(Qt.AlignCenter)
-                emoji_label.setStyleSheet(f"background-color: transparent; color: white; border: none;")
-                card_layout.addWidget(emoji_label)
+                # Icon/Emoji container with fixed height for alignment
+                icon_container = QWidget()
+                icon_container.setFixedHeight(60)
+                icon_container.setStyleSheet("background-color: transparent;")
+                icon_container_layout = QVBoxLayout(icon_container)
+                icon_container_layout.setContentsMargins(0, 0, 0, 0)
+                icon_container_layout.setAlignment(Qt.AlignCenter)
+                
+                # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others
+                if mi["value"] == "ai-hunter":
+                    # Use Halgakos icon for AI Hunter
+                    try:
+                        ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                        if os.path.isfile(ico_path):
+                            icon_label = QLabel()
+                            # Load icon from QIcon to get best size, then convert to pixmap
+                            icon = QIcon(ico_path)
+                            # Get the available sizes and pick closest to desired size
+                            available_sizes = icon.availableSizes()
+                            if available_sizes:
+                                # Find size closest to 56x56
+                                target_size = 56
+                                best_size = min(available_sizes, 
+                                              key=lambda s: abs(s.width() - target_size) + abs(s.height() - target_size))
+                                # Get pixmap at native resolution
+                                original_pixmap = icon.pixmap(best_size)
+                            else:
+                                # Fallback if no sizes available
+                                original_pixmap = QPixmap(ico_path)
+                            
+                            if not original_pixmap.isNull():
+                                # Scale from best native size with high quality
+                                scaled_pixmap = original_pixmap.scaled(
+                                    56, 56,
+                                    Qt.KeepAspectRatio,
+                                    Qt.SmoothTransformation
+                                )
+                                icon_label.setPixmap(scaled_pixmap)
+                                icon_label.setAlignment(Qt.AlignCenter)
+                                icon_label.setStyleSheet("background-color: transparent; border: none;")
+                                icon_container_layout.addWidget(icon_label)
+                        else:
+                            # Fallback to emoji if icon not found
+                            emoji_label = QLabel(mi["emoji"])
+                            emoji_label.setFont(QFont("Arial", 38))
+                            emoji_label.setAlignment(Qt.AlignCenter)
+                            emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
+                            icon_container_layout.addWidget(emoji_label)
+                    except Exception:
+                        # Fallback to emoji if error
+                        emoji_label = QLabel(mi["emoji"])
+                        emoji_label.setFont(QFont("Arial", 38))
+                        emoji_label.setAlignment(Qt.AlignCenter)
+                        emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
+                        icon_container_layout.addWidget(emoji_label)
+                else:
+                    # Use emoji for other cards
+                    emoji_label = QLabel(mi["emoji"])
+                    emoji_label.setFont(QFont("Arial", 38))
+                    emoji_label.setAlignment(Qt.AlignCenter)
+                    emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
+                    icon_container_layout.addWidget(emoji_label)
+                
+                card_layout.addWidget(icon_container)
                 
                 # Title
                 title_label = QLabel(mi["title"])
-                title_label.setFont(QFont("Arial", 24, QFont.Bold))
+                title_label.setFont(QFont("Arial", 16, QFont.Bold))
                 title_label.setAlignment(Qt.AlignCenter)
                 title_label.setStyleSheet(f"background-color: transparent; color: white; border: none;")
                 card_layout.addWidget(title_label)
                 
                 # Subtitle
                 subtitle_label = QLabel(mi["subtitle"])
-                subtitle_label.setFont(QFont("Arial", 14))
+                subtitle_label.setFont(QFont("Arial", 10))
                 subtitle_label.setAlignment(Qt.AlignCenter)
                 subtitle_label.setStyleSheet(f"background-color: transparent; color: {mi['accent_color']}; border: none;")
                 card_layout.addWidget(subtitle_label)
-                card_layout.addSpacing(10)
+                card_layout.addSpacing(6)
                 
                 # Features
                 for feature in mi["features"]:
                     feature_label = QLabel(feature)
-                    feature_label.setFont(QFont("Arial", 11))
+                    feature_label.setFont(QFont("Arial", 9))
                     feature_label.setStyleSheet(f"background-color: transparent; color: #e0e0e0; border: none;")
                     card_layout.addWidget(feature_label)
                 
                 # Recommendation badge if present
                 if mi["recommendation"]:
-                    card_layout.addSpacing(10)
+                    card_layout.addSpacing(6)
                     rec_label = QLabel(mi["recommendation"])
-                    rec_label.setFont(QFont("Arial", 11, QFont.Bold))
+                    rec_label.setFont(QFont("Arial", 9, QFont.Bold))
                     rec_label.setStyleSheet(f"""
                         background-color: {mi['accent_color']};
                         color: white;
-                        padding: 4px 8px;
+                        padding: 3px 6px;
                         border-radius: 3px;
                     """)
                     rec_label.setAlignment(Qt.AlignCenter)

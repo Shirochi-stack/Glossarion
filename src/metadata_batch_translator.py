@@ -1173,19 +1173,27 @@ class MetadataBatchTranslatorUI:
                 border: 1px solid #555555;
                 border-radius: 3px;
                 padding: 5px;
+                padding-right: 30px;
             }
             QComboBox:focus {
                 border: 1px solid #5a9fd4;
             }
             QComboBox::drop-down {
-                border: none;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 30px;
+                border-left: 1px solid #555555;
             }
             QComboBox::down-arrow {
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid #e0e0e0;
-                margin-right: 5px;
+                image: url(halgakos.ico);
+                width: 16px;
+                height: 16px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                selection-background-color: #3daee9;
             }
         """)
         output_layout.addWidget(self.output_lang_combo)

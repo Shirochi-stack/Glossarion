@@ -447,12 +447,20 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 color: #666666;
                 border: 1px solid #3a3a3a;
             }
+            QPushButton::menu-indicator {
+                width: 0;
+                height: 0;
+                border: none;
+                background: none;
+                margin-right: 8px;
+            }
             QComboBox {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
                 padding: 4px;
+                padding-right: 25px;
             }
             QComboBox:disabled {
                 background-color: #1a1a1a;
@@ -460,7 +468,19 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 border: 1px solid #3a3a3a;
             }
             QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid #4a5568;
+            }
+            QComboBox::down-arrow {
+                width: 16px;
+                height: 16px;
+                background: transparent;
                 border: none;
+            }
+            QComboBox::down-arrow:on {
+                top: 1px;
             }
             QComboBox QAbstractItemView {
                 background-color: #2d2d2d;
@@ -1620,6 +1640,41 @@ Recent translations to summarize:
         except Exception:
             pass
     
+    def _add_combobox_arrow(self, combobox):
+        """Add a unicode arrow overlay to a combobox"""
+        from PySide6.QtCore import QTimer
+        
+        arrow_label = QLabel("▼", combobox)
+        arrow_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-size: 10pt;
+                border: none;
+            }
+        """)
+        arrow_label.setAlignment(Qt.AlignCenter)
+        arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_arrow():
+            try:
+                if arrow_label and combobox:
+                    width = combobox.width()
+                    height = combobox.height()
+                    arrow_label.setGeometry(width - 20, (height - 16) // 2, 20, 16)
+            except RuntimeError:
+                pass
+        
+        # Position arrow when combobox is resized
+        original_resize = combobox.resizeEvent
+        def new_resize(event):
+            original_resize(event)
+            position_arrow()
+        combobox.resizeEvent = new_resize
+        
+        # Initial position
+        QTimer.singleShot(0, position_arrow)
+    
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay - from manga integration"""
         from PySide6.QtWidgets import QCheckBox, QLabel
@@ -1913,25 +1968,17 @@ Recent translations to summarize:
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
         self.model_combo.setMaximumWidth(450)
-        # Add dropdown arrow styling
+        # Add custom styling with unicode arrow
         self.model_combo.setStyleSheet("""
-            QComboBox {
-                padding-right: 20px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
             QComboBox::down-arrow {
                 image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid #ffffff;
-                width: 0;
-                height: 0;
-                margin-right: 5px;
+                width: 12px;
+                height: 12px;
+                border: none;
             }
         """)
+        # Add unicode arrow using a label overlay
+        self._add_combobox_arrow(self.model_combo)
         self.frame.addWidget(self.model_combo, 1, 1, 1, 2)  # row, col, rowspan, colspan
         
         # Track previous text to make autocomplete less aggressive
@@ -1959,25 +2006,17 @@ Recent translations to summarize:
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
         self.profile_menu.setMaximumWidth(380)
-        # Add dropdown arrow styling
+        # Add custom styling with unicode arrow
         self.profile_menu.setStyleSheet("""
-            QComboBox {
-                padding-right: 20px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
             QComboBox::down-arrow {
                 image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid #ffffff;
-                width: 0;
-                height: 0;
-                margin-right: 5px;
+                width: 12px;
+                height: 12px;
+                border: none;
             }
         """)
+        # Add unicode arrow using a label overlay
+        self._add_combobox_arrow(self.profile_menu)
         self.frame.addWidget(self.profile_menu, 2, 1)
         
         # Connect signals for profile selection
@@ -2182,6 +2221,33 @@ Recent translations to summarize:
         if state is not None:
             self.REMOVE_AI_ARTIFACTS_var = (state == Qt.Checked)
     
+    def _auto_save_system_prompt(self):
+        """Auto-save system prompt to current profile as user types"""
+        try:
+            # Get current profile name
+            if not hasattr(self, 'profile_menu'):
+                return
+            
+            name = self.profile_menu.currentText().strip()
+            if not name:
+                return
+            
+            # Get current text from prompt_text
+            content = self.prompt_text.toPlainText().strip()
+            
+            # Update the profile in memory
+            self.prompt_profiles[name] = content
+            
+            # Update config
+            self.config['prompt_profiles'] = self.prompt_profiles
+            self.config['active_profile'] = name
+            
+            # Note: We don't call save_profiles() here to avoid constant disk I/O
+            # The profile will be saved when the config is saved (on exit or manual save)
+        except Exception as e:
+            # Silently fail to avoid disrupting user's typing
+            pass
+    
     def _create_api_section(self):
         """Create API key section"""
         # API Key Label (row 8)
@@ -2228,6 +2294,10 @@ Recent translations to summarize:
         self.prompt_text.setMaximumHeight(220)
         self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.prompt_text.setAcceptRichText(False)  # Plain text only
+        
+        # Auto-save system prompt as user types
+        self.prompt_text.textChanged.connect(self._auto_save_system_prompt)
+        
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
         
         # Output Token Limit button (row 9, column 0 - below label)
