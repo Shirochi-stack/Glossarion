@@ -393,7 +393,6 @@ def translate_headers_standalone(
     
     log("\n" + "=" * 80)
     log(f"Translation complete! Translated {len(result)} chapter headers")
-    log("Uses IDENTICAL method as pipeline (regex-based, preserves formatting)")
     log("=" * 80)
     
     return result
@@ -571,24 +570,17 @@ def run_translate_headers_gui(gui_instance):
             log_callback=gui_instance.append_log
         )
         
+        # Log results instead of showing message box
         if result:
-            from PySide6.QtGui import QIcon
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-            
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Information)
-            msg_box.setWindowTitle("Success")
-            msg_box.setText(f"Successfully translated {len(result)} chapter headers!")
-            msg_box.setInformativeText(f"Output directory: {output_dir}")
-            msg_box.setWindowIcon(icon)
-            msg_box.exec()
+            gui_instance.append_log(f"✅ Successfully translated {len(result)} chapter headers!")
+            # Show the translated_headers.txt file path only if saving was enabled
+            if save_to_file:
+                translations_file = os.path.join(output_dir, "translated_headers.txt")
+                gui_instance.append_log(f"📄 Translations saved to: {translations_file}")
+            if update_html:
+                gui_instance.append_log(f"🗂️ HTML files updated in: {output_dir}")
         else:
-            QMessageBox.warning(
-                None,
-                "No Results",
-                "No chapters were translated. Please check the logs."
-            )
+            gui_instance.append_log("⚠️ No chapters were translated. Please check the logs above.")
     
     except Exception as e:
         import traceback

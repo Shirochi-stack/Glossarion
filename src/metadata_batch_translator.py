@@ -1412,9 +1412,12 @@ class BatchHeaderTranslator:
         return translated_headers
         
     def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None) -> Dict[int, str]:
-        """Translate headers in batches using configured prompts"""
+        """Translate headers in batches using configured prompts with parallel execution"""
         if not headers_dict:
             return {}
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
         
         # Import tiktoken for token counting
         try:
@@ -1480,16 +1483,20 @@ class BatchHeaderTranslator:
         system_tokens = count_tokens(self.system_prompt)
         print(f"[DEBUG] System prompt tokens: {system_tokens}")
         
-        for batch_num in range(total_batches):
+        # Determine max workers from config or environment variable
+        # Use extraction_workers setting, with fallback to default of 3
+        configured_workers = int(os.getenv('EXTRACTION_WORKERS', self.config.get('extraction_workers', 3)))
+        # Don't create more workers than batches, and cap at configured limit
+        max_workers = min(configured_workers, total_batches)
+        print(f"[DEBUG] Using ThreadPoolExecutor with {max_workers} workers for {total_batches} batches (configured: {configured_workers})")
+        
+        # Thread-safe lock for updating all_translations
+        translations_lock = threading.Lock()
+        
+        def translate_batch(batch_num: int, batch_headers: Dict[int, str]):
+            """Translate a single batch - thread-safe function"""
             if self.stop_flag:
-                print("Translation interrupted by user")
-                break
-                
-            start_idx = batch_num * batch_size
-            end_idx = min((batch_num + 1) * batch_size, len(sorted_headers))
-            batch_headers = dict(sorted_headers[start_idx:end_idx])
-            
-            print(f"\n📚 Translating header batch {batch_num + 1}/{total_batches}")
+                return None
             
             try:
                 titles_json = json.dumps(batch_headers, ensure_ascii=False, indent=2)
@@ -1500,6 +1507,7 @@ class BatchHeaderTranslator:
                 total_input_tokens = system_tokens + user_tokens
                 
                 # Debug output showing input tokens
+                print(f"\n📚 Translating header batch {batch_num + 1}/{total_batches}")
                 print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
                 print(f"  - User prompt: {user_tokens} tokens")
                 print(f"  - Total input: {total_input_tokens} tokens (including system prompt)")
@@ -1540,29 +1548,65 @@ class BatchHeaderTranslator:
                 
                 if response_content:
                     translations = self._parse_json_response(response_content, batch_headers)
-                    all_translations.update(translations)
                     
                     # Count output tokens for debug
                     output_tokens = count_tokens(response_content)
-                    print(f"[DEBUG] Response tokens: {output_tokens}")
+                    print(f"[DEBUG] Batch {batch_num + 1} response tokens: {output_tokens}")
                     
                     for num, translated in translations.items():
                         if num in batch_headers:
                             print(f"  ✓ Ch{num}: {batch_headers[num]} → {translated}")
+                    
+                    return translations
                 else:
-                    print(f"  ⚠️ Empty response from API")
+                    print(f"  ⚠️ Batch {batch_num + 1}: Empty response from API")
+                    return {}
                     
             except json.JSONDecodeError as e:
-                print(f"  ❌ Failed to parse JSON response: {e}")
+                print(f"  ❌ Batch {batch_num + 1}: Failed to parse JSON response: {e}")
                 # Try to extract translations manually from the response
                 if response_content:
-                    translations = self._fallback_parse(response_content, batch_headers)
-                    all_translations.update(translations)
+                    return self._fallback_parse(response_content, batch_headers)
+                return {}
             except Exception as e:
-                print(f"  ❌ Error in batch {batch_num + 1}: {e}")
-                continue
+                print(f"  ❌ Batch {batch_num + 1}: Error: {e}")
+                return {}
         
-        print(f"\n✅ Translated {len(all_translations)} headers total")
+        # Create batches
+        batch_tasks = []
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min((batch_num + 1) * batch_size, len(sorted_headers))
+            batch_headers = dict(sorted_headers[start_idx:end_idx])
+            batch_tasks.append((batch_num, batch_headers))
+        
+        # Execute batches in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="HeaderBatch") as executor:
+            # Submit all tasks
+            future_to_batch = {executor.submit(translate_batch, batch_num, headers): batch_num 
+                             for batch_num, headers in batch_tasks}
+            
+            # Collect results as they complete
+            completed = 0
+            for future in as_completed(future_to_batch):
+                if self.stop_flag:
+                    print("\nTranslation interrupted by user")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                
+                batch_num = future_to_batch[future]
+                try:
+                    translations = future.result()
+                    if translations:
+                        with translations_lock:
+                            all_translations.update(translations)
+                    completed += 1
+                    print(f"\n[Progress] Completed {completed}/{total_batches} batches")
+                except Exception as e:
+                    print(f"\n❌ Batch {batch_num + 1} generated exception: {e}")
+                    completed += 1
+        
+        print(f"\n✅ Translated {len(all_translations)} headers total (using parallel execution)")
         return all_translations
     
     def _parse_json_response(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
