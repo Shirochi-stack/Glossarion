@@ -2371,7 +2371,7 @@ Recent translations to summarize:
                 background-color: #218838;
             }
         """)
-        self.run_button.setMinimumWidth(150)
+        self.run_button.setMinimumWidth(200)
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.frame.addWidget(self.run_button, 9, 4, Qt.AlignmentFlag(0))
     

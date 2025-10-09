@@ -4337,6 +4337,19 @@ class UnifiedClient:
                             print(f"[{label} {idx+1}] ❌ Got error message: {content}")
                             continue
                         
+                        # Check for refusal patterns (content moderation)
+                        if content:
+                            content_lower = content.lower().strip()
+                            refusal_patterns = [
+                                "i can't", "i cannot", "i'm not able", "i am not able",
+                                "i'm unable", "i am unable", "as an ai", "as a language model",
+                                "i don't feel comfortable", "i cannot assist", "i can't assist",
+                                "i'm sorry, but i can't", "i apologize, but i cannot"
+                            ]
+                            if any(pattern in content_lower for pattern in refusal_patterns):
+                                print(f"[{label} {idx+1}] ❌ Refusal pattern detected: {content[:100]}")
+                                continue
+                        
                         # Check if content is valid - accept any non-empty content (symbols, single chars, etc. are valid)
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
                             print(f"[{label} {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
