@@ -7838,7 +7838,8 @@ class UnifiedClient:
                 ),
             ]
             if not self._is_stop_requested():
-                logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
+                #logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
+                pass
         else:
             if not self._is_stop_requested():
                 logger.info("Using default Gemini safety settings")
