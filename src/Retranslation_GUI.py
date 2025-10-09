@@ -643,8 +643,18 @@ class RetranslationMixin:
         if parent_dialog and not hasattr(parent_dialog, '_all_toggle_checkboxes'):
             parent_dialog._all_toggle_checkboxes = []
             parent_dialog._all_checkmark_labels = []
+            parent_dialog._tab_file_paths = {}  # Map file_path to index
         if parent_dialog:
-            parent_dialog._all_toggle_checkboxes.append(show_special_files_cb)
+            # Store the index for this file
+            file_key = os.path.abspath(file_path)
+            if file_key not in parent_dialog._tab_file_paths:
+                parent_dialog._tab_file_paths[file_key] = len(parent_dialog._all_toggle_checkboxes)
+                parent_dialog._all_toggle_checkboxes.append(show_special_files_cb)
+            else:
+                # Replace the old checkbox at this index
+                idx = parent_dialog._tab_file_paths[file_key]
+                if idx < len(parent_dialog._all_toggle_checkboxes):
+                    parent_dialog._all_toggle_checkboxes[idx] = show_special_files_cb
         
         # Apply blue checkbox stylesheet (matching Other Settings dialog)
         show_special_files_cb.setStyleSheet("""
@@ -720,7 +730,14 @@ class RetranslationMixin:
         
         # Register checkmark for cross-tab syncing
         if parent_dialog:
-            parent_dialog._all_checkmark_labels.append(checkmark)
+            file_key = os.path.abspath(file_path)
+            if file_key in parent_dialog._tab_file_paths:
+                idx = parent_dialog._tab_file_paths[file_key]
+                # Append if new, replace if exists
+                if idx >= len(parent_dialog._all_checkmark_labels):
+                    parent_dialog._all_checkmark_labels.append(checkmark)
+                else:
+                    parent_dialog._all_checkmark_labels[idx] = checkmark
         
         title_layout.addWidget(show_special_files_cb)
         
@@ -750,25 +767,31 @@ class RetranslationMixin:
                 if hasattr(parent_dialog, '_all_toggle_checkboxes'):
                     for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
                         if other_checkbox != show_special_files_cb:
-                            # Temporarily disconnect to avoid recursive updates
                             try:
-                                other_checkbox.stateChanged.disconnect()
-                            except:
+                                # Check if the widget still exists before trying to use it
+                                if other_checkbox and not other_checkbox.isHidden() is None:
+                                    # Temporarily disconnect to avoid recursive updates
+                                    try:
+                                        other_checkbox.stateChanged.disconnect()
+                                    except:
+                                        pass
+                                    other_checkbox.setChecked(show_special_files[0])
+                                    # Update the corresponding checkmark visual
+                                    if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
+                                        try:
+                                            other_checkmark = parent_dialog._all_checkmark_labels[idx]
+                                            if other_checkmark and not other_checkmark.isHidden() is None:
+                                                if show_special_files[0]:
+                                                    other_checkmark.setGeometry(2, 1, 14, 14)
+                                                    other_checkmark.show()
+                                                else:
+                                                    other_checkmark.hide()
+                                        except RuntimeError:
+                                            # Widget was deleted
+                                            pass
+                            except RuntimeError:
+                                # Widget was deleted, skip it
                                 pass
-                            other_checkbox.setChecked(show_special_files[0])
-                            # Update the corresponding checkmark visual
-                            if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
-                                try:
-                                    other_checkmark = parent_dialog._all_checkmark_labels[idx]
-                                    if show_special_files[0]:
-                                        other_checkmark.setGeometry(2, 1, 14, 14)
-                                        other_checkmark.show()
-                                    else:
-                                        other_checkmark.hide()
-                                except:
-                                    pass
-                            # Reconnect (the handler will be in that tab's scope)
-                            # We don't reconnect here as each checkbox has its own handler
                 
                 # Clear the tab frame's layout
                 for i in reversed(range(container_layout.count())):
@@ -778,6 +801,7 @@ class RetranslationMixin:
                         widget.deleteLater()
                 
                 # Rebuild the tab content with new toggle state
+                # The rebuild will replace the checkbox/checkmark at the same index
                 self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
                 return
             
