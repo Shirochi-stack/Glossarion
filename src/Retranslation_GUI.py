@@ -742,6 +742,9 @@ class RetranslationMixin:
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
                 json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
+            # Auto-refresh the display
+            self._refresh_retranslation_data(data)
+            
             QMessageBox.information(data.get('dialog', self), "Success", f"Removed QA failed mark from {cleared_count} chapters.")
         
         def retranslate_selected():
@@ -800,8 +803,8 @@ class RetranslationMixin:
                         except Exception as e:
                             print(f"Failed to delete {output_path}: {e}")
                     
-                    # Reset status for any completed or qa_failed chapters
-                    if ch_info['status'] in ['completed', 'qa_failed']:
+                    # Reset status for any completed, completed_empty, or qa_failed chapters
+                    if ch_info['status'] in ['completed', 'completed_empty', 'qa_failed']:
                         target_output_file = ch_info['output_file']
                         chapter_key = None
                         
@@ -848,6 +851,9 @@ class RetranslationMixin:
                     print(f"Updated progress tracking file - reset {status_reset_count} chapter statuses to pending")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
+            
+            # Auto-refresh the display to show updated status
+            self._refresh_retranslation_data(data)
             
             # Build success message
             success_parts = []
@@ -903,10 +909,208 @@ class RetranslationMixin:
         btn_remove_qa.clicked.connect(remove_qa_failed_mark)
         button_layout.addWidget(btn_remove_qa, 1, 2, 1, 1)
         
+        # Add refresh button
+        btn_refresh = QPushButton("🔄 Refresh")
+        btn_refresh.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; font-weight: bold; }")
+        btn_refresh.clicked.connect(lambda: self._refresh_retranslation_data(data))
+        button_layout.addWidget(btn_refresh, 1, 3, 1, 1)
+        
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
-        button_layout.addWidget(btn_cancel, 1, 3, 1, 2)
+        button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
+
+    def _refresh_retranslation_data(self, data):
+        """Refresh the retranslation dialog data by reloading progress and updating display"""
+        try:
+            print("🔄 Refreshing retranslation data...")
+            
+            # Reload progress file
+            with open(data['progress_file'], 'r', encoding='utf-8') as f:
+                data['prog'] = json.load(f)
+            
+            # Re-parse and update chapter status information
+            self._update_chapter_status_info(data)
+            
+            # Update the listbox display
+            self._update_listbox_display(data)
+            
+            # Update statistics if available
+            self._update_statistics_display(data)
+            
+            # Clear selections
+            data['listbox'].clearSelection()
+            data['selection_count_label'].setText("Selected: 0")
+            
+            print("✅ Retranslation data refreshed successfully")
+            
+        except Exception as e:
+            print(f"❌ Failed to refresh data: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(data.get('dialog', self), "Refresh Failed", 
+                              f"Failed to refresh data: {str(e)}")
+    
+    def _update_chapter_status_info(self, data):
+        """Update chapter status information after refresh"""
+        # Re-check file existence and update status for each chapter
+        for info in data['chapter_display_info']:
+            output_file = info['output_file']
+            output_path = os.path.join(data['output_dir'], output_file)
+            
+            # Find matching progress entry
+            matched_info = None
+            for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
+                if chapter_info.get('output_file') == output_file:
+                    matched_info = chapter_info
+                    break
+                # Also try matching by chapter number as fallback
+                if not matched_info:
+                    actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
+                    if actual_num is not None and actual_num == info['num']:
+                        matched_info = chapter_info
+                        break
+            
+            # Update status based on current state
+            if matched_info:
+                new_status = matched_info.get('status', 'unknown')
+                # Verify file actually exists for completed status
+                if new_status == 'completed' and not os.path.exists(output_path):
+                    new_status = 'file_missing'
+                info['status'] = new_status
+                info['info'] = matched_info
+            elif os.path.exists(output_path):
+                info['status'] = 'completed'
+            else:
+                info['status'] = 'not_translated'
+    
+    def _update_listbox_display(self, data):
+        """Update the listbox display with current chapter information"""
+        listbox = data['listbox']
+        
+        # Clear existing items
+        listbox.clear()
+        
+        # Status icons and labels
+        status_icons = {
+            'completed': '✅',
+            'failed': '❌',
+            'qa_failed': '❌',
+            'file_missing': '⚠️',
+            'in_progress': '🔄',
+            'not_translated': '❌',
+            'unknown': '❓'
+        }
+        
+        status_labels = {
+            'completed': 'Completed',
+            'failed': 'Failed',
+            'qa_failed': 'QA Failed',
+            'file_missing': 'File Missing',
+            'in_progress': 'In Progress',
+            'not_translated': 'Not Translated',
+            'unknown': 'Unknown'
+        }
+        
+        # Rebuild listbox items
+        for info in data['chapter_display_info']:
+            chapter_num = info['num']
+            status = info['status']
+            output_file = info['output_file']
+            icon = status_icons.get(status, '❓')
+            status_label = status_labels.get(status, status)
+            
+            # Format display with OPF info if available
+            if 'opf_position' in info:
+                # OPF-based display
+                original_file = info.get('original_filename', '')
+                opf_pos = info['opf_position'] + 1  # 1-based for display
+                
+                # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+                else:
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+            else:
+                # Original format
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:15s} | {output_file}"
+                elif isinstance(chapter_num, float):
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:15s} | {output_file}"
+                else:
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:15s} | {output_file}"
+            
+            if info.get('duplicate_count', 1) > 1:
+                display += f" | ({info['duplicate_count']} entries)"
+            
+            from PySide6.QtWidgets import QListWidgetItem
+            from PySide6.QtGui import QColor
+            item = QListWidgetItem(display)
+            
+            # Color code based on status
+            if status == 'completed':
+                item.setForeground(QColor('green'))
+            elif status in ['failed', 'qa_failed', 'not_translated']:
+                item.setForeground(QColor('red'))
+            elif status == 'file_missing':
+                item.setForeground(QColor('purple'))
+            elif status == 'in_progress':
+                item.setForeground(QColor('orange'))
+            
+            listbox.addItem(item)
+    
+    def _update_statistics_display(self, data):
+        """Update statistics display if spine chapters are available"""
+        if not data.get('spine_chapters'):
+            return
+        
+        # Find statistics labels in the container
+        container = data['container']
+        
+        # Search for statistics labels by traversing the widget hierarchy
+        def find_stats_labels(widget):
+            labels = {}
+            if hasattr(widget, 'children'):
+                for child in widget.children():
+                    if hasattr(child, 'text'):
+                        text = child.text()
+                        if text.startswith('Total:'):
+                            labels['total'] = child
+                        elif text.startswith('✅ Completed:'):
+                            labels['completed'] = child
+                        elif text.startswith('❌ Missing:'):
+                            labels['missing'] = child
+                        elif text.startswith('⚠️ Failed:'):
+                            labels['failed'] = child
+                        elif text.startswith('📁 File Missing:'):
+                            labels['file_missing'] = child
+                    
+                    # Recursively search children
+                    labels.update(find_stats_labels(child))
+            return labels
+        
+        stats_labels = find_stats_labels(container)
+        
+        if stats_labels:
+            # Recalculate statistics
+            spine_chapters = data['spine_chapters']
+            total_chapters = len(spine_chapters)
+            completed = sum(1 for info in data['chapter_display_info'] if info['status'] == 'completed')
+            missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'not_translated')
+            failed = sum(1 for info in data['chapter_display_info'] if info['status'] in ['failed', 'qa_failed'])
+            file_missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'file_missing')
+            
+            # Update labels
+            if 'total' in stats_labels:
+                stats_labels['total'].setText(f"Total: {total_chapters} | ")
+            if 'completed' in stats_labels:
+                stats_labels['completed'].setText(f"✅ Completed: {completed} | ")
+            if 'missing' in stats_labels:
+                stats_labels['missing'].setText(f"❌ Missing: {missing} | ")
+            if 'failed' in stats_labels:
+                stats_labels['failed'].setText(f"⚠️ Failed: {failed} | ")
+            if 'file_missing' in stats_labels:
+                stats_labels['file_missing'].setText(f"📁 File Missing: {file_missing}")
 
 
     def _force_retranslation_multiple_files(self):
