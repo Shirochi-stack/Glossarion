@@ -104,6 +104,7 @@ app_files = [
 	
 	# Metadata and header batch translation
     ('metadata_batch_translator.py', '.'),
+    ('translate_headers_standalone.py', '.'),
     
     # Resources
     ('Halgakos.ico', '.'),
@@ -290,6 +291,7 @@ app_modules = [
 	'http_logger',
 	'async_api_processor',
 	'metadata_batch_translator',
+	'translate_headers_standalone',
 	'enhanced_text_extractor.py',
 	'multi_api_key_manager.py',
 	'individual_endpoint_dialog.py',
