@@ -2290,7 +2290,11 @@ class QAScannerMixin:
         def save_settings():
             """Save QA scanner settings with comprehensive debugging"""
             try:
-                self.append_log("🔍 [DEBUG] Starting QA Scanner settings save process...")
+                # Check if debug mode is enabled
+                debug_mode = self.config.get('show_debug_buttons', False)
+                
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Starting QA Scanner settings save process...")
                 
                 # Helper to get the selected radio button value
                 def get_selected_radio_value(radio_button_list):
@@ -2326,20 +2330,23 @@ class QAScannerMixin:
                         new_value = converter(var_obj)
                         qa_settings[setting_name] = new_value
                         
-                        if old_value != new_value:
-                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
-                        else:
-                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
+                        if debug_mode:
+                            if old_value != new_value:
+                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
+                            else:
+                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
                             
                     except Exception as e:
                         failed_core_settings.append(f"{setting_name} ({str(e)})")
-                        self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
                 
-                if failed_core_settings:
+                if failed_core_settings and debug_mode:
                     self.append_log(f"⚠️ [DEBUG] Failed QA core settings: {', '.join(failed_core_settings)}")
                 
                 # Cache settings with debugging
-                self.append_log("🔍 [DEBUG] Saving QA cache settings...")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Saving QA cache settings...")
                 cache_settings_to_save = {
                     'cache_enabled': (cache_enabled_checkbox, lambda x: x.isChecked()),
                     'cache_auto_size': (auto_size_checkbox, lambda x: x.isChecked()),
@@ -2353,13 +2360,15 @@ class QAScannerMixin:
                         new_value = converter(var_obj)
                         qa_settings[setting_name] = new_value
                         
-                        if old_value != new_value:
-                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
-                        else:
-                            self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
+                        if debug_mode:
+                            if old_value != new_value:
+                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
+                            else:
+                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
                     except Exception as e:
                         failed_cache_settings.append(f"{setting_name} ({str(e)})")
-                        self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
                 
                 # Save individual cache sizes with debugging
                 saved_cache_vars = []
@@ -2372,38 +2381,45 @@ class QAScannerMixin:
                         qa_settings[cache_key] = new_value
                         saved_cache_vars.append(cache_name)
                         
-                        if old_value != new_value:
+                        if debug_mode and old_value != new_value:
                             self.append_log(f"🔍 [DEBUG] QA {cache_key}: '{old_value}' → '{new_value}'")
                     except Exception as e:
                         failed_cache_vars.append(f"{cache_name} ({str(e)})")
-                        self.append_log(f"❌ [DEBUG] Failed to save QA cache_{cache_name}: {e}")
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to save QA cache_{cache_name}: {e}")
                 
-                if saved_cache_vars:
-                    self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
-                if failed_cache_vars:
-                    self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
+                if debug_mode:
+                    if saved_cache_vars:
+                        self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
+                    if failed_cache_vars:
+                        self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
                 
                 # AI Hunter config with debugging
-                self.append_log("🔍 [DEBUG] Saving AI Hunter config...")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Saving AI Hunter config...")
                 try:
                     if 'ai_hunter_config' not in self.config:
                         self.config['ai_hunter_config'] = {}
-                        self.append_log("🔍 [DEBUG] Created new ai_hunter_config section")
+                        if debug_mode:
+                            self.append_log("🔍 [DEBUG] Created new ai_hunter_config section")
                     
                     old_workers = self.config['ai_hunter_config'].get('ai_hunter_max_workers', '<NOT SET>')
                     new_workers = ai_hunter_workers_spinbox.value()
                     self.config['ai_hunter_config']['ai_hunter_max_workers'] = new_workers
                     
-                    if old_workers != new_workers:
-                        self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: '{old_workers}' → '{new_workers}'")
-                    else:
-                        self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: unchanged ('{new_workers}')")
+                    if debug_mode:
+                        if old_workers != new_workers:
+                            self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: '{old_workers}' → '{new_workers}'")
+                        else:
+                            self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: unchanged ('{new_workers}')")
                         
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Failed to save AI Hunter config: {e}")
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] Failed to save AI Hunter config: {e}")
     
                 # Validate and save paragraph threshold with debugging
-                self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
                 try:
                     threshold_value = paragraph_threshold_spinbox.value()
                     old_threshold = qa_settings.get('paragraph_threshold', '<NOT SET>')
@@ -2412,41 +2428,47 @@ class QAScannerMixin:
                         new_threshold = threshold_value / 100.0  # Convert to decimal
                         qa_settings['paragraph_threshold'] = new_threshold
                         
-                        if old_threshold != new_threshold:
-                            self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: '{old_threshold}' → '{new_threshold}' ({threshold_value}%)")
-                        else:
-                            self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: unchanged ('{new_threshold}' / {threshold_value}%)")
+                        if debug_mode:
+                            if old_threshold != new_threshold:
+                                self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: '{old_threshold}' → '{new_threshold}' ({threshold_value}%)")
+                            else:
+                                self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: unchanged ('{new_threshold}' / {threshold_value}%)")
                     else:
                         raise ValueError("Threshold must be between 0 and 100")
                         
                 except (ValueError, Exception) as e:
                     # Default to 30% if invalid
                     qa_settings['paragraph_threshold'] = 0.3
-                    self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
                     self.append_log("⚠️ Invalid paragraph threshold, using default 30%")
 
                 # Save to main config with debugging
-                self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
                 try:
                     old_qa_config = self.config.get('qa_scanner_settings', {})
                     self.config['qa_scanner_settings'] = qa_settings
                     
-                    # Count changed settings
-                    changed_settings = []
-                    for key, new_value in qa_settings.items():
-                        if old_qa_config.get(key) != new_value:
-                            changed_settings.append(key)
-                    
-                    if changed_settings:
-                        self.append_log(f"🔍 [DEBUG] Changed {len(changed_settings)} QA settings: {', '.join(changed_settings[:5])}{'...' if len(changed_settings) > 5 else ''}")
-                    else:
-                        self.append_log("🔍 [DEBUG] No QA settings changed")
+                    if debug_mode:
+                        # Count changed settings
+                        changed_settings = []
+                        for key, new_value in qa_settings.items():
+                            if old_qa_config.get(key) != new_value:
+                                changed_settings.append(key)
+                        
+                        if changed_settings:
+                            self.append_log(f"🔍 [DEBUG] Changed {len(changed_settings)} QA settings: {', '.join(changed_settings[:5])}{'...' if len(changed_settings) > 5 else ''}")
+                        else:
+                            self.append_log("🔍 [DEBUG] No QA settings changed")
                         
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Failed to update main config: {e}")
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] Failed to update main config: {e}")
                 
                 # Environment variables setup for QA Scanner
-                self.append_log("🔍 [DEBUG] Setting QA Scanner environment variables...")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Setting QA Scanner environment variables...")
                 qa_env_vars_set = []
                 
                 try:
@@ -2473,48 +2495,59 @@ class QAScannerMixin:
                             new_value = os.environ[env_key]
                             qa_env_vars_set.append(env_key)
                             
-                            if old_value != new_value:
-                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value}'")
-                            else:
-                                self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{new_value}')")
+                            if debug_mode:
+                                if old_value != new_value:
+                                    self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value}'")
+                                else:
+                                    self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{new_value}')")
                                 
                         except Exception as e:
-                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+                            if debug_mode:
+                                self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
                     
-                    self.append_log(f"🔍 [DEBUG] Successfully set {len(qa_env_vars_set)} QA environment variables")
+                    if debug_mode:
+                        self.append_log(f"🔍 [DEBUG] Successfully set {len(qa_env_vars_set)} QA environment variables")
                     
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] QA environment variable setup failed: {e}")
-                    import traceback
-                    self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] QA environment variable setup failed: {e}")
+                        import traceback
+                        self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
                 
                 # Call save_config with show_message=False to avoid the error
-                self.append_log("🔍 [DEBUG] Calling main save_config method...")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Calling main save_config method...")
                 try:
                     self.save_config(show_message=False)
-                    self.append_log("🔍 [DEBUG] Main save_config completed successfully")
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Main save_config completed successfully")
                 except Exception as e:
-                    self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
                     raise
                 
                 # Final QA environment variable verification
-                self.append_log("🔍 [DEBUG] Final QA environment variable check:")
-                critical_qa_vars = ['QA_FOREIGN_CHAR_THRESHOLD', 'QA_TARGET_LANGUAGE', 'QA_REPORT_FORMAT', 'AI_HUNTER_MAX_WORKERS']
-                for var in critical_qa_vars:
-                    value = os.environ.get(var, '<NOT SET>')
-                    if value == '<NOT SET>' or not value:
-                        self.append_log(f"❌ [DEBUG] CRITICAL QA: {var} is not set or empty!")
-                    else:
-                        self.append_log(f"✅ [DEBUG] QA {var}: {value}")
+                if debug_mode:
+                    self.append_log("🔍 [DEBUG] Final QA environment variable check:")
+                    critical_qa_vars = ['QA_FOREIGN_CHAR_THRESHOLD', 'QA_TARGET_LANGUAGE', 'QA_REPORT_FORMAT', 'AI_HUNTER_MAX_WORKERS']
+                    for var in critical_qa_vars:
+                        value = os.environ.get(var, '<NOT SET>')
+                        if value == '<NOT SET>' or not value:
+                            self.append_log(f"❌ [DEBUG] CRITICAL QA: {var} is not set or empty!")
+                        else:
+                            self.append_log(f"✅ [DEBUG] QA {var}: {value}")
                 
                 self.append_log("✅ QA Scanner settings saved successfully")
                 dialog._cleanup_scrolling()  # Clean up scrolling bindings
                 dialog.accept()
                 
             except Exception as e:
-                self.append_log(f"❌ [DEBUG] QA save_settings full exception: {str(e)}")
-                import traceback
-                self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
+                # Get debug_mode again in case of early exception
+                debug_mode = self.config.get('show_debug_buttons', False)
+                if debug_mode:
+                    self.append_log(f"❌ [DEBUG] QA save_settings full exception: {str(e)}")
+                    import traceback
+                    self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
                 self.append_log(f"❌ Error saving QA settings: {str(e)}")
                 QMessageBox.critical(dialog, "Error", f"Failed to save settings: {str(e)}")
         
@@ -2600,3 +2633,313 @@ class QAScannerMixin:
         
         # Show the dialog and return result
         return dialog.exec()
+
+
+def show_custom_detection_dialog(parent=None):
+    """
+    Standalone function to show the custom detection settings dialog.
+    Returns a dictionary with the settings if user confirms, None if cancelled.
+    
+    This function can be called from anywhere, including scan_html_folder.py
+    """
+    from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton, 
+                                   QVBoxLayout, QHBoxLayout, QScrollArea, QGroupBox,
+                                   QCheckBox, QSpinBox, QSlider, QMessageBox, QSizePolicy)
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont, QIcon
+    import os
+    
+    # Create dialog
+    custom_dialog = QDialog(parent)
+    custom_dialog.setWindowTitle("Custom Mode Settings")
+    custom_dialog.setModal(True)
+    
+    # Set dialog size
+    screen = QApplication.primaryScreen().geometry()
+    custom_width = int(screen.width() * 0.41)
+    custom_height = int(screen.height() * 0.60)
+    custom_dialog.resize(custom_width, custom_height)
+    
+    # Set window icon
+    try:
+        # Try to find the icon in common locations
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico'),
+            os.path.join(os.getcwd(), 'Halgakos.ico'),
+        ]
+        for ico_path in possible_paths:
+            if os.path.isfile(ico_path):
+                custom_dialog.setWindowIcon(QIcon(ico_path))
+                break
+    except Exception:
+        pass
+    
+    # Main layout
+    dialog_layout = QVBoxLayout(custom_dialog)
+    
+    # Scroll area
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    
+    # Scrollable content widget
+    scroll_widget = QWidget()
+    scroll_layout = QVBoxLayout(scroll_widget)
+    scroll.setWidget(scroll_widget)
+    dialog_layout.addWidget(scroll)
+    
+    # Default settings
+    custom_settings = {
+        'text_similarity': 85,
+        'semantic_analysis': 80,
+        'structural_patterns': 90,
+        'word_overlap': 75,
+        'minhash_similarity': 80,
+        'consecutive_chapters': 2,
+        'check_all_pairs': False,
+        'sample_size': 3000,
+        'min_text_length': 500
+    }
+    
+    # Store widget references
+    custom_widgets = {}
+    
+    # Title
+    title_label = QLabel("Configure Custom Detection Settings")
+    title_label.setFont(QFont('Arial', 20, QFont.Bold))
+    title_label.setAlignment(Qt.AlignCenter)
+    scroll_layout.addWidget(title_label)
+    scroll_layout.addSpacing(20)
+    
+    # Detection Thresholds Section
+    threshold_group = QGroupBox("Detection Thresholds (%)")
+    threshold_group.setFont(QFont('Arial', 12, QFont.Bold))
+    threshold_layout = QVBoxLayout(threshold_group)
+    threshold_layout.setContentsMargins(25, 25, 25, 25)
+    scroll_layout.addWidget(threshold_group)
+    
+    threshold_descriptions = {
+        'text_similarity': ('Text Similarity', 'Character-by-character comparison'),
+        'semantic_analysis': ('Semantic Analysis', 'Meaning and context matching'),
+        'structural_patterns': ('Structural Patterns', 'Document structure similarity'),
+        'word_overlap': ('Word Overlap', 'Common words between texts'),
+        'minhash_similarity': ('MinHash Similarity', 'Fast approximate matching')
+    }
+    
+    # Create percentage labels dictionary
+    percentage_labels = {}
+    
+    for setting_key, (label_text, description) in threshold_descriptions.items():
+        # Container for each threshold
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 8, 0, 8)
+        
+        # Left side - labels
+        label_widget = QWidget()
+        label_layout = QVBoxLayout(label_widget)
+        label_layout.setContentsMargins(0, 0, 0, 0)
+        
+        main_label = QLabel(f"{label_text} - {description}:")
+        main_label.setFont(QFont('Arial', 11))
+        label_layout.addWidget(main_label)
+        label_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        row_layout.addWidget(label_widget)
+        
+        # Right side - slider and percentage
+        slider_widget = QWidget()
+        slider_layout = QHBoxLayout(slider_widget)
+        slider_layout.setContentsMargins(20, 0, 0, 0)
+        
+        # Create slider
+        slider = QSlider(Qt.Horizontal)
+        slider.setMinimum(10)
+        slider.setMaximum(100)
+        slider.setValue(custom_settings[setting_key])
+        slider.setMinimumWidth(300)
+        slider.wheelEvent = lambda event: event.ignore()
+        slider_layout.addWidget(slider)
+        
+        # Percentage label
+        percentage_label = QLabel(f"{custom_settings[setting_key]}%")
+        percentage_label.setFont(QFont('Arial', 12, QFont.Bold))
+        percentage_label.setMinimumWidth(50)
+        percentage_label.setAlignment(Qt.AlignRight)
+        slider_layout.addWidget(percentage_label)
+        percentage_labels[setting_key] = percentage_label
+        
+        row_layout.addWidget(slider_widget)
+        threshold_layout.addWidget(row_widget)
+        
+        # Store slider widget reference
+        custom_widgets[setting_key] = slider
+        
+        # Update percentage label when slider moves
+        def create_update_function(key, label, settings_dict):
+            def update_percentage(value):
+                settings_dict[key] = value
+                label.setText(f"{value}%")
+            return update_percentage
+        
+        update_func = create_update_function(setting_key, percentage_label, custom_settings)
+        slider.valueChanged.connect(update_func)
+    
+    scroll_layout.addSpacing(15)
+    
+    # Processing Options Section
+    options_group = QGroupBox("Processing Options")
+    options_group.setFont(QFont('Arial', 12, QFont.Bold))
+    options_layout = QVBoxLayout(options_group)
+    options_layout.setContentsMargins(20, 20, 20, 20)
+    scroll_layout.addWidget(options_group)
+    
+    # Consecutive chapters option
+    consec_widget = QWidget()
+    consec_layout = QHBoxLayout(consec_widget)
+    consec_layout.setContentsMargins(0, 5, 0, 5)
+    
+    consec_label = QLabel("Consecutive chapters to check:")
+    consec_label.setFont(QFont('Arial', 11))
+    consec_layout.addWidget(consec_label)
+    
+    consec_spinbox = QSpinBox()
+    consec_spinbox.setMinimum(1)
+    consec_spinbox.setMaximum(10)
+    consec_spinbox.setValue(custom_settings['consecutive_chapters'])
+    consec_spinbox.setMinimumWidth(100)
+    consec_spinbox.wheelEvent = lambda event: event.ignore()
+    consec_layout.addWidget(consec_spinbox)
+    consec_layout.addStretch()
+    options_layout.addWidget(consec_widget)
+    custom_widgets['consecutive_chapters'] = consec_spinbox
+    
+    # Sample size option
+    sample_widget = QWidget()
+    sample_layout = QHBoxLayout(sample_widget)
+    sample_layout.setContentsMargins(0, 5, 0, 5)
+    
+    sample_label = QLabel("Sample size for comparison (characters):")
+    sample_label.setFont(QFont('Arial', 11))
+    sample_layout.addWidget(sample_label)
+    
+    sample_spinbox = QSpinBox()
+    sample_spinbox.setMinimum(1000)
+    sample_spinbox.setMaximum(10000)
+    sample_spinbox.setSingleStep(500)
+    sample_spinbox.setValue(custom_settings['sample_size'])
+    sample_spinbox.setMinimumWidth(100)
+    sample_spinbox.wheelEvent = lambda event: event.ignore()
+    sample_layout.addWidget(sample_spinbox)
+    sample_layout.addStretch()
+    options_layout.addWidget(sample_widget)
+    custom_widgets['sample_size'] = sample_spinbox
+    
+    # Minimum text length option
+    min_length_widget = QWidget()
+    min_length_layout = QHBoxLayout(min_length_widget)
+    min_length_layout.setContentsMargins(0, 5, 0, 5)
+    
+    min_length_label = QLabel("Minimum text length to process (characters):")
+    min_length_label.setFont(QFont('Arial', 11))
+    min_length_layout.addWidget(min_length_label)
+    
+    min_length_spinbox = QSpinBox()
+    min_length_spinbox.setMinimum(100)
+    min_length_spinbox.setMaximum(5000)
+    min_length_spinbox.setSingleStep(100)
+    min_length_spinbox.setValue(custom_settings['min_text_length'])
+    min_length_spinbox.setMinimumWidth(100)
+    min_length_spinbox.wheelEvent = lambda event: event.ignore()
+    min_length_layout.addWidget(min_length_spinbox)
+    min_length_layout.addStretch()
+    options_layout.addWidget(min_length_widget)
+    custom_widgets['min_text_length'] = min_length_spinbox
+    
+    # Check all file pairs option
+    check_all_checkbox = QCheckBox("Check all file pairs (slower but more thorough)")
+    check_all_checkbox.setChecked(custom_settings['check_all_pairs'])
+    options_layout.addWidget(check_all_checkbox)
+    custom_widgets['check_all_pairs'] = check_all_checkbox
+    
+    scroll_layout.addSpacing(30)
+    
+    # Button layout
+    button_widget = QWidget()
+    button_layout = QHBoxLayout(button_widget)
+    button_layout.addStretch()
+    scroll_layout.addWidget(button_widget)
+    
+    # Flag to track if settings were confirmed
+    settings_confirmed = False
+    result_settings = None
+    
+    def confirm_settings():
+        """Confirm settings and close dialog"""
+        nonlocal settings_confirmed, result_settings
+        
+        result_settings = {
+            'text_similarity': custom_widgets['text_similarity'].value(),
+            'semantic_analysis': custom_widgets['semantic_analysis'].value(),
+            'structural_patterns': custom_widgets['structural_patterns'].value(),
+            'word_overlap': custom_widgets['word_overlap'].value(),
+            'minhash_similarity': custom_widgets['minhash_similarity'].value(),
+            'consecutive_chapters': custom_widgets['consecutive_chapters'].value(),
+            'check_all_pairs': custom_widgets['check_all_pairs'].isChecked(),
+            'sample_size': custom_widgets['sample_size'].value(),
+            'min_text_length': custom_widgets['min_text_length'].value()
+        }
+        settings_confirmed = True
+        custom_dialog.accept()
+    
+    def reset_to_defaults():
+        """Reset all values to defaults"""
+        reply = QMessageBox.question(custom_dialog, "Reset to Defaults", 
+                                   "Reset all values to default settings?",
+                                   QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            custom_widgets['text_similarity'].setValue(85)
+            custom_widgets['semantic_analysis'].setValue(80)
+            custom_widgets['structural_patterns'].setValue(90)
+            custom_widgets['word_overlap'].setValue(75)
+            custom_widgets['minhash_similarity'].setValue(80)
+            custom_widgets['consecutive_chapters'].setValue(2)
+            custom_widgets['check_all_pairs'].setChecked(False)
+            custom_widgets['sample_size'].setValue(3000)
+            custom_widgets['min_text_length'].setValue(500)
+    
+    # Create buttons
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.setMinimumWidth(120)
+    cancel_btn.clicked.connect(custom_dialog.reject)
+    button_layout.addWidget(cancel_btn)
+    
+    reset_btn = QPushButton("Reset Defaults")
+    reset_btn.setMinimumWidth(120)
+    reset_btn.clicked.connect(reset_to_defaults)
+    button_layout.addWidget(reset_btn)
+    
+    start_btn = QPushButton("Start Scan")
+    start_btn.setMinimumWidth(120)
+    start_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #28a745;
+            color: white;
+            border: 1px solid #28a745;
+            padding: 6px 12px;
+            border-radius: 4px;
+        }
+        QPushButton:hover {
+            background-color: #218838;
+        }
+    """)
+    start_btn.clicked.connect(confirm_settings)
+    button_layout.addWidget(start_btn)
+    
+    button_layout.addStretch()
+    
+    # Show dialog and return result
+    custom_dialog.exec()
+    
+    # Return settings if confirmed, None otherwise
+    return result_settings if settings_confirmed else None

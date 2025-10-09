@@ -4619,20 +4619,69 @@ def launch_gui():
 
 if __name__ == "__main__":
     import sys
+    import argparse
+    
     if len(sys.argv) < 2:
         launch_gui()
     else:
-        mode = 'standard'
-        if len(sys.argv) > 2:
-            if sys.argv[2] == "--aggressive":
-                mode = 'aggressive'
-            elif sys.argv[2] == "--custom":
-                mode = 'custom'
-            elif sys.argv[2] == "--quick-scan":
-                mode = 'quick-scan'
-            elif sys.argv[2] == "--ai-hunter":
-                mode = 'ai-hunter'
-        scan_html_folder(sys.argv[1], mode=mode)
+        # Parse command-line arguments
+        parser = argparse.ArgumentParser(description='QA Scanner for translated HTML files')
+        parser.add_argument('folder', help='Folder containing HTML files to scan')
+        parser.add_argument('--mode', choices=['quick-scan', 'aggressive', 'ai-hunter', 'custom', 'standard'], 
+                           default='quick-scan', help='Detection mode to use')
+        parser.add_argument('--interactive', action='store_true', 
+                           help='Show custom settings dialog for custom mode')
+        parser.add_argument('--aggressive', action='store_true', help='Use aggressive mode (deprecated, use --mode aggressive)')
+        parser.add_argument('--custom', action='store_true', help='Use custom mode (deprecated, use --mode custom)')
+        parser.add_argument('--quick-scan', action='store_true', help='Use quick-scan mode (deprecated, use --mode quick-scan)')
+        parser.add_argument('--ai-hunter', action='store_true', help='Use ai-hunter mode (deprecated, use --mode ai-hunter)')
+        
+        args = parser.parse_args()
+        
+        # Handle deprecated flags
+        if args.aggressive:
+            args.mode = 'aggressive'
+        elif args.custom:
+            args.mode = 'custom'
+        elif args.quick_scan:
+            args.mode = 'quick-scan'
+        elif args.ai_hunter:
+            args.mode = 'ai-hunter'
+        
+        # For custom mode with --interactive, show the custom detection settings dialog
+        if args.mode == 'custom' and args.interactive:
+            print("\ud83c\udfdb️ Opening Custom Detection Settings dialog...")
+            from PySide6.QtWidgets import QApplication
+            from QA_Scanner_GUI import show_custom_detection_dialog
+            
+            app = QApplication(sys.argv)
+            
+            # Show the dialog and get the settings
+            settings_dict = show_custom_detection_dialog(None)
+            
+            if settings_dict:
+                # User confirmed settings, now run the scan
+                print("\u2705 Custom settings configured, starting scan...")
+                
+                # Create a config object from the settings
+                config = DuplicateDetectionConfig()
+                config.similarity_threshold = settings_dict['text_similarity'] / 100.0
+                config.semantic_threshold = settings_dict['semantic_analysis'] / 100.0
+                config.structural_threshold = settings_dict['structural_patterns'] / 100.0
+                config.word_overlap_threshold = settings_dict['word_overlap'] / 100.0
+                config.minhash_threshold = settings_dict['minhash_similarity'] / 100.0
+                config.consecutive_chapters = settings_dict['consecutive_chapters']
+                config.sample_size = settings_dict['sample_size']
+                config.min_length = settings_dict['min_text_length']
+                config.check_all_pairs = settings_dict.get('check_all_pairs', False)
+                
+                # Run the scan with custom settings
+                scan_html_folder(args.folder, mode=args.mode, config=config)
+            else:
+                print("\u274c Custom settings dialog cancelled, scan aborted")
+        else:
+            # Run scan normally without dialog
+            scan_html_folder(args.folder, mode=args.mode)
 
 
 

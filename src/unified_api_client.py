@@ -3120,19 +3120,8 @@ class UnifiedClient:
                 
                 #print(f"[DEBUG] Gemini will use OpenAI-compatible endpoint: {gemini_endpoint}")
                 
-                disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
-                
-                config_data = {
-                    "type": "GEMINI_OPENAI_ENDPOINT_REQUEST",
-                    "model": self.model,
-                    "endpoint": gemini_endpoint,
-                    "safety_enabled": not disable_safety,
-                    "safety_settings": "DISABLED_VIA_OPENAI_ENDPOINT" if disable_safety else "DEFAULT",
-                    "timestamp": datetime.now().isoformat(),
-                }
-                
-                # Just call the existing save method
-                self._save_gemini_safety_config(config_data, None)
+                # Safety config will be saved when actual API call is made
+                # No need to save during client setup
             else:
                 # Use native Gemini client
                 #print(f"[DEBUG] Preparing native Gemini client")
