@@ -96,6 +96,9 @@ app_files = [
     ('manga_integration.py', '.'),
     ('manga_settings_dialog.py', '.'), 
     
+    # Dialog animations
+    ('dialog_animations.py', '.'),
+    
     # Update Manager
     ('update_manager.py', '.'),
 	
@@ -286,7 +289,8 @@ app_modules = [
     'manga_translator',    # Manga translator module
     'manga_integration',   # Manga GUI integration
     'manga_settings_dialog', 
-    'update_manager',     
+    'dialog_animations',   # Dialog fade animations
+    'update_manager',
     'api_key_encryption',
 	'http_logger',
 	'async_api_processor',
