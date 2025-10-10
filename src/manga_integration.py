@@ -397,6 +397,10 @@ class MangaTranslationTab:
         # Queue for thread-safe GUI updates
         self.update_queue = Queue()
         
+        # Auto-scroll control: delay forcing scroll on new runs
+        self._autoscroll_delay_until = 0.0  # epoch seconds
+        self._user_scrolled_up = False  # Track if user manually scrolled up
+        
         # Flags for stdio redirection to avoid duplicate GUI logs
         self._stdout_redirect_on = False
         self._stderr_redirect_on = False
@@ -4205,6 +4209,10 @@ class MangaTranslationTab:
         """)
         log_frame_layout.addWidget(self.log_text)
         
+        # Connect scrollbar to detect manual scrolling
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.valueChanged.connect(self._on_log_scroll)
+        
         main_layout.addWidget(log_frame)
         
         # Restore persistent log from previous sessions
@@ -6987,6 +6995,30 @@ class MangaTranslationTab:
         except Exception:
             pass
 
+    def _on_log_scroll(self, value):
+        """Detect when user manually scrolls up in the log"""
+        try:
+            scrollbar = self.log_text.verticalScrollBar()
+            # If user scrolled up (not at bottom), mark it
+            at_bottom = value >= scrollbar.maximum() - 10
+            if not at_bottom:
+                self._user_scrolled_up = True
+            else:
+                # User scrolled back to bottom, resume auto-scroll
+                self._user_scrolled_up = False
+        except Exception:
+            pass
+    
+    def _start_autoscroll_delay(self, ms=500):
+        """Delay auto-scroll for the specified milliseconds"""
+        try:
+            import time as _time
+            self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
+            # Reset manual scroll flag when starting new operation
+            self._user_scrolled_up = False
+        except Exception:
+            self._autoscroll_delay_until = 0.0
+    
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI text widget or console with enhanced stop suppression"""
         # Enhanced stop suppression - allow only essential stop confirmation messages
@@ -7051,7 +7083,16 @@ class MangaTranslationTab:
                         cursor.insertText("\n")
                     
                     cursor.insertText(message, format)
-                    self.log_text.ensureCursorVisible()
+                    
+                    # Scroll to bottom (respect delay and manual scrolling)
+                    try:
+                        import time as _time
+                        # Only auto-scroll if delay passed AND user hasn't scrolled up
+                        if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
+                            not getattr(self, '_user_scrolled_up', False)):
+                            self.log_text.ensureCursorVisible()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             else:
@@ -7147,7 +7188,16 @@ class MangaTranslationTab:
                             cursor.insertText("\n")
                         
                         cursor.insertText(message, format)
-                        self.log_text.ensureCursorVisible()
+                        
+                        # Scroll to bottom (respect delay and manual scrolling)
+                        try:
+                            import time as _time
+                            # Only auto-scroll if delay passed AND user hasn't scrolled up
+                            if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
+                                not getattr(self, '_user_scrolled_up', False)):
+                                self.log_text.ensureCursorVisible()
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     
@@ -7338,6 +7388,9 @@ class MangaTranslationTab:
         except Exception:
             pass
         
+        # Delay auto-scroll so first log is readable
+        self._start_autoscroll_delay(100)
+        
         # Immediate minimal feedback using direct log append
         try:
             if hasattr(self, 'log_text') and self.log_text:
@@ -7355,7 +7408,7 @@ class MangaTranslationTab:
                     cursor.insertText("\n")
                 
                 cursor.insertText("Starting translation...", format)
-                self.log_text.ensureCursorVisible()
+                # Note: Auto-scroll delay just started above, so this will scroll
         except Exception:
             pass
         
@@ -7386,19 +7439,23 @@ class MangaTranslationTab:
                     cursor.insertText("\n")
                 
                 cursor.insertText("🚀 Starting new manga translation batch", format)
-                self.log_text.ensureCursorVisible()
+                # Note: Auto-scroll delay just started above, so initial scrolls will work
                 
                 # Scroll to bottom after a short delay to ensure it happens after button processing
                 def scroll_to_bottom():
                     try:
                         if hasattr(self, 'log_text') and self.log_text:
-                            self.log_text.moveCursor(QTextCursor.End)
-                            self.log_text.ensureCursorVisible()
-                            # Also scroll the parent scroll area if it exists
-                            if hasattr(self, 'scroll_area') and self.scroll_area:
-                                scrollbar = self.scroll_area.verticalScrollBar()
-                                if scrollbar:
-                                    scrollbar.setValue(scrollbar.maximum())
+                            # Only auto-scroll if user hasn't manually scrolled up
+                            import time as _time
+                            if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
+                                not getattr(self, '_user_scrolled_up', False)):
+                                self.log_text.moveCursor(QTextCursor.End)
+                                self.log_text.ensureCursorVisible()
+                                # Also scroll the parent scroll area if it exists
+                                if hasattr(self, 'scroll_area') and self.scroll_area:
+                                    scrollbar = self.scroll_area.verticalScrollBar()
+                                    if scrollbar:
+                                        scrollbar.setValue(scrollbar.maximum())
                     except Exception:
                         pass
                 

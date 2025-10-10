@@ -640,6 +640,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         # Auto-scroll control: delay forcing scroll on new runs
         self._autoscroll_delay_until = 0.0  # epoch seconds
+        self._user_scrolled_up = False  # Track if user manually scrolled up
         
         self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
@@ -2569,6 +2570,10 @@ Recent translations to summarize:
         # Setup context menu
         self.log_text.setContextMenuPolicy(Qt.CustomContextMenu)
         self.log_text.customContextMenuRequested.connect(self._show_context_menu)
+        
+        # Connect scrollbar to detect manual scrolling
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.valueChanged.connect(self._on_log_scroll)
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
@@ -6847,10 +6852,26 @@ Important rules:
             self.close()
             sys.exit(0)
 
+    def _on_log_scroll(self, value):
+        """Detect when user manually scrolls up in the log"""
+        try:
+            scrollbar = self.log_text.verticalScrollBar()
+            # If user scrolled up (not at bottom), mark it
+            at_bottom = value >= scrollbar.maximum() - 10
+            if not at_bottom:
+                self._user_scrolled_up = True
+            else:
+                # User scrolled back to bottom, resume auto-scroll
+                self._user_scrolled_up = False
+        except Exception:
+            pass
+    
     def _start_autoscroll_delay(self, ms=500):
         try:
             import time as _time
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
+            # Reset manual scroll flag when starting new operation
+            self._user_scrolled_up = False
         except Exception:
             self._autoscroll_delay_until = 0.0
     
@@ -6875,10 +6896,12 @@ Important rules:
             
             cursor.insertText(message)
             
-            # Scroll to bottom (respect delay to allow user to read first log)
+            # Scroll to bottom (respect delay and manual scrolling)
             try:
                 import time as _time
-                if _time.time() >= getattr(self, '_autoscroll_delay_until', 0):
+                # Only auto-scroll if delay passed AND user hasn't scrolled up
+                if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
+                    not getattr(self, '_user_scrolled_up', False)):
                     scrollbar = self.log_text.verticalScrollBar()
                     scrollbar.setValue(scrollbar.maximum())
             except Exception:
@@ -6953,10 +6976,12 @@ Important rules:
                    # Regular text append
                    self.log_text.append(message)
                
-               # Try to scroll to bottom to ensure visibility, but respect delayed auto-scroll window
+               # Try to scroll to bottom to ensure visibility, but respect delayed auto-scroll window and manual scrolling
                try:
                    import time as _time
-                   if _time.time() >= getattr(self, '_autoscroll_delay_until', 0):
+                   # Only auto-scroll if delay passed AND user hasn't scrolled up
+                   if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
+                       not getattr(self, '_user_scrolled_up', False)):
                        scrollbar = self.log_text.verticalScrollBar()
                        if at_bottom or True:
                            scrollbar.setValue(scrollbar.maximum())
