@@ -6573,6 +6573,10 @@ class MangaTranslator:
                         "is there something different i can help you with",
                         "careful ethical considerations",
                         "i could help you with a different question or task",
+                        "what other topics or questions can i help you explore",
+                        "i cannot and will not translate",
+                        "i cannot translate this content",
+                        "i can't translate this content",
                     ]
                     
                     # Check both simple string matching and regex patterns
@@ -6709,6 +6713,10 @@ class MangaTranslator:
                     "is there something different i can help you with",
                     "careful ethical considerations",
                     "i could help you with a different question or task",
+                    "what other topics or questions can i help you explore",
+                    "i cannot and will not translate",
+                    "i cannot translate this content",
+                    "i can't translate this content",
                 ]
                 
                 # Sample first 3 translations (or all if fewer)

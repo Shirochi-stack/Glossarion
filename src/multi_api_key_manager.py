@@ -445,23 +445,513 @@ class APIKeyPool:
                 
                 logger.info(f"Removed key for model {removed_key.model} from pool")
 
+
+class RefusalPatternsDialog(QDialog):
+    """Dialog for managing AI refusal patterns"""
+    
+    def __init__(self, parent, translator_gui):
+        super().__init__(parent)
+        self.translator_gui = translator_gui
+        self.setWindowTitle("Manage Refusal Patterns")
+        
+        # Set dialog size based on screen size (35% width, 40% height)
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        dialog_width = int(screen.width() * 0.25)
+        dialog_height = int(screen.height() * 0.4)
+        self.resize(dialog_width, dialog_height)
+        
+        # Set window icon
+        self._set_icon()
+        
+        # Load patterns from config
+        self.patterns = self._load_patterns()
+        
+        self._create_dialog()
+    
+    def _set_icon(self):
+        """Set Halgakos.ico as window icon if available."""
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                # Load icon with high quality preservation
+                icon = QIcon(ico_path)
+                # Enable high DPI pixmaps for better quality
+                if hasattr(icon, 'setIsMask'):
+                    icon.setIsMask(False)
+                self.setWindowIcon(icon)
+        except Exception:
+            pass
+    
+    def _load_patterns(self):
+        """Load refusal patterns from config"""
+        if hasattr(self.translator_gui, 'config'):
+            return self.translator_gui.config.get('refusal_patterns', self._get_default_patterns())
+        return self._get_default_patterns()
+    
+    def _get_default_patterns(self):
+        """Get default refusal patterns"""
+        return [
+            "i cannot assist", "i can't assist", "i'm not able to assist",
+            "i cannot help", "i can't help", "i'm unable to help",
+            "i'm afraid i cannot help with that", "designed to ensure appropriate use",
+            "as an ai", "as a language model", "as an ai language model",
+            "i don't feel comfortable", "i apologize, but i cannot",
+            "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
+            "against my programming", "against my guidelines",
+            "violates content policy", "i'm not programmed to",
+            "cannot provide that kind", "unable to provide that",
+            "i cannot assist with this request",
+            "that's not within my capabilities to appropriately assist with",
+            "is there something different i can help you with",
+            "careful ethical considerations",
+            "i could help you with a different question or task",
+            "what other topics or questions can i help you explore",
+            "i cannot and will not translate",
+            "i cannot translate this content",
+            "i can't translate this content",
+        ]
+    
+    def _create_dialog(self):
+        """Create the dialog UI"""
+        # Apply stylesheet matching other dialogs
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 5px 15px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #5a5a5a;
+            }
+            QPushButton:pressed {
+                background-color: #1a1a1a;
+            }
+            QLineEdit {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QTreeWidget {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                selection-background-color: #4a7ba7;
+            }
+            QTreeWidget::item:hover {
+                background-color: #3a3a3a;
+            }
+            QHeaderView::section {
+                background-color: #252525;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                padding: 4px;
+            }
+        """)
+        
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title with icons on both sides
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(15)
+        title_layout.setAlignment(Qt.AlignCenter)
+        
+        # Left Icon
+        icon_label_left = QLabel()
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                # Load icon as pixmap with high quality
+                pixmap = QPixmap(ico_path)
+                if not pixmap.isNull():
+                    # Scale to appropriate size while preserving quality
+                    # Use smooth transformation for better quality
+                    scaled_pixmap = pixmap.scaled(
+                        48, 48,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                    icon_label_left.setPixmap(scaled_pixmap)
+                    icon_label_left.setFixedSize(48, 48)
+                    icon_label_left.setAlignment(Qt.AlignCenter)
+        except Exception:
+            pass
+        
+        title_layout.addWidget(icon_label_left, 0, Qt.AlignVCenter)
+        
+        # Title text
+        title_label = QLabel("Refusal Pattern Management")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(title_label, 0, Qt.AlignVCenter)
+        
+        # Right Icon (mirror of left)
+        icon_label_right = QLabel()
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                # Load icon as pixmap with high quality
+                pixmap = QPixmap(ico_path)
+                if not pixmap.isNull():
+                    # Scale to appropriate size while preserving quality
+                    # Use smooth transformation for better quality
+                    scaled_pixmap = pixmap.scaled(
+                        48, 48,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                    icon_label_right.setPixmap(scaled_pixmap)
+                    icon_label_right.setFixedSize(48, 48)
+                    icon_label_right.setAlignment(Qt.AlignCenter)
+        except Exception:
+            pass
+        
+        title_layout.addWidget(icon_label_right, 0, Qt.AlignVCenter)
+        
+        main_layout.addWidget(title_container)
+        
+        # Description
+        desc_label = QLabel(
+            "Patterns used to detect AI refusals in responses. "
+            "When detected, fallback keys will be attempted.\n"
+            "Patterns are checked on responses under 1000 characters (case-insensitive).")
+        desc_label.setStyleSheet("color: gray; padding: 5px 0px 10px 0px;")
+        desc_label.setWordWrap(True)
+        main_layout.addWidget(desc_label)
+        
+        # Tree widget for patterns
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Pattern"])
+        self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.tree.header().setStretchLastSection(True)
+        main_layout.addWidget(self.tree)
+        
+        # Load patterns into tree
+        self._refresh_tree()
+        
+        # Add/Edit/Delete buttons
+        button_frame = QWidget()
+        button_layout = QHBoxLayout(button_frame)
+        button_layout.setContentsMargins(0, 10, 0, 0)
+        
+        add_btn = QPushButton("➕ Add Pattern")
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a5c1b;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #145016;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #237024;
+                border-color: #1a5c1b;
+            }
+            QPushButton:pressed {
+                background-color: #0f3d10;
+            }
+        """)
+        add_btn.clicked.connect(self._add_pattern)
+        button_layout.addWidget(add_btn)
+        
+        edit_btn = QPushButton("✏️ Edit Selected")
+        edit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2c5278;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #1e3a54;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3a6a94;
+                border-color: #2c5278;
+            }
+            QPushButton:pressed {
+                background-color: #1e3a54;
+            }
+        """)
+        edit_btn.clicked.connect(self._edit_pattern)
+        button_layout.addWidget(edit_btn)
+        
+        delete_btn = QPushButton("🗑️ Delete Selected")
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8b2e2e;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #6b1f1f;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #a73a3a;
+                border-color: #8b2e2e;
+            }
+            QPushButton:pressed {
+                background-color: #5c1e1e;
+            }
+        """)
+        delete_btn.clicked.connect(self._delete_patterns)
+        button_layout.addWidget(delete_btn)
+        
+        button_layout.addStretch()
+        
+        reset_btn = QPushButton("🔄 Reset to Defaults")
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6b5a1e;
+                color: #ffffff;
+                padding: 6px 12px;
+                border: 1px solid #4d4116;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #8b7528;
+                border-color: #6b5a1e;
+            }
+            QPushButton:pressed {
+                background-color: #4d4116;
+            }
+        """)
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        button_layout.addWidget(reset_btn)
+        
+        main_layout.addWidget(button_frame)
+        
+        # Save/Cancel buttons
+        save_cancel_frame = QWidget()
+        save_cancel_layout = QHBoxLayout(save_cancel_frame)
+        save_cancel_layout.setContentsMargins(0, 10, 0, 0)
+        save_cancel_layout.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumHeight(32)
+        cancel_btn.clicked.connect(self.reject)
+        save_cancel_layout.addWidget(cancel_btn)
+        
+        save_btn = QPushButton("Save & Close")
+        save_btn.setMinimumHeight(32)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a7ba7;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5a9fd4;
+            }
+        """)
+        save_btn.clicked.connect(self._save_and_close)
+        save_cancel_layout.addWidget(save_btn)
+        
+        main_layout.addWidget(save_cancel_frame)
+    
+    def _refresh_tree(self):
+        """Refresh the tree widget with current patterns"""
+        self.tree.clear()
+        for pattern in self.patterns:
+            item = QTreeWidgetItem([pattern])
+            self.tree.addTopLevelItem(item)
+    
+    def _add_pattern(self):
+        """Add a new pattern"""
+        # Create input dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Refusal Pattern")
+        dialog.setMinimumWidth(500)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        label = QLabel("Enter refusal pattern (case-insensitive):")
+        layout.addWidget(label)
+        
+        entry = QLineEdit()
+        layout.addWidget(entry)
+        
+        hint_label = QLabel("Examples: \"i cannot assist\", \"as an ai\", \"violates content policy\"")
+        hint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        layout.addWidget(hint_label)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        ok_btn = QPushButton("Add")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(ok_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            pattern = entry.text().strip().lower()
+            if pattern and pattern not in self.patterns:
+                self.patterns.append(pattern)
+                self._refresh_tree()
+    
+    def _edit_pattern(self):
+        """Edit the selected pattern"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select a pattern to edit")
+            return
+        
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Warning", "Please select only one pattern to edit")
+            return
+        
+        item = selected[0]
+        old_pattern = item.text(0)
+        
+        # Create input dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Refusal Pattern")
+        dialog.setMinimumWidth(500)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        label = QLabel("Edit refusal pattern:")
+        layout.addWidget(label)
+        
+        entry = QLineEdit()
+        entry.setText(old_pattern)
+        layout.addWidget(entry)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        ok_btn = QPushButton("Save")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(ok_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            new_pattern = entry.text().strip().lower()
+            if new_pattern and new_pattern != old_pattern:
+                if new_pattern in self.patterns:
+                    QMessageBox.warning(self, "Warning", "Pattern already exists")
+                else:
+                    index = self.patterns.index(old_pattern)
+                    self.patterns[index] = new_pattern
+                    self._refresh_tree()
+    
+    def _delete_patterns(self):
+        """Delete selected patterns"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select patterns to delete")
+            return
+        
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Delete {len(selected)} pattern(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            for item in selected:
+                pattern = item.text(0)
+                if pattern in self.patterns:
+                    self.patterns.remove(pattern)
+            self._refresh_tree()
+    
+    def _reset_to_defaults(self):
+        """Reset patterns to defaults"""
+        reply = QMessageBox.question(
+            self,
+            "Confirm Reset",
+            "Reset all patterns to defaults? This will replace your current patterns.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.patterns = self._get_default_patterns()
+            self._refresh_tree()
+    
+    def _save_and_close(self):
+        """Save patterns and close dialog"""
+        if hasattr(self.translator_gui, 'config'):
+            self.translator_gui.config['refusal_patterns'] = self.patterns
+            self.translator_gui.save_config(show_message=False)
+            QMessageBox.information(self, "Success", f"Saved {len(self.patterns)} refusal patterns")
+        self.accept()
+
+
 class MultiAPIKeyDialog(QDialog):
     """Dialog for managing multiple API keys"""
     
     @staticmethod
     def show_dialog(parent, translator_gui):
-        """Static method to create and show the dialog modally.
+        """Static method to create and show the dialog non-modally.
         
-        This ensures proper PySide6 application context and returns after dialog closes.
+        This ensures proper PySide6 application context.
         """
         # Ensure QApplication exists
         app = QApplication.instance()
         if app is None:
             app = QApplication([])
         
-        # Create and execute dialog
-        dialog = MultiAPIKeyDialog(parent, translator_gui)
-        dialog.exec_()  # Modal execution - blocks until closed
+        # Check if dialog already exists on the translator_gui
+        if not hasattr(translator_gui, '_multi_api_key_dialog') or translator_gui._multi_api_key_dialog is None:
+            # Create and show dialog non-modally
+            dialog = MultiAPIKeyDialog(parent, translator_gui)
+            dialog.setWindowModality(Qt.NonModal)
+            # Make dialog stay on top of other windows
+            dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+            translator_gui._multi_api_key_dialog = dialog
+        else:
+            dialog = translator_gui._multi_api_key_dialog
+        
+        # Show and raise the dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         
         return dialog
     
@@ -1833,6 +2323,30 @@ class MultiAPIKeyDialog(QDialog):
         export_btn.clicked.connect(self._export_keys)
         button_layout.addWidget(export_btn)
         
+        # Manage Refusal Patterns button
+        refusal_btn = QPushButton("🚫 Manage Refusal Patterns")
+        refusal_btn.setMinimumHeight(40)
+        refusal_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5c2e5b;
+                color: #ffffff;
+                font-size: 11pt;
+                padding: 8px 20px;
+                border: 1px solid #42213f;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #733d71;
+                border-color: #5c2e5b;
+            }
+            QPushButton:pressed {
+                background-color: #3d1d3c;
+            }
+        """)
+        refusal_btn.clicked.connect(self._manage_refusal_patterns)
+        button_layout.addWidget(refusal_btn)
+        
         button_layout.addStretch()
         
         # Cancel button
@@ -2865,6 +3379,18 @@ class MultiAPIKeyDialog(QDialog):
                         )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+    
+    def _manage_refusal_patterns(self):
+        """Open dialog to manage refusal patterns (non-modal)"""
+        # Keep reference to prevent garbage collection
+        if not hasattr(self, '_refusal_patterns_dialog') or self._refusal_patterns_dialog is None:
+            self._refusal_patterns_dialog = RefusalPatternsDialog(self, self.translator_gui)
+            self._refusal_patterns_dialog.setWindowModality(Qt.NonModal)
+        
+        # Show and raise the dialog
+        self._refusal_patterns_dialog.show()
+        self._refusal_patterns_dialog.raise_()
+        self._refusal_patterns_dialog.activateWindow()
     
     def _attach_model_autofill(self, combo: QComboBox, on_change=None):
         """Attach gentle autofill/autocomplete behavior to a QComboBox.

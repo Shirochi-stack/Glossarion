@@ -3416,6 +3416,67 @@ class UnifiedClient:
         logger.info(f"✅ Initialized {self.client_type} client for model: {self.model}")
         logger.debug("✅ GUI retry features supported: truncation detection, timeout handling, duplicate detection")
     
+    def _check_for_refusal_patterns(self, content: str) -> bool:
+        """Check if content contains AI refusal patterns.
+        
+        Args:
+            content: The response content to check
+            
+        Returns:
+            True if refusal pattern detected, False otherwise
+        """
+        if not content or len(content) >= 1000:
+            return False
+        
+        content_lower = content.lower().strip()
+        
+        # Load patterns from config if available, otherwise use defaults
+        refusal_patterns = self._get_refusal_patterns()
+        
+        # Check if response CONTAINS these patterns (not just starts with)
+        # This catches AI refusals while avoiding false positives from character dialogue
+        return any(pattern in content_lower for pattern in refusal_patterns)
+    
+    def _get_refusal_patterns(self):
+        """Get refusal patterns from config or return defaults.
+        
+        Returns:
+            List of refusal patterns to check
+        """
+        # Try to load from config file
+        try:
+            from translator_gui import CONFIG_FILE
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    patterns = config.get('refusal_patterns')
+                    if patterns and isinstance(patterns, list):
+                        return patterns
+        except Exception:
+            pass
+        
+        # Return default patterns if config loading fails
+        return [
+            "i cannot assist", "i can't assist", "i'm not able to assist",
+            "i cannot help", "i can't help", "i'm unable to help",
+            "i'm afraid i cannot help with that", "designed to ensure appropriate use",
+            "as an ai", "as a language model", "as an ai language model",
+            "i don't feel comfortable", "i apologize, but i cannot",
+            "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
+            "against my programming", "against my guidelines",
+            "violates content policy", "i'm not programmed to",
+            "cannot provide that kind", "unable to provide that",
+            "i cannot assist with this request",
+            "that's not within my capabilities to appropriately assist with",
+            "is there something different i can help you with",
+            "careful ethical considerations",
+            "i could help you with a different question or task",
+            "what other topics or questions can i help you explore",
+            "i cannot and will not translate",
+            "i cannot translate this content",
+            "i can't translate this content",
+        ]
+    
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Backwards-compatible public API; now delegates to unified _send_core."""
@@ -3651,6 +3712,17 @@ class UnifiedClient:
                 # This must happen even for truncated/empty responses
                 if extracted_content:
                     self._save_response(extracted_content, response_name)
+                
+                # Check for refusal patterns in non-empty responses
+                # This catches AI refusals that don't raise explicit errors (OpenAI, Claude, etc.)
+                if extracted_content and self._check_for_refusal_patterns(extracted_content):
+                    print(f"⚠️ AI refusal pattern detected in response")
+                    # Raise as prohibited_content to trigger fallback logic
+                    raise UnifiedClientError(
+                        f"Content refused by API",
+                        error_type="prohibited_content",
+                        details={"refusal_message": extracted_content[:500]}
+                    )
 
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
@@ -4238,9 +4310,9 @@ class UnifiedClient:
             
             print(f"[MAIN KEY RETRY] Total keys to try: {len(fallback_keys)}")
             
-            # Try each fallback key in the list
-            max_attempts = min(len(fallback_keys), self._get_max_retries())
-            for idx, fallback_data in enumerate(fallback_keys[:max_attempts]):
+            # Try each fallback key in the list (all of them, no arbitrary limit)
+            max_attempts = len(fallback_keys)
+            for idx, fallback_data in enumerate(fallback_keys):
                 label = fallback_data.get('label', 'Fallback')
                 fallback_key = fallback_data.get('api_key')
                 fallback_model = fallback_data.get('model')
@@ -4362,32 +4434,36 @@ class UnifiedClient:
                             continue
                         
                         # Check for refusal patterns (content moderation)
-                        # Be more precise: look for AI refusal patterns, not natural dialogue
-                        if content and len(content) < 1000:  # Check responses up to 1000 chars (AIs can be verbose)
-                            content_lower = content.lower().strip()
-                            # Only flag as refusal if it contains explicit AI meta-language or assistance refusal
-                            # Avoid false positives with natural dialogue (e.g., manga: "I can't do this!")
-                            refusal_patterns = [
-                                "i cannot assist", "i can't assist", "i'm not able to assist",
-                                "i cannot help", "i can't help", "i'm unable to help",
-                                "i'm afraid i cannot help with that", "designed to ensure appropriate use",
-                                "as an ai", "as a language model", "as an ai language model",
-                                "i don't feel comfortable", "i apologize, but i cannot",
-                                "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
-                                "against my programming", "against my guidelines",
-                                "violates content policy", "i'm not programmed to",
-                                "cannot provide that kind", "unable to provide that",
-                                "i cannot assist with this request",
-                                "that's not within my capabilities to appropriately assist with",
-                                "is there something different i can help you with",
-                                "careful ethical considerations",
-                                "i could help you with a different question or task",
-                            ]
-                            # Check if response CONTAINS these patterns (not just starts with)
-                            # This catches AI refusals while avoiding false positives from character dialogue
-                            if any(pattern in content_lower for pattern in refusal_patterns):
-                                print(f"[{label} {idx+1}] ❌ AI refusal pattern detected: {content[:100]}")
-                                continue
+                        if content and self._check_for_refusal_patterns(content):
+                            print(f"[{label} {idx+1}] ❌ AI refusal pattern detected: {content[:100]}")
+                            continue
+                        
+                        # Check for severe truncation by comparing input vs output
+                        is_severely_truncated = False
+                        if content and messages:
+                            # Get the last user message (the actual content to translate)
+                            user_message = None
+                            for msg in reversed(messages):
+                                if msg.get('role') == 'user':
+                                    user_message = msg.get('content', '')
+                                    break
+                            
+                            if user_message and len(user_message) > 1000:  # Only check for large inputs
+                                input_len = len(user_message)
+                                output_len = len(content)
+                                char_ratio = output_len / input_len
+                                
+                                # If output is less than 10% of input, severely truncated
+                                if char_ratio < 0.1:
+                                    is_severely_truncated = True
+                                    # Only continue if not the last key
+                                    if idx < max_attempts - 1:
+                                        msg = f"[{label} {idx+1}] ⚠️ Severely truncated ({output_len}/{input_len} = {char_ratio:.1%}) - trying next key"
+                                        print(msg)
+                                        continue
+                                    else:
+                                        msg = f"[{label} {idx+1}] ⚠️ Truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option"
+                                        print(msg)
                         
                         # Check if content is valid - accept any non-empty content (symbols, single chars, etc. are valid)
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
@@ -4478,9 +4554,9 @@ class UnifiedClient:
             print(msg)
             logger.info(msg)
             
-            # Try each fallback key
-            max_attempts = min(len(configured_fallbacks), 3)  # Limit attempts
-            for idx, fb in enumerate(configured_fallbacks[:max_attempts]):
+            # Try each fallback key (all of them, no arbitrary limit)
+            max_attempts = len(configured_fallbacks)
+            for idx, fb in enumerate(configured_fallbacks):
                 fallback_key = fb.get('api_key')
                 fallback_model = fb.get('model')
                 fallback_google_creds = fb.get('google_credentials')
@@ -4589,6 +4665,43 @@ class UnifiedClient:
                             # Error cases should be longer to be valid
                             min_length = 50
                         
+                        # Check for refusal patterns (content moderation)
+                        if content and self._check_for_refusal_patterns(content):
+                            msg = f"❌ Fallback key {idx+1} also refused - trying next key"
+                            print(msg)
+                            logger.warning(msg)
+                            continue
+                        
+                        # Check for severe truncation by comparing input vs output
+                        # Extract original input from messages
+                        is_severely_truncated = False
+                        if content and messages:
+                            # Get the last user message (the actual content to translate)
+                            user_message = None
+                            for msg in reversed(messages):
+                                if msg.get('role') == 'user':
+                                    user_message = msg.get('content', '')
+                                    break
+                            
+                            if user_message and len(user_message) > 1000:  # Only check for large inputs
+                                input_len = len(user_message)
+                                output_len = len(content)
+                                char_ratio = output_len / input_len
+                                
+                                # If output is less than 10% of input, severely truncated
+                                if char_ratio < 0.1:
+                                    is_severely_truncated = True
+                                    # Only continue if not the last key
+                                    if idx < max_attempts - 1:
+                                        msg = f"⚠️ Fallback key {idx+1} severely truncated ({output_len}/{input_len} = {char_ratio:.1%}) - trying next key"
+                                        print(msg)
+                                        logger.warning(msg)
+                                        continue
+                                    else:
+                                        msg = f"⚠️ Fallback key {idx+1} truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option"
+                                        print(msg)
+                                        logger.warning(msg)
+                        
                         # Check if content is valid - reject if finish_reason indicates failure
                         if (content and 
                             "[AI RESPONSE UNAVAILABLE]" not in content and 
@@ -4597,6 +4710,8 @@ class UnifiedClient:
                             msg = f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars"
                             print(msg)
                             logger.info(msg)
+                            # Mark that a fallback key was used
+                            self._used_fallback_key = True
                             return content, finish_reason
                         else:
                             if finish_reason in ['content_filter', 'error', 'cancelled']:
@@ -6667,9 +6782,18 @@ class UnifiedClient:
         """
         api_delay = self._get_send_interval()
         provider = provider_name or "HTTP"
+        
+        # Debug: track max_tokens across retries (wired to GUI debug toggle)
+        debug_max_tokens = os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1"
+        
         for attempt in range(max_retries):
             if self._cancelled:
                 raise UnifiedClientError("Operation cancelled")
+            
+            # Debug logging for retry loop
+            if debug_max_tokens and attempt > 0:
+                current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
+                print(f"    [DEBUG] HTTP retry attempt {attempt + 1}/{max_retries}, max_tokens in payload: {current_max}")
             
             # Toggle to ignore server-provided Retry-After headers
             ignore_retry_after = (os.getenv("ENABLE_HTTP_TUNING", "0") == "1") and (os.getenv("IGNORE_RETRY_AFTER", "0") == "1")
@@ -6692,9 +6816,26 @@ class UnifiedClient:
                         base_for_session = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
                     session = self._get_session(base_for_session) if base_for_session else requests
                     timeout = self._get_timeouts() if base_for_session else self.request_timeout
+                    
+                    # Debug: log when actually sending request
+                    if debug_max_tokens:
+                        current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
+                        print(f"    [DEBUG] Sending HTTP request with max_tokens={current_max}...")
+                    
                     resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
+                    
+                    # Debug: log when response received
+                    if debug_max_tokens:
+                        print(f"    [DEBUG] Received HTTP response: status={resp.status_code}")
                 else:
+                    if debug_max_tokens:
+                        current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
+                        print(f"    [DEBUG] Sending HTTP request with max_tokens={current_max}...")
+                    
                     resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
+                    
+                    if debug_max_tokens:
+                        print(f"    [DEBUG] Received HTTP response: status={resp.status_code}")
                 # Save incoming response snapshot regardless of status
                 try:
                     try:
@@ -6806,7 +6947,45 @@ class UnifiedClient:
             # Other non-success statuses
             if attempt < max_retries - 1:
                 snippet = _sanitize_for_log(resp.text, 300)
-                print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
+                
+                # Check for "max_tokens is too large" error before logging
+                if status == 400 and ("max_tokens is too large" in resp.text or "supports at most" in resp.text):
+                    # Log the original error first
+                    print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1}/{max_retries})")
+                    
+                    import re
+                    # Extract the supported max tokens from error message
+                    match = re.search(r'supports at most (\d+) completion tokens', resp.text)
+                    if match:
+                        supported_max = int(match.group(1))
+                        # Try to find current max_tokens in the request body
+                        current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
+                        
+                        if current_max and supported_max < current_max:
+                            print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
+                            print(f"    🔄 Retrying with adjusted limit: {supported_max:,} tokens")
+                            
+                            # Update the request body for the retry
+                            if 'max_tokens' in json:
+                                json['max_tokens'] = supported_max
+                                print(f"    ✅ Updated json['max_tokens'] = {supported_max:,}")
+                            if 'max_completion_tokens' in json:
+                                json['max_completion_tokens'] = supported_max
+                                print(f"    ✅ Updated json['max_completion_tokens'] = {supported_max:,}")
+                            
+                            # Don't count this as a failed attempt - reset the counter
+                            attempt = max(0, attempt - 1)
+                            
+                            # Retry immediately
+                            print(f"    ⏱️ Sleeping 1s before retry...")
+                            time.sleep(1)
+                            print(f"    🚀 Retrying request with adjusted max_tokens...")
+                            continue
+                        else:
+                            print(f"    ⚠️ max_tokens error but cannot adjust: current={current_max}, supported={supported_max}")
+                else:
+                    # Normal error logging for non-max_tokens errors
+                    print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
                 time.sleep(api_delay)
                 continue
             raise UnifiedClientError(f"{provider} API error: {status} - {_sanitize_for_log(resp.text, 300)}", http_status=status)
@@ -9188,6 +9367,32 @@ class UnifiedClient:
                     
                 except Exception as e:
                     error_str = str(e).lower()
+                    
+                    # Handle "max_tokens is too large" error - auto-adjust and retry
+                    if "max_tokens is too large" in str(e) or "supports at most" in str(e):
+                        import re
+                        # Extract the supported max tokens from error message
+                        # Example: "This model supports at most 32768 completion tokens, whereas you provided 36000."
+                        match = re.search(r'supports at most (\d+) completion tokens', str(e))
+                        if match:
+                            supported_max = int(match.group(1))
+                            current_max = max_tokens or norm_max_tokens or 8192
+                            
+                            if supported_max < current_max:
+                                print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
+                                print(f"    🔄 Retrying with supported limit: {supported_max:,} tokens")
+                                
+                                # Update max_tokens for the retry
+                                max_tokens = supported_max
+                                
+                                # Retry immediately
+                                time.sleep(1)
+                                continue
+                            else:
+                                print(f"    ⚠️ max_tokens error but config ({current_max:,}) <= supported ({supported_max:,})")
+                        else:
+                            print(f"    ⚠️ Could not extract supported max_tokens from error: {str(e)}")
+                    
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
                         # Preserve the full error message from OpenRouter/ElectronHub
                         raise UnifiedClientError(str(e), error_type="rate_limit")

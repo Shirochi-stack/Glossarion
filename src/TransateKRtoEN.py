@@ -3814,6 +3814,10 @@ def is_qa_failed_response(content):
         "is there something different i can help you with",
         "careful ethical considerations",
         "i could help you with a different question or task",
+        "what other topics or questions can i help you explore",
+        "i cannot and will not translate",
+        "i cannot translate this content",
+        "i can't translate this content",
     ]
     
     # Check responses up to 1000 chars (AIs can be verbose when refusing)
@@ -6162,6 +6166,55 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.update(idx, actual_num, content_hash, output_file=None, status="failed")
                     progress_manager.save()
                     continue
+                
+                # ENHANCED TRUNCATION CHECK: Compare input vs output character counts
+                # Skip this check if base64 images are present (they skew the character count)
+                has_base64_image = 'data:image' in chunk_html or 'base64,' in chunk_html
+                
+                # Check if this result came from a fallback key
+                used_fallback = hasattr(translation_processor.client, '_used_fallback_key') and translation_processor.client._used_fallback_key
+                
+                if not has_base64_image:
+                    input_char_count = len(chunk_html)
+                    output_char_count = len(result)
+                    char_ratio = output_char_count / input_char_count if input_char_count > 0 else 0
+                    
+                    # If output is less than half of input, likely truncated
+                    if char_ratio < 0.5 and output_char_count > 100:  # Only check if output has substance
+                        if used_fallback:
+                            # For fallback keys, just warn - don't retry (would go back to refusing model)
+                            print(f"    ⚠️ Truncated output from fallback key - accepting as-is")
+                        else:
+                            print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio)")
+                            
+                            # Override finish_reason to trigger retry logic
+                            # This will be caught by the retry logic if RETRY_TRUNCATED is enabled
+                            if finish_reason != "length" and finish_reason != "max_tokens":
+                                print(f"    🔄 Setting finish_reason to 'length' to trigger auto-retry logic")
+                                finish_reason = "length"
+                                
+                                # If retry is enabled, call translate_with_retry again with increased tokens
+                                retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                                if retry_truncated_enabled and config.MAX_OUTPUT_TOKENS < config.MAX_RETRY_TOKENS:
+                                    print(f"    🔄 Retrying with increased token limit...")
+                                    # Temporarily increase max tokens
+                                    original_max = config.MAX_OUTPUT_TOKENS
+                                    config.MAX_OUTPUT_TOKENS = config.MAX_RETRY_TOKENS
+                                    
+                                    # Retry the translation
+                                    result_retry, finish_reason_retry = translation_processor.translate_with_retry(
+                                        msgs, chunk_html, c, chunk_idx, total_chunks
+                                    )
+                                    
+                                    # Restore original max tokens
+                                    config.MAX_OUTPUT_TOKENS = original_max
+                                    
+                                    if result_retry and len(result_retry) > len(result):
+                                        print(f"    ✅ Retry succeeded: {len(result):,} → {len(result_retry):,} chars")
+                                        result = result_retry
+                                        finish_reason = finish_reason_retry
+                                    else:
+                                        print(f"    ⚠️ Retry did not improve output, using original")
 
                 if config.REMOVE_AI_ARTIFACTS:
                     result = ContentProcessor.clean_ai_artifacts(result, True)
