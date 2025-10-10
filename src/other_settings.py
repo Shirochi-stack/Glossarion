@@ -309,8 +309,12 @@ def configure_rolling_summary_prompts(self):
 
     layout.addLayout(btn_row)
 
-    # Show non-modally (do not block)
-    dialog.show()
+    # Show non-modally with smooth fade animation (no flash)
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
 
 def toggle_thinking_budget(self):
     """Enable/disable thinking budget entry and labels based on checkbox state (PySide6 version)"""
@@ -348,13 +352,33 @@ def open_other_settings(self):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
     
+    # If dialog already exists, just show and focus it to preserve exact state
+    try:
+        if hasattr(self, "_other_settings_dialog") and self._other_settings_dialog is not None:
+            # Show with fade animation
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._other_settings_dialog, duration=220)
+            except Exception:
+                self._other_settings_dialog.show()
+            # Bring to front and focus
+            try:
+                self._other_settings_dialog.raise_()
+                self._other_settings_dialog.activateWindow()
+            except Exception:
+                pass
+            return
+    except Exception:
+        # If the old reference is invalid, recreate below
+        self._other_settings_dialog = None
+    
     # Create dialog with proper window attributes
     # Pass self as parent so it stays in front of main GUI but allows other dialogs on top
     dialog = QDialog(self)
     dialog.setWindowTitle("Other Settings")
     
-    # CRITICAL: Set window attribute to allow maximize
-    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    # Do not delete widgets on close; we'll hide instead to retain exact state
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
     
     # Set window flags
     dialog.setWindowFlags(
@@ -364,6 +388,10 @@ def open_other_settings(self):
         Qt.WindowType.WindowMaximizeButtonHint |
         Qt.WindowType.WindowCloseButtonHint
     )
+    
+    # CRITICAL: Position dialog way off-screen during construction to prevent flash
+    # We'll move it to proper position before showing
+    dialog.move(-10000, -10000)
     
     # CRITICAL: Remove size constraints that prevent maximize
     dialog.setSizeGripEnabled(False)
@@ -520,7 +548,7 @@ def open_other_settings(self):
                 self.append_log("✅ Settings saved and environment variables updated")
         except Exception as e:
             self.append_log(f"⚠️ Error saving settings: {e}")
-        dialog.close()
+        dialog.hide()
 
     save_btn = QPushButton("💾 Save Settings")
     save_btn.clicked.connect(_save_and_close)
@@ -556,10 +584,38 @@ def open_other_settings(self):
 
     main_layout.addLayout(btns)
 
+    # Intercept window close: hide instead of destroy to preserve state
+    def _handle_close(event):
+        try:
+            event.ignore()
+            dialog.hide()
+        except Exception:
+            # Best-effort: still hide on any error
+            try:
+                event.ignore()
+            except Exception:
+                pass
+            dialog.hide()
+    dialog.closeEvent = _handle_close
+
     # Store reference for later closing
     self._other_settings_dialog = dialog
     
-    dialog.show()
+    # Move dialog to center of screen (was off-screen during construction)
+    try:
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog_x = screen.x() + (screen.width() - dialog.width()) // 2
+        dialog_y = screen.y() + (screen.height() - dialog.height()) // 2
+        dialog.move(dialog_x, dialog_y)
+    except Exception:
+        pass
+    
+    # Show with smooth fade animation (no flash of generic window)
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
     
     # Auto-fit width to content after showing
     from PySide6.QtCore import QTimer

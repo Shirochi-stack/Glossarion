@@ -194,18 +194,7 @@ class QAScannerMixin:
             dialog_height = int(screen_height * 0.43)  # 45% of screen height
             
             mode_dialog = QDialog(self)
-            mode_dialog.setWindowTitle("Select QA Scanner Mode")
-            mode_dialog.resize(dialog_width, dialog_height)
-            mode_dialog.setModal(True)
-            # Set window icon
-            try:
-                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-                if os.path.isfile(ico_path):
-                    mode_dialog.setWindowIcon(QIcon(ico_path))
-            except Exception:
-                pass
-            
-            # Apply global stylesheet for consistent appearance
+            # Apply global stylesheet for consistent appearance IMMEDIATELY to prevent white flash
             mode_dialog.setStyleSheet("""
                 QDialog {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -227,6 +216,16 @@ class QAScannerMixin:
                     background-color: #1a202c;
                 }
             """)
+            mode_dialog.setWindowTitle("Select QA Scanner Mode")
+            mode_dialog.resize(dialog_width, dialog_height)
+            mode_dialog.setModal(True)
+            # Set window icon
+            try:
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    mode_dialog.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
         
         if selected_mode_value is None:
             # Set minimum size to prevent dialog from being too small (using ratios)
@@ -571,6 +570,36 @@ class QAScannerMixin:
         if selected_mode_value == "custom" and not non_interactive:
             # Create custom settings dialog
             custom_dialog = QDialog(self)
+            # Apply dark stylesheet IMMEDIATELY to prevent white flash
+            custom_dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #2d2d2d;
+                    color: white;
+                }
+                QGroupBox {
+                    color: white;
+                    border: 1px solid #555;
+                    margin: 10px;
+                    padding-top: 10px;
+                }
+                QGroupBox::title {
+                    color: white;
+                    left: 10px;
+                    padding: 0 5px;
+                }
+                QLabel {
+                    color: white;
+                }
+                QPushButton {
+                    background-color: #404040;
+                    color: white;
+                    border: 1px solid #555;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #505050;
+                }
+            """)
             custom_dialog.setWindowTitle("Custom Mode Settings")
             custom_dialog.setModal(True)
             # Use screen ratios: 20% width, 50% height for better content fit
@@ -1466,23 +1495,7 @@ class QAScannerMixin:
         """Show QA Scanner settings dialog"""
         # Create settings dialog
         dialog = QDialog(parent_dialog)
-        dialog.setWindowTitle("QA Scanner Settings")
-        dialog.setModal(True)
-        # Use screen ratios: 40% width, 85% height (decreased from 100%)
-        screen = QApplication.primaryScreen().geometry()
-        settings_width = int(screen.width() * 0.37)
-        settings_height = int(screen.height() * 0.85)
-        dialog.resize(settings_width, settings_height)
-        
-        # Set window icon
-        try:
-            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                dialog.setWindowIcon(QIcon(ico_path))
-        except Exception:
-            pass
-        
-        # Apply basic dark stylesheet
+        # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
         dialog.setStyleSheet("""
             QDialog {
                 background-color: #2d2d2d;
@@ -1543,6 +1556,21 @@ class QAScannerMixin:
                 selection-background-color: #505050;
             }
         """)
+        dialog.setWindowTitle("QA Scanner Settings")
+        dialog.setModal(True)
+        # Use screen ratios: 40% width, 85% height (decreased from 100%)
+        screen = QApplication.primaryScreen().geometry()
+        settings_width = int(screen.width() * 0.37)
+        settings_height = int(screen.height() * 0.85)
+        dialog.resize(settings_width, settings_height)
+        
+        # Set window icon
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                dialog.setWindowIcon(QIcon(ico_path))
+        except Exception:
+            pass
         
         # Main layout
         main_layout = QVBoxLayout(dialog)
