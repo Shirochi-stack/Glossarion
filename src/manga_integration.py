@@ -5791,10 +5791,13 @@ class MangaTranslationTab:
         return fonts
     
     def _on_font_selected(self):
-        """Handle font selection - updates font path only, save+apply called by widget"""
+        """Handle font selection - updates font path AND font_style_value, save+apply called by widget"""
         if not hasattr(self, 'font_combo'):
             return
         selected = self.font_combo.currentText()
+        
+        # Update font_style_value to persist the selection
+        self.font_style_value = selected
         
         if selected == "Default":
             self.selected_font_path = None

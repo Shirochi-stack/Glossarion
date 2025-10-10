@@ -1253,7 +1253,9 @@ class MangaSettingsDialog(QDialog):
         self.hd_resize_limit_spin = QSpinBox()
         self.hd_resize_limit_spin.setRange(512, 4096)
         self.hd_resize_limit_spin.setSingleStep(64)
-        self.hd_resize_limit_spin.setValue(int(self.settings.get('advanced', {}).get('hd_strategy_resize_limit', 1536)))
+        loaded_value = int(self.settings.get('advanced', {}).get('hd_strategy_resize_limit', 1536))
+        print(f"[RESIZE_LIMIT_DEBUG] Loading hd_strategy_resize_limit from settings: {loaded_value}")
+        self.hd_resize_limit_spin.setValue(loaded_value)
         resize_layout.addWidget(self.hd_resize_limit_spin)
         
         resize_layout.addWidget(QLabel("px"))
@@ -4327,7 +4329,9 @@ class MangaSettingsDialog(QDialog):
             
             # Save HD strategy settings
             self.settings['advanced']['hd_strategy'] = str(self.hd_strategy_combo.currentText())
-            self.settings['advanced']['hd_strategy_resize_limit'] = int(self.hd_resize_limit_spin.value())
+            resize_limit_value = int(self.hd_resize_limit_spin.value())
+            print(f"[RESIZE_LIMIT_DEBUG] Saving hd_strategy_resize_limit: {resize_limit_value}")
+            self.settings['advanced']['hd_strategy_resize_limit'] = resize_limit_value
             self.settings['advanced']['hd_strategy_crop_margin'] = int(self.hd_crop_margin_spin.value())
             self.settings['advanced']['hd_strategy_crop_trigger_size'] = int(self.hd_crop_trigger_spin.value())
             # Also reflect into environment for immediate effect in this session
