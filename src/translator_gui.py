@@ -925,8 +925,8 @@ Text to analyze:
         
         
         # Async processing settings
-        self.async_wait_for_completion_var = False
-        self.async_poll_interval_var = 60
+        self.async_wait_for_completion_var = self.config.get('async_wait_for_completion', False)
+        self.async_poll_interval_var = self.config.get('async_poll_interval', 60)
         
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
@@ -8218,6 +8218,10 @@ Important rules:
                 
                 # File selection settings
                 ('deep_scan', ['deep_scan_check', 'deep_scan_var'], False, bool),
+                
+                # Async processing settings
+                ('async_wait_for_completion', ['async_wait_for_completion_var'], False, bool),
+                ('async_poll_interval', ['async_poll_interval_var'], 60, lambda v: safe_int(v, 60)),
             ]
             
             # Process the settings map to populate self.config

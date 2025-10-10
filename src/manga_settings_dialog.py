@@ -3797,7 +3797,9 @@ class MangaSettingsDialog(QDialog):
         
         self.ram_cap_mb_spinbox = QSpinBox()
         self.ram_cap_mb_spinbox.setRange(512, 131072)
-        self.ram_cap_mb_spinbox.setValue(int(self.settings.get('advanced', {}).get('ram_cap_mb', 0) or 0))
+        ram_cap_mb_value = int(self.settings.get('advanced', {}).get('ram_cap_mb', 4096))
+        print(f"[RAM_CAP_DEBUG] Loading ram_cap_mb: {ram_cap_mb_value}")
+        self.ram_cap_mb_spinbox.setValue(ram_cap_mb_value)
         ramcap_value_layout.addWidget(self.ram_cap_mb_spinbox)
         
         ramcap_value_help = QLabel("(0 = disabled)")
@@ -3819,7 +3821,13 @@ class MangaSettingsDialog(QDialog):
         
         self.ram_cap_mode_combo = QComboBox()
         self.ram_cap_mode_combo.addItems(['soft', 'hard (Windows only)'])
-        self.ram_cap_mode_combo.setCurrentText(self.settings.get('advanced', {}).get('ram_cap_mode', 'soft'))
+        ram_cap_mode_value = self.settings.get('advanced', {}).get('ram_cap_mode', 'soft')
+        print(f"[RAM_CAP_DEBUG] Loading ram_cap_mode: {ram_cap_mode_value}")
+        # Handle both 'hard' and 'hard (Windows only)' formats
+        if ram_cap_mode_value == 'hard':
+            self.ram_cap_mode_combo.setCurrentText('hard (Windows only)')
+        else:
+            self.ram_cap_mode_combo.setCurrentText('soft')
         ramcap_mode_layout.addWidget(self.ram_cap_mode_combo)
         
         ramcap_mode_help = QLabel("Soft = clean/trim, Hard = OS-enforced (may OOM)")
@@ -3842,7 +3850,9 @@ class MangaSettingsDialog(QDialog):
         self.ram_gate_timeout_spinbox = QDoubleSpinBox()
         self.ram_gate_timeout_spinbox.setRange(2.0, 60.0)
         self.ram_gate_timeout_spinbox.setSingleStep(0.5)
-        self.ram_gate_timeout_spinbox.setValue(float(self.settings.get('advanced', {}).get('ram_gate_timeout_sec', 10.0)))
+        ram_gate_timeout_value = float(self.settings.get('advanced', {}).get('ram_gate_timeout_sec', 15.0))
+        print(f"[RAM_CAP_DEBUG] Loading ram_gate_timeout_sec: {ram_gate_timeout_value}")
+        self.ram_gate_timeout_spinbox.setValue(ram_gate_timeout_value)
         gate_layout.addWidget(self.ram_gate_timeout_spinbox)
         gate_layout.addStretch()
         
@@ -3858,7 +3868,9 @@ class MangaSettingsDialog(QDialog):
         
         self.ram_gate_floor_spinbox = QSpinBox()
         self.ram_gate_floor_spinbox.setRange(64, 2048)
-        self.ram_gate_floor_spinbox.setValue(int(self.settings.get('advanced', {}).get('ram_min_floor_over_baseline_mb', 128)))
+        ram_gate_floor_value = int(self.settings.get('advanced', {}).get('ram_min_floor_over_baseline_mb', 256))
+        print(f"[RAM_CAP_DEBUG] Loading ram_min_floor_over_baseline_mb: {ram_gate_floor_value}")
+        self.ram_gate_floor_spinbox.setValue(ram_gate_floor_value)
         floor_layout.addWidget(self.ram_gate_floor_spinbox)
         floor_layout.addStretch()
         
@@ -4386,14 +4398,22 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'ram_cap_enabled_checkbox'):
                 self.settings['advanced']['ram_cap_enabled'] = bool(self.ram_cap_enabled_checkbox.isChecked())
             if hasattr(self, 'ram_cap_mb_spinbox'):
-                self.settings['advanced']['ram_cap_mb'] = int(self.ram_cap_mb_spinbox.value())
+                ram_cap_mb = int(self.ram_cap_mb_spinbox.value())
+                print(f"[RAM_CAP_DEBUG] Saving ram_cap_mb: {ram_cap_mb}")
+                self.settings['advanced']['ram_cap_mb'] = ram_cap_mb
             if hasattr(self, 'ram_cap_mode_combo'):
                 mode = self.ram_cap_mode_combo.currentText()
-                self.settings['advanced']['ram_cap_mode'] = 'hard' if mode.startswith('hard') else 'soft'
+                ram_cap_mode = 'hard' if mode.startswith('hard') else 'soft'
+                print(f"[RAM_CAP_DEBUG] Saving ram_cap_mode: {ram_cap_mode}")
+                self.settings['advanced']['ram_cap_mode'] = ram_cap_mode
             if hasattr(self, 'ram_gate_timeout_spinbox'):
-                self.settings['advanced']['ram_gate_timeout_sec'] = float(self.ram_gate_timeout_spinbox.value())
+                ram_gate_timeout = float(self.ram_gate_timeout_spinbox.value())
+                print(f"[RAM_CAP_DEBUG] Saving ram_gate_timeout_sec: {ram_gate_timeout}")
+                self.settings['advanced']['ram_gate_timeout_sec'] = ram_gate_timeout
             if hasattr(self, 'ram_gate_floor_spinbox'):
-                self.settings['advanced']['ram_min_floor_over_baseline_mb'] = int(self.ram_gate_floor_spinbox.value())
+                ram_gate_floor = int(self.ram_gate_floor_spinbox.value())
+                print(f"[RAM_CAP_DEBUG] Saving ram_min_floor_over_baseline_mb: {ram_gate_floor}")
+                self.settings['advanced']['ram_min_floor_over_baseline_mb'] = ram_gate_floor
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_selected'):

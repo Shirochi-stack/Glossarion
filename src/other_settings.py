@@ -713,7 +713,7 @@ def _create_context_management_section(self, parent):
     rolling_controls.append(mode_lbl)
     mode_combo = QComboBox()
     mode_combo.addItems(["append", "replace"])
-    mode_combo.setFixedWidth(90)
+    mode_combo.setFixedWidth(100)
     # Add custom styling with unicode arrow
     mode_combo.setStyleSheet("""
         QComboBox::down-arrow {
@@ -938,7 +938,7 @@ def _create_response_handling_section(self, parent):
     gpt_h1.addWidget(self.gpt_effort_label)
     self.gpt_effort_combo = QComboBox()
     self.gpt_effort_combo.addItems(["low", "medium", "high"])
-    self.gpt_effort_combo.setFixedWidth(90)
+    self.gpt_effort_combo.setFixedWidth(100)
     # Add custom styling with unicode arrow
     self.gpt_effort_combo.setStyleSheet("""
         QComboBox::down-arrow {

@@ -1598,7 +1598,17 @@ class AsyncProcessingDialog:
         
         # Wait for completion checkbox using styled version
         self.wait_for_completion_checkbox = self._create_styled_checkbox("Wait for completion (blocks GUI)")
-        self.wait_for_completion_checkbox.setChecked(False)
+        # Load from config
+        wait_value = self.main_gui.config.get('async_wait_for_completion', False)
+        print(f"[ASYNC_DEBUG] Loading async_wait_for_completion: {wait_value}")
+        self.wait_for_completion_checkbox.setChecked(wait_value)
+        # Save to config when changed
+        def _on_wait_changed(checked):
+            self.main_gui.config['async_wait_for_completion'] = checked
+            self.main_gui.async_wait_for_completion_var = checked
+            print(f"[ASYNC_DEBUG] Saving async_wait_for_completion: {checked}")
+            self.main_gui.save_config(show_message=False)
+        self.wait_for_completion_checkbox.toggled.connect(_on_wait_changed)
         config_layout.addWidget(self.wait_for_completion_checkbox)
         
         # Poll interval
@@ -1610,7 +1620,17 @@ class AsyncProcessingDialog:
         self.poll_interval_spinbox = QSpinBox()
         self.poll_interval_spinbox.setMinimum(10)
         self.poll_interval_spinbox.setMaximum(600)
-        self.poll_interval_spinbox.setValue(60)
+        # Load from config
+        poll_value = int(self.main_gui.config.get('async_poll_interval', 60))
+        print(f"[ASYNC_DEBUG] Loading async_poll_interval: {poll_value}")
+        self.poll_interval_spinbox.setValue(poll_value)
+        # Save to config when changed
+        def _on_poll_changed(value):
+            self.main_gui.config['async_poll_interval'] = value
+            self.main_gui.async_poll_interval_var = value
+            print(f"[ASYNC_DEBUG] Saving async_poll_interval: {value}")
+            self.main_gui.save_config(show_message=False)
+        self.poll_interval_spinbox.valueChanged.connect(_on_poll_changed)
         self.poll_interval_spinbox.setFixedWidth(100)
         self.poll_interval_spinbox.setStyleSheet("""
             QSpinBox {
