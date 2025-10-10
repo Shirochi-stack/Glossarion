@@ -9,8 +9,9 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QLabel, QPushButton, QCheckBox, QSpinBox, QDoubleSpinBox,
                                 QSlider, QComboBox, QLineEdit, QGroupBox, QTabWidget,
                                 QWidget, QScrollArea, QFrame, QRadioButton, QButtonGroup,
-                                QMessageBox, QFileDialog, QSizePolicy, QApplication)
-from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject
+                                QMessageBox, QFileDialog, QSizePolicy, QApplication,
+                                QGraphicsOpacityEffect)
+from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QIcon, QPixmap, QImage, QPainter, QColor
 from typing import Dict, Any, Optional, Callable
 from bubble_detector import BubbleDetector
@@ -756,6 +757,9 @@ class MangaSettingsDialog(QDialog):
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Store reference for auto-scrolling in OCR tab
+        self.main_scroll_area = scroll_area
         
         # Create content widget that will go inside scroll area
         content_widget = QWidget()
@@ -2277,22 +2281,10 @@ class MangaSettingsDialog(QDialog):
         tab_widget = QWidget()
         self.tab_widget.addTab(tab_widget, "OCR")
         
-        # Create scroll area for OCR settings
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
+        # Create content layout directly (no duplicate scroll area)
+        content_layout = QVBoxLayout(tab_widget)
         content_layout.setSpacing(10)
         content_layout.setContentsMargins(20, 20, 20, 20)
-        
-        scroll_area.setWidget(content_widget)
-        
-        # Add scroll area to parent layout
-        parent_layout = QVBoxLayout(tab_widget)
-        parent_layout.setContentsMargins(0, 0, 0, 0)
-        parent_layout.addWidget(scroll_area)
         
         # Language hints
         lang_group = QGroupBox("Language Detection")
@@ -3037,6 +3029,7 @@ class MangaSettingsDialog(QDialog):
 
         # Store controls for enable/disable
         self.bubble_controls = [
+            self.use_rtdetr_for_ocr_checkbox,
             self.detector_type_combo,
             self.bubble_model_entry,
             self.bubble_browse_btn,
@@ -3067,6 +3060,9 @@ class MangaSettingsDialog(QDialog):
         # Add stretch to end of OCR tab content
         content_layout.addStretch()
 
+        # Set initialization flag to prevent auto-scroll during setup
+        self._initializing_bubble_controls = True
+        
         # Initialize control states
         self._toggle_bubble_controls()
 
@@ -3079,6 +3075,9 @@ class MangaSettingsDialog(QDialog):
                 # Frames not yet created, skip initialization
                 pass
 
+        # Clear initialization flag
+        self._initializing_bubble_controls = False
+        
         # Check status after dialog ready
         QTimer.singleShot(500, self._check_rtdetr_status)
     
@@ -3348,11 +3347,15 @@ class MangaSettingsDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to load: {e}")
         
     def _toggle_bubble_controls(self):
-        """Enable/disable bubble detection controls"""
+        """Enable/disable bubble detection controls with fade animation"""
         enabled = self.bubble_detection_enabled_checkbox.isChecked()
         
         if enabled:
-            # Enable controls
+            # Fade in and enable controls
+            self._fade_widget(self.use_rtdetr_for_ocr_checkbox, fade_in=True)
+            self._fade_widget(self.yolo_settings_group, fade_in=True)
+            
+            # Enable controls after starting fade
             for widget in self.bubble_controls:
                 try:
                     widget.setEnabled(True)
@@ -3361,17 +3364,101 @@ class MangaSettingsDialog(QDialog):
             
             # Show/hide frames based on detector type
             self._on_detector_type_changed()
+            
+            # Auto-scroll to show the expanded bubble detection settings (but not during initialization)
+            if not getattr(self, '_initializing_bubble_controls', False):
+                QTimer.singleShot(100, self._scroll_to_bubble_settings)
         else:
-            # Disable controls
+            # Fade out and disable controls
+            self._fade_widget(self.use_rtdetr_for_ocr_checkbox, fade_in=False)
+            self._fade_widget(self.yolo_settings_group, fade_in=False, 
+                            on_finished=lambda: self._finish_bubble_disable())
+            
+            # Disable controls immediately
             for widget in self.bubble_controls:
                 try:
                     widget.setEnabled(False)
                 except:
                     pass
+    
+    def _scroll_to_bubble_settings(self):
+        """Smoothly scroll DOWN to show expanded bubble detection settings"""
+        if not hasattr(self, 'main_scroll_area'):
+            return
+        
+        try:
+            # Get current scroll position
+            scrollbar = self.main_scroll_area.verticalScrollBar()
+            current_value = scrollbar.value()
             
-            # Hide frames
-            self.yolo_settings_group.setVisible(False)
-            self.bubble_status_label.setText("")
+            # Scroll down by a reasonable amount to reveal the expanded content
+            # Add 200 pixels to current position to scroll down
+            scroll_increment = 200
+            target_value = min(current_value + scroll_increment, scrollbar.maximum())
+            
+            # Only scroll if we're not already at the bottom
+            if current_value < scrollbar.maximum():
+                # Smooth scroll animation
+                self._scroll_animation = QPropertyAnimation(scrollbar, b"value")
+                self._scroll_animation.setDuration(300)
+                self._scroll_animation.setStartValue(current_value)
+                self._scroll_animation.setEndValue(target_value)
+                self._scroll_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
+                self._scroll_animation.start()
+        except Exception as e:
+            # Fallback to instant scroll if animation fails
+            pass
+    
+    def _finish_bubble_disable(self):
+        """Complete the bubble disable process after fade out"""
+        self.yolo_settings_group.setVisible(False)
+        self.bubble_status_label.setText("")
+    
+    def _fade_widget(self, widget, fade_in=True, duration=200, on_finished=None):
+        """Fade a widget in or out with animation
+        
+        Args:
+            widget: The widget to fade
+            fade_in: True to fade in, False to fade out
+            duration: Animation duration in milliseconds
+            on_finished: Optional callback when animation finishes
+        """
+        # Ensure widget is visible for fade-in
+        if fade_in:
+            widget.setVisible(True)
+        
+        # Create opacity effect
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        
+        # Create animation
+        animation = QPropertyAnimation(effect, b"opacity")
+        animation.setDuration(duration)
+        animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        
+        def cleanup():
+            """Remove graphics effect and call optional callback"""
+            widget.setGraphicsEffect(None)  # Remove effect to restore normal rendering
+            if fade_in:
+                widget.setVisible(True)  # Ensure visible after fade in
+            if on_finished:
+                on_finished()
+        
+        if fade_in:
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+            animation.finished.connect(cleanup)
+        else:
+            animation.setStartValue(1.0)
+            animation.setEndValue(0.0)
+            animation.finished.connect(cleanup)
+        
+        # Store animation reference to prevent garbage collection
+        if not hasattr(self, '_animations'):
+            self._animations = []
+        self._animations.append(animation)
+        
+        animation.start()
 
     def _browse_bubble_model(self):
         """Browse for model file"""
