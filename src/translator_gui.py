@@ -8378,9 +8378,14 @@ Important rules:
                 # Normalize and align glossary prompts across keys with safe fallbacks
                 manual_prompt = (
                     self.config.get('manual_glossary_prompt') or
+                    (self.manual_prompt_text.toPlainText().strip() if hasattr(self, 'manual_prompt_text') else None) or
+                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
+                )
+                # FIXED: append_glossary_prompt should be separate from manual_glossary_prompt
+                append_prompt = (
                     self.config.get('append_glossary_prompt') or
                     (self.append_prompt_text.toPlainText().strip() if hasattr(self, 'append_prompt_text') else None) or
-                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
+                    getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
                 )
                 auto_prompt = (
                     self.config.get('auto_glossary_prompt') or
@@ -8398,9 +8403,9 @@ Important rules:
                     getattr(self, 'glossary_format_instructions', '')
                 )
 
-                # Persist normalized values under both legacy and current keys
+                # Persist normalized values - FIXED: append_glossary_prompt should be independent
                 self.config['manual_glossary_prompt'] = manual_prompt or ''
-                self.config['append_glossary_prompt'] = manual_prompt or ''
+                self.config['append_glossary_prompt'] = append_prompt or ''
                 self.config['auto_glossary_prompt'] = auto_prompt or ''
                 self.config['glossary_translation_prompt'] = trans_prompt or ''
                 self.config['glossary_format_instructions'] = format_instr or ''
@@ -8408,6 +8413,7 @@ Important rules:
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
+                    ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),

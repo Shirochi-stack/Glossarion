@@ -1192,9 +1192,8 @@ class GlossaryManagerMixin:
         self.manual_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
         prompt_frame_layout.addWidget(self.manual_prompt_text)
         
-        # Set default prompt if not already set
-        if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
-            self.manual_glossary_prompt = """Extract character names and important terms from the following text.
+        # Always reload prompt from config to ensure fresh state
+        default_manual_prompt = """Extract character names and important terms from the following text.
 
 Output format:
 {fields}
@@ -1205,6 +1204,7 @@ Rules:
 - One entry per line
 - Leave gender empty for terms (just end with comma)
     """
+        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', default_manual_prompt)
         
         self.manual_prompt_text.setPlainText(self.manual_glossary_prompt)
         
@@ -1293,23 +1293,41 @@ Rules:
     def update_glossary_prompts(self):
         """Update glossary prompts from text widgets if they exist"""
         try:
+            debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
+            
             if hasattr(self, 'manual_prompt_text'):
                 self.manual_glossary_prompt = self.manual_prompt_text.toPlainText().strip()
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] manual_glossary_prompt: {len(self.manual_glossary_prompt)} chars")
             
             if hasattr(self, 'auto_prompt_text'):
                 self.auto_glossary_prompt = self.auto_prompt_text.toPlainText().strip()
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] auto_glossary_prompt: {len(self.auto_glossary_prompt)} chars")
             
             if hasattr(self, 'append_prompt_text'):
+                old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
                 self.append_glossary_prompt = self.append_prompt_text.toPlainText().strip()
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] append_glossary_prompt: OLD='{old_value[:50]}...' NEW='{self.append_glossary_prompt[:50]}...' ({len(self.append_glossary_prompt)} chars)")
+                else:
+                    # Always print this one since it's the problematic field
+                    print(f"📝 Updated append_glossary_prompt from UI: '{self.append_glossary_prompt[:80]}...' ({len(self.append_glossary_prompt)} chars)")
             
             if hasattr(self, 'translation_prompt_text'):
                 self.glossary_translation_prompt = self.translation_prompt_text.toPlainText().strip()
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] glossary_translation_prompt: {len(self.glossary_translation_prompt)} chars")
 
             if hasattr(self, 'format_instructions_text'):
                 self.glossary_format_instructions = self.format_instructions_text.toPlainText().strip()
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] glossary_format_instructions: {len(self.glossary_format_instructions)} chars")
                 
         except Exception as e:
-            print(f"Error updating glossary prompts: {e}")
+            print(f"❌ Error updating glossary prompts: {e}")
+            import traceback
+            traceback.print_exc()
             
     def _setup_auto_glossary_tab(self, parent):
         """Setup automatic glossary tab with fully configurable prompts"""
@@ -1361,11 +1379,9 @@ Rules:
         self.append_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
         append_prompt_layout.addWidget(self.append_prompt_text)
         
-        # Set default append prompt if not already set
-        if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
-            # Load from config if available, otherwise use default
-            self.append_glossary_prompt = self.config.get('append_glossary_prompt', 
-                "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+        # Always reload append prompt from config to ensure fresh state
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', default_append_prompt)
         
         self.append_prompt_text.setPlainText(self.append_glossary_prompt)
         
@@ -1658,9 +1674,9 @@ Rules:
         self.auto_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
         auto_prompt_frame_layout.addWidget(self.auto_prompt_text)
         
-        # Set default extraction prompt if not set
-        if not hasattr(self, 'auto_glossary_prompt') or not self.auto_glossary_prompt:
-            self.auto_glossary_prompt = getattr(self, 'default_auto_glossary_prompt', '')
+        # Always reload extraction prompt from config to ensure fresh state
+        default_auto_prompt = getattr(self, 'default_auto_glossary_prompt', '')
+        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', default_auto_prompt)
         
         self.auto_prompt_text.setPlainText(self.auto_glossary_prompt)
         
@@ -1709,9 +1725,8 @@ Rules:
         format_placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
         format_prompt_frame_layout.addWidget(format_placeholder_label)
         
-        # Initialize format instructions variable and text widget
-        if not hasattr(self, 'glossary_format_instructions'):
-            self.glossary_format_instructions = """
+        # Always reload format instructions from config to ensure fresh state
+        default_format_instructions = """
 Return the results in EXACT CSV format with this header:
 type,raw_name,translated_name
 
@@ -1725,6 +1740,7 @@ Do not use quotes around values unless they contain commas.
 
 Text to analyze:
 {text_sample}"""
+        self.glossary_format_instructions = self.config.get('glossary_format_instructions', default_format_instructions)
         
         self.format_instructions_text = QTextEdit()
         self.format_instructions_text.setMinimumHeight(250)
@@ -1791,9 +1807,8 @@ Text to analyze:
         trans_placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
         trans_prompt_frame_layout.addWidget(trans_placeholder_label)
         
-        # Initialize translation prompt variable and text widget
-        if not hasattr(self, 'glossary_translation_prompt'):
-            self.glossary_translation_prompt = """
+        # Always reload translation prompt from config to ensure fresh state
+        default_translation_prompt = """
 You are translating {language} character names and important terms to English.
 For character names, provide English transliterations or keep as romanized.
 Keep honorifics/suffixes only if they are integral to the name.
@@ -1803,6 +1818,7 @@ Terms to translate:
 {terms_list}
 
 Provide translations in the same numbered format."""
+        self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', default_translation_prompt)
         
         self.translation_prompt_text = QTextEdit()
         self.translation_prompt_text.setMinimumHeight(250)
