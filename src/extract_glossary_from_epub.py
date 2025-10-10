@@ -929,7 +929,13 @@ def skip_duplicate_entries(glossary):
     Skip entries with duplicate raw names using fuzzy matching.
     Returns deduplicated list maintaining first occurrence of each unique raw name.
     """
-    import difflib
+    # Try to use RapidFuzz for speed, fallback to difflib
+    try:
+        from rapidfuzz import fuzz
+        use_rapidfuzz = True
+    except ImportError:
+        import difflib
+        use_rapidfuzz = False
     
     # Get fuzzy threshold from environment
     fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.9'))
@@ -937,6 +943,12 @@ def skip_duplicate_entries(glossary):
     seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
     deduplicated = []
     skipped_count = 0
+    
+    # Show which method we're using
+    if use_rapidfuzz:
+        print(f"[Dedup] Using RapidFuzz (C++ speed) with threshold {fuzzy_threshold:.2f}")
+    else:
+        print(f"[Dedup] Using difflib (fallback) with threshold {fuzzy_threshold:.2f}")
     
     for entry in glossary:
         # Get raw_name and clean it
@@ -947,16 +959,59 @@ def skip_duplicate_entries(glossary):
         # Remove honorifics for comparison (unless disabled)
         cleaned_name = remove_honorifics(raw_name)
         
-        # Check for fuzzy matches with seen names
+        # Check for fuzzy matches with seen names using advanced multi-algorithm approach
         is_duplicate = False
+        best_score = 0.0
+        best_match = None
+        
         for seen_clean, seen_original in seen_raw_names:
-            similarity = difflib.SequenceMatcher(None, cleaned_name.lower(), seen_clean.lower()).ratio()
+            # Try multiple algorithms for better accuracy
+            scores = []
+            
+            if use_rapidfuzz:
+                # RapidFuzz: Multiple methods
+                basic = fuzz.ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
+                scores.append(basic)
+                
+                # Token sort (handles word order: "Kim Sang" vs "Sang Kim")
+                try:
+                    token_sort = fuzz.token_sort_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
+                    scores.append(token_sort)
+                except:
+                    pass
+                
+                # Partial ratio (substring matching: "김상현" in "김상현님")
+                try:
+                    partial = fuzz.partial_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
+                    scores.append(partial)
+                except:
+                    pass
+            else:
+                # Fallback to difflib
+                basic = difflib.SequenceMatcher(None, cleaned_name.lower(), seen_clean.lower()).ratio()
+                scores.append(basic)
+            
+            # Try Jaro-Winkler (better for names)
+            try:
+                import jellyfish
+                jaro = jellyfish.jaro_winkler_similarity(cleaned_name, seen_clean)
+                scores.append(jaro)
+            except ImportError:
+                pass
+            
+            # Take the best score from all algorithms
+            similarity = max(scores) if scores else 0.0
             
             if similarity >= fuzzy_threshold:
-                skipped_count += 1
-                print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name}) - {similarity*100:.1f}% match with {seen_original}")
+                if similarity > best_score:
+                    best_score = similarity
+                    best_match = seen_original
                 is_duplicate = True
-                break
+        
+        if is_duplicate:
+            skipped_count += 1
+            print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
+        else:
         
         if not is_duplicate:
             # Add to seen list and keep the entry

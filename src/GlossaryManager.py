@@ -2268,10 +2268,32 @@ def _process_ai_response(response_text, all_text, min_frequency,
     return csv_lines
 
 def _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold):
-    """Apply fuzzy matching to remove duplicate entries from the glossary with stop flag checks"""
+    """Apply advanced fuzzy matching to remove duplicate entries from the glossary with stop flag checks"""
     from difflib import SequenceMatcher
     
-    print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+    # Try to import advanced libraries
+    try:
+        from rapidfuzz import fuzz as rfuzz
+        use_rapidfuzz = True
+    except ImportError:
+        use_rapidfuzz = False
+    
+    try:
+        import jellyfish
+        use_jellyfish = True
+    except ImportError:
+        use_jellyfish = False
+    
+    algo_info = []
+    if use_rapidfuzz:
+        algo_info.append("RapidFuzz")
+    if use_jellyfish:
+        algo_info.append("Jaro-Winkler")
+    if not algo_info:
+        algo_info.append("difflib")
+    
+    print(f"📋 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+    print(f"📋 Using algorithms: {', '.join(algo_info)}")
     
     # Check stop flag at start
     if is_stop_requested():
@@ -2333,18 +2355,47 @@ def _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold):
                 if min_len <= len(seen_name) <= max_len:
                     candidates.append(seen_name)
             
-            # Check fuzzy similarity with candidates
+            # Check fuzzy similarity with candidates using multiple algorithms
             for seen_name in candidates:
-                # Quick character overlap check before expensive SequenceMatcher
+                # Quick character overlap check before expensive comparison
                 char_overlap = len(set(raw_name_lower) & set(seen_name.lower()))
                 if char_overlap < len(raw_name_lower) * 0.5:
                     continue  # Too different, skip
                 
-                raw_similarity = SequenceMatcher(None, raw_name_lower, seen_name.lower()).ratio()
+                # Try multiple algorithms and take the best score
+                scores = []
                 
-                if raw_similarity >= fuzzy_threshold:
+                if use_rapidfuzz:
+                    # RapidFuzz basic ratio
+                    scores.append(rfuzz.ratio(raw_name_lower, seen_name.lower()) / 100.0)
+                    # Token sort (handles word order)
+                    try:
+                        scores.append(rfuzz.token_sort_ratio(raw_name_lower, seen_name.lower()) / 100.0)
+                    except:
+                        pass
+                    # Partial ratio (substring)
+                    try:
+                        scores.append(rfuzz.partial_ratio(raw_name_lower, seen_name.lower()) / 100.0)
+                    except:
+                        pass
+                else:
+                    # Fallback to difflib
+                    scores.append(SequenceMatcher(None, raw_name_lower, seen_name.lower()).ratio())
+                
+                # Try Jaro-Winkler (better for names)
+                if use_jellyfish:
+                    try:
+                        jaro = jellyfish.jaro_winkler_similarity(raw_name, seen_name)
+                        scores.append(jaro)
+                    except:
+                        pass
+                
+                # Take best score
+                best_similarity = max(scores) if scores else 0.0
+                
+                if best_similarity >= fuzzy_threshold:
                     if removed_count < 10:  # Only log first few
-                        print(f"📑   Removing duplicate: '{raw_name}' ~= '{seen_name}' (similarity: {raw_similarity:.2%})")
+                        print(f"📋   Removing duplicate: '{raw_name}' ~= '{seen_name}' (score: {best_similarity:.2%})")
                     removed_count += 1
                     is_duplicate = True
                     break

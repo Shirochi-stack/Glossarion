@@ -519,6 +519,25 @@ class GlossaryManagerMixin:
                 except Exception as e:
                     debug_log(f"❌ [DEBUG] Fuzzy threshold error: {e}")
                 
+                # Save duplicate detection algorithm
+                try:
+                    if hasattr(self, 'duplicate_algo_combo'):
+                        algo_reverse_map = {
+                            0: 'auto',
+                            1: 'strict',
+                            2: 'balanced',
+                            3: 'aggressive',
+                            4: 'basic'
+                        }
+                        selected_algo = algo_reverse_map.get(self.duplicate_algo_combo.currentIndex(), 'auto')
+                        self.config['glossary_duplicate_algorithm'] = selected_algo
+                        debug_log(f"🔍 [DEBUG] Saved duplicate_algorithm: {selected_algo}")
+                    else:
+                        debug_log("⚠️ [DEBUG] duplicate_algo_combo not found, using default 'auto'")
+                        self.config['glossary_duplicate_algorithm'] = 'auto'
+                except Exception as e:
+                    debug_log(f"❌ [DEBUG] Duplicate algorithm error: {e}")
+                
                 # Save filter mode from radio buttons
                 if hasattr(self, 'glossary_filter_mode_buttons'):
                     for mode_key, radio_button in self.glossary_filter_mode_buttons.items():
@@ -558,6 +577,7 @@ class GlossaryManagerMixin:
                         ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if hasattr(self, 'disable_honorifics_checkbox') and self.disable_honorifics_checkbox.isChecked() else '0'),
                         ('GLOSSARY_STRIP_HONORIFICS', '1' if hasattr(self, 'strip_honorifics_checkbox') and self.strip_honorifics_checkbox.isChecked() else '0'),
                         ('GLOSSARY_FUZZY_THRESHOLD', str(self.fuzzy_threshold_slider.value() / 100.0) if hasattr(self, 'fuzzy_threshold_slider') else '0.90'),
+                        ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
                         ('GLOSSARY_TRANSLATION_PROMPT', getattr(self, 'glossary_translation_prompt', '')),
                         ('GLOSSARY_FORMAT_INSTRUCTIONS', getattr(self, 'glossary_format_instructions', '')),
                         ('GLOSSARY_USE_LEGACY_CSV', '1' if hasattr(self, 'use_legacy_csv_checkbox') and self.use_legacy_csv_checkbox.isChecked() else '0'),
@@ -900,6 +920,68 @@ class GlossaryManagerMixin:
         duplicate_frame = QGroupBox("Duplicate Detection")
         duplicate_frame_layout = QVBoxLayout(duplicate_frame)
         manual_layout.addWidget(duplicate_frame)
+        
+        # Algorithm selection dropdown
+        algo_label = QLabel("Detection Algorithm:")
+        duplicate_frame_layout.addWidget(algo_label)
+        
+        algo_widget = QWidget()
+        algo_layout = QHBoxLayout(algo_widget)
+        algo_layout.setContentsMargins(0, 0, 0, 10)
+        duplicate_frame_layout.addWidget(algo_widget)
+        
+        self.duplicate_algo_combo = QComboBox()
+        self.duplicate_algo_combo.addItems([
+            "Auto (Recommended) - Uses all algorithms",
+            "Strict - High precision, minimal merging",
+            "Balanced - Token + Partial matching",
+            "Aggressive - Maximum duplicate detection",
+            "Basic Only - Simple Levenshtein distance"
+        ])
+        
+        # Load saved setting or default to Auto
+        saved_algo = self.config.get('glossary_duplicate_algorithm', 'auto')
+        algo_index_map = {
+            'auto': 0,
+            'strict': 1,
+            'balanced': 2,
+            'aggressive': 3,
+            'basic': 4
+        }
+        self.duplicate_algo_combo.setCurrentIndex(algo_index_map.get(saved_algo, 0))
+        algo_layout.addWidget(self.duplicate_algo_combo)
+        
+        # Info button
+        algo_info_btn = QPushButton("ℹ️ Info")
+        algo_info_btn.setFixedWidth(60)
+        algo_info_btn.clicked.connect(lambda: QMessageBox.information(
+            parent,
+            "Algorithm Information",
+            "<b>Auto (Recommended)</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score. Best for most cases.<br><br>"
+            "<b>Strict</b>: Only matches very similar names (95%+ similarity). Keeps more entries, minimal merging. Good if you want to review duplicates manually.<br><br>"
+            "<b>Balanced</b>: Uses token-based and partial matching. Handles word order (‘Park Ji-sung’ = ‘Ji-sung Park’) and substrings. Good middle ground.<br><br>"
+            "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants (‘Catherine’ = ‘Katherine’). May over-merge similar names.<br><br>"
+            "<b>Basic Only</b>: Simple Levenshtein distance. Faster but less accurate. May miss variants like ‘Kim Sang-hyun’ vs ‘Kim Sanghyun’."
+        ))
+        algo_layout.addWidget(algo_info_btn)
+        algo_layout.addStretch()
+        
+        algo_desc = QLabel("🎯 Auto mode uses multiple algorithms for best accuracy")
+        algo_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        duplicate_frame_layout.addWidget(algo_desc)
+        
+        # Update description when algorithm changes
+        def update_algo_description(index):
+            descriptions = [
+                "🎯 Auto mode uses multiple algorithms for best accuracy",
+                "🔒 Strict mode: High precision, keeps more entries",
+                "⚖️ Balanced mode: Handles word order and substrings",
+                "🔥 Aggressive mode: Maximum duplicate detection (may over-merge)",
+                "📄 Basic mode: Simple matching (faster, less accurate)"
+            ]
+            algo_desc.setText(descriptions[index])
+        
+        self.duplicate_algo_combo.currentIndexChanged.connect(update_algo_description)
         
         # Honorifics filter toggle
         if not hasattr(self, 'disable_honorifics_checkbox'):
