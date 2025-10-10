@@ -1056,9 +1056,42 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
                 is_duplicate = True
         
         if is_duplicate:
-            skipped_count += 1
-            if skipped_count <= 10:  # Only log first few
-                print(f"[Skip] Pass 1: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
+            # Find the existing entry to compare field counts
+            existing_entry = None
+            for i, existing in enumerate(deduplicated):
+                if existing.get('raw_name') == best_match:
+                    existing_entry = existing
+                    existing_index = i
+                    break
+            
+            if existing_entry:
+                # Count fields in both entries
+                current_field_count = len([v for v in entry.values() if v and str(v).strip()])
+                existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+                
+                # If current entry has more fields, replace the existing one
+                if current_field_count > existing_field_count:
+                    # Replace existing entry
+                    deduplicated[existing_index] = entry
+                    # Update seen_raw_names
+                    for j, (seen_clean, seen_original) in enumerate(seen_raw_names):
+                        if seen_original == best_match:
+                            seen_raw_names[j] = (cleaned_name, entry.get('raw_name', ''))
+                            break
+                    skipped_count += 1
+                    if skipped_count <= 10:
+                        print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match, more detailed entry")
+                else:
+                    # Keep existing entry
+                    skipped_count += 1
+                    if skipped_count <= 10:
+                        extra_info = f" ({current_field_count} vs {existing_field_count} fields)" if current_field_count != existing_field_count else ""
+                        print(f"[Skip] Pass 1: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}{extra_info}")
+            else:
+                # Fallback if we can't find the existing entry
+                skipped_count += 1
+                if skipped_count <= 10:
+                    print(f"[Skip] Pass 1: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
         else:
             # Add to seen list and keep the entry
             seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
@@ -1086,9 +1119,28 @@ def _skip_translated_name_duplicates(glossary):
         # Check if we've seen this translation before
         if translated_lower in seen_translations:
             existing_raw, existing_entry = seen_translations[translated_lower]
-            skipped_count += 1
-            if skipped_count <= 10:  # Only log first few
-                print(f"[Skip] Pass 2: '{raw_name}' -> '{translated_name}' (conflicts with '{existing_raw}')")
+            existing_translated = existing_entry.get('translated_name', translated_name)
+            
+            # Count fields in both entries (more fields = higher priority)
+            current_field_count = len([v for v in entry.values() if v and str(v).strip()])
+            existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+            
+            # If current entry has more fields, replace the existing one
+            if current_field_count > existing_field_count:
+                # Remove existing entry from deduplicated list
+                deduplicated = [e for e in deduplicated if e != existing_entry]
+                # Replace with current entry
+                seen_translations[translated_lower] = (raw_name, entry)
+                deduplicated.append(entry)
+                skipped_count += 1
+                if skipped_count <= 10:  # Only log first few
+                    print(f"[Skip] Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields) - more detailed entry")
+            else:
+                # Keep existing entry (has same or more fields)
+                skipped_count += 1
+                if skipped_count <= 10:  # Only log first few
+                    extra_info = f" ({current_field_count} vs {existing_field_count} fields)" if current_field_count != existing_field_count else ""
+                    print(f"[Skip] Pass 2: Removing '{raw_name}' -> '{translated_name}' (duplicate translation of '{existing_raw}' -> '{existing_translated}'){extra_info}")
         else:
             # New translation, keep it
             seen_translations[translated_lower] = (raw_name, entry)

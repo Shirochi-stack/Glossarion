@@ -2493,9 +2493,30 @@ def _deduplicate_pass2_translated_names(entry_lines):
         # Check if we've seen this translation before
         if translated_lower in seen_translations:
             existing_raw, existing_line = seen_translations[translated_lower]
-            removed_count += 1
-            if removed_count <= 10:  # Only log first few
-                print(f"📋   Pass 2: Removing translation duplicate: '{raw_name}' -> '{translated_name}' (conflicts with '{existing_raw}')")
+            # Get the existing translated name from the line
+            existing_parts = existing_line.split(',')
+            existing_translated = existing_parts[2] if len(existing_parts) >= 3 else translated_name
+            
+            # Count fields in both entries (more fields = higher priority)
+            current_field_count = len([f.strip() for f in parts if f.strip()])
+            existing_field_count = len([f.strip() for f in existing_parts if f.strip()])
+            
+            # If current entry has more fields, replace the existing one
+            if current_field_count > existing_field_count:
+                # Remove existing entry from deduplicated list
+                deduplicated = [l for l in deduplicated if l != existing_line]
+                # Replace with current entry
+                seen_translations[translated_lower] = (raw_name, line)
+                deduplicated.append(line)
+                removed_count += 1
+                if removed_count <= 10:  # Only log first few
+                    print(f"📋   Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields) - more detailed entry")
+            else:
+                # Keep existing entry (has same or more fields)
+                removed_count += 1
+                if removed_count <= 10:  # Only log first few
+                    extra_info = f" ({current_field_count} vs {existing_field_count} fields)" if current_field_count != existing_field_count else ""
+                    print(f"📋   Pass 2: Removing '{raw_name}' -> '{translated_name}' (duplicate translation of '{existing_raw}' -> '{existing_translated}'){extra_info}")
         else:
             # New translation, keep it
             seen_translations[translated_lower] = (raw_name, line)
