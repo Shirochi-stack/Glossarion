@@ -3172,9 +3172,8 @@ class MangaTranslationTab:
         # Add local_inpaint_frame to inpaint_group
         inpaint_group_layout.addWidget(self.local_inpaint_frame)
         
-        # Hide both frames by default to prevent window popup
-        self.cloud_inpaint_frame.hide()
-        self.local_inpaint_frame.hide()
+        # Both frames start visible but will be managed by _on_inpaint_method_change
+        # Don't hide them here - let the method visibility logic handle it
 
         # Try to load saved model for current type on dialog open
         initial_model_type = self.local_model_type_value
@@ -5910,39 +5909,31 @@ class MangaTranslationTab:
                 print("🚫 Skip Inpainter: ENABLED - Inpainting will be skipped")
                 # Disable all inpainting options
                 try:
-                    widgets_to_disable = [
-                        self.inpaint_method_frame,
-                        self.cloud_inpaint_frame,
-                        self.local_inpaint_frame,
-                        self.inpaint_separator
-                    ]
-                    
-                    for widget in widgets_to_disable:
+                    # Disable parent frames
+                    for widget in [self.inpaint_method_frame, self.cloud_inpaint_frame, 
+                                   self.local_inpaint_frame, self.inpaint_separator]:
                         widget.setEnabled(False)
-                        # Apply comprehensive disabled styling to all child widgets
-                        widget.setStyleSheet("""
-                            QWidget {
-                                color: #666666;
-                            }
-                            QLabel {
-                                color: #666666;
-                            }
-                            QRadioButton {
-                                color: #666666;
-                            }
-                            QComboBox {
-                                color: #666666;
-                                background-color: #2d2d2d;
-                            }
-                            QLineEdit {
-                                color: #666666;
-                                background-color: #2d2d2d;
-                            }
-                            QPushButton {
-                                color: #666666;
-                                background-color: #3d3d3d;
-                            }
-                        """)
+                    
+                    # Apply disabled styling DIRECTLY to each child widget
+                    disabled_button_style = "QPushButton { background-color: #2a2a2a; color: #555555; border: 1px solid #333333; padding: 5px 15px; }"
+                    disabled_input_style = "QLineEdit { background-color: #252525; color: #555555; border: 1px solid #333333; }"
+                    disabled_combo_style = "QComboBox { background-color: #252525; color: #555555; border: 1px solid #333333; }"
+                    disabled_label_style = "QLabel { color: #555555; }"
+                    disabled_radio_style = "QRadioButton { color: #555555; }"
+                    
+                    # Style all buttons in the frames
+                    for frame in [self.inpaint_method_frame, self.cloud_inpaint_frame, self.local_inpaint_frame]:
+                        for button in frame.findChildren(QPushButton):
+                            button.setStyleSheet(disabled_button_style)
+                        for lineedit in frame.findChildren(QLineEdit):
+                            lineedit.setStyleSheet(disabled_input_style)
+                        for combo in frame.findChildren(QComboBox):
+                            combo.setStyleSheet(disabled_combo_style)
+                        for label in frame.findChildren(QLabel):
+                            label.setStyleSheet(disabled_label_style)
+                        for radio in frame.findChildren(QRadioButton):
+                            radio.setStyleSheet(disabled_radio_style)
+                            
                 except Exception as ve:
                     print(f"⚠️ Error disabling widgets: {ve}")
             else:
@@ -5956,12 +5947,63 @@ class MangaTranslationTab:
                         self.inpaint_separator
                     ]
                     
+                    # Re-enable widgets
                     for widget in widgets_to_enable:
                         widget.setEnabled(True)
-                        # Clear ALL disabled styling - return to original state
-                        widget.setStyleSheet("")
                     
-                    # Update method-specific frames visibility
+                    # Clear disabled styling by setting empty stylesheet on parent frames
+                    self.inpaint_method_frame.setStyleSheet("")
+                    self.cloud_inpaint_frame.setStyleSheet("")
+                    self.local_inpaint_frame.setStyleSheet("")
+                    self.inpaint_separator.setStyleSheet("")
+                    
+                    # Restore styling for ALL child widgets (reverse of disable)
+                    for frame in [self.inpaint_method_frame, self.cloud_inpaint_frame, self.local_inpaint_frame]:
+                        # Restore labels to white text
+                        for label in frame.findChildren(QLabel):
+                            label.setStyleSheet("QLabel { color: white; }")
+                        
+                        # Restore radio buttons to white text  
+                        for radio in frame.findChildren(QRadioButton):
+                            radio.setStyleSheet("QRadioButton { color: white; }")
+                        
+                        # Restore combo boxes - ensure they're fully enabled with proper styling
+                        for combo in frame.findChildren(QComboBox):
+                            combo.setEnabled(True)  # Explicitly re-enable
+                            # Apply an enabled style to override the disabled style completely
+                            combo.setStyleSheet("QComboBox { background-color: palette(base); color: palette(text); border: 1px solid palette(mid); }")
+                            combo.update()  # Force visual refresh
+                        
+                        # Restore line edits
+                        for lineedit in frame.findChildren(QLineEdit):
+                            if lineedit == getattr(self, 'local_model_entry', None):
+                                lineedit.setStyleSheet("QLineEdit { background-color: #2b2b2b; color: #ffffff; }")
+                            else:
+                                lineedit.setStyleSheet("")
+                        
+                        # Restore buttons with their original colors
+                        for button in frame.findChildren(QPushButton):
+                            btn_text = button.text()
+                            if "Browse" in btn_text:
+                                button.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
+                            elif "Load" in btn_text:
+                                button.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+                            elif "Download" in btn_text:
+                                button.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+                            elif "Configure" in btn_text:
+                                button.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
+                            elif "Clear" in btn_text:
+                                button.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+                            elif "Info" in btn_text:
+                                button.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+                            else:
+                                button.setStyleSheet("")
+                    
+                    # Make all frames visible first before calling the method change handler
+                    self.cloud_inpaint_frame.show()
+                    self.local_inpaint_frame.show()
+                    
+                    # Update method-specific frames visibility based on selected method
                     self._on_inpaint_method_change()
                 except Exception as ve:
                     print(f"⚠️ Error enabling widgets: {ve}")
@@ -5988,6 +6030,11 @@ class MangaTranslationTab:
 
     def _on_inpaint_method_change(self):
         """Show appropriate inpainting settings based on method"""
+        # Don't change visibility AT ALL if skip inpainting is enabled
+        # The frames stay visible but disabled
+        if getattr(self, 'skip_inpainting_value', False):
+            return
+        
         # Determine current method from radio buttons
         if self.cloud_radio.isChecked():
             method = 'cloud'
@@ -6001,16 +6048,18 @@ class MangaTranslationTab:
         # Update the stored value
         self.inpaint_method_value = method
         
+        # Show/hide frames based on method
+        # Cloud frame: visible for cloud and hybrid
+        # Local frame: visible for local and hybrid
         if method == 'cloud':
-            self.cloud_inpaint_frame.setVisible(True)
-            self.local_inpaint_frame.setVisible(False)
+            self.cloud_inpaint_frame.show()
+            self.local_inpaint_frame.hide()
         elif method == 'local':
-            self.local_inpaint_frame.setVisible(True)
-            self.cloud_inpaint_frame.setVisible(False)
+            self.cloud_inpaint_frame.hide()
+            self.local_inpaint_frame.show()
         elif method == 'hybrid':
-            # Show both frames for hybrid
-            self.local_inpaint_frame.setVisible(True)
-            self.cloud_inpaint_frame.setVisible(True)
+            self.cloud_inpaint_frame.show()
+            self.local_inpaint_frame.show()
         
         # Force layout update
         if hasattr(self, 'parent_widget') and self.parent_widget:
