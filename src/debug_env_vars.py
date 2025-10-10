@@ -77,7 +77,7 @@ def print_env_var_status():
         'MANGA_SHADOW_OFFSET_X': 'Shadow offset X',
         'MANGA_SHADOW_OFFSET_Y': 'Shadow offset Y',
         'MANGA_SHADOW_BLUR': 'Shadow blur radius',
-        'MANGA_INPAINT_SKIP': 'Skip inpainting',
+        'MANGA_SKIP_INPAINTING': 'Skip inpainting',
         'MANGA_INPAINT_QUALITY': 'Inpainting quality preset',
         'MANGA_INPAINT_DILATION': 'Inpainting dilation (px)',
         'MANGA_INPAINT_PASSES': 'Inpainting passes',

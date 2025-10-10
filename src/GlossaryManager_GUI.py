@@ -681,8 +681,12 @@ class GlossaryManagerMixin:
         cancel_button.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
         control_layout.addWidget(cancel_button)
         
-        # Show dialog
-        dialog.exec()
+        # Show dialog with fade animation
+        try:
+            from dialog_animations import exec_dialog_with_fade
+            exec_dialog_with_fade(dialog, duration=250)
+        except Exception:
+            dialog.exec()
 
     def _setup_manual_glossary_tab(self, parent):
         """Setup manual glossary tab - simplified for new format"""
@@ -2403,8 +2407,12 @@ Provide translations in the same numbered format."""
             
             button_layout.addStretch()
             
-            # Show dialog
-            backup_dialog.exec()
+            # Show dialog with fade animation
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(backup_dialog, duration=250)
+            except Exception:
+                backup_dialog.exec()
     
         def smart_trim_dialog():
             if not self.current_glossary_data:
@@ -2562,8 +2570,12 @@ Provide translations in the same numbered format."""
             tip_label.setStyleSheet("color: #666; font-size: 9pt; font-style: italic;")
             main_layout.addWidget(tip_label)
 
-            # Show dialog
-            trim_dialog.exec()
+            # Show dialog with fade animation
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(trim_dialog, duration=250)
+            except Exception:
+                trim_dialog.exec()
        
         def filter_entries_dialog():
             if not self.current_glossary_data:
@@ -2805,8 +2817,12 @@ Provide translations in the same numbered format."""
             
             button_layout.addStretch()
             
-            # Show dialog
-            filter_dialog.exec()
+            # Show dialog with fade animation
+            try:
+                from dialog_animations import exec_dialog_with_fade
+                exec_dialog_with_fade(filter_dialog, duration=250)
+            except Exception:
+                filter_dialog.exec()
     
         def export_selection():
            selected = self.glossary_tree.selectedItems()
@@ -3050,7 +3066,12 @@ Provide translations in the same numbered format."""
        # Connect Enter/Escape shortcuts
        entry.returnPressed.connect(save_edit)
        
-       edit_dialog.exec()
+       # Show edit dialog with fade animation
+       try:
+           from dialog_animations import exec_dialog_with_fade
+           exec_dialog_with_fade(edit_dialog, duration=250)
+       except Exception:
+           edit_dialog.exec()
 
     def convert_glossary_format(self, reload_callback):
         """Export glossary to CSV format"""

@@ -117,77 +117,7 @@ class QAScannerMixin:
     
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
-        # Create a small loading window with icon
-        loading_window = QDialog(self)
-        loading_window.setWindowTitle("Loading QA Scanner")
-        loading_window.setModal(True)
-        # Use screen ratios: 15% width, 10% height for better label fit
-        screen = QApplication.primaryScreen().geometry()
-        loading_width = int(screen.width() * 0.15)
-        loading_height = int(screen.height() * 0.10)
-        loading_window.setFixedSize(loading_width, loading_height)
-        
-        # Create content layout
-        layout = QVBoxLayout(loading_window)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        # Try to add icon image if available
-        status_label = None
-        try:
-            from PIL import Image
-            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                loading_window.setWindowIcon(QIcon(ico_path))
-                # Load icon at small size
-                icon_image = Image.open(ico_path)
-                icon_image = icon_image.resize((32, 32), Image.Resampling.LANCZOS)
-                
-                # Create horizontal layout
-                h_layout = QHBoxLayout()
-                
-                icon_label = QLabel()
-                # Convert PIL to QPixmap
-                icon_pixmap = QPixmap(ico_path).scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                icon_label.setPixmap(icon_pixmap)
-                h_layout.addWidget(icon_label)
-                
-                # Text on the right
-                text_layout = QVBoxLayout()
-                main_label = QLabel("Initializing QA Scanner...")
-                main_label.setFont(QFont("Arial", 11))
-                text_layout.addWidget(main_label)
-                
-                status_label = QLabel("Loading modules...")
-                status_label.setFont(QFont("Arial", 9))
-                status_label.setStyleSheet("color: gray;")
-                text_layout.addWidget(status_label)
-                
-                h_layout.addLayout(text_layout)
-                layout.addLayout(h_layout)
-            else:
-                # Fallback without icon
-                main_label = QLabel("Initializing QA Scanner...")
-                main_label.setFont(QFont("Arial", 11))
-                layout.addWidget(main_label)
-                
-                status_label = QLabel("Loading modules...")
-                status_label.setFont(QFont("Arial", 9))
-                status_label.setStyleSheet("color: gray;")
-                layout.addWidget(status_label)
-        except ImportError:
-            # No PIL, simple text only
-            main_label = QLabel("Initializing QA Scanner...")
-            main_label.setFont(QFont("Arial", 11))
-            layout.addWidget(main_label)
-            
-            status_label = QLabel("Loading modules...")
-            status_label.setFont(QFont("Arial", 9))
-            status_label.setStyleSheet("color: gray;")
-            layout.addWidget(status_label)
-        
-        loading_window.show()
-        QApplication.processEvents()
-        
+        # Removed loading screen - initialize directly for smoother experience
         try:
             # Start a brief auto-scroll delay so first log lines are readable
             try:
@@ -198,41 +128,27 @@ class QAScannerMixin:
                     self._autoscroll_delay_until = _time.time() + 0.6
             except Exception:
                 pass
-            # Update status
-            if status_label:
-                status_label.setText("Loading translation modules...")
-            QApplication.processEvents()
             
             if not self._lazy_load_modules():
-                loading_window.close()
                 self.append_log("❌ Failed to load QA scanner modules")
                 return
-            
-            if status_label:
-                status_label.setText("Preparing scanner...")
-            QApplication.processEvents()
             
             # Check for scan_html_folder in the global scope from translator_gui
             import sys
             translator_module = sys.modules.get('translator_gui')
             if translator_module is None or not hasattr(translator_module, 'scan_html_folder') or translator_module.scan_html_folder is None:
-                loading_window.close()
                 self.append_log("❌ QA scanner module is not available")
                 QMessageBox.critical(None, "Module Error", "QA scanner module is not available.")
                 return
             
             if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
-                loading_window.close()
                 self.stop_requested = True
                 self.append_log("⛔ QA scan stop requested.")
                 return
             
-            # Close loading window
-            loading_window.close()
             self.append_log("✅ QA scanner initialized successfully")
             
         except Exception as e:
-            loading_window.close()
             self.append_log(f"❌ Error initializing QA scanner: {e}")
             return
         
@@ -2630,8 +2546,12 @@ class QAScannerMixin:
             dialog._cleanup_scrolling()
         dialog.rejected.connect(handle_close)
         
-        # Show the dialog and return result
-        return dialog.exec()
+        # Show the dialog with fade animation and return result
+        try:
+            from dialog_animations import exec_dialog_with_fade
+            return exec_dialog_with_fade(dialog, duration=250)
+        except Exception:
+            return dialog.exec()
 
 
 def show_custom_detection_dialog(parent=None):
@@ -2937,8 +2857,12 @@ def show_custom_detection_dialog(parent=None):
     
     button_layout.addStretch()
     
-    # Show dialog and return result
-    custom_dialog.exec()
+    # Show dialog with fade animation and return result
+    try:
+        from dialog_animations import exec_dialog_with_fade
+        exec_dialog_with_fade(custom_dialog, duration=250)
+    except Exception:
+        custom_dialog.exec()
     
     # Return settings if confirmed, None otherwise
     return result_settings if settings_confirmed else None

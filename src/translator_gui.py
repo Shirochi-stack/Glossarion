@@ -1392,7 +1392,12 @@ Text to analyze:
         # If dialog already exists, just show and focus it to preserve exact state
         try:
             if hasattr(self, "_manga_dialog") and self._manga_dialog is not None:
-                self._manga_dialog.show()
+                # Show with fade-in animation
+                try:
+                    from dialog_animations import show_dialog_with_fade
+                    show_dialog_with_fade(self._manga_dialog, duration=250)
+                except Exception:
+                    self._manga_dialog.show()
                 # Bring to front and focus
                 try:
                     self._manga_dialog.raise_()
@@ -1481,11 +1486,16 @@ Text to analyze:
                 dialog.hide()
         dialog.closeEvent = _handle_close
         
-        # Show the dialog
-        dialog.show()
-        
         # Keep reference to prevent garbage collection and allow reuse
         self._manga_dialog = dialog
+        
+        # Show the dialog with smooth fade-in animation
+        try:
+            from dialog_animations import show_dialog_with_fade
+            show_dialog_with_fade(dialog, duration=250)
+        except Exception:
+            # Fallback to normal show if animation fails
+            dialog.show()
 
         
     def _init_default_prompts(self):
@@ -8752,7 +8762,7 @@ Important rules:
             'MANGA_SHADOW_OFFSET_X': 'Shadow offset X',
             'MANGA_SHADOW_OFFSET_Y': 'Shadow offset Y',
             'MANGA_SHADOW_BLUR': 'Shadow blur radius',
-            'MANGA_INPAINT_SKIP': 'Skip inpainting',
+            'MANGA_SKIP_INPAINTING': 'Skip inpainting',
             'MANGA_INPAINT_QUALITY': 'Inpainting quality preset',
             'MANGA_INPAINT_DILATION': 'Inpainting dilation (px)',
             'MANGA_INPAINT_PASSES': 'Inpainting passes',
@@ -8948,7 +8958,7 @@ Important rules:
                 ('MANGA_SHADOW_OFFSET_X', str(self.config.get('manga_shadow_offset_x', 2))),
                 ('MANGA_SHADOW_OFFSET_Y', str(self.config.get('manga_shadow_offset_y', 2))),
                 ('MANGA_SHADOW_BLUR', str(self.config.get('manga_shadow_blur', 0))),
-                ('MANGA_INPAINT_SKIP', '1' if self.config.get('manga_skip_inpainting', False) else '0'),
+                ('MANGA_SKIP_INPAINTING', '1' if self.config.get('manga_skip_inpainting', False) else '0'),
                 ('MANGA_INPAINT_QUALITY', str(self.config.get('manga_inpaint_quality', 'high'))),
                 ('MANGA_INPAINT_DILATION', str(self.config.get('manga_inpaint_dilation', 15))),
                 ('MANGA_INPAINT_PASSES', str(self.config.get('manga_inpaint_passes', 2))),
@@ -8981,7 +8991,7 @@ Important rules:
                 ('MANGA_DEBUG_MODE', '1' if manga_adv.get('debug_mode', False) else '0'),
                 ('MANGA_SAVE_INTERMEDIATE', '1' if manga_adv.get('save_intermediate', False) else '0'),
                 ('MANGA_CONCISE_LOGS', '1' if manga_adv.get('concise_logs', True) else '0'),
-                ('MANGA_SKIP_INPAINTING', '1' if manga_adv.get('skip_inpainting', False) else '0'),
+                # Note: MANGA_SKIP_INPAINTING is set from manga_skip_inpainting (line 8951) - don't duplicate here
             ]
 
             # Combine all environment variable mappings

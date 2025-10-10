@@ -929,7 +929,7 @@ class MangaTranslator:
         self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
         self.force_caps_lock = config.get('manga_force_caps_lock', False)
-        self.skip_inpainting = config.get('manga_skip_inpainting', True)
+        self.skip_inpainting = config.get('manga_skip_inpainting', False)  # Default: perform inpainting
 
         # Font size multiplier mode - Load from config
         self.font_size_mode = config.get('manga_font_size_mode', 'fixed')  # 'fixed' or 'multiplier'
@@ -11450,9 +11450,29 @@ class MangaTranslator:
             
             def _task_inpaint():
                 try:
-                    if getattr(self, 'skip_inpainting', False):
+                    # CRITICAL: Re-check the skip flag from config at runtime (don't use cached value)
+                    # This ensures toggle changes are respected even after MangaTranslator initialization
+                    skip_flag = False
+                    try:
+                        # Priority 1: Check environment variable (set by toggle)
+                        import os
+                        env_skip = os.environ.get('MANGA_SKIP_INPAINTING', '').strip()
+                        if env_skip in ('1', 'true', 'True', 'TRUE'):
+                            skip_flag = True
+                        elif env_skip in ('0', 'false', 'False', 'FALSE'):
+                            skip_flag = False
+                        else:
+                            # Priority 2: Check config
+                            skip_flag = self.main_gui.config.get('manga_skip_inpainting', False)
+                    except Exception:
+                        # Fallback to cached value
+                        skip_flag = getattr(self, 'skip_inpainting', False)
+                    
+                    if skip_flag:
                         self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
                         return image.copy()
+                    else:
+                        self._log(f"🎨 Inpainting enabled - will remove original text", "debug")
                     
                     self._log(f"🎭 Creating text mask...")
                     try:
