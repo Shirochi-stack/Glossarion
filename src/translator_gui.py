@@ -1869,6 +1869,7 @@ Recent translations to summarize:
         QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
         
         return checkbox
+    
 
     def create_file_section(self):
         """Create file selection section with multi-file support"""
@@ -2223,10 +2224,22 @@ Recent translations to summarize:
         self.frame.addWidget(self.toggle_token_btn, 7, 1, Qt.AlignLeft)
         
         # Contextual Translation (right side, row 3) - with extra padding on top
+        contextual_container = QWidget()
+        contextual_layout = QHBoxLayout(contextual_container)
+        contextual_layout.setContentsMargins(0, 0, 0, 0)
+        contextual_layout.setSpacing(8)
+        
         self.contextual_checkbox = self._create_styled_checkbox("Contextual Translation")
         self.contextual_checkbox.setChecked(self.contextual_var)
         self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
-        self.frame.addWidget(self.contextual_checkbox, 3, 2, 1, 2, Qt.AlignLeft)
+        contextual_layout.addWidget(self.contextual_checkbox)
+        
+        contextual_warning = QLabel("⚠️ May result in duplicate outputs")
+        contextual_warning.setStyleSheet("color: #ff9800; font-size: 9pt; font-style: italic;")
+        contextual_layout.addWidget(contextual_warning)
+        contextual_layout.addStretch()
+        
+        self.frame.addWidget(contextual_container, 3, 2, 1, 2, Qt.AlignLeft)
         
         # Translation History Limit (row 4)
         self.trans_history_label = QLabel("Translation History Limit:")
@@ -2255,11 +2268,27 @@ Recent translations to summarize:
         self.trans_temp.setMaximumWidth(60)
         self.frame.addWidget(self.trans_temp, 6, 3, Qt.AlignLeft)
         
-        # Batch Translation (row 7)
+        # Batch Translation (row 7) with spinning icon
+        batch_container = QWidget()
+        batch_layout = QHBoxLayout(batch_container)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+        batch_layout.setSpacing(8)
+        
         self.batch_checkbox = self._create_styled_checkbox("Batch Translation")
         self.batch_checkbox.setChecked(self.batch_translation_var)
         self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
-        self.frame.addWidget(self.batch_checkbox, 7, 2, Qt.AlignLeft)
+        
+        # Add spinning icon next to batch checkbox using spinning helper
+        from spinning import create_icon_label, animate_icon
+        base_dir = getattr(self, 'base_dir', None)
+        self.batch_icon = create_icon_label(size=20, base_dir=base_dir)
+        self.batch_checkbox.toggled.connect(lambda: animate_icon(self.batch_icon))
+        
+        batch_layout.addWidget(self.batch_icon)
+        batch_layout.addWidget(self.batch_checkbox)
+        batch_layout.addStretch()
+        
+        self.frame.addWidget(batch_container, 7, 2, Qt.AlignLeft)
         
         self.batch_size_entry = QLineEdit()
         self.batch_size_entry.setText(str(self.batch_size_var))

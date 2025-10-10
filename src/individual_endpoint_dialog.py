@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QPixmap, QTransform
+from spinning import create_icon_label, animate_icon
 from typing import Callable
 
 try:
@@ -79,56 +80,6 @@ class IndividualEndpointDialog(QDialog):
         QTimer.singleShot(0, safe_init)
         
         return checkbox
-    
-    def _animate_icon(self):
-        """Animate the icon with a spin rotation when Enable is toggled"""
-        if not hasattr(self, 'icon_label') or not self.icon_label:
-            return
-        
-        # Create rotation animation
-        self.icon_animation = QPropertyAnimation(self.icon_label, b"geometry")
-        self.icon_animation.setDuration(500)  # 500ms animation
-        self.icon_animation.setEasingCurve(QEasingCurve.OutCubic)
-        
-        # Get current pixmap for rotation
-        current_pixmap = self.icon_label.pixmap()
-        if current_pixmap and not current_pixmap.isNull():
-            # Create rotation frames
-            original_pixmap = current_pixmap
-            
-            # Animate through rotation
-            def rotate_frame(angle):
-                transform = QTransform()
-                transform.rotate(angle)
-                rotated_pixmap = original_pixmap.transformed(transform, Qt.SmoothTransformation)
-                
-                # Ensure the rotated pixmap fits in the label
-                if not rotated_pixmap.isNull():
-                    scaled_rotated = rotated_pixmap.scaled(
-                        24, 24, 
-                        Qt.KeepAspectRatio, 
-                        Qt.SmoothTransformation
-                    )
-                    self.icon_label.setPixmap(scaled_rotated)
-            
-            # Create timer-based rotation animation
-            self.rotation_timer = QTimer()
-            self.current_angle = 0
-            self.rotation_steps = 36  # 10-degree steps for smooth animation
-            self.rotation_step = 0
-            
-            def animate_rotation():
-                if self.rotation_step < self.rotation_steps:
-                    angle = (self.rotation_step * 360) // self.rotation_steps
-                    rotate_frame(angle)
-                    self.rotation_step += 1
-                else:
-                    # Animation complete, restore original
-                    self.icon_label.setPixmap(original_pixmap)
-                    self.rotation_timer.stop()
-            
-            self.rotation_timer.timeout.connect(animate_rotation)
-            self.rotation_timer.start(14)  # ~14ms per frame for smooth 500ms total
 
     def _build(self):
         title = f"Configure Individual Endpoint — {getattr(self.key, 'model', '')}"
@@ -136,8 +87,8 @@ class IndividualEndpointDialog(QDialog):
         # Use screen ratios for sizing (decreased from 37% x 41% to 30% x 35%)
         from PySide6.QtWidgets import QApplication
         screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.30)  # 30% of screen width
-        height = int(screen.height() * 0.35)  # 35% of screen height
+        width = int(screen.width() * 0.25)  # 30% of screen width
+        height = int(screen.height() * 0.25)  # 35% of screen height
         self.setMinimumSize(width, height)
         
         # Main layout
@@ -158,7 +109,6 @@ class IndividualEndpointDialog(QDialog):
         self.enable_checkbox = self._create_styled_checkbox("Enable")
         self.enable_checkbox.setChecked(bool(getattr(self.key, 'use_individual_endpoint', False)))
         self.enable_checkbox.toggled.connect(self._toggle_fields)
-        self.enable_checkbox.toggled.connect(self._animate_icon)
         # Increase checkbox size
         self.enable_checkbox.setStyleSheet("""
             QCheckBox {
@@ -183,73 +133,12 @@ class IndividualEndpointDialog(QDialog):
         """)
         header_layout.addStretch()
         
-        # Add Halgakos.ico next to the enable checkbox
-        icon_label = QLabel()
-        icon_loaded = False
+        # Add Halgakos.ico next to the enable checkbox using spinning helper
+        base_dir = getattr(self.translator_gui, 'base_dir', None)
+        icon_label = create_icon_label(size=24, base_dir=base_dir)
         
-        # Try multiple possible paths for the icon
-        possible_paths = []
-        
-        # Method 1: Use translator_gui base_dir
-        if hasattr(self.translator_gui, 'base_dir'):
-            possible_paths.append(os.path.join(self.translator_gui.base_dir, 'Halgakos.ico'))
-        
-        # Method 2: Use current working directory
-        possible_paths.append(os.path.join(os.getcwd(), 'Halgakos.ico'))
-        
-        # Method 3: Use script directory
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        possible_paths.append(os.path.join(script_dir, 'Halgakos.ico'))
-        
-        # Method 4: Check parent directory (common for project structure)
-        parent_dir = os.path.dirname(script_dir)
-        possible_paths.append(os.path.join(parent_dir, 'Halgakos.ico'))
-        
-        try:
-            for ico_path in possible_paths:
-                if os.path.isfile(ico_path):
-                    # Load icon as pixmap with high quality
-                    pixmap = QPixmap(ico_path)
-                    if not pixmap.isNull():
-                        # Scale to appropriate size for checkbox area
-                        # Use smooth transformation for better quality
-                        scaled_pixmap = pixmap.scaled(
-                            24, 24,  # Slightly larger to make it more visible
-                            Qt.KeepAspectRatio,
-                            Qt.SmoothTransformation
-                        )
-                        icon_label.setPixmap(scaled_pixmap)
-                        icon_label.setFixedSize(24, 24)
-                        icon_label.setAlignment(Qt.AlignCenter)
-                        # Remove background, keep icon transparent
-                        icon_label.setStyleSheet("""
-                            QLabel {
-                                background: transparent;
-                                border: none;
-                            }
-                        """)
-                        icon_loaded = True
-                        break
-        except Exception as e:
-            # Fallback: create a simple text-based icon if image fails
-            pass
-        
-        # If no icon was loaded, create a simple fallback
-        if not icon_loaded:
-            icon_label.setText("⚙️")  # Gear emoji as fallback
-            icon_label.setFixedSize(24, 24)
-            icon_label.setAlignment(Qt.AlignCenter)
-            icon_label.setStyleSheet("""
-                QLabel {
-                    background: transparent;
-                    border: none;
-                    font-size: 14px;
-                    color: #5a9fd4;
-                }
-            """)
-        
-        # Store icon label for animation
-        self.icon_label = icon_label
+        # Connect checkbox toggle to spinning animation
+        self.enable_checkbox.toggled.connect(lambda: animate_icon(icon_label))
         
         header_layout.addWidget(icon_label)
         header_layout.addWidget(self.enable_checkbox)
@@ -273,16 +162,16 @@ class IndividualEndpointDialog(QDialog):
         form_layout.setSpacing(6)
         
         # Endpoint URL
-        endpoint_label = QLabel("Endpoint Base URL:")
-        form_layout.addWidget(endpoint_label, 0, 0, Qt.AlignLeft)
+        self.endpoint_label = QLabel("Endpoint Base URL:")
+        form_layout.addWidget(self.endpoint_label, 0, 0, Qt.AlignLeft)
         
         self.endpoint_entry = QLineEdit()
         self.endpoint_entry.setText(getattr(self.key, 'azure_endpoint', '') or '')
         form_layout.addWidget(self.endpoint_entry, 0, 1)
         
         # Azure API version
-        api_version_label = QLabel("Azure API Version:")
-        form_layout.addWidget(api_version_label, 1, 0, Qt.AlignLeft)
+        self.api_version_label = QLabel("Azure API Version:")
+        form_layout.addWidget(self.api_version_label, 1, 0, Qt.AlignLeft)
         
         self.api_version_combo = QComboBox()
         self.api_version_combo.addItems([
@@ -343,9 +232,17 @@ class IndividualEndpointDialog(QDialog):
 
     def _toggle_fields(self):
         enabled = self.enable_checkbox.isChecked()
+        
+        # Enable/disable input fields
         self.endpoint_entry.setEnabled(enabled)
-        # API version is only relevant for Azure but we leave it enabled while toggle is on
         self.api_version_combo.setEnabled(enabled)
+        
+        # Enable/disable labels with color change
+        label_color = 'white' if enabled else 'gray'
+        self.endpoint_label.setEnabled(enabled)
+        self.endpoint_label.setStyleSheet(f"color: {label_color};")
+        self.api_version_label.setEnabled(enabled)
+        self.api_version_label.setStyleSheet(f"color: {label_color};")
 
     def _is_azure_endpoint(self, url: str) -> bool:
         if not url:

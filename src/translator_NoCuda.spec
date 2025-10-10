@@ -99,8 +99,11 @@ app_files = [
     # Dialog animations
     ('dialog_animations.py', '.'),
     
+    # Spinning icon helper
+    ('spinning.py', '.'),
+    
     # Update Manager
-    ('update_manager.py', '.'),
+    ('update_manager.py', '.')
 	
 	# Async Processing
     ('async_api_processor.py', '.'),
@@ -290,6 +293,7 @@ app_modules = [
     'manga_integration',   # Manga GUI integration
     'manga_settings_dialog', 
     'dialog_animations',   # Dialog fade animations
+    'spinning',            # Spinning icon helper
     'update_manager',
     'api_key_encryption',
 	'http_logger',
