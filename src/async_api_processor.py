@@ -1483,12 +1483,12 @@ class AsyncProcessingDialog:
         # Load active jobs
         self._refresh_jobs_list()
         
-        # Size and position dialog
+        # Size and position dialog - more compact
         app = QApplication.instance()
         if app:
             screen = app.primaryScreen().availableGeometry()
-            dialog_width = min(1200, int(screen.width() * 0.9))
-            dialog_height = int(screen.height() * 0.92)
+            dialog_width = min(1000, int(screen.width() * 0.7))
+            dialog_height = int(screen.height() * 0.75)
             self.dialog.resize(dialog_width, dialog_height)
             
             # Center the dialog
@@ -1599,15 +1599,15 @@ class AsyncProcessingDialog:
         # Wait for completion checkbox using styled version
         self.wait_for_completion_checkbox = self._create_styled_checkbox("Wait for completion (blocks GUI)")
         # Load from config
-        wait_value = self.main_gui.config.get('async_wait_for_completion', False)
+        wait_value = self.gui.config.get('async_wait_for_completion', False)
         print(f"[ASYNC_DEBUG] Loading async_wait_for_completion: {wait_value}")
         self.wait_for_completion_checkbox.setChecked(wait_value)
         # Save to config when changed
         def _on_wait_changed(checked):
-            self.main_gui.config['async_wait_for_completion'] = checked
-            self.main_gui.async_wait_for_completion_var = checked
+            self.gui.config['async_wait_for_completion'] = checked
+            self.gui.async_wait_for_completion_var = checked
             print(f"[ASYNC_DEBUG] Saving async_wait_for_completion: {checked}")
-            self.main_gui.save_config(show_message=False)
+            self.gui.save_config(show_message=False)
         self.wait_for_completion_checkbox.toggled.connect(_on_wait_changed)
         config_layout.addWidget(self.wait_for_completion_checkbox)
         
@@ -1621,34 +1621,20 @@ class AsyncProcessingDialog:
         self.poll_interval_spinbox.setMinimum(10)
         self.poll_interval_spinbox.setMaximum(600)
         # Load from config
-        poll_value = int(self.main_gui.config.get('async_poll_interval', 60))
+        poll_value = int(self.gui.config.get('async_poll_interval', 60))
         print(f"[ASYNC_DEBUG] Loading async_poll_interval: {poll_value}")
         self.poll_interval_spinbox.setValue(poll_value)
         # Save to config when changed
         def _on_poll_changed(value):
-            self.main_gui.config['async_poll_interval'] = value
-            self.main_gui.async_poll_interval_var = value
+            self.gui.config['async_poll_interval'] = value
+            self.gui.async_poll_interval_var = value
             print(f"[ASYNC_DEBUG] Saving async_poll_interval: {value}")
-            self.main_gui.save_config(show_message=False)
+            self.gui.save_config(show_message=False)
         self.poll_interval_spinbox.valueChanged.connect(_on_poll_changed)
         self.poll_interval_spinbox.setFixedWidth(100)
-        self.poll_interval_spinbox.setStyleSheet("""
-            QSpinBox {
-                font-size: 10pt;
-                background-color: #2b2b2b;
-                color: #ffffff;
-                border: 0.05em solid #555555;
-                border-radius: 0.15em;
-                padding: 0.15em;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #3d3d3d;
-                border: 0.05em solid #555555;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #4d4d4d;
-            }
-        """)
+        # Disable mousewheel scrolling
+        self.poll_interval_spinbox.wheelEvent = lambda event: None
+        # Don't set any custom stylesheet - let it use default arrows
         poll_layout.addWidget(self.poll_interval_spinbox)
         poll_layout.addStretch()
         
@@ -1783,19 +1769,20 @@ class AsyncProcessingDialog:
         
         button_style = """
             QPushButton {
-                background-color: #6c757d;
+                background-color: #495057;
                 color: white;
-                font-size: 9pt;
-                padding: 0.4em 0.75em;
-                border-radius: 0.2em;
+                font-size: 10pt;
+                font-weight: bold;
+                padding: 0.5em 1em;
+                border-radius: 0.25em;
                 border: none;
-                min-width: 5em;
+                min-width: 6em;
             }
             QPushButton:hover {
-                background-color: #5a6268;
+                background-color: #3d4349;
             }
             QPushButton:pressed {
-                background-color: #545b62;
+                background-color: #2d3238;
             }
         """
         
@@ -1806,19 +1793,19 @@ class AsyncProcessingDialog:
         
         retrieve_btn = QPushButton("Retrieve Results")
         retrieve_btn.clicked.connect(self._retrieve_selected_results)
-        retrieve_btn.setStyleSheet(button_style.replace("#6c757d", "#28a745").replace("#5a6268", "#218838").replace("#545b62", "#1e7e34"))
+        retrieve_btn.setStyleSheet(button_style.replace("#495057", "#1e7e34").replace("#3d4349", "#19692c").replace("#2d3238", "#145523"))
         action_layout.addWidget(retrieve_btn)
         
         cancel_btn = QPushButton("Cancel Job")
         cancel_btn.clicked.connect(self._cancel_selected_job)
-        cancel_btn.setStyleSheet(button_style.replace("#6c757d", "#ffc107").replace("#5a6268", "#e0a800").replace("#545b62", "#d39e00"))
+        cancel_btn.setStyleSheet(button_style.replace("#495057", "#e0a800").replace("#3d4349", "#c69500").replace("#2d3238", "#b38600"))
         action_layout.addWidget(cancel_btn)
         
         action_layout.addSpacing(30)
         
         delete_btn = QPushButton("Delete Selected")
         delete_btn.clicked.connect(self._delete_selected_job)
-        delete_btn.setStyleSheet(button_style.replace("#6c757d", "#dc3545").replace("#5a6268", "#c82333").replace("#545b62", "#bd2130"))
+        delete_btn.setStyleSheet(button_style.replace("#495057", "#bd2130").replace("#3d4349", "#a71d2a").replace("#2d3238", "#8b1924"))
         action_layout.addWidget(delete_btn)
         
         clear_btn = QPushButton("Clear Completed")
@@ -1842,24 +1829,25 @@ class AsyncProcessingDialog:
         self.start_button.clicked.connect(self._start_processing)
         self.start_button.setStyleSheet("""
             QPushButton {
-                background-color: #28a745;
+                background-color: #1e7e34;
                 color: white;
                 font-weight: bold;
                 font-size: 11pt;
-                padding: 0.6em 1.25em;
+                padding: 0.7em 1.5em;
                 border-radius: 0.25em;
                 border: none;
-                min-width: 9em;
+                min-width: 10em;
             }
             QPushButton:hover {
-                background-color: #218838;
+                background-color: #19692c;
+                border: 1px solid #28a745;
             }
             QPushButton:pressed {
-                background-color: #1e7e34;
+                background-color: #145523;
             }
             QPushButton:disabled {
-                background-color: #94d3a2;
-                color: #ffffff;
+                background-color: #5a6268;
+                color: #999999;
             }
         """)
         button_layout.addWidget(self.start_button)
@@ -1869,20 +1857,21 @@ class AsyncProcessingDialog:
         estimate_button.clicked.connect(self._estimate_cost)
         estimate_button.setStyleSheet("""
             QPushButton {
-                background-color: #007bff;
+                background-color: #0056b3;
                 color: white;
                 font-weight: bold;
                 font-size: 11pt;
-                padding: 0.6em 1.25em;
+                padding: 0.7em 1.5em;
                 border-radius: 0.25em;
                 border: none;
-                min-width: 8em;
+                min-width: 9em;
             }
             QPushButton:hover {
-                background-color: #0069d9;
+                background-color: #004a9f;
+                border: 1px solid #007bff;
             }
             QPushButton:pressed {
-                background-color: #0056b3;
+                background-color: #003d82;
             }
         """)
         button_layout.addWidget(estimate_button)
@@ -1894,19 +1883,20 @@ class AsyncProcessingDialog:
         close_button.clicked.connect(self.dialog.close)
         close_button.setStyleSheet("""
             QPushButton {
-                background-color: #6c757d;
+                background-color: #495057;
                 color: white;
                 font-size: 10pt;
-                padding: 0.6em 1.5em;
+                font-weight: bold;
+                padding: 0.7em 1.5em;
                 border-radius: 0.25em;
                 border: none;
-                min-width: 5em;
+                min-width: 6em;
             }
             QPushButton:hover {
-                background-color: #5a6268;
+                background-color: #3d4349;
             }
             QPushButton:pressed {
-                background-color: #545b62;
+                background-color: #2d3238;
             }
         """)
         button_layout.addWidget(close_button)

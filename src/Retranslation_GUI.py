@@ -236,6 +236,22 @@ class RetranslationMixin:
             # Reuse existing dialog - just show it and refresh data
             cached_data = self._retranslation_dialog_cache[file_key]
             if cached_data and cached_data.get('dialog'):
+                # Check if output folder still exists before trying to refresh
+                output_dir = cached_data.get('output_dir')
+                progress_file = cached_data.get('progress_file')
+                
+                if not output_dir or not os.path.exists(output_dir):
+                    # Output folder was deleted - show message and remove from cache
+                    self._show_message('info', "Info", "No translation output found for this file.")
+                    del self._retranslation_dialog_cache[file_key]
+                    return
+                
+                if not progress_file or not os.path.exists(progress_file):
+                    # Progress file was deleted - show message and remove from cache
+                    self._show_message('info', "Info", "No progress tracking found.")
+                    del self._retranslation_dialog_cache[file_key]
+                    return
+                
                 dialog = cached_data['dialog']
                 # Refresh the data before showing
                 self._refresh_retranslation_data(cached_data)
@@ -1547,7 +1563,14 @@ class RetranslationMixin:
                 print("⚠️ Could not save selection state - widget was deleted")
                 return
             
-            # Reload progress file
+            # Reload progress file - check if it exists first
+            if not os.path.exists(data['progress_file']):
+                print(f"⚠️ Progress file not found: {data['progress_file']}")
+                QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
+                                      f"The output folder appears to have been deleted.\n\n"
+                                      f"Progress file not found:\n{data['progress_file']}")
+                return
+            
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
                 data['prog'] = json.load(f)
             
@@ -1581,13 +1604,28 @@ class RetranslationMixin:
             
         except RuntimeError as e:
             print(f"❌ Failed to refresh data - widget deleted: {e}")
+        except FileNotFoundError as e:
+            print(f"❌ Failed to refresh data - file not found: {e}")
+            try:
+                QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
+                                      f"The output folder appears to have been deleted or moved.\n\n"
+                                      f"File not found: {os.path.basename(str(e))}")
+            except (RuntimeError, AttributeError):
+                print(f"[WARN] Could not show error dialog - dialog was deleted")
         except Exception as e:
             print(f"❌ Failed to refresh data: {e}")
             import traceback
             traceback.print_exc()
             try:
-                QMessageBox.warning(data.get('dialog', self), "Refresh Failed", 
-                                  f"Failed to refresh data: {str(e)}")
+                # Show friendlier error message for common cases
+                error_msg = str(e)
+                if "No such file or directory" in error_msg or "cannot find the path" in error_msg:
+                    QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
+                                          f"The output folder appears to have been deleted or moved.\n\n"
+                                          f"Error: {error_msg}")
+                else:
+                    QMessageBox.warning(data.get('dialog', self), "Refresh Failed", 
+                                      f"Failed to refresh data: {error_msg}")
             except (RuntimeError, AttributeError):
                 # Dialog was also deleted, just print to console
                 print(f"[WARN] Could not show error dialog - dialog was deleted")

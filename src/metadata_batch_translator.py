@@ -1183,6 +1183,10 @@ class MetadataBatchTranslatorUI:
                 subcontrol-position: top right;
                 width: 30px;
                 border-left: 1px solid #555555;
+                background-color: transparent;
+            }
+            QComboBox::drop-down:hover {
+                background-color: rgba(255, 255, 255, 0.1);
             }
             QComboBox::down-arrow {
                 image: url(halgakos.ico);
@@ -1194,9 +1198,60 @@ class MetadataBatchTranslatorUI:
                 color: #e0e0e0;
                 border: 1px solid #555555;
                 selection-background-color: #3daee9;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 5px;
+                border: none;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #3daee9;
+                color: white;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #3daee9;
+                color: white;
             }
         """)
         output_layout.addWidget(self.output_lang_combo)
+        
+        # Force the dropdown to be properly clickable
+        from PySide6.QtCore import Qt
+        
+        # Get the dropdown list view and ensure it accepts mouse events
+        dropdown_view = self.output_lang_combo.view()
+        dropdown_view.setMouseTracking(True)
+        dropdown_view.setAttribute(Qt.WA_Hover, True)
+        
+        # Ensure the combo box itself is properly configured
+        self.output_lang_combo.setAttribute(Qt.WA_Hover, True)
+        self.output_lang_combo.setFocusPolicy(Qt.StrongFocus)
+        
+        # Make sure it's enabled
+        self.output_lang_combo.setEnabled(True)
+        dropdown_view.setEnabled(True)
+        
+        # Force proper selection handling
+        from PySide6.QtWidgets import QAbstractItemView
+        dropdown_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        dropdown_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        # Connect a manual click handler to the view
+        def on_view_clicked(index):
+            if index.isValid():
+                self.output_lang_combo.setCurrentIndex(index.row())
+                self.output_lang_combo.hidePopup()
+        
+        dropdown_view.clicked.connect(on_view_clicked)
+        
+        # Debug: Print current state
+        print(f"Dropdown enabled: {self.output_lang_combo.isEnabled()}")
+        print(f"Dropdown view enabled: {dropdown_view.isEnabled()}")
+        print(f"Parent group enabled: {output_group.isEnabled()}")
+        print(f"Parent layout widget enabled: {output_group.parent().isEnabled() if output_group.parent() else 'No parent'}")
+        
+        # Add proper signal connections like the working model dropdown
+        self.output_lang_combo.currentIndexChanged.connect(lambda: None)  # Basic signal connection
         
         # Disable mousewheel scrolling
         self.output_lang_combo.wheelEvent = lambda event: None
