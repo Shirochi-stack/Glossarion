@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
-                                QSizePolicy, QAbstractItemView, QButtonGroup, QApplication)
+                                QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
+                                QComboBox)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QColor, QIcon
 
@@ -930,6 +931,33 @@ class GlossaryManagerMixin:
         algo_layout.setContentsMargins(0, 0, 0, 10)
         duplicate_frame_layout.addWidget(algo_widget)
         
+        # Add icon before dropdown
+        algo_icon_label = QLabel()
+        try:
+            # Try to load Halgakos.ico as icon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtGui import QPixmap
+                pixmap = QPixmap(icon_path)
+                if not pixmap.isNull():
+                    # Scale to 24x24 for nice display
+                    scaled_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    algo_icon_label.setPixmap(scaled_pixmap)
+                else:
+                    # Fallback to emoji if icon doesn't load
+                    algo_icon_label.setText("🎯")
+                    algo_icon_label.setStyleSheet("font-size: 18pt;")
+            else:
+                # Icon file not found, use emoji
+                algo_icon_label.setText("🎯")
+                algo_icon_label.setStyleSheet("font-size: 18pt;")
+        except Exception as e:
+            # Any error, fallback to emoji
+            algo_icon_label.setText("🎯")
+            algo_icon_label.setStyleSheet("font-size: 18pt;")
+        
+        algo_layout.addWidget(algo_icon_label)
+        
         self.duplicate_algo_combo = QComboBox()
         self.duplicate_algo_combo.addItems([
             "Auto (Recommended) - Uses all algorithms",
@@ -949,20 +977,68 @@ class GlossaryManagerMixin:
             'basic': 4
         }
         self.duplicate_algo_combo.setCurrentIndex(algo_index_map.get(saved_algo, 0))
+        
+        # Try to set custom dropdown icon using Halgakos.ico
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                # Create a small icon for the dropdown arrow
+                icon = QIcon(icon_path)
+                # Set the icon for each item (optional, makes it appear next to text)
+                # self.duplicate_algo_combo.setItemIcon(0, icon)
+                
+                # Custom stylesheet for this combo box with icon-based dropdown
+                combo_style = """
+                    QComboBox {
+                        padding-right: 28px;
+                    }
+                    QComboBox::drop-down {
+                        subcontrol-origin: padding;
+                        subcontrol-position: top right;
+                        width: 24px;
+                        border-left: 1px solid #4a5568;
+                    }
+                    QComboBox::down-arrow {
+                        width: 16px;
+                        height: 16px;
+                        image: url(""" + icon_path.replace('\\', '/') + """);
+                    }
+                    QComboBox::down-arrow:on {
+                        top: 1px;
+                    }
+                """
+                self.duplicate_algo_combo.setStyleSheet(combo_style)
+        except Exception as e:
+            # If icon fails, just use default styling
+            pass
+        
         algo_layout.addWidget(self.duplicate_algo_combo)
         
         # Info button
         algo_info_btn = QPushButton("ℹ️ Info")
         algo_info_btn.setFixedWidth(60)
-        algo_info_btn.clicked.connect(lambda: QMessageBox.information(
-            parent,
-            "Algorithm Information",
-            "<b>Auto (Recommended)</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score. Best for most cases.<br><br>"
-            "<b>Strict</b>: Only matches very similar names (95%+ similarity). Keeps more entries, minimal merging. Good if you want to review duplicates manually.<br><br>"
-            "<b>Balanced</b>: Uses token-based and partial matching. Handles word order (‘Park Ji-sung’ = ‘Ji-sung Park’) and substrings. Good middle ground.<br><br>"
-            "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants (‘Catherine’ = ‘Katherine’). May over-merge similar names.<br><br>"
-            "<b>Basic Only</b>: Simple Levenshtein distance. Faster but less accurate. May miss variants like ‘Kim Sang-hyun’ vs ‘Kim Sanghyun’."
-        ))
+        
+        def show_algorithm_info():
+            msg_box = QMessageBox(parent)
+            msg_box.setWindowTitle("Algorithm Information")
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setText(
+                "<b>Auto (Recommended)</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score. Best for most cases.<br><br>"
+                "<b>Strict</b>: Only matches very similar names (95%+ similarity). Keeps more entries, minimal merging. Good if you want to review duplicates manually.<br><br>"
+                "<b>Balanced</b>: Uses token-based and partial matching. Handles word order (‘Park Ji-sung’ = ‘Ji-sung Park’) and substrings. Good middle ground.<br><br>"
+                "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants (‘Catherine’ = ‘Katherine’). May over-merge similar names.<br><br>"
+                "<b>Basic Only</b>: Simple Levenshtein distance. Faster but less accurate. May miss variants like ‘Kim Sang-hyun’ vs ‘Kim Sanghyun’."
+            )
+            
+            # Set size using screen ratios: 40% width, 50% height
+            screen_width = self._screen.width()
+            screen_height = self._screen.height()
+            msg_box.setMinimumWidth(int(screen_width * 0.40))
+            msg_box.setMinimumHeight(int(screen_height * 0.50))
+            
+            msg_box.exec()
+        
+        algo_info_btn.clicked.connect(show_algorithm_info)
         algo_layout.addWidget(algo_info_btn)
         algo_layout.addStretch()
         

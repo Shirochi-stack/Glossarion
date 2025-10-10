@@ -1012,8 +1012,6 @@ def skip_duplicate_entries(glossary):
             skipped_count += 1
             print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
         else:
-        
-        if not is_duplicate:
             # Add to seen list and keep the entry
             seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
             deduplicated.append(entry)
