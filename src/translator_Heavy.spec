@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Heavy v6.0.2 - PyInstaller Specification File
+Glossarion Heavy v6.0.3 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'H_Glossarion Heavy v6.0.2'  # CHANGED: Updated version
+APP_NAME = 'H_Glossarion Heavy v6.0.3'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -246,10 +246,6 @@ app_files = [
     ('ocr_manager.py', '.'),
     ('model_options.py', '.'),
     ('hyphen_textwrap.py', '.'),
-	
-	# Duplicate detection
-	('duplicate_detection_config.py', '.'),
-	('advanced_duplicate_detection.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -306,8 +302,6 @@ app_modules = [
 	'ocr_manager',
 	'model_options',
 	'hyphen_textwrap',
-	'duplicate_detection_config',
-	'advanced_duplicate_detection',
 	
 ]
 

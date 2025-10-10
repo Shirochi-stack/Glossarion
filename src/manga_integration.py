@@ -2923,7 +2923,7 @@ class MangaTranslationTab:
         inpaint_group_layout.addWidget(self.skip_inpainting_checkbox)
 
         # Inpainting method selection (only visible when inpainting is enabled)
-        self.inpaint_method_frame = QWidget()
+        self.inpaint_method_frame = QWidget(inpaint_group)
         inpaint_method_layout = QHBoxLayout(self.inpaint_method_frame)
         inpaint_method_layout.setContentsMargins(0, 0, 0, 0)
         inpaint_method_layout.setSpacing(10)
@@ -2978,9 +2978,7 @@ class MangaTranslationTab:
         inpaint_group_layout.addWidget(self.inpaint_method_frame)
 
         # Cloud settings frame
-        self.cloud_inpaint_frame = QWidget()
-        # Ensure this widget doesn't become a window
-        self.cloud_inpaint_frame.setWindowFlags(Qt.WindowType.Widget)
+        self.cloud_inpaint_frame = QWidget(inpaint_group)
         cloud_inpaint_layout = QVBoxLayout(self.cloud_inpaint_frame)
         cloud_inpaint_layout.setContentsMargins(0, 0, 0, 0)
         cloud_inpaint_layout.setSpacing(5)
@@ -3056,9 +3054,7 @@ class MangaTranslationTab:
         inpaint_group_layout.addWidget(self.cloud_inpaint_frame)
 
         # Local inpainting settings frame
-        self.local_inpaint_frame = QWidget()
-        # Ensure this widget doesn't become a window
-        self.local_inpaint_frame.setWindowFlags(Qt.WindowType.Widget)
+        self.local_inpaint_frame = QWidget(inpaint_group)
         local_inpaint_layout = QVBoxLayout(self.local_inpaint_frame)
         local_inpaint_layout.setContentsMargins(0, 0, 0, 0)
         local_inpaint_layout.setSpacing(5)
@@ -5890,15 +5886,20 @@ class MangaTranslationTab:
         
         if self.skip_inpainting_value:
             # Hide all inpainting options
-            self.inpaint_method_frame.hide()
-            self.cloud_inpaint_frame.hide()
-            self.local_inpaint_frame.hide()
-            self.inpaint_separator.hide()  # Hide separator
+            self.inpaint_method_frame.setVisible(False)
+            self.cloud_inpaint_frame.setVisible(False)
+            self.local_inpaint_frame.setVisible(False)
+            self.inpaint_separator.setVisible(False)  # Hide separator
         else:
             # Show method selection
-            self.inpaint_method_frame.show()
-            self.inpaint_separator.show()  # Show separator
+            self.inpaint_method_frame.setVisible(True)
+            self.inpaint_separator.setVisible(True)  # Show separator
             self._on_inpaint_method_change()
+        
+        # Force layout update to prevent empty dialogs
+        if hasattr(self, 'parent_widget') and self.parent_widget:
+            self.parent_widget.updateGeometry()
+            self.parent_widget.update()
         
         # Don't save during initialization
         if not (hasattr(self, '_initializing') and self._initializing):
@@ -5920,15 +5921,20 @@ class MangaTranslationTab:
         self.inpaint_method_value = method
         
         if method == 'cloud':
-            self.cloud_inpaint_frame.show()
-            self.local_inpaint_frame.hide()
+            self.cloud_inpaint_frame.setVisible(True)
+            self.local_inpaint_frame.setVisible(False)
         elif method == 'local':
-            self.local_inpaint_frame.show()
-            self.cloud_inpaint_frame.hide()
+            self.local_inpaint_frame.setVisible(True)
+            self.cloud_inpaint_frame.setVisible(False)
         elif method == 'hybrid':
             # Show both frames for hybrid
-            self.local_inpaint_frame.show()
-            self.cloud_inpaint_frame.show()
+            self.local_inpaint_frame.setVisible(True)
+            self.cloud_inpaint_frame.setVisible(True)
+        
+        # Force layout update
+        if hasattr(self, 'parent_widget') and self.parent_widget:
+            self.parent_widget.updateGeometry()
+            self.parent_widget.update()
         
         # Don't save during initialization
         if not (hasattr(self, '_initializing') and self._initializing):

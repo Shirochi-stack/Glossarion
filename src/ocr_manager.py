@@ -1959,13 +1959,41 @@ class AzureDocumentIntelligenceProvider(OCRProvider):
             _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
             image_bytes = encoded.tobytes()
             
+            # Get language hint from kwargs if provided
+            language_hint = kwargs.get('language_hint', None)
+            locale = None
+            
+            if language_hint:
+                # Map common language codes to Azure Document Intelligence locale codes
+                locale_map = {
+                    'ja': 'ja',      # Japanese
+                    'ko': 'ko',      # Korean
+                    'zh': 'zh-Hans', # Simplified Chinese
+                    'zh-Hans': 'zh-Hans',
+                    'zh-Hant': 'zh-Hant', # Traditional Chinese
+                    'zh-TW': 'zh-Hant',
+                    'en': 'en',      # English
+                    'ar': 'ar',      # Arabic
+                    'he': 'he'       # Hebrew
+                }
+                locale = locale_map.get(language_hint, language_hint)
+                self._log(f"🌍 Using language hint: {locale}")
+            
             self._log("🔍 Analyzing image with Azure Document Intelligence...")
             
             # Call Document Intelligence API with read model
-            poller = self.client.begin_analyze_document(
-                "prebuilt-read",  # Use the read model for OCR
-                document=image_bytes
-            )
+            # Pass locale if provided (helps with language-specific OCR)
+            if locale:
+                poller = self.client.begin_analyze_document(
+                    "prebuilt-read",  # Use the read model for OCR
+                    document=image_bytes,
+                    locale=locale
+                )
+            else:
+                poller = self.client.begin_analyze_document(
+                    "prebuilt-read",  # Use the read model for OCR
+                    document=image_bytes
+                )
             
             # Wait for result
             result = poller.result()

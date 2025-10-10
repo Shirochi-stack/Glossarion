@@ -4140,10 +4140,16 @@ class MangaTranslator:
                                 # - Better reading order detection
                                 # - Only one API call instead of N calls
                                 self._log(f"📊 Step 1: Running Azure Document Intelligence on full image to detect text lines")
+                                
+                                # Get language hint for better OCR accuracy
+                                language_hints = ocr_settings.get('language_hints', ['ja'])
+                                language_hint = language_hints[0] if language_hints else 'ja'
+                                
                                 full_image_ocr = self.ocr_manager.detect_text(
                                     image,
                                     'azure-document-intelligence',
-                                    confidence=confidence_threshold
+                                    confidence=confidence_threshold,
+                                    language_hint=language_hint
                                 )
                                 
                                 if full_image_ocr:
@@ -4185,8 +4191,16 @@ class MangaTranslator:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with Azure Document Intelligence")
                         
+                        # Get language hint for better OCR accuracy
+                        language_hints = ocr_settings.get('language_hints', ['ja'])
+                        language_hint = language_hints[0] if language_hints else 'ja'
+                        
                         # Provider already initialized with credentials, just use it
-                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+                        ocr_results = self.ocr_manager.detect_text(
+                            image, 
+                            self.ocr_provider,
+                            language_hint=language_hint
+                        )
 
                 elif self.ocr_provider == 'rapidocr':
                     # Initialize results list
