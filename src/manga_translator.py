@@ -3247,8 +3247,14 @@ class MangaTranslator:
                         all_regions = None
                 
                 # ROI-based concurrent OCR when bubble detection is enabled and batching is requested
+                # This is an advanced feature that should only run if:
+                # 1. Bubble detection is enabled AND
+                # 2. ROI locality is explicitly enabled AND
+                # 3. use_rtdetr_for_ocr_regions is NOT explicitly disabled (or RT-DETR guidance is intended)
                 try:
-                    use_roi_locality = ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('roi_locality_enabled', False)
+                    use_roi_locality = (ocr_settings.get('bubble_detection_enabled', False) and 
+                                       ocr_settings.get('roi_locality_enabled', False) and 
+                                       ocr_settings.get('use_rtdetr_for_ocr_regions', True))
                     if 'ocr_batch_enabled' in ocr_settings:
                         ocr_batch_enabled = bool(ocr_settings.get('ocr_batch_enabled'))
                     else:
@@ -4107,8 +4113,8 @@ class MangaTranslator:
                     
                     self._log("📋 Azure Document Intelligence OCR (successor to Azure AI Vision)")
                     
-                    # Check if we should use bubble detection for regions
-                    if ocr_settings.get('bubble_detection_enabled', False):
+                    # Check if we should use RT-DETR for text region detection (same check as Azure Vision)
+                    if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
                         self._log("🎯 Azure Doc Intelligence full image → match to RT-DETR blocks")
                         
                         # Run bubble detection to get regions (thread-local)

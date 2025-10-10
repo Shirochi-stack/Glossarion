@@ -110,6 +110,10 @@ app_files = [
 	('individual_endpoint_dialog.py', '.'),
 	('model_options.py', '.'),
 	('hyphen_textwrap.py', '.'),
+	
+	# Duplicate detection
+	('duplicate_detection_config.py', '.'),
+	('advanced_duplicate_detection.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -166,6 +170,8 @@ app_modules = [
 	'ocr_manager',
 	'model_options',
 	'hyphen_textwrap',
+	'duplicate_detection_config',
+	'advanced_duplicate_detection',
 	
 ]
 
