@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
     QCompleter
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
 import json
 import os
 import threading
@@ -1040,6 +1040,137 @@ class MultiAPIKeyDialog(QDialog):
         
         return checkbox
     
+    def _animate_icon(self, icon_label):
+        """Animate an icon with a spin rotation"""
+        if not icon_label:
+            return
+        
+        # Get current pixmap for rotation
+        current_pixmap = icon_label.pixmap()
+        if current_pixmap and not current_pixmap.isNull():
+            # Create rotation frames
+            original_pixmap = current_pixmap
+            
+            # Animate through rotation
+            def rotate_frame(angle):
+                transform = QTransform()
+                transform.rotate(angle)
+                rotated_pixmap = original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                
+                # Ensure the rotated pixmap fits in the label
+                if not rotated_pixmap.isNull():
+                    # Get original size from the icon label
+                    label_size = icon_label.size()
+                    scaled_rotated = rotated_pixmap.scaled(
+                        label_size.width(), label_size.height(), 
+                        Qt.KeepAspectRatio, 
+                        Qt.SmoothTransformation
+                    )
+                    icon_label.setPixmap(scaled_rotated)
+            
+            # Create timer-based rotation animation
+            rotation_timer = QTimer()
+            rotation_steps = 36  # 10-degree steps for smooth animation
+            rotation_step = 0
+            
+            def animate_rotation():
+                nonlocal rotation_step
+                if rotation_step < rotation_steps:
+                    angle = (rotation_step * 360) // rotation_steps
+                    rotate_frame(angle)
+                    rotation_step += 1
+                else:
+                    # Animation complete, restore original
+                    icon_label.setPixmap(original_pixmap)
+                    rotation_timer.stop()
+            
+            rotation_timer.timeout.connect(animate_rotation)
+            rotation_timer.start(14)  # ~14ms per frame for smooth 500ms total
+        else:
+            # Fallback for text-based icons (like gear emoji)
+            # Create a simple scale animation
+            original_stylesheet = icon_label.styleSheet()
+            
+            def pulse_effect():
+                # Quick scale pulse effect for text icons
+                icon_label.setStyleSheet(original_stylesheet + """
+                    QLabel { 
+                        font-size: 18px; 
+                        color: #7fb3d4; 
+                    }
+                """)
+                
+                # Return to normal after short delay
+                QTimer.singleShot(150, lambda: icon_label.setStyleSheet(original_stylesheet))
+            
+            pulse_effect()
+    
+    def _create_icon_label(self, size=24):
+        """Create a Halgakos.ico icon label with fallback"""
+        icon_label = QLabel()
+        icon_loaded = False
+        
+        # Try multiple possible paths for the icon
+        possible_paths = []
+        
+        # Method 1: Use translator_gui base_dir
+        if hasattr(self.translator_gui, 'base_dir'):
+            possible_paths.append(os.path.join(self.translator_gui.base_dir, 'Halgakos.ico'))
+        
+        # Method 2: Use current working directory
+        possible_paths.append(os.path.join(os.getcwd(), 'Halgakos.ico'))
+        
+        # Method 3: Use script directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        possible_paths.append(os.path.join(script_dir, 'Halgakos.ico'))
+        
+        # Method 4: Check parent directory (common for project structure)
+        parent_dir = os.path.dirname(script_dir)
+        possible_paths.append(os.path.join(parent_dir, 'Halgakos.ico'))
+        
+        try:
+            for ico_path in possible_paths:
+                if os.path.isfile(ico_path):
+                    # Load icon as pixmap with high quality
+                    pixmap = QPixmap(ico_path)
+                    if not pixmap.isNull():
+                        # Scale to appropriate size
+                        scaled_pixmap = pixmap.scaled(
+                            size, size, 
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation
+                        )
+                        icon_label.setPixmap(scaled_pixmap)
+                        icon_label.setFixedSize(size, size)
+                        icon_label.setAlignment(Qt.AlignCenter)
+                        # Transparent background
+                        icon_label.setStyleSheet("""
+                            QLabel {
+                                background: transparent;
+                                border: none;
+                            }
+                        """)
+                        icon_loaded = True
+                        break
+        except Exception:
+            pass
+        
+        # If no icon was loaded, create a simple fallback
+        if not icon_loaded:
+            icon_label.setText("⚙️")  # Gear emoji as fallback
+            icon_label.setFixedSize(size, size)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setStyleSheet("""
+                QLabel {
+                    background: transparent;
+                    border: none;
+                    font-size: 14px;
+                    color: #5a9fd4;
+                }
+            """)
+        
+        return icon_label
+    
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox (PySide6)"""
         spinbox.wheelEvent = lambda event: None
@@ -1317,12 +1448,18 @@ class MultiAPIKeyDialog(QDialog):
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
         
-        # Enable/Disable toggle
+        # Enable/Disable toggle with spinning icon
         self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
         self.enabled_checkbox = self._create_styled_checkbox("Enable Multi-Key Mode")
         self.enabled_checkbox.setChecked(self.enabled_var)
         self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
+        
+        # Add spinning icon next to multi-key mode checkbox
+        self.multikey_icon = self._create_icon_label(24)
+        self.enabled_checkbox.toggled.connect(lambda: self._animate_icon(self.multikey_icon))
+        
         title_layout.addStretch()
+        title_layout.addWidget(self.multikey_icon)
         title_layout.addWidget(self.enabled_checkbox)
         
         scrollable_layout.addWidget(title_frame)
@@ -1441,12 +1578,26 @@ class MultiAPIKeyDialog(QDialog):
         desc_label.setWordWrap(True)
         fallback_frame_layout.addWidget(desc_label)
         
-        # Enable fallback checkbox
+        # Enable fallback checkbox with spinning icon
+        fallback_checkbox_container = QWidget()
+        fallback_checkbox_layout = QHBoxLayout(fallback_checkbox_container)
+        fallback_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        fallback_checkbox_layout.setSpacing(8)
+        
         self.use_fallback_var = self.translator_gui.config.get('use_fallback_keys', False)
         self.use_fallback_checkbox = self._create_styled_checkbox("Enable Fallback Keys")
         self.use_fallback_checkbox.setChecked(self.use_fallback_var)
         self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
-        fallback_frame_layout.addWidget(self.use_fallback_checkbox)
+        
+        # Add spinning icon next to fallback keys checkbox
+        self.fallback_icon = self._create_icon_label(20)  # Slightly smaller for fallback section
+        self.use_fallback_checkbox.toggled.connect(lambda: self._animate_icon(self.fallback_icon))
+        
+        fallback_checkbox_layout.addWidget(self.fallback_icon)
+        fallback_checkbox_layout.addWidget(self.use_fallback_checkbox)
+        fallback_checkbox_layout.addStretch()
+        
+        fallback_frame_layout.addWidget(fallback_checkbox_container)
         
         # Add fallback key section - store reference for opacity effect
         self.add_fallback_frame = QWidget()
