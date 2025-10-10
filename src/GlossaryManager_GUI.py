@@ -1647,11 +1647,19 @@ Provide translations in the same numbered format."""
         def update_auto_glossary_state(checked=None):
             enabled = self.enable_auto_glossary_checkbox.isChecked()
             
-            # Enable/disable extraction settings widgets
+            # Enable/disable the entire Targeted Extraction Settings group box
+            settings_label_frame.setEnabled(enabled)
+            
+            # Enable/disable all extraction grid widgets (for thorough coverage)
             for i in range(extraction_grid.count()):
-                widget = extraction_grid.itemAt(i).widget()
-                if widget and isinstance(widget, (QLineEdit, QCheckBox)):
-                    widget.setEnabled(enabled)
+                item = extraction_grid.itemAt(i)
+                if item:
+                    widget = item.widget()
+                    if widget:
+                        widget.setEnabled(enabled)
+                        # Also enable/disable all children within compound widgets
+                        for child in widget.findChildren(QWidget):
+                            child.setEnabled(enabled)
             
             # Enable/disable text widgets
             self.auto_prompt_text.setEnabled(enabled)

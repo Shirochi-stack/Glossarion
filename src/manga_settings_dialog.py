@@ -4538,6 +4538,13 @@ class MangaSettingsDialog(QDialog):
                 QMessageBox.critical(self, "Save Error", f"Failed to save settings: {e}")
                 return
             
+            # Refresh manga integration status if available (fixes status label not updating after bubble detection changes)
+            if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, '_check_provider_status'):
+                try:
+                    self.main_gui.manga_tab._check_provider_status()
+                except Exception as e:
+                    print(f"Error refreshing manga provider status: {e}")
+            
             # Call callback if provided
             if self.callback:
                 try:

@@ -469,6 +469,10 @@ class MangaTranslationTab:
         # Use QTimer for PySide6 dialog
         QTimer.singleShot(100, self._check_provider_status)
         
+        # Add additional status refresh with longer delay to ensure correct status on startup
+        # This fixes cases where bubble detection settings aren't reflected immediately
+        QTimer.singleShot(500, self._check_provider_status)
+        
         # Start model preloading in background
         QTimer.singleShot(200, self._start_model_preloading)
         

@@ -1176,39 +1176,19 @@ class MultiAPIKeyDialog(QDialog):
                 color: #666666;
                 border-color: #2a2a2a;
             }
-            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+            QLineEdit, QTextEdit {
                 background-color: #2d2d2d;
                 color: #e0e0e0;
                 border: 1px solid #3a3a3a;
                 border-radius: 3px;
                 padding: 4px;
             }
-            QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QComboBox:focus {
+            QLineEdit:focus, QTextEdit:focus {
                 border-color: #5a5a5a;
             }
-            QLineEdit:disabled, QTextEdit:disabled, QSpinBox:disabled, QComboBox:disabled {
+            QLineEdit:disabled, QTextEdit:disabled {
                 background-color: #1a1a1a;
                 color: #666666;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid #7a7a7a;
-                width: 0;
-                height: 0;
-                margin-right: 8px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                selection-background-color: #4a7ba7;
-                selection-color: #ffffff;
-                border: 1px solid #3a3a3a;
             }
             QCheckBox {
                 color: #e0e0e0;
@@ -1297,30 +1277,6 @@ class MultiAPIKeyDialog(QDialog):
                 /* HLine */
                 background-color: #3a3a3a;
                 max-height: 1px;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #2d2d2d;
-                border: none;
-                width: 16px;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #3a3a3a;
-            }
-            QSpinBox::up-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-bottom: 6px solid #7a7a7a;
-                width: 0;
-                height: 0;
-            }
-            QSpinBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid #7a7a7a;
-                width: 0;
-                height: 0;
             }
         """)
         
