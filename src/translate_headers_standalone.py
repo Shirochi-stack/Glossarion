@@ -119,9 +119,13 @@ def extract_source_chapters_with_opf_mapping(
                                 file_path = manifest[idref]
                                 basename = os.path.basename(file_path).lower()
                                 
-                                # Skip navigation/toc files
-                                if not any(skip in basename for skip in skip_keywords):
-                                    spine_order.append(file_path)
+                                # Skip navigation/toc files - BUT only if basename has NO numbers
+                                # Files with numbers like 'nav01', 'toc05' are real chapters
+                                import re
+                                has_numbers = bool(re.search(r'\d', basename))
+                                if not has_numbers and any(skip in basename for skip in skip_keywords):
+                                    continue
+                                spine_order.append(file_path)
                     
                     log(f"📋 Found {len(spine_order)} content chapters in OPF spine order")
                     
@@ -136,11 +140,13 @@ def extract_source_chapters_with_opf_mapping(
             else:
                 # Fallback: alphabetical order
                 skip_keywords = ['nav', 'toc', 'contents', 'cover']
+                import re
                 epub_html_files = sorted([
                     f for f in zf.namelist() 
                     if f.endswith(('.html', '.xhtml', '.htm')) 
                     and not f.startswith('__MACOSX')
-                    and not any(skip in os.path.basename(f).lower() for skip in skip_keywords)
+                    # Skip only if basename has NO numbers (files with numbers like 'nav01' are real chapters)
+                    and not (not bool(re.search(r'\d', os.path.basename(f))) and any(skip in os.path.basename(f).lower() for skip in skip_keywords))
                 ])
                 log("⚠️ No OPF spine found, using alphabetical order")
             

@@ -1804,8 +1804,8 @@ class ImageTranslator:
             
             # Log the size for debugging
             size_kb = len(data) / 1024
-            if size_kb > 500:  # Warn if chunk is over 500KB
-                print(f"   ⚠️ Large chunk detected: {size_kb:.1f}KB - consider enabling compression!")
+            if size_kb > 0:  # Log if file is over 0kb
+                print(f"   💾 Image Chunk Size: {size_kb:.1f}KB ")
             
             return data
 

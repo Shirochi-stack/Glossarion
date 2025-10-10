@@ -1092,7 +1092,8 @@ Rules:
                     print(f"🔍 [UPDATE] append_glossary_prompt: OLD='{old_value[:50]}...' NEW='{self.append_glossary_prompt[:50]}...' ({len(self.append_glossary_prompt)} chars)")
                 else:
                     # Always print this one since it's the problematic field
-                    print(f"📝 Updated append_glossary_prompt from UI: '{self.append_glossary_prompt[:80]}...' ({len(self.append_glossary_prompt)} chars)")
+                    #print(f"Updated append_glossary_prompt from UI: '{self.append_glossary_prompt[:80]}...' ({len(self.append_glossary_prompt)} chars)")
+                    pass
             
             if hasattr(self, 'translation_prompt_text'):
                 self.glossary_translation_prompt = self.translation_prompt_text.toPlainText().strip()

@@ -103,7 +103,7 @@ app_files = [
     ('spinning.py', '.'),
     
     # Update Manager
-    ('update_manager.py', '.')
+    ('update_manager.py', '.'),
 	
 	# Async Processing
     ('async_api_processor.py', '.'),

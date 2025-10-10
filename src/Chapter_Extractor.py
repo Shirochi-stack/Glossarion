@@ -237,8 +237,11 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
                     href = manifest[idref]
                     filename = os.path.basename(href)
                     
-                    # Skip nav, toc, cover
-                    if any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
+                    # Skip nav, toc, cover - BUT only if filename has NO numbers
+                    # Files with numbers like 'nav01', 'toc05' are real chapters
+                    import re
+                    has_numbers = bool(re.search(r'\d', filename))
+                    if not has_numbers and any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
                         continue
                     
                     opf_chapters.append(href)

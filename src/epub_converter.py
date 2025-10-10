@@ -1874,11 +1874,23 @@ class EPUBCompiler:
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
                         filename = manifest[idref]
-                        # Skip special files unless override is enabled
-                        if not skip_list or not any(skip in filename.lower() for skip in skip_list):
+                        
+                        # CRITICAL: Files with numbers are always regular chapters, regardless of keywords!
+                        name_without_ext = os.path.splitext(filename)[0].lower()
+                        has_numbers = bool(re.search(r'\d', name_without_ext))
+                        
+                        # If file has numbers, it's a chapter - include it
+                        if has_numbers:
+                            filename_to_order[filename] = chapter_num
+                            self.log(f"  Chapter {chapter_num}: {filename} (numbered)")
+                            chapter_num += 1
+                        # Otherwise, check skip list for special files
+                        elif not skip_list or not any(skip in filename.lower() for skip in skip_list):
                             filename_to_order[filename] = chapter_num
                             self.log(f"  Chapter {chapter_num}: {filename}")
                             chapter_num += 1
+                        else:
+                            self.log(f"  Skipping special file (no numbers): {filename}")
             
             return filename_to_order
             

@@ -2747,12 +2747,18 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         filename_lower = filename.lower()
         name_without_ext = os.path.splitext(filename)[0].lower()
         
-        # Check for special keywords OR no numbers present
+        # CRITICAL: Any file with numbers is a regular chapter, regardless of keywords!
+        has_numbers = bool(re.search(r'\d', name_without_ext))
+        
+        if has_numbers:
+            # This is a numbered chapter (e.g., "Notice01") - use spine position
+            return opf_spine_position, 'opf_spine_order'
+        
+        # Only check special keywords for files WITHOUT numbers
         special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
         has_special_keyword = any(name in filename_lower for name in special_keywords)
-        has_no_numbers = not re.search(r'\d', name_without_ext)
         
-        if has_special_keyword or has_no_numbers:
+        if has_special_keyword:
             return 0, 'opf_special_file'
         
         # Use spine position for regular chapters (0, 1, 2, 3...)
@@ -2760,12 +2766,20 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     
     # Priority 2: Check if this looks like a special file (even without OPF)
     name_without_ext = os.path.splitext(filename)[0].lower()
-    special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
-    has_special_keyword = any(name in name_without_ext for name in special_keywords)
-    has_no_numbers = not re.search(r'\d', name_without_ext)
     
-    if has_special_keyword or has_no_numbers:
-        return 0, 'special_file'
+    # CRITICAL: Any file with numbers is a regular chapter, regardless of keywords!
+    has_numbers = bool(re.search(r'\d', name_without_ext))
+    
+    if has_numbers:
+        # This is a numbered chapter - continue to number extraction
+        pass  # Fall through to extraction logic below
+    else:
+        # Only check special keywords for files WITHOUT numbers
+        special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
+        has_special_keyword = any(name in name_without_ext for name in special_keywords)
+        
+        if has_special_keyword:
+            return 0, 'special_file'
     
     # Priority 3: Try to extract sequential numbers (000, 001, 002...)
     name_without_ext = os.path.splitext(filename)[0]
