@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QWidget, QScrollArea, QFrame, QRadioButton, QButtonGroup,
                                 QMessageBox, QFileDialog, QSizePolicy, QApplication)
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QIcon, QPixmap, QImage, QPainter, QColor
 from typing import Dict, Any, Optional, Callable
 from bubble_detector import BubbleDetector
 import logging
@@ -477,6 +477,34 @@ class MangaSettingsDialog(QDialog):
         self.auto_fit_style = style
         self._save_rendering_settings()
 
+    def _create_grayed_icon(self, icon_path):
+        """Create a grayed-out version of the icon for disabled state"""
+        grayed_path = os.path.join(os.path.dirname(__file__), 'Halgakos_disabled.png')
+        try:
+            # Load the icon
+            pixmap = QPixmap(icon_path)
+            if pixmap.isNull():
+                return ''
+            
+            # Create grayscale version
+            image = pixmap.toImage()
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    pixel = image.pixelColor(x, y)
+                    gray = int(0.299 * pixel.red() + 0.587 * pixel.green() + 0.114 * pixel.blue())
+                    # Make it darker for disabled look
+                    gray = int(gray * 0.4)
+                    pixel.setRgb(gray, gray, gray, pixel.alpha())
+                    image.setPixelColor(x, y, pixel)
+            
+            # Save grayed version
+            grayed_pixmap = QPixmap.fromImage(image)
+            grayed_pixmap.save(grayed_path, 'PNG')
+            return grayed_path
+        except Exception as e:
+            # If grayscale creation fails, just continue without it
+            return ''
+    
     def _create_tooltip(self, widget, text):
         """Create a tooltip for a widget - PySide6 version"""
         # In PySide6, tooltips are much simpler - just set the toolTip property
@@ -587,17 +615,14 @@ class MangaSettingsDialog(QDialog):
             QComboBox::drop-down:hover {
                 background-color: #4a4a4a;
             }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #aaa;
-                width: 0;
-                height: 0;
-                margin-right: 5px;
+            QComboBox::drop-down:disabled {
+                background-color: #252525;
+                border-left: 1px solid #3a3a3a;
             }
-            QComboBox::down-arrow:hover {
-                border-top: 5px solid #fff;
+            QComboBox::down-arrow {
+                image: url(Halgakos.ico);
+                width: 16px;
+                height: 16px;
             }
             QComboBox QAbstractItemView {
                 background-color: #2d2d2d;
@@ -606,6 +631,9 @@ class MangaSettingsDialog(QDialog):
                 selection-color: white;
                 border: 1px solid #555;
                 outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 4px;
             }
             QPushButton {
                 font-family: Arial;
@@ -3342,7 +3370,7 @@ class MangaSettingsDialog(QDialog):
         
         if model_path.startswith("ogkalu/"):
             self.bubble_status_label.setText(f"📥 {detector} ready to download")
-            self.bubble_status_label.setStyleSheet("color: blue;")
+            self.bubble_status_label.setStyleSheet("color: #5dade2;")  # Light cyan for better contrast
         elif os.path.exists(model_path):
             self.bubble_status_label.setText("✅ Model file ready")
             self.bubble_status_label.setStyleSheet("color: green;")

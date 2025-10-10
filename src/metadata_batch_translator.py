@@ -146,7 +146,7 @@ class MetadataBatchTranslatorUI:
             
             # Get screen dimensions and calculate size
             screen = app.primaryScreen().geometry()
-            dialog_width = int(screen.width() * 0.25)
+            dialog_width = int(screen.width() * 0.28)  # Slightly increased from 0.25
             dialog_height = int(screen.height() * 0.50)
             dialog.resize(dialog_width, dialog_height)
             
@@ -315,7 +315,7 @@ class MetadataBatchTranslatorUI:
                         
                         # Add note explaining title is controlled elsewhere
                         note_label = QLabel("ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface")
-                        note_label.setStyleSheet("color: blue; font-size: 9pt;")
+                        note_label.setStyleSheet("color: #5dade2; font-size: 9pt;")  # Light blue/cyan for better contrast
                         note_label.setWordWrap(True)
                         note_label.setContentsMargins(25, 0, 0, 10)
                         fields_layout.addWidget(note_label)

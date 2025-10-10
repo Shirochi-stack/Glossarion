@@ -3103,7 +3103,7 @@ class MangaTranslationTab:
             else:
                 # Do not auto-load large models at startup to avoid crashes on some systems
                 self.local_model_status_label.setText("💤 Saved model detected (not loaded). Click 'Load' to initialize.")
-                self.local_model_status_label.setStyleSheet("color: blue;")
+                self.local_model_status_label.setStyleSheet("color: #5dade2;")  # Light cyan for better contrast
         else:
             self.local_model_status_label.setText("No model loaded")
             self.local_model_status_label.setStyleSheet("color: gray;")
@@ -5982,10 +5982,10 @@ class MangaTranslationTab:
                     self.local_model_status_label.setStyleSheet("color: green;")
                 else:
                     self.local_model_status_label.setText("ℹ️ Will convert to ONNX on first use")
-                    self.local_model_status_label.setStyleSheet("color: blue;")
+                    self.local_model_status_label.setStyleSheet("color: #5dade2;")  # Light cyan for better contrast
             else:
                 self.local_model_status_label.setText("ℹ️ Will convert to ONNX on first use")
-                self.local_model_status_label.setStyleSheet("color: blue;")
+                self.local_model_status_label.setStyleSheet("color: #5dade2;")  # Light cyan for better contrast
         else:
             self.local_model_status_label.setText("✅ ONNX model ready")
             self.local_model_status_label.setStyleSheet("color: green;")
