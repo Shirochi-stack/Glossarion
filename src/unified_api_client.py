@@ -1134,11 +1134,6 @@ class UnifiedClient:
             'fallback_keys': json.loads(os.getenv('FALLBACK_KEYS', '[]'))
         }
         
-        # Debug print to verify
-        if self.translator_config['use_fallback_keys']:
-            num_fallbacks = len(self.translator_config['fallback_keys'])
-            print(f"🔑 Fallback keys loaded: {num_fallbacks} keys")
-        
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
         print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
@@ -4550,9 +4545,7 @@ class UnifiedClient:
         
         try:
             configured_fallbacks = json.loads(fallback_keys_json)
-            msg = f"[FALLBACK DIRECT] Loaded {len(configured_fallbacks)} fallback keys"
-            print(msg)
-            logger.info(msg)
+            print(f"[FALLBACK DIRECT] 🔑 Loaded {len(configured_fallbacks)} fallback keys")
             
             # Try each fallback key (all of them, no arbitrary limit)
             max_attempts = len(configured_fallbacks)
@@ -4569,9 +4562,7 @@ class UnifiedClient:
                     print(f"[FALLBACK DIRECT {idx+1}] Invalid key data, skipping")
                     continue
                 
-                msg = f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}"
-                print(msg)
-                logger.info(msg)
+                print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
                 
                 try:
                     # Create temporary client for fallback key
@@ -4630,9 +4621,7 @@ class UnifiedClient:
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
                     
-                    msg = f"[FALLBACK DIRECT {idx+1}] Sending request..."
-                    print(msg)
-                    logger.info(msg)
+                    print(f"[FALLBACK DIRECT {idx+1}] Sending request...")
                     
                     # Use internal method to avoid nested retry loops
                     result = temp_client._send_internal(
@@ -4667,9 +4656,7 @@ class UnifiedClient:
                         
                         # Check for refusal patterns (content moderation)
                         if content and self._check_for_refusal_patterns(content):
-                            msg = f"❌ Fallback key {idx+1} also refused - trying next key"
-                            print(msg)
-                            logger.warning(msg)
+                            print(f"❌ Fallback key {idx+1} also refused - trying next key")
                             continue
                         
                         # Check for severe truncation by comparing input vs output
@@ -4693,40 +4680,30 @@ class UnifiedClient:
                                     is_severely_truncated = True
                                     # Only continue if not the last key
                                     if idx < max_attempts - 1:
-                                        msg = f"⚠️ Fallback key {idx+1} severely truncated ({output_len}/{input_len} = {char_ratio:.1%}) - trying next key"
-                                        print(msg)
-                                        logger.warning(msg)
+                                        print(f"⚠️ Fallback key {idx+1} severely truncated ({output_len}/{input_len} = {char_ratio:.1%}) - trying next key")
                                         continue
                                     else:
-                                        msg = f"⚠️ Fallback key {idx+1} truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option"
-                                        print(msg)
-                                        logger.warning(msg)
+                                        print(f"⚠️ Fallback key {idx+1} truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option")
                         
                         # Check if content is valid - reject if finish_reason indicates failure
                         if (content and 
                             "[AI RESPONSE UNAVAILABLE]" not in content and 
                             finish_reason not in ['content_filter', 'error', 'cancelled'] and
                             len(content) >= min_length):
-                            msg = f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars"
-                            print(msg)
-                            logger.info(msg)
+                            print(f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars")
                             # Mark that a fallback key was used
                             self._used_fallback_key = True
                             return content, finish_reason
                         else:
                             if finish_reason in ['content_filter', 'error', 'cancelled']:
-                                msg = f"❌ Fallback key {idx+1} failed: {finish_reason} - trying next key"
+                                print(f"❌ Fallback key {idx+1} failed: {finish_reason} - trying next key")
                             elif len(content) < min_length:
-                                msg = f"❌ Fallback key {idx+1} returned only {len(content)} chars - trying next key"
+                                print(f"❌ Fallback key {idx+1} returned only {len(content)} chars - trying next key")
                             else:
-                                msg = f"❌ Fallback key {idx+1} invalid response - trying next key"
-                            print(msg)
-                            logger.warning(msg)
+                                print(f"❌ Fallback key {idx+1} invalid response - trying next key")
                             continue
                     else:
-                        msg = f"❌ Fallback key {idx+1} unexpected result format - trying next key"
-                        print(msg)
-                        logger.warning(msg)
+                        print(f"❌ Fallback key {idx+1} unexpected result format - trying next key")
                         continue
                         
                 except Exception as e:
