@@ -926,8 +926,12 @@ Return the data in the exact format specified above."""
 
 def skip_duplicate_entries(glossary):
     """
-    Skip entries with duplicate raw names using fuzzy matching.
-    Returns deduplicated list maintaining first occurrence of each unique raw name.
+    Skip entries with duplicate raw names and translated names using 2-pass deduplication.
+    
+    Pass 1: Remove entries with similar raw names (fuzzy matching)
+    Pass 2: Remove entries with identical translated names (exact matching)
+    
+    Returns deduplicated list maintaining first occurrence of each unique entry.
     """
     # Try to use RapidFuzz for speed, fallback to difflib
     try:
@@ -937,18 +941,61 @@ def skip_duplicate_entries(glossary):
         import difflib
         use_rapidfuzz = False
     
-    # Get fuzzy threshold from environment
+    # Get configuration
     fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.9'))
+    # GLOSSARY_DEDUPE_TRANSLATIONS: "1" = enable Pass 2 (remove entries with identical translations)
+    #                              : "0" = disable Pass 2 (only remove entries with similar raw names)
+    dedupe_translations = os.getenv('GLOSSARY_DEDUPE_TRANSLATIONS', '1') == '1'
     
-    seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
-    deduplicated = []
-    skipped_count = 0
+    original_count = len(glossary)
+    print(f"[Dedup] Starting 2-pass deduplication with {original_count} entries...")
     
     # Show which method we're using
     if use_rapidfuzz:
         print(f"[Dedup] Using RapidFuzz (C++ speed) with threshold {fuzzy_threshold:.2f}")
     else:
         print(f"[Dedup] Using difflib (fallback) with threshold {fuzzy_threshold:.2f}")
+    
+    if dedupe_translations:
+        print(f"[Dedup] Pass 2 (translated name deduplication): ENABLED")
+    else:
+        print(f"[Dedup] Pass 2 (translated name deduplication): DISABLED")
+    
+    # PASS 1: Raw name deduplication (existing fuzzy matching logic)
+    print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
+    pass1_results = _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz)
+    pass1_removed = original_count - len(pass1_results)
+    print(f"[Dedup] ✅ PASS 1 complete: {pass1_removed} duplicates removed ({len(pass1_results)} remaining)")
+    
+    # PASS 2: Translated name deduplication (if enabled)
+    if dedupe_translations:
+        print(f"[Dedup] 🔄 PASS 2: Translated name deduplication...")
+        final_results = _skip_translated_name_duplicates(pass1_results)
+        pass2_removed = len(pass1_results) - len(final_results)
+        print(f"[Dedup] ✅ PASS 2 complete: {pass2_removed} duplicates removed ({len(final_results)} remaining)")
+        total_removed = pass1_removed + pass2_removed
+    else:
+        final_results = pass1_results
+        total_removed = pass1_removed
+        print(f"[Dedup] ⏭️ PASS 2 skipped (translation deduplication disabled)")
+    
+    if total_removed > 0:
+        print(f"⏭️ Total skipped: {total_removed} duplicate entries")
+        print(f"✅ Total kept: {len(final_results)} unique entries")
+    
+    return final_results
+
+
+def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
+    """Pass 1: Remove entries with similar raw names using fuzzy matching"""
+    if use_rapidfuzz:
+        from rapidfuzz import fuzz
+    else:
+        import difflib
+    
+    seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
+    deduplicated = []
+    skipped_count = 0
     
     for entry in glossary:
         # Get raw_name and clean it
@@ -1010,17 +1057,45 @@ def skip_duplicate_entries(glossary):
         
         if is_duplicate:
             skipped_count += 1
-            print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
+            if skipped_count <= 10:  # Only log first few
+                print(f"[Skip] Pass 1: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
         else:
             # Add to seen list and keep the entry
             seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
             deduplicated.append(entry)
     
-    if skipped_count > 0:
-        print(f"⏭️ Skipped {skipped_count} duplicate entries (threshold: {fuzzy_threshold:.2f})")
-        print(f"✅ Kept {len(deduplicated)} unique entries")
+    return deduplicated
+
+
+def _skip_translated_name_duplicates(glossary):
+    """Pass 2: Remove entries with identical translated names"""
+    seen_translations = {}  # translated_name.lower() -> (raw_name, entry)
+    deduplicated = []
+    skipped_count = 0
+    
+    for entry in glossary:
+        raw_name = entry.get('raw_name', '')
+        translated_name = entry.get('translated_name', '')
+        translated_lower = translated_name.lower().strip()
+        
+        # Skip empty translations
+        if not translated_lower:
+            deduplicated.append(entry)
+            continue
+        
+        # Check if we've seen this translation before
+        if translated_lower in seen_translations:
+            existing_raw, existing_entry = seen_translations[translated_lower]
+            skipped_count += 1
+            if skipped_count <= 10:  # Only log first few
+                print(f"[Skip] Pass 2: '{raw_name}' -> '{translated_name}' (conflicts with '{existing_raw}')")
+        else:
+            # New translation, keep it
+            seen_translations[translated_lower] = (raw_name, entry)
+            deduplicated.append(entry)
     
     return deduplicated
+
 
 # Batch processing functions
 def process_chapter_batch(chapters_batch: List[Tuple[int, str]], 

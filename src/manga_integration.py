@@ -5895,148 +5895,96 @@ class MangaTranslationTab:
                 self.inpaint_quality_frame.show()
 
     def _toggle_inpaint_visibility(self):
-        """Show/hide inpainting options based on skip toggle with smooth fade animation"""
+        """Enable/disable inpainting options based on skip toggle (no animations to prevent dialog issues)"""
         print("\n" + "="*80)
         print("TOGGLE FUNCTION CALLED!")
         print(f"Checkbox state: {self.skip_inpainting_checkbox.isChecked() if hasattr(self, 'skip_inpainting_checkbox') else 'NO CHECKBOX'}")
         print(f"Initializing: {getattr(self, '_initializing', 'NO FLAG')}")
         print("="*80 + "\n")
         try:
-            from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QAbstractAnimation
-            from PySide6.QtWidgets import QGraphicsOpacityEffect
-            
             # Update the value from the checkbox
             self.skip_inpainting_value = self.skip_inpainting_checkbox.isChecked()
             
-            # Animation duration in milliseconds
-            fade_duration = 200
-            
-            # Clear old animations to prevent memory leaks
-            if hasattr(self, '_animations'):
-                for old_anim in self._animations:
-                    try:
-                        if old_anim.state() == QAbstractAnimation.Running:
-                            old_anim.stop()
-                    except:
-                        pass
-                self._animations.clear()
-            else:
-                self._animations = []
-            
-            # Log the toggle change
+            # Simple enable/disable logic - no animations, no show/hide, no empty dialogs!
             if self.skip_inpainting_value:
                 print("🚫 Skip Inpainter: ENABLED - Inpainting will be skipped")
-                self._log("🚫 Skip Inpainter: ENABLED - Inpainting will be skipped", "info")
-                # Fade out and hide all inpainting options
+                # Disable all inpainting options
                 try:
-                    widgets_to_hide = [
+                    widgets_to_disable = [
                         self.inpaint_method_frame,
                         self.cloud_inpaint_frame,
                         self.local_inpaint_frame,
                         self.inpaint_separator
                     ]
                     
-                    for widget in widgets_to_hide:
-                        if widget.isVisible():
-                            # Create opacity effect
-                            effect = QGraphicsOpacityEffect(widget)
-                            widget.setGraphicsEffect(effect)
-                            
-                            # Create fade out animation
-                            animation = QPropertyAnimation(effect, b"opacity")
-                            animation.setDuration(fade_duration)
-                            animation.setStartValue(1.0)
-                            animation.setEndValue(0.0)
-                            animation.setEasingCurve(QEasingCurve.OutCubic)
-                            
-                            # Hide widget when animation finishes
-                            animation.finished.connect(lambda w=widget: w.hide())
-                            animation.finished.connect(lambda w=widget: w.setGraphicsEffect(None))
-                            
-                            animation.start()
-                            # Store animation reference to prevent garbage collection
-                            if not hasattr(self, '_animations'):
-                                self._animations = []
-                            self._animations.append(animation)
+                    for widget in widgets_to_disable:
+                        widget.setEnabled(False)
+                        # Apply comprehensive disabled styling to all child widgets
+                        widget.setStyleSheet("""
+                            QWidget {
+                                color: #666666;
+                            }
+                            QLabel {
+                                color: #666666;
+                            }
+                            QRadioButton {
+                                color: #666666;
+                            }
+                            QComboBox {
+                                color: #666666;
+                                background-color: #2d2d2d;
+                            }
+                            QLineEdit {
+                                color: #666666;
+                                background-color: #2d2d2d;
+                            }
+                            QPushButton {
+                                color: #666666;
+                                background-color: #3d3d3d;
+                            }
+                        """)
                 except Exception as ve:
-                    print(f"⚠️ Error hiding widgets: {ve}")
-                    self._log(f"⚠️ Error hiding widgets: {ve}", "error")
+                    print(f"⚠️ Error disabling widgets: {ve}")
             else:
                 print("✅ Skip Inpainter: DISABLED - Inpainting will be performed")
-                self._log("✅ Skip Inpainter: DISABLED - Inpainting will be performed", "info")
-                # Show and fade in method selection
+                # Enable all inpainting options
                 try:
-                    widgets_to_show = [self.inpaint_method_frame, self.inpaint_separator]
+                    widgets_to_enable = [
+                        self.inpaint_method_frame,
+                        self.cloud_inpaint_frame,
+                        self.local_inpaint_frame,
+                        self.inpaint_separator
+                    ]
                     
-                    for widget in widgets_to_show:
-                        if not widget.isVisible():
-                            # Show widget first (but invisible)
-                            widget.show()
-                            
-                            # Create opacity effect
-                            effect = QGraphicsOpacityEffect(widget)
-                            widget.setGraphicsEffect(effect)
-                            effect.setOpacity(0.0)
-                            
-                            # Create fade in animation
-                            animation = QPropertyAnimation(effect, b"opacity")
-                            animation.setDuration(fade_duration)
-                            animation.setStartValue(0.0)
-                            animation.setEndValue(1.0)
-                            animation.setEasingCurve(QEasingCurve.InCubic)
-                            
-                            # Remove effect when animation finishes
-                            animation.finished.connect(lambda w=widget: w.setGraphicsEffect(None))
-                            
-                            animation.start()
-                            # Store animation reference to prevent garbage collection
-                            if not hasattr(self, '_animations'):
-                                self._animations = []
-                            self._animations.append(animation)
+                    for widget in widgets_to_enable:
+                        widget.setEnabled(True)
+                        # Clear ALL disabled styling - return to original state
+                        widget.setStyleSheet("")
                     
-                    # Update method-specific frames after showing method frame
+                    # Update method-specific frames visibility
                     self._on_inpaint_method_change()
                 except Exception as ve:
-                    print(f"⚠️ Error showing widgets: {ve}")
-                    self._log(f"⚠️ Error showing widgets: {ve}", "error")
-            
-            # Force layout update to prevent empty dialogs
-            try:
-                if hasattr(self, 'parent_widget') and self.parent_widget:
-                    # Process pending events before updating geometry to prevent ghost dialogs
-                    from PySide6.QtCore import QCoreApplication
-                    QCoreApplication.processEvents()
-                    self.parent_widget.updateGeometry()
-                    self.parent_widget.update()
-                    # Process events again after geometry update
-                    QCoreApplication.processEvents()
-            except Exception as ue:
-                self._log(f"⚠️ Error updating layout: {ue}", "error")
+                    print(f"⚠️ Error enabling widgets: {ve}")
             
             # Don't save during initialization
             if not (hasattr(self, '_initializing') and self._initializing):
                 print(f"💾 Saving config with skip_inpainting={self.skip_inpainting_value}")
-                self._log(f"💾 Saving config with skip_inpainting={self.skip_inpainting_value}", "debug")
                 self._save_rendering_settings()
                 print("✅ Config saved and environment variables reinitialized")
-                self._log(f"✅ Config saved and environment variables reinitialized", "success")
                 
                 # Verify the environment variable was set correctly
                 import os
                 env_value = os.environ.get('MANGA_SKIP_INPAINTING', 'NOT SET')
                 print(f"🔍 Environment variable check: MANGA_SKIP_INPAINTING = {env_value}")
-                self._log(f"🔍 Environment variable check: MANGA_SKIP_INPAINTING = {env_value}", "debug")
                 expected_value = '1' if self.skip_inpainting_value else '0'
                 if env_value == expected_value:
                     print(f"✅ Environment variable matches toggle state (expected={expected_value})")
-                    self._log(f"✅ Environment variable matches toggle state", "success")
                 else:
                     print(f"⚠️ WARNING: Environment variable mismatch! Expected '{expected_value}' but got '{env_value}'")
-                    self._log(f"⚠️ WARNING: Environment variable mismatch! Expected '{expected_value}' but got '{env_value}'", "warning")
         except Exception as e:
-            self._log(f"❌ CRITICAL ERROR in toggle function: {e}", "error")
             import traceback
-            self._log(f"{traceback.format_exc()}", "error")
+            print(f"❌ CRITICAL ERROR in toggle function: {e}")
+            print(traceback.format_exc())
 
     def _on_inpaint_method_change(self):
         """Show appropriate inpainting settings based on method"""
