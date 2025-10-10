@@ -1861,6 +1861,180 @@ class RapidOCRProvider(OCRProvider):
         
         return results
 
+class AzureDocumentIntelligenceProvider(OCRProvider):
+    """Azure Document Intelligence OCR provider (successor to Azure AI Vision)
+    
+    Azure Document Intelligence offers superior OCR capabilities with:
+    - Better text extraction accuracy
+    - Layout analysis
+    - Language detection
+    - Reading order detection
+    """
+    
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        self.client = None
+        self.endpoint = None
+        self.key = None
+        
+    def check_installation(self) -> bool:
+        """Check if Azure Document Intelligence SDK is installed"""
+        try:
+            from azure.ai.formrecognizer import DocumentAnalysisClient
+            from azure.core.credentials import AzureKeyCredential
+            self.is_installed = True
+            return True
+        except ImportError:
+            return False
+    
+    def install(self, progress_callback=None) -> bool:
+        """Provide installation instructions"""
+        if progress_callback:
+            progress_callback("Azure Document Intelligence requires manual installation")
+        self._log("Run: pip install azure-ai-formrecognizer", "info")
+        return False
+    
+    def load_model(self, **kwargs) -> bool:
+        """Initialize Azure Document Intelligence client"""
+        try:
+            if not self.is_installed and not self.check_installation():
+                self._log("❌ Azure Document Intelligence SDK not installed", "error")
+                self._log("   Install with: pip install azure-ai-formrecognizer", "info")
+                return False
+            
+            from azure.ai.formrecognizer import DocumentAnalysisClient
+            from azure.core.credentials import AzureKeyCredential
+            
+            # Get credentials from multiple sources (kwargs, environment, or fall back to azure_vision_* config)
+            # Priority: explicit kwargs > specific env vars > azure_vision config (GUI uses this)
+            self.endpoint = (
+                kwargs.get('endpoint') or 
+                kwargs.get('azure_endpoint') or
+                os.environ.get('AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT') or
+                os.environ.get('AZURE_ENDPOINT')
+            )
+            
+            self.key = (
+                kwargs.get('key') or 
+                kwargs.get('azure_key') or
+                os.environ.get('AZURE_DOCUMENT_INTELLIGENCE_KEY') or
+                os.environ.get('AZURE_KEY')
+            )
+            
+            if not self.endpoint or not self.key:
+                self._log("❌ Azure Document Intelligence credentials not configured", "error")
+                self._log("   Please configure Azure Key and Endpoint in the GUI", "info")
+                return False
+            
+            # Create client
+            self.client = DocumentAnalysisClient(
+                endpoint=self.endpoint,
+                credential=AzureKeyCredential(self.key)
+            )
+            
+            self.is_loaded = True
+            self._log("✅ Azure Document Intelligence client initialized")
+            return True
+            
+        except Exception as e:
+            self._log(f"❌ Failed to initialize Azure Document Intelligence: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+            return False
+    
+    def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
+        """Detect text using Azure Document Intelligence"""
+        results = []
+        
+        try:
+            if not self.is_loaded:
+                if not self.load_model(**kwargs):
+                    return results
+            
+            # Convert numpy array to bytes
+            import cv2
+            from io import BytesIO
+            
+            # Encode image to JPEG
+            _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            image_bytes = encoded.tobytes()
+            
+            self._log("🔍 Analyzing image with Azure Document Intelligence...")
+            
+            # Call Document Intelligence API with read model
+            poller = self.client.begin_analyze_document(
+                "prebuilt-read",  # Use the read model for OCR
+                document=image_bytes
+            )
+            
+            # Wait for result
+            result = poller.result()
+            
+            # Extract text from result
+            if result.pages:
+                for page in result.pages:
+                    # Process lines (better structure than words)
+                    if hasattr(page, 'lines') and page.lines:
+                        for line in page.lines:
+                            # Extract text
+                            text = line.content.strip()
+                            if not text:
+                                continue
+                            
+                            # Get bounding polygon
+                            if hasattr(line, 'polygon') and line.polygon:
+                                # Convert polygon to vertices
+                                vertices = [(int(point.x), int(point.y)) for point in line.polygon]
+                                
+                                # Calculate bounding box
+                                xs = [v[0] for v in vertices]
+                                ys = [v[1] for v in vertices]
+                                x_min, x_max = min(xs), max(xs)
+                                y_min, y_max = min(ys), max(ys)
+                                
+                                # Get confidence (if available)
+                                confidence = getattr(line, 'confidence', 0.9)
+                                
+                                results.append(OCRResult(
+                                    text=text,
+                                    bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                    confidence=confidence,
+                                    vertices=vertices
+                                ))
+                            else:
+                                # Fallback: use bounding regions if polygon not available
+                                if hasattr(line, 'bounding_regions') and line.bounding_regions:
+                                    for region in line.bounding_regions:
+                                        if hasattr(region, 'polygon') and region.polygon:
+                                            vertices = [(int(point.x), int(point.y)) for point in region.polygon]
+                                            xs = [v[0] for v in vertices]
+                                            ys = [v[1] for v in vertices]
+                                            x_min, x_max = min(xs), max(xs)
+                                            y_min, y_max = min(ys), max(ys)
+                                            
+                                            confidence = getattr(line, 'confidence', 0.9)
+                                            
+                                            results.append(OCRResult(
+                                                text=text,
+                                                bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                                confidence=confidence,
+                                                vertices=vertices
+                                            ))
+                                            break  # Use first region only
+            
+            if results:
+                self._log(f"✅ Detected {len(results)} text regions")
+            else:
+                self._log("⚠️ No text detected", "warning")
+            
+        except Exception as e:
+            self._log(f"❌ Error in Azure Document Intelligence detection: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+        
+        return results
+
+
 class OCRManager:
     """Manager for multiple OCR providers"""
     
@@ -1873,7 +2047,8 @@ class OCRManager:
             'paddleocr': PaddleOCRProvider(log_callback),
             'doctr': DocTROCRProvider(log_callback),
             'rapidocr': RapidOCRProvider(log_callback),
-            'Qwen2-VL': Qwen2VL(log_callback)
+            'Qwen2-VL': Qwen2VL(log_callback),
+            'azure-document-intelligence': AzureDocumentIntelligenceProvider(log_callback)
         }
         self.current_provider = None
         self.stop_flag = None

@@ -2421,6 +2421,41 @@ class MangaSettingsDialog(QDialog):
         min_region_layout.addWidget(min_region_desc)
         min_region_layout.addStretch()
         
+        # OCR Max Retries
+        ocr_retry_widget = QWidget()
+        ocr_retry_layout = QHBoxLayout(ocr_retry_widget)
+        ocr_retry_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_layout.addWidget(ocr_retry_widget)
+        
+        ocr_retry_label = QLabel("OCR Max Retries:")
+        ocr_retry_label.setMinimumWidth(180)
+        ocr_retry_label.setToolTip(
+            "Number of retries for failed OCR attempts per region.\n\n"
+            "• 0 = Disabled (default, fastest - try once only)\n"
+            "• 1-2 = Conservative (retry on genuine API errors)\n"
+            "• 3-5 = Aggressive (for unreliable connections)\n\n"
+            "Note: Empty regions often mean there's truly no text,\n"
+            "so retrying doesn't help and just slows things down."
+        )
+        ocr_retry_layout.addWidget(ocr_retry_label)
+        
+        self.ocr_max_retries_spinbox = QSpinBox()
+        self.ocr_max_retries_spinbox.setRange(0, 5)
+        self.ocr_max_retries_spinbox.setSingleStep(1)
+        self.ocr_max_retries_spinbox.setValue(self.settings['ocr'].get('ocr_max_retries', 0))
+        self.ocr_max_retries_spinbox.setToolTip("0 = disabled (fastest), 5 = maximum")
+        ocr_retry_layout.addWidget(self.ocr_max_retries_spinbox)
+        
+        ocr_retry_unit = QLabel("retries")
+        ocr_retry_layout.addWidget(ocr_retry_unit)
+        
+        ocr_retry_desc = QLabel("(0 = disabled, recommended for speed)")
+        ocr_retry_desc_font = QFont('Arial', 9)
+        ocr_retry_desc.setFont(ocr_retry_desc_font)
+        ocr_retry_desc.setStyleSheet("color: gray;")
+        ocr_retry_layout.addWidget(ocr_retry_desc)
+        ocr_retry_layout.addStretch()
+        
         # Text merging settings
         merge_group = QGroupBox("Text Region Merging")
         merge_layout = QVBoxLayout(merge_group)
@@ -4222,6 +4257,7 @@ class MangaSettingsDialog(QDialog):
             self.settings['ocr']['ocr_batch_enabled'] = bool(self.ocr_batch_enabled_checkbox.isChecked())
             self.settings['ocr']['ocr_batch_size'] = int(self.ocr_batch_size_spinbox.value())
             self.settings['ocr']['ocr_max_concurrency'] = int(self.ocr_max_conc_spinbox.value())
+            self.settings['ocr']['ocr_max_retries'] = int(self.ocr_max_retries_spinbox.value())
             self.settings['ocr']['roi_locality_enabled'] = bool(self.roi_locality_checkbox.isChecked())
             self.settings['ocr']['roi_padding_ratio'] = float(self.roi_padding_ratio_slider.value() / 100.0)
             self.settings['ocr']['roi_min_side_px'] = int(self.roi_min_side_spinbox.value())

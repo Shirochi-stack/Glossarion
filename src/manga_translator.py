@@ -3854,6 +3854,19 @@ class MangaTranslator:
                         success = self.ocr_manager.load_provider(self.ocr_provider, **load_kwargs)
                         if not success:
                             raise Exception(f"Failed to initialize {self.ocr_provider}")
+                    elif self.ocr_provider == 'azure-document-intelligence':
+                        # Azure Document Intelligence is a cloud API - just initialize with credentials
+                        self._log("☁️ Initializing Azure Document Intelligence (cloud API)...")
+                        load_kwargs = {}
+                        if hasattr(self, 'main_gui'):
+                            # Get credentials from config
+                            load_kwargs['azure_endpoint'] = self.main_gui.config.get('azure_document_intelligence_endpoint', '')
+                            load_kwargs['azure_key'] = self.main_gui.config.get('azure_document_intelligence_key', '')
+                        
+                        # Initialize the provider with credentials
+                        success = self.ocr_manager.load_provider(self.ocr_provider, **load_kwargs)
+                        if not success:
+                            raise Exception(f"Failed to initialize {self.ocr_provider} - check credentials")
                     else:
                         # Other providers
                         success = self.ocr_manager.load_provider(self.ocr_provider)
@@ -4254,6 +4267,71 @@ class MangaTranslator:
                         self._log("📝 Processing full image with DocTR")
                         ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
 
+                elif self.ocr_provider == 'azure-document-intelligence':
+                    # Initialize results list
+                    ocr_results = []
+                    
+                    self._log("📋 Azure Document Intelligence OCR (successor to Azure AI Vision)")
+                    
+                    # Check if we should use bubble detection for regions
+                    if ocr_settings.get('bubble_detection_enabled', False):
+                        self._log("📝 Using bubble detection regions for Azure Document Intelligence...")
+                        
+                        # Run bubble detection to get regions (thread-local)
+                        _ = self._get_thread_bubble_detector()
+                        
+                        # Get regions from bubble detector
+                        rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
+                        if rtdetr_detections:
+                            
+                            # Process only text-containing regions
+                            all_regions = []
+                            if 'text_bubbles' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+                            if 'text_free' in rtdetr_detections:
+                                all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # Sort regions by manga reading order
+                            if all_regions:
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                right_to_left = source_lang in ['ja', 'ar', 'he']
+                                all_regions = sorted(all_regions, key=lambda bbox: (
+                                    bbox[1] + bbox[3] / 2,  # y_center
+                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
+                                ))
+                                direction = "right→left" if right_to_left else "left→right"
+                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
+                            
+                            self._log(f"📊 Processing {len(all_regions)} text regions with Azure Document Intelligence")
+                            
+                            # Provider already initialized with credentials at line 3857-3869
+                            # No need to pass credentials again
+                            
+                            # Check if parallel processing is enabled
+                            if self.parallel_processing and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with Azure Document Intelligence")
+                                # Provider already initialized with credentials, no need to pass load_kwargs
+                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'azure-document-intelligence', confidence_threshold)
+                            else:
+                                # Process each region with Azure Document Intelligence
+                                for i, (x, y, w, h) in enumerate(all_regions):
+                                    cropped = self._safe_crop_region(image, x, y, w, h)
+                                    if cropped is None:
+                                        continue
+                                    # Provider already initialized, just use it
+                                    result = self.ocr_manager.detect_text(cropped, 'azure-document-intelligence', confidence=confidence_threshold)
+                                    if result and len(result) > 0 and result[0].text.strip():
+                                        result[0].bbox = (x, y, w, h)
+                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+                                        ocr_results.append(result[0])
+                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                    else:
+                        # Process full image without bubble detection
+                        self._log("📝 Processing full image with Azure Document Intelligence")
+                        
+                        # Provider already initialized with credentials, just use it
+                        ocr_results = self.ocr_manager.detect_text(image, self.ocr_provider)
+
                 elif self.ocr_provider == 'rapidocr':
                     # Initialize results list
                     ocr_results = []
@@ -4518,12 +4596,13 @@ class MangaTranslator:
                 
                 # Run OCR on this region with retry logic for failures
                 result = None
-                # Get max_retries from config (default 7 means 1 initial + 7 retries = 8 total attempts)
-                # Subtract 1 because the initial attempt counts as the first try
+                # Get OCR-specific retry setting (separate from translation retries)
+                # Default: 0 retries (disabled) - empty regions are often genuinely empty
                 try:
-                    max_retries = int(self.main_gui.config.get('max_retries', 7)) if hasattr(self, 'main_gui') else 2
+                    ocr_max_retries = int(self.manga_settings.get('ocr', {}).get('ocr_max_retries', 0)) if hasattr(self, 'manga_settings') else 0
+                    max_retries = max(0, min(ocr_max_retries, 5))  # Cap at 5 max (6 total attempts)
                 except Exception:
-                    max_retries = 2  # Fallback to 2 retries (3 total attempts)
+                    max_retries = 0  # Fallback: disabled (1 attempt only)
                 
                 for attempt in range(max_retries + 1):
                     result = self.ocr_manager.detect_text(
@@ -4594,15 +4673,22 @@ class MangaTranslator:
         
         # Process regions in parallel
         max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
-        # For custom-api, treat OCR calls as API calls: use batch size when batch mode is enabled
+        
+        # For cloud OCR providers (custom-api, azure-document-intelligence), use OCR-specific concurrency settings
         try:
             if provider == 'custom-api':
                 # prefer MangaTranslator.batch_size (from env BATCH_SIZE)
                 bs = int(getattr(self, 'batch_size', 0) or int(os.getenv('BATCH_SIZE', '0')))
                 if bs and bs > 0:
                     max_workers = bs
+            elif provider == 'azure-document-intelligence':
+                # Use OCR Max Concurrency setting from manga settings
+                ocr_max_conc = self.manga_settings.get('ocr', {}).get('ocr_max_concurrency', 2)
+                max_workers = max(1, min(int(ocr_max_conc), 8))  # Azure: cap at 8 to avoid rate limits
+                self._log(f"📊 Azure Document Intelligence: Using {max_workers} concurrent workers", "debug")
         except Exception:
             pass
+        
         # Never spawn more workers than regions
         max_workers = max(1, min(max_workers, len(regions)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

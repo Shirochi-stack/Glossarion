@@ -1495,6 +1495,20 @@ class MangaTranslationTab:
             else:
                 self.provider_status_label.setText("❌ Key needed")
                 self.provider_status_label.setStyleSheet("color: red;")
+        
+        elif provider == 'azure-document-intelligence':
+            # Azure Document Intelligence - check for API key (uses same config as Azure CV)
+            azure_key = self.main_gui.config.get('azure_vision_key', '') or self.main_gui.config.get('azure_document_intelligence_key', '')
+            azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '') or self.main_gui.config.get('azure_document_intelligence_endpoint', '')
+            if azure_key and azure_endpoint:
+                self.provider_status_label.setText("✅ Ready (successor to Azure AI Vision)")
+                self.provider_status_label.setStyleSheet("color: green;")
+            elif azure_key:
+                self.provider_status_label.setText("⚠️ Endpoint needed")
+                self.provider_status_label.setStyleSheet("color: orange;")
+            else:
+                self.provider_status_label.setText("❌ Key & Endpoint needed")
+                self.provider_status_label.setStyleSheet("color: red;")
 
         elif provider == 'custom-api':
             # Custom API - check for main API key
@@ -1664,8 +1678,8 @@ class MangaTranslationTab:
         """Setup/install/load OCR provider"""
         provider = self.ocr_provider_value
         
-        if provider in ['google', 'azure']:
-            return  # Cloud providers don't need setup
+        if provider in ['google', 'azure', 'azure-document-intelligence']:
+            return  # Cloud providers don't need setup/model loading
 
         # your own api key
         if provider == 'custom-api':
@@ -2026,6 +2040,8 @@ class MangaTranslationTab:
             self.google_creds_frame.setVisible(False)
         if hasattr(self, 'azure_frame'):
             self.azure_frame.setVisible(False)
+        if hasattr(self, 'azure_doc_intel_frame'):
+            self.azure_doc_intel_frame.setVisible(False)
         
         # Show only the relevant settings frame for the selected provider
         if provider == 'google':
@@ -2034,9 +2050,14 @@ class MangaTranslationTab:
                 self.google_creds_frame.setVisible(True)
             
         elif provider == 'azure':
-            # Show Azure settings frame  
+            # Show Azure Computer Vision settings frame
             if hasattr(self, 'azure_frame'):
                 self.azure_frame.setVisible(True)
+        
+        elif provider == 'azure-document-intelligence':
+            # Show Azure Document Intelligence settings frame (separate)
+            if hasattr(self, 'azure_doc_intel_frame'):
+                self.azure_doc_intel_frame.setVisible(True)
             
         # For all other providers (manga-ocr, Qwen2-VL, easyocr, paddleocr, doctr)
         # Don't show any cloud credential frames - they use local models
@@ -2052,6 +2073,7 @@ class MangaTranslationTab:
             'custom-api': "Custom API - use your own vision model",
             'google': "Google Cloud Vision (requires credentials)",
             'azure': "Azure Computer Vision (requires API key)",
+            'azure-document-intelligence': "Azure Document Intelligence - successor to Azure AI Vision (requires API key)",
             'manga-ocr': "Manga OCR - optimized for Japanese manga",
             'rapidocr': "RapidOCR - fast local OCR with region detection",
             'Qwen2-VL': "Qwen2-VL - a big model", 
@@ -2100,6 +2122,10 @@ class MangaTranslationTab:
             is_ready = has_api_key and has_vision
         elif provider == 'azure':
             has_azure = bool(self.main_gui.config.get('azure_vision_key', ''))
+            is_ready = has_api_key and has_azure
+        elif provider == 'azure-document-intelligence':
+            # Azure Document Intelligence uses same credentials storage as Azure CV for now
+            has_azure = bool(self.main_gui.config.get('azure_document_intelligence_key', '') or self.main_gui.config.get('azure_vision_key', ''))
             is_ready = has_api_key and has_azure
         else:
             # Local providers or custom-api only need API key for translation
@@ -2454,6 +2480,7 @@ class MangaTranslationTab:
             ('custom-api', 'Your Own key'),
             ('google', 'Google Cloud Vision'),
             ('azure', 'Azure Computer Vision'),
+            ('azure-document-intelligence', '📋 Azure Document Intelligence (successor to Azure AI Vision)'),
             ('rapidocr', '⚡ RapidOCR (Fast & Local)'),
             ('manga-ocr', '🇯🇵 Manga OCR (Japanese)'),
             ('Qwen2-VL', '🇰🇷 Qwen2-VL (Korean)'),
@@ -2596,6 +2623,66 @@ class MangaTranslationTab:
         
         settings_frame_layout.addWidget(self.azure_frame)
         self.azure_frame.setVisible(False)  # Hidden by default
+
+        # Azure Document Intelligence settings frame (separate from Azure CV)
+        self.azure_doc_intel_frame = QWidget()
+        azure_doc_intel_layout = QVBoxLayout(self.azure_doc_intel_frame)
+        azure_doc_intel_layout.setContentsMargins(0, 0, 0, 10)
+        azure_doc_intel_layout.setSpacing(5)
+
+        # Azure Document Intelligence Key
+        azure_doc_key_frame = QWidget()
+        azure_doc_key_layout = QHBoxLayout(azure_doc_key_frame)
+        azure_doc_key_layout.setContentsMargins(0, 0, 0, 0)
+        azure_doc_key_layout.setSpacing(10)
+
+        azure_doc_key_label = QLabel("Document Intelligence Key:")
+        azure_doc_key_label.setMinimumWidth(150)
+        azure_doc_key_label.setAlignment(Qt.AlignLeft)
+        azure_doc_key_layout.addWidget(azure_doc_key_label)
+        
+        self.azure_doc_intel_key_entry = QLineEdit()
+        self.azure_doc_intel_key_entry.setEchoMode(QLineEdit.Password)
+        self.azure_doc_intel_key_entry.setMinimumWidth(150)
+        self.azure_doc_intel_key_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.azure_doc_intel_key_entry.textChanged.connect(self._on_azure_doc_intel_credentials_change)
+        azure_doc_key_layout.addWidget(self.azure_doc_intel_key_entry)
+
+        # Show/Hide button for Azure Document Intelligence key
+        self.show_azure_doc_key_checkbox = self._create_styled_checkbox("Show")
+        self.show_azure_doc_key_checkbox.stateChanged.connect(self._toggle_azure_doc_intel_key_visibility)
+        azure_doc_key_layout.addWidget(self.show_azure_doc_key_checkbox)
+        azure_doc_key_layout.addStretch()
+        azure_doc_intel_layout.addWidget(azure_doc_key_frame)
+
+        # Azure Document Intelligence Endpoint
+        azure_doc_endpoint_frame = QWidget()
+        azure_doc_endpoint_layout = QHBoxLayout(azure_doc_endpoint_frame)
+        azure_doc_endpoint_layout.setContentsMargins(0, 0, 0, 0)
+        azure_doc_endpoint_layout.setSpacing(10)
+
+        azure_doc_endpoint_label = QLabel("Document Intelligence Endpoint:")
+        azure_doc_endpoint_label.setMinimumWidth(150)
+        azure_doc_endpoint_label.setAlignment(Qt.AlignLeft)
+        azure_doc_endpoint_layout.addWidget(azure_doc_endpoint_label)
+        
+        self.azure_doc_intel_endpoint_entry = QLineEdit()
+        self.azure_doc_intel_endpoint_entry.setPlaceholderText("https://your-resource.cognitiveservices.azure.com/")
+        self.azure_doc_intel_endpoint_entry.setMinimumWidth(150)
+        self.azure_doc_intel_endpoint_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.azure_doc_intel_endpoint_entry.textChanged.connect(self._on_azure_doc_intel_credentials_change)
+        azure_doc_endpoint_layout.addWidget(self.azure_doc_intel_endpoint_entry)
+        azure_doc_endpoint_layout.addStretch()
+        azure_doc_intel_layout.addWidget(azure_doc_endpoint_frame)
+
+        # Load saved Azure Document Intelligence settings
+        saved_doc_key = self.main_gui.config.get('azure_document_intelligence_key', '')
+        saved_doc_endpoint = self.main_gui.config.get('azure_document_intelligence_endpoint', '')
+        self.azure_doc_intel_key_entry.setText(saved_doc_key)
+        self.azure_doc_intel_endpoint_entry.setText(saved_doc_endpoint)
+        
+        settings_frame_layout.addWidget(self.azure_doc_intel_frame)
+        self.azure_doc_intel_frame.setVisible(False)  # Hidden by default
 
         # Initially show/hide based on saved provider
         self._on_ocr_provider_change()
@@ -4367,7 +4454,7 @@ class MangaTranslationTab:
             self._apply_rendering_settings()
     
     def _toggle_azure_key_visibility(self, state):
-        """Toggle visibility of Azure API key"""
+        """Toggle visibility of Azure Computer Vision API key"""
         from PySide6.QtWidgets import QLineEdit
         from PySide6.QtCore import Qt
         
@@ -4380,6 +4467,41 @@ class MangaTranslationTab:
         else:
             # Hide the key
             self.azure_key_entry.setEchoMode(QLineEdit.Password)
+    
+    def _toggle_azure_doc_intel_key_visibility(self, state):
+        """Toggle visibility of Azure Document Intelligence API key"""
+        from PySide6.QtWidgets import QLineEdit
+        from PySide6.QtCore import Qt
+        
+        # Check the checkbox state directly to be sure
+        is_checked = self.show_azure_doc_key_checkbox.isChecked()
+        
+        if is_checked:
+            # Show the key
+            self.azure_doc_intel_key_entry.setEchoMode(QLineEdit.Normal)
+        else:
+            # Hide the key
+            self.azure_doc_intel_key_entry.setEchoMode(QLineEdit.Password)
+    
+    def _on_azure_doc_intel_credentials_change(self, text=None):
+        """Save Azure Document Intelligence credentials when they change"""
+        try:
+            # Get current values
+            key = self.azure_doc_intel_key_entry.text() if hasattr(self, 'azure_doc_intel_key_entry') else ''
+            endpoint = self.azure_doc_intel_endpoint_entry.text() if hasattr(self, 'azure_doc_intel_endpoint_entry') else ''
+            
+            # Save to config
+            self.main_gui.config['azure_document_intelligence_key'] = key
+            self.main_gui.config['azure_document_intelligence_endpoint'] = endpoint
+            
+            # Save config file
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+            
+            # Update status
+            self._check_provider_status()
+        except Exception as e:
+            self._log(f"Error saving Azure Document Intelligence credentials: {e}", "error")
     
     def _toggle_shadow_controls(self):
         """Enable/disable shadow controls based on checkbox"""
