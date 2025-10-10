@@ -2424,28 +2424,28 @@ class MultiAPIKeyDialog(QDialog):
         move_layout.addWidget(reorder_label)
         
         # Move to top button with expanded width
-        top_btn = QPushButton("⬆⬆")
+        top_btn = QPushButton("↑ ↑")
         top_btn.setFixedSize(55, 32)
         top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         top_btn.clicked.connect(lambda: self._move_key('top'))
         move_layout.addWidget(top_btn)
         
         # Move up button with expanded width
-        up_btn = QPushButton("⬆")
+        up_btn = QPushButton("↑")
         up_btn.setFixedSize(55, 32)
         up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_key('up'))
         move_layout.addWidget(up_btn)
         
         # Move down button with expanded width
-        down_btn = QPushButton("⬇")
+        down_btn = QPushButton("↓")
         down_btn.setFixedSize(55, 32)
         down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_key('down'))
         move_layout.addWidget(down_btn)
         
         # Move to bottom button with expanded width
-        bottom_btn = QPushButton("⬇⬇")
+        bottom_btn = QPushButton("↓ ↓")
         bottom_btn.setFixedSize(55, 32)
         bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         bottom_btn.clicked.connect(lambda: self._move_key('bottom'))
