@@ -2,9 +2,9 @@
 import sys
 import time
 import atexit
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget, QProgressBar
+from PySide6.QtWidgets import QApplication, QWidget, QLabel, QProgressBar, QVBoxLayout
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap, QPalette, QColor, QFont
+from PySide6.QtGui import QFont, QPalette, QColor, QPixmap
 
 class SplashManager:
     """PySide6 splash screen manager - shows faster than Tkinter"""
@@ -37,7 +37,7 @@ class SplashManager:
             # Use screen ratios for sizing
             screen = self.app.primaryScreen().geometry()
             width = int(screen.width() * 0.24)  # 24% of screen width
-            height = int(screen.height() * 0.36)  # 36% of screen height
+            height = int(screen.height() * 0.30)  # 30% of screen height (reduced from 36%)
             self.splash_window.setFixedSize(width, height)
             
             # Set dark background with border
@@ -56,10 +56,10 @@ class SplashManager:
             """)
             self.splash_window.setObjectName("splash_main")
             
-            # Main layout
+            # Main layout with tighter spacing
             layout = QVBoxLayout()
-            layout.setContentsMargins(20, 20, 20, 20)
-            layout.setSpacing(10)
+            layout.setContentsMargins(15, 15, 15, 15)  # Reduced margins from 20 to 15
+            layout.setSpacing(8)  # Reduced spacing from 10 to 8
             
             # Load and add icon
             self._load_icon(layout)
@@ -80,7 +80,7 @@ class SplashManager:
             subtitle_label.setStyleSheet("color: #cccccc; background: transparent;")
             layout.addWidget(subtitle_label)
             
-            layout.addSpacing(10)
+            layout.addSpacing(6)  # Reduced from 10 to 6
             
             # Status label with fixed height to prevent shaking
             self.status_label = QLabel(self._status_text)
@@ -123,11 +123,17 @@ class SplashManager:
                 background: transparent;
                 border: none;
             """)
-            # Position label over progress bar with fixed geometry
-            self.progress_label.setGeometry(0, 0, 400, 36)  # Fixed width to match progress bar
+            # Position label to match progress bar size dynamically
+            # Use a timer to ensure the progress bar has been laid out first
+            def position_progress_label():
+                if self.progress_bar and self.progress_label:
+                    bar_width = self.progress_bar.width()
+                    bar_height = self.progress_bar.height()
+                    self.progress_label.setGeometry(0, 0, bar_width, bar_height)
+            QTimer.singleShot(0, position_progress_label)
             self.progress_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             
-            layout.addSpacing(5)
+            layout.addSpacing(3)  # Reduced from 5 to 3
             
             # Version info
             version_label = QLabel("Starting up...")
@@ -196,16 +202,16 @@ class SplashManager:
                     # Get pixmap at the largest native size
                     pixmap = icon.pixmap(largest_size)
                     
-                    # Only scale if the native size is larger than 128x128
+                    # Only scale if the native size is larger than 110x110
                     # This preserves quality by using native resolution when possible
-                    if largest_size.width() > 128 or largest_size.height() > 128:
-                        pixmap = pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, 
+                    if largest_size.width() > 110 or largest_size.height() > 110:
+                        pixmap = pixmap.scaled(110, 110, Qt.AspectRatioMode.KeepAspectRatio, 
                                               Qt.TransformationMode.SmoothTransformation)
                 else:
                     # Fallback to direct load
                     pixmap = QPixmap(ico_path)
-                    if pixmap.width() > 128 or pixmap.height() > 128:
-                        pixmap = pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, 
+                    if pixmap.width() > 110 or pixmap.height() > 110:
+                        pixmap = pixmap.scaled(110, 110, Qt.AspectRatioMode.KeepAspectRatio, 
                                               Qt.TransformationMode.SmoothTransformation)
                 
                 if not pixmap.isNull():
@@ -223,10 +229,10 @@ class SplashManager:
         # Fallback emoji if icon loading fails
         icon_label = QLabel("📚")
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_font = QFont("Arial", 64)
+        icon_font = QFont("Arial", 56)  # Reduced from 64
         icon_label.setFont(icon_font)
         icon_label.setStyleSheet("background: #4a9eff; color: white; border-radius: 10px;")
-        icon_label.setFixedSize(128, 128)
+        icon_label.setFixedSize(110, 110)  # Reduced from 128x128
         layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _animate_progress(self):
@@ -239,6 +245,10 @@ class SplashManager:
     def _update_progress(self):
         """Update progress animation"""
         try:
+            # Skip auto-animation if manual control is active
+            if getattr(self, '_manual_progress', False):
+                return
+                
             if self.splash_window and self.progress_value < 100:
                 # Auto-increment progress for visual effect during startup
                 if self.progress_value < 30:
@@ -280,14 +290,19 @@ class SplashManager:
                     "Loading theme framework...": 5,
                     "Loading UI framework...": 8,
                     
-                    # Module loading phase - starts at 10% and goes to 85%
-                    "Loading translation modules...": 10,
-                    "Initializing module system...": 15,
-                    "Loading translation engine...": 20,
-                    "Validating translation engine...": 30,
-                    "✅ translation engine loaded": 40,
-                    "Loading glossary extractor...": 45,
-                    "Validating glossary extractor...": 55,
+                    # Script validation phase - 10-25%
+                    "Scanning Python modules...": 10,
+                    "Validating": 12,  # Partial match for "Validating X Python scripts..."
+                    "✅ All scripts validated": 25,
+                    
+                    # Module loading phase - 30-85%
+                    "Loading translation modules...": 30,
+                    "Initializing module system...": 35,
+                    "Loading translation engine...": 40,
+                    "Validating translation engine...": 45,
+                    "✅ translation engine loaded": 50,
+                    "Loading glossary extractor...": 55,
+                    "Validating glossary extractor...": 60,
                     "✅ glossary extractor loaded": 65,
                     "Loading EPUB converter...": 70,
                     "✅ EPUB converter loaded": 75,
@@ -323,8 +338,95 @@ class SplashManager:
             self.progress_bar.setValue(self.progress_value)
         if self.progress_label:
             self.progress_label.setText(f"{self.progress_value}%")
-        if self.app:
-            self.app.processEvents()
+    
+    def validate_all_scripts(self, base_dir=None):
+        """Validate that all Python scripts in the project compile without syntax errors
+        
+        Args:
+            base_dir: Directory to scan for Python files. Defaults to script directory.
+            
+        Returns:
+            tuple: (success_count, total_count, failed_scripts)
+        """
+        import os
+        import py_compile
+        
+        # Enable manual progress control and stop auto-animation timer
+        self._manual_progress = True
+        if self.timer:
+            self.timer.stop()
+        
+        if base_dir is None:
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        self.update_status("Scanning Python modules...")
+        self.set_progress(10)  # Explicitly set starting progress
+        
+        # Find all Python files
+        python_files = []
+        try:
+            for file in os.listdir(base_dir):
+                if file.endswith('.py') and not file.startswith('.'):
+                    python_files.append(os.path.join(base_dir, file))
+        except Exception as e:
+            print(f"⚠️ Could not scan directory: {e}")
+            return (0, 0, [])
+        
+        total_count = len(python_files)
+        success_count = 0
+        failed_scripts = []
+        
+        if total_count == 0:
+            return (0, 0, [])
+        
+        self.update_status(f"Validating {total_count} Python scripts...")
+        print(f"🔍 Validating {total_count} Python scripts for compilation errors...")
+        
+        # Check each file
+        for idx, filepath in enumerate(python_files, 1):
+            filename = os.path.basename(filepath)
+            
+            try:
+                # Try to compile the file
+                py_compile.compile(filepath, doraise=True)
+                success_count += 1
+                
+                # Update progress based on validation progress
+                # Map 0-100% of files to 15-25% of total progress
+                progress_pct = 15 + int((idx / total_count) * 10)
+                # Only update if progress actually changed (avoid animation churn)
+                if progress_pct != self.progress_value:
+                    self.set_progress(progress_pct)
+                
+            except SyntaxError as e:
+                failed_scripts.append((filename, str(e)))
+                print(f"❌ Syntax error in {filename}: {e}")
+            except Exception as e:
+                failed_scripts.append((filename, str(e)))
+                print(f"⚠️ Could not validate {filename}: {e}")
+            
+            # Process events to keep UI responsive
+            if self.app:
+                self.app.processEvents()
+        
+        # Report results
+        if failed_scripts:
+            self.update_status(f"⚠️ {success_count}/{total_count} scripts valid")
+            print(f"\n⚠️ Validation complete: {success_count}/{total_count} scripts compiled successfully")
+            print(f"Failed scripts:")
+            for script, error in failed_scripts:
+                print(f"  • {script}: {error}")
+        else:
+            self.update_status("✅ All scripts validated")
+            print(f"✅ All {total_count} Python scripts validated successfully")
+        
+        # Re-enable auto-animation after validation completes
+        self._manual_progress = False
+        
+        return (success_count, total_count, failed_scripts)
     
     def close_splash(self):
         """Close the splash screen"""

@@ -9300,6 +9300,31 @@ if __name__ == "__main__":
         
         # REAL module loading during splash screen with gradual progression
         if splash_manager:
+            # Check if debug mode is enabled in config
+            debug_mode_enabled = False
+            try:
+                import json
+                config_path = "config.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                        debug_mode_enabled = config.get('show_debug_buttons', False)
+            except Exception:
+                pass
+            
+            # Validate all Python scripts first (only if debug mode is enabled)
+            if debug_mode_enabled:
+                try:
+                    success_count, total_count, failed_scripts = splash_manager.validate_all_scripts()
+                    if failed_scripts:
+                        print(f"\n⚠️ WARNING: {len(failed_scripts)} script(s) have compilation errors!")
+                        print("The application will continue but some features may not work.\n")
+                except Exception as e:
+                    print(f"⚠️ Script validation failed: {e}")
+            else:
+                # Skip validation, jump straight to 25%
+                splash_manager.set_progress(25)
+            
             # Create a custom callback function for splash updates
             def splash_callback(message):
                 if splash_manager and splash_manager.splash_window:
