@@ -447,7 +447,7 @@ class MangaTranslator:
         Args:
             ocr_config: Dictionary with OCR provider settings:
                 {
-                    'provider': 'google' or 'azure',
+                    'provider': 'google' or 'azure' or 'azure-document-intelligence',
                     'google_credentials_path': str (if google),
                     'azure_key': str (if azure),
                     'azure_endpoint': str (if azure)
@@ -2621,9 +2621,9 @@ class MangaTranslator:
             min_text_length = ocr_settings.get('min_text_length', 2)
             exclude_english = ocr_settings.get('exclude_english_text', True)
             
-            # Confidence threshold: Cloud providers (Google/Azure) vs Local OCR
+            # Confidence threshold: Cloud providers (Google/Azure/Azure Document Intelligence) vs Local OCR
             # Comic-translate approach: Local OCR uses RT-DETR confidence only (no OCR filtering)
-            if self.ocr_provider in ['google', 'azure']:
+            if self.ocr_provider in ['google', 'azure', 'azure-document-intelligence']:
                 # Cloud providers: use configurable threshold (default 0.0 like comic-translate)
                 confidence_threshold = ocr_settings.get('cloud_ocr_confidence', 0.0)
             else:
@@ -3144,273 +3144,107 @@ class MangaTranslator:
                 
                 # Check if we should use RT-DETR for text region detection (NEW FEATURE)
                 if ocr_settings.get('bubble_detection_enabled', False) and ocr_settings.get('use_rtdetr_for_ocr_regions', True):
-                    self._log("🎯 Using RT-DETR to guide Azure Computer Vision OCR")
+                    self._log("🎯 Azure Vision full image → match to RT-DETR blocks")
                     
                     # Run RT-DETR to detect text regions first
                     _ = self._get_thread_bubble_detector()
                     rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                     
                     if rtdetr_detections:
-                        # Collect all text-containing regions WITH TYPE TRACKING
+                        # Get all text-containing regions
                         all_regions = []
-                        # Track region type to assign bubble_type later
-                        region_types = {}
-                        idx = 0
                         if 'text_bubbles' in rtdetr_detections:
-                            for bbox in rtdetr_detections.get('text_bubbles', []):
-                                all_regions.append(bbox)
-                                region_types[idx] = 'text_bubble'
-                                idx += 1
+                            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
                         if 'text_free' in rtdetr_detections:
-                            for bbox in rtdetr_detections.get('text_free', []):
-                                all_regions.append(bbox)
-                                region_types[idx] = 'free_text'
-                                idx += 1
+                            all_regions.extend(rtdetr_detections.get('text_free', []))
                         
-                        if all_regions:
-                            self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Azure Vision")
+                        if not all_regions:
+                            self._log("⚠️ No RT-DETR text regions found")
+                        else:
+                            # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
+                            # This is MUCH better for Azure Vision:
+                            # - Preserves document layout context
+                            # - Only one API call instead of N calls
+                            # - Better text recognition with surrounding context
+                            # - No tight cropping artifacts
+                            self._log(f"📊 Step 1: Running Azure Vision on full image to detect text lines")
                             
-                            # Load image for cropping
-                            import cv2
-                            cv_image = cv2.imread(image_path)
-                            if cv_image is None:
-                                self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
-                            else:
-                                ocr_results = []
-                                
-                                # Define worker function for concurrent OCR
-                                def ocr_region_azure(region_data):
-                                    i, region_idx, x, y, w, h = region_data
-                                    try:
-                                        # Crop region
-                                        cropped = self._safe_crop_region(cv_image, x, y, w, h)
-                                        if cropped is None:
-                                            return None
-                                        
-                                        # Validate and resize crop if needed (Azure Vision requires minimum dimensions)
-                                        h_crop, w_crop = cropped.shape[:2]
-                                        MIN_SIZE = ocr_settings.get('min_region_size', 50)  # Configurable minimum (0 = disabled)
-                                        MIN_AREA = MIN_SIZE * MIN_SIZE if MIN_SIZE > 0 else 0  # Area based on MIN_SIZE
-                                        
-                                        # Skip completely invalid/corrupted regions (0 or negative dimensions)
-                                        if h_crop <= 0 or w_crop <= 0:
-                                            self._log(f"⚠️ Region {i} has invalid dimensions ({w_crop}x{h_crop}px), skipping", "debug")
-                                            return None
-                                        
-                                        # Only apply minimum size check if MIN_SIZE > 0
-                                        if MIN_SIZE > 0 and (h_crop < MIN_SIZE or w_crop < MIN_SIZE or h_crop * w_crop < MIN_AREA):
-                                            # Region too small - resize it
-                                            scale_w = MIN_SIZE / w_crop if w_crop < MIN_SIZE else 1.0
-                                            scale_h = MIN_SIZE / h_crop if h_crop < MIN_SIZE else 1.0
-                                            scale = max(scale_w, scale_h)
+                            # Use Azure Vision to OCR the full image
+                            from azure.ai.vision.imageanalysis.models import VisualFeatures
+                            
+                            result = self.vision_client.analyze(
+                                image_data=processed_image_data,
+                                visual_features=[VisualFeatures.READ]
+                            )
+                            
+                            # Extract text lines from Azure Vision result
+                            full_image_ocr = []
+                            if result.read and result.read.blocks:
+                                for block in result.read.blocks:
+                                    for line in block.lines:
+                                        # Get bounding box from Azure Vision line
+                                        # Azure Vision provides bounding_polygon with points
+                                        if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                            points = line.bounding_polygon
+                                            xs = [p.x for p in points]
+                                            ys = [p.y for p in points]
+                                            x_min, x_max = int(min(xs)), int(max(xs))
+                                            y_min, y_max = int(min(ys)), int(max(ys))
                                             
-                                            if scale > 1.0:
-                                                new_w = int(w_crop * scale)
-                                                new_h = int(h_crop * scale)
-                                                cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-                                                self._log(f"🔍 Region {i} resized from {w_crop}x{h_crop}px to {new_w}x{new_h}px for Azure OCR", "debug")
-                                                h_crop, w_crop = new_h, new_w
-                                        
-                                        # RATE LIMITING: Add delay between Azure API calls to avoid "Too Many Requests"
-                                        # Azure Free tier: 20 calls/minute = 1 call per 3 seconds
-                                        # Azure Standard tier: Higher limits but still needs throttling
-                                        import time
-                                        import random
-                                        # Stagger requests with randomized delay (0.1-0.3 seconds)
-                                        time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
-                                        
-                                        # Encode cropped image
-                                        _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                                        region_image_bytes = encoded.tobytes()
-                                        
-                                        # Call Azure Image Analysis API (synchronous)
-                                        from azure.ai.vision.imageanalysis.models import VisualFeatures
-                                        
-                                        result = self.vision_client.analyze(
-                                            image_data=region_image_bytes,
-                                            visual_features=[VisualFeatures.READ]
-                                        )
-                                        
-                                        # Extract text from result
-                                        region_text = ""
-                                        if result.read and result.read.blocks:
-                                            for block in result.read.blocks:
-                                                for line in block.lines:
-                                                    region_text += line.text + "\n"
-                                        
-                                        region_text = region_text.strip()
-                                        if region_text:
-                                            # Clean the text
-                                            region_text = self._fix_encoding_issues(region_text)
-                                            region_text = self._sanitize_unicode_characters(region_text)
-                                            
-                                            # Create TextRegion with original image coordinates
-                                            region = TextRegion(
-                                                text=region_text,
-                                                vertices=[(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
-                                                bounding_box=(x, y, w, h),
-                                                confidence=0.9,  # RT-DETR confidence
-                                                region_type='text_block'
+                                            # Create OCR result compatible with ocr_manager format
+                                            from ocr_manager import OCRResult
+                                            ocr_line = OCRResult(
+                                                text=line.text,
+                                                bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                                confidence=0.9,
+                                                vertices=[(int(p.x), int(p.y)) for p in points]
                                             )
-                                            # Assign bubble_type from RT-DETR detection
-                                            region.bubble_type = region_types.get(region_idx, 'text_bubble')
-                                            if not getattr(self, 'concise_logs', False):
-                                                self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
-                                            return region
-                                        return None
-                                    
-                                    except Exception as e:
-                                        # Provide more detailed error info for debugging
-                                        error_msg = str(e)
-                                        if 'Bad Request' in error_msg or 'invalid' in error_msg.lower() or 'Too Many Requests' in error_msg:
-                                            if 'Too Many Requests' in error_msg:
-                                                self._log(f"⏸️ Region {i}: Azure rate limit hit, consider increasing delays", "warning")
-                                            else:
-                                                self._log(f"⏭️ Skipping region {i}: Too small or invalid for Azure Vision", "debug")
-                                        else:
-                                            self._log(f"⚠️ Error OCR-ing region {i}: {e}", "warning")
-                                        return None
+                                            full_image_ocr.append(ocr_line)
+                            
+                            if full_image_ocr:
+                                self._log(f"✅ Azure Vision detected {len(full_image_ocr)} text lines in full image")
                                 
-                                # Process regions concurrently with RT-DETR concurrency control
-                                from concurrent.futures import ThreadPoolExecutor, as_completed
-                                # Use rtdetr_max_concurrency setting (default 12)
-                                # Note: Rate limiting is handled via 0.1-0.3s delays per request
-                                max_workers = min(ocr_settings.get('rtdetr_max_concurrency', 12), len(all_regions))
+                                # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
+                                self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
+                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang)
                                 
-                                region_data_list = [(i+1, i, x, y, w, h) for i, (x, y, w, h) in enumerate(all_regions)]
+                                # Convert matched blocks to TextRegion format
+                                regions = []
+                                for block_data in matched_blocks:
+                                    if block_data['text'].strip():  # Only include blocks with text
+                                        # Create TextRegion with RT-DETR bubble bounds
+                                        region = TextRegion(
+                                            text=block_data['text'],
+                                            vertices=[(block_data['bbox'][0], block_data['bbox'][1]),
+                                                     (block_data['bbox'][0]+block_data['bbox'][2], block_data['bbox'][1]),
+                                                     (block_data['bbox'][0]+block_data['bbox'][2], block_data['bbox'][1]+block_data['bbox'][3]),
+                                                     (block_data['bbox'][0], block_data['bbox'][1]+block_data['bbox'][3])],
+                                            bounding_box=block_data['bbox'],
+                                            confidence=0.9,
+                                            region_type='text_block'
+                                        )
+                                        # Use RT-DETR bubble bounds for rendering
+                                        region.bubble_bounds = block_data['bbox']
+                                        regions.append(region)
                                 
-                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                    futures = {executor.submit(ocr_region_azure, rd): rd for rd in region_data_list}
-                                    for future in as_completed(futures):
-                                        try:
-                                            result = future.result()
-                                            if result:
-                                                regions.append(result)
-                                        finally:
-                                            # Clean up future to free memory
-                                            del future
+                                self._log(f"✅ Matched text to {len(regions)} RT-DETR blocks (comic-translate style)")
+                                for i, region in enumerate(regions, 1):
+                                    line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
+                                    self._log(f"   Block {i}: {line_count} lines → '{region.text[:50]}...'")
                                 
-                                # If we got results, sort and post-process
-                                if regions:
-                                    # CRITICAL: Sort regions by position (top-to-bottom, left-to-right)
-                                    # Concurrent processing returns them in completion order, not detection order
-                                    regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
-                                    self._log(f"✅ RT-DETR + Azure Vision: {len(regions)} text regions detected (sorted by position)")
-                                    
-                                    # POST-PROCESS: DISABLED - was causing duplicate text issues
-                                    # Check for text_bubbles that overlap with free_text regions
-                                    # If a text_bubble's center is within a free_text bbox, reclassify it as free_text
-                                    free_text_bboxes = [] # rtdetr_detections.get('text_free', [])
-                                    
-                                    # DEBUG: Log what we have
-                                    self._log(f"🔍 POST-PROCESS: Found {len(free_text_bboxes)} free_text bboxes from RT-DETR", "debug")
-                                    for idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
-                                        self._log(f"   Free text bbox {idx+1}: x={fx:.0f}, y={fy:.0f}, w={fw:.0f}, h={fh:.0f}", "debug")
-                                    
-                                    text_bubble_count = sum(1 for r in regions if getattr(r, 'bubble_type', None) == 'text_bubble')
-                                    free_text_count = sum(1 for r in regions if getattr(r, 'bubble_type', None) == 'free_text')
-                                    self._log(f"🔍 Before reclassification: {text_bubble_count} text_bubbles, {free_text_count} free_text", "debug")
-                                    
-                                    if free_text_bboxes:
-                                        reclassified_count = 0
-                                        for region in regions:
-                                            if getattr(region, 'bubble_type', None) == 'text_bubble':
-                                                # Get region center
-                                                x, y, w, h = region.bounding_box
-                                                cx = x + w / 2
-                                                cy = y + h / 2
-                                                
-                                                self._log(f"   Checking text_bubble '{region.text[:30]}...' at center ({cx:.0f}, {cy:.0f})", "debug")
-                                                
-                                                # Check if center is in any free_text bbox
-                                                for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
-                                                    in_x = fx <= cx <= fx + fw
-                                                    in_y = fy <= cy <= fy + fh
-                                                    self._log(f"      vs free_text bbox {bbox_idx+1}: in_x={in_x}, in_y={in_y}", "debug")
-                                                    
-                                                    if in_x and in_y:
-                                                        # Reclassify as free text
-                                                        old_type = region.bubble_type
-                                                        region.bubble_type = 'free_text'
-                                                        reclassified_count += 1
-                                                        self._log(f"      ✅ RECLASSIFIED '{region.text[:30]}...' from {old_type} to free_text", "info")
-                                                        break
-                                        
-                                        if reclassified_count > 0:
-                                            self._log(f"🔄 Reclassified {reclassified_count} overlapping regions as free_text", "info")
-                                            
-                                            # MERGE: Combine free_text regions that are within the same free_text bbox
-                                            # Group free_text regions by which free_text bbox they belong to
-                                            free_text_groups = {}
-                                            other_regions = []
-                                            
-                                            for region in regions:
-                                                if getattr(region, 'bubble_type', None) == 'free_text':
-                                                    # Find which free_text bbox this region belongs to
-                                                    x, y, w, h = region.bounding_box
-                                                    cx = x + w / 2
-                                                    cy = y + h / 2
-                                                    
-                                                    for bbox_idx, (fx, fy, fw, fh) in enumerate(free_text_bboxes):
-                                                        if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
-                                                            if bbox_idx not in free_text_groups:
-                                                                free_text_groups[bbox_idx] = []
-                                                            free_text_groups[bbox_idx].append(region)
-                                                            break
-                                                    else:
-                                                        # Free text region not in any bbox (shouldn't happen, but handle it)
-                                                        other_regions.append(region)
-                                                else:
-                                                    other_regions.append(region)
-                                            
-                                            # Merge each group of free_text regions
-                                            merged_free_text = []
-                                            for bbox_idx, group in free_text_groups.items():
-                                                if len(group) > 1:
-                                                    # Merge multiple free text regions in same bbox
-                                                    merged_text = " ".join(r.text for r in group)
-                                                    
-                                                    min_x = min(r.bounding_box[0] for r in group)
-                                                    min_y = min(r.bounding_box[1] for r in group)
-                                                    max_x = max(r.bounding_box[0] + r.bounding_box[2] for r in group)
-                                                    max_y = max(r.bounding_box[1] + r.bounding_box[3] for r in group)
-                                                    
-                                                    all_vertices = []
-                                                    for r in group:
-                                                        if hasattr(r, 'vertices') and r.vertices:
-                                                            all_vertices.extend(r.vertices)
-                                                    
-                                                    if not all_vertices:
-                                                        all_vertices = [
-                                                            (min_x, min_y),
-                                                            (max_x, min_y),
-                                                            (max_x, max_y),
-                                                            (min_x, max_y)
-                                                        ]
-                                                    
-                                                    merged_region = TextRegion(
-                                                        text=merged_text,
-                                                        vertices=all_vertices,
-                                                        bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
-                                                        confidence=0.95,
-                                                        region_type='text_block'
-                                                    )
-                                                    merged_region.bubble_type = 'free_text'
-                                                    merged_region.should_inpaint = True
-                                                    merged_free_text.append(merged_region)
-                                                    self._log(f"🔀 Merged {len(group)} free_text regions into one: '{merged_text[:50]}...'", "debug")
-                                                else:
-                                                    # Single region, keep as-is
-                                                    merged_free_text.extend(group)
-                                            
-                                            # Combine all regions
-                                            regions = other_regions + merged_free_text
-                                            self._log(f"✅ Final: {len(regions)} regions after reclassification and merging", "info")
-                                    
-                                    # Skip merging section and return directly
-                                    return regions
-                                else:
-                                    self._log("⚠️ No text found in RT-DETR regions, falling back to full-page OCR", "warning")
+                                # Clear detections
+                                rtdetr_detections = None
+                                all_regions = None
+                                
+                                # Return results directly
+                                return regions
+                            else:
+                                self._log("⚠️ Azure Vision found no text lines in full image")
+                        
+                        # Clear detections
+                        rtdetr_detections = None
+                        all_regions = None
                 
                 # ROI-based concurrent OCR when bubble detection is enabled and batching is requested
                 try:
@@ -4275,7 +4109,7 @@ class MangaTranslator:
                     
                     # Check if we should use bubble detection for regions
                     if ocr_settings.get('bubble_detection_enabled', False):
-                        self._log("📝 Using bubble detection regions for Azure Document Intelligence...")
+                        self._log("🎯 Azure Doc Intelligence full image → match to RT-DETR blocks")
                         
                         # Run bubble detection to get regions (thread-local)
                         _ = self._get_thread_bubble_detector()
@@ -4283,48 +4117,64 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
-                            
-                            # Process only text-containing regions
+                            # Get all text-containing regions
                             all_regions = []
                             if 'text_bubbles' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_bubbles', []))
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
-                            # Sort regions by manga reading order
-                            if all_regions:
-                                source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                right_to_left = source_lang in ['ja', 'ar', 'he']
-                                all_regions = sorted(all_regions, key=lambda bbox: (
-                                    bbox[1] + bbox[3] / 2,  # y_center
-                                    -(bbox[0] + bbox[2] / 2) if right_to_left else (bbox[0] + bbox[2] / 2)
-                                ))
-                                direction = "right→left" if right_to_left else "left→right"
-                                self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
-                            
-                            self._log(f"📊 Processing {len(all_regions)} text regions with Azure Document Intelligence")
-                            
-                            # Provider already initialized with credentials at line 3857-3869
-                            # No need to pass credentials again
-                            
-                            # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
-                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with Azure Document Intelligence")
-                                # Provider already initialized with credentials, no need to pass load_kwargs
-                                ocr_results = self._parallel_ocr_regions(image, all_regions, 'azure-document-intelligence', confidence_threshold)
+                            if not all_regions:
+                                self._log("⚠️ No RT-DETR text regions found")
                             else:
-                                # Process each region with Azure Document Intelligence
-                                for i, (x, y, w, h) in enumerate(all_regions):
-                                    cropped = self._safe_crop_region(image, x, y, w, h)
-                                    if cropped is None:
-                                        continue
-                                    # Provider already initialized, just use it
-                                    result = self.ocr_manager.detect_text(cropped, 'azure-document-intelligence', confidence=confidence_threshold)
-                                    if result and len(result) > 0 and result[0].text.strip():
-                                        result[0].bbox = (x, y, w, h)
-                                        result[0].vertices = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
-                                        ocr_results.append(result[0])
-                                        self._log(f"✅ Region {i+1}: {result[0].text[:50]}...")
+                                # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
+                                # This is MUCH better for Azure Document Intelligence:
+                                # - Preserves document layout context
+                                # - Utilizes Azure's layout analysis features
+                                # - Better reading order detection
+                                # - Only one API call instead of N calls
+                                self._log(f"📊 Step 1: Running Azure Document Intelligence on full image to detect text lines")
+                                full_image_ocr = self.ocr_manager.detect_text(
+                                    image,
+                                    'azure-document-intelligence',
+                                    confidence=confidence_threshold
+                                )
+                                
+                                if full_image_ocr:
+                                    self._log(f"✅ Azure detected {len(full_image_ocr)} text lines in full image")
+                                    
+                                    # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
+                                    self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
+                                    source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang)
+                                    
+                                    # Convert matched blocks to OCR results
+                                    ocr_results = []
+                                    for block_data in matched_blocks:
+                                        if block_data['text'].strip():  # Only include blocks with text
+                                            # Create OCR result object
+                                            class OCRResult:
+                                                def __init__(self, text, bbox):
+                                                    self.text = text
+                                                    self.bbox = bbox
+                                                    self.vertices = [(bbox[0], bbox[1]), (bbox[0]+bbox[2], bbox[1]),
+                                                                   (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
+                                                    self.confidence = 0.9  # High confidence since RT-DETR detected it
+                                                    self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                            
+                                            result = OCRResult(block_data['text'], block_data['bbox'])
+                                            ocr_results.append(result)
+                                    
+                                    self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
+                                    for i, result in enumerate(ocr_results, 1):
+                                        line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
+                                        self._log(f"   Block {i}: {line_count} lines → '{result.text[:50]}...'")
+                                else:
+                                    self._log("⚠️ Azure Document Intelligence found no text lines in full image")
+                            
+                            # Clear detections
+                            rtdetr_detections = None
+                            all_regions = None
                     else:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with Azure Document Intelligence")
@@ -4489,19 +4339,19 @@ class MangaTranslator:
                 skip_merge_providers = ['rapidocr', 'manga-ocr', 'Qwen2-VL', 'custom-api', 'easyocr', 'paddleocr', 'doctr']
                 
                 # If RT-DETR guidance is enabled for cloud providers, they also skip merging
-                # (they process regions individually, not full image line-by-line)
+                # (they use full-image OCR + RT-DETR matching, so results are already aligned to bubbles)
                 use_rtdetr_guidance = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
                 if use_rtdetr_guidance:
-                    if self.ocr_provider in ['google', 'azure']:
-                        skip_merge_providers.extend(['google', 'azure'])
+                    if self.ocr_provider in ['google', 'azure', 'azure-document-intelligence']:
+                        skip_merge_providers.extend(['google', 'azure', 'azure-document-intelligence'])
                 
                 if self.ocr_provider in skip_merge_providers:
                     self._log("🎯 Skipping bubble detection merge (regions already aligned with RT-DETR)")
                     # RapidOCR: Already matched to RT-DETR blocks via comic-translate approach
-                    # Google/Azure (with RT-DETR guidance): Processed regions individually, already aligned
+                    # Google/Azure/Azure Doc Intelligence (with RT-DETR guidance): Full-image OCR + RT-DETR matching, already aligned
                     # Others: Regions already have bubble_bounds set from OCR phase - no need to merge
                 else:
-                    # Azure and Google (without RT-DETR guidance) return full-image line-level results that need merging
+                    # Cloud providers (without RT-DETR guidance) return full-image line-level results that need merging
                     self._log("🤖 Using AI bubble detection for merging")
                     regions = self._merge_with_bubble_detection(regions, image_path)
             else:
