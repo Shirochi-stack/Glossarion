@@ -4139,6 +4139,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.append_log(f"{'='*60}")
             
+            # Only return True if at least one file succeeded
+            # This prevents QA scanner from running when all files failed
+            if successful == 0:
+                return False
+            
             return True  # Translation completed successfully
             
         except Exception as e:
@@ -5020,7 +5025,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 else:
                     return False
                     
+            except ValueError as e:
+                # ValueError is used for user-facing errors like invalid chapter range
+                # These already have clear error messages, so no need for traceback
+                error_msg = str(e)
+                if "Chapter range" not in error_msg:
+                    # If it's not a chapter range error, show the message
+                    self.append_log(f"❌ Translation error: {e}")
+                # Don't show traceback for user-friendly errors
+                return False
+                
             except Exception as e:
+                # For other exceptions, show full details
                 self.append_log(f"❌ Translation error: {e}")
                 if hasattr(self, 'append_log_with_api_error_detection'):
                     self.append_log_with_api_error_detection(str(e))

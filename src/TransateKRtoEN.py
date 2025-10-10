@@ -5308,6 +5308,33 @@ def main(log_callback=None, stop_callback=None):
             for file in skipped:
                 print(f"   • {file}")
     
+    # Check if no chapters will be processed and provide helpful error
+    if chapters_to_process == 0:
+        if start is not None and end is not None:
+            # Get actual chapter range available
+            if chapters:
+                available_chapters = [c.get('actual_chapter_num', c['num']) for c in chapters]
+                min_chapter = min(available_chapters)
+                max_chapter = max(available_chapters)
+                
+                print(f"\n❌ ERROR: Chapter range {start}-{end} doesn't match any chapters!")
+                print(f"📚 Available chapters in this EPUB: {min_chapter}-{max_chapter} ({len(chapters)} total)")
+                print(f"💡 Please adjust your chapter range in the settings to match the available chapters.")
+                
+                if hasattr(config, '_range_skipped_chapters') and config._range_skipped_chapters:
+                    print(f"\n📊 All {len(config._range_skipped_chapters)} chapters were outside the specified range.")
+            else:
+                print(f"\n❌ ERROR: No chapters found in EPUB to translate!")
+            
+            raise ValueError(f"Chapter range {start}-{end} doesn't match any available chapters ({min_chapter}-{max_chapter})")
+        elif not translate_special and total_chapters > 0:
+            print(f"\n⚠️ WARNING: All chapters are special files (chapter 0) and TRANSLATE_SPECIAL_FILES is disabled.")
+            print(f"💡 Enable 'Translate Special Files' in settings if you want to translate these files.")
+        elif total_chunks_needed == 0 and total_chapters > 0:
+            print(f"\n✅ All chapters already translated - nothing to do!")
+        else:
+            print(f"\n❌ ERROR: No chapters to process!")
+    
     terminology = "Sections" if is_text_file else "Chapters"
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
     print(f"📚 {terminology} to process: {chapters_to_process}")
