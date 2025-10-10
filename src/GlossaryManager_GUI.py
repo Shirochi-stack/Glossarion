@@ -712,7 +712,7 @@ class GlossaryManagerMixin:
         
         algo_widget = QWidget()
         algo_layout = QHBoxLayout(algo_widget)
-        algo_layout.setContentsMargins(0, 0, 0, 10)
+        algo_layout.setContentsMargins(0, 0, 0, 5)
         duplicate_frame_layout.addWidget(algo_widget)
         
         # Add icon before dropdown
@@ -827,7 +827,7 @@ class GlossaryManagerMixin:
         algo_layout.addStretch()
         
         algo_desc = QLabel("🎯 Auto mode uses multiple algorithms for best accuracy")
-        algo_desc.setStyleSheet("color: gray; font-size: 9pt;")
+        algo_desc.setStyleSheet("color: gray; font-size: 9pt; margin-bottom: 15px;")
         duplicate_frame_layout.addWidget(algo_desc)
         
         # Update description when algorithm changes
